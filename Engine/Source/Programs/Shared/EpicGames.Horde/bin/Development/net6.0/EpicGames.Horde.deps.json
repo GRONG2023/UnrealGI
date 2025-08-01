@@ -1588,10 +1588,7 @@
           "System.Memory": "4.5.5"
         },
         "runtime": {
-          "EpicGames.Core.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.Core.dll": {}
         }
       },
       "EpicGames.IoHash/1.0.0": {
@@ -1601,10 +1598,7 @@
           "System.Memory": "4.5.5"
         },
         "runtime": {
-          "EpicGames.IoHash.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.IoHash.dll": {}
         }
       },
       "EpicGames.OIDC/1.0.0": {
@@ -1614,18 +1608,12 @@
           "Microsoft.Extensions.Configuration.Json": "6.0.0"
         },
         "runtime": {
-          "EpicGames.OIDC.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.OIDC.dll": {}
         }
       },
       "EpicGames.Oodle/1.0.0": {
         "runtime": {
-          "EpicGames.Oodle.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.Oodle.dll": {}
         }
       },
       "EpicGames.Serialization/1.0.0": {
@@ -1633,10 +1621,7 @@
           "EpicGames.IoHash": "1.0.0"
         },
         "runtime": {
-          "EpicGames.Serialization.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.Serialization.dll": {}
         }
       }
     }
