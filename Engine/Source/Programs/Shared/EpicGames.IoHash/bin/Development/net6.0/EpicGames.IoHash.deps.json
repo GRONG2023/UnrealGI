@@ -316,10 +316,7 @@
           "System.Memory": "4.5.5"
         },
         "runtime": {
-          "EpicGames.Core.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.Core.dll": {}
         }
       }
     }

@@ -412,10 +412,7 @@
           "System.Memory": "4.5.5"
         },
         "runtime": {
-          "EpicGames.Core.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.Core.dll": {}
         }
       },
       "EpicGames.IoHash/1.0.0": {
@@ -425,10 +422,7 @@
           "System.Memory": "4.5.5"
         },
         "runtime": {
-          "EpicGames.IoHash.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.IoHash.dll": {}
         }
       },
       "EpicGames.MsBuild/1.0.0": {
@@ -436,10 +430,7 @@
           "EpicGames.Core": "1.0.0"
         },
         "runtime": {
-          "EpicGames.MsBuild.dll": {
-            "assemblyVersion": "5.0.0.0",
-            "fileVersion": "5.0.0.0"
-          }
+          "EpicGames.MsBuild.dll": {}
         }
       }
     }
