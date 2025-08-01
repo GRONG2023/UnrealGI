@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Containers/IndirectArray.h"
+#include "UObject/PrintStaleReferencesOptions.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "Misc/Guid.h"
@@ -12,20 +13,29 @@
 #include "Engine/EngineBaseTypes.h"
 #include "UObject/SoftObjectPath.h"
 #include "Engine/World.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "Misc/BufferedOutputDevice.h"
+#endif
 #include "Misc/FrameRate.h"
 #include "Subsystems/SubsystemCollection.h"
 #include "Subsystems/EngineSubsystem.h"
+#include "RHIDefinitions.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "RHI.h"
 #include "AudioDeviceManager.h"
+#endif
+#include "Templates/PimplPtr.h"
 #include "Templates/UniqueObj.h"
+#include "Containers/Ticker.h"
+#include "DynamicRenderScaling.h"
+#include "Misc/StatusLog.h"
 #include "Engine.generated.h"
 
 #define WITH_DYNAMIC_RESOLUTION (!UE_SERVER)
 
-class AMatineeActor;
 class APlayerController;
 class Error;
+class FAudioDeviceManager;
 class FCanvas;
 class FCommonViewportClient;
 class FFineGrainedPerformanceTracker;
@@ -49,6 +59,7 @@ class UGameViewportClient;
 class ULocalPlayer;
 class UNetDriver;
 class UTimecodeProvider;
+class UActorFolder;
 
 #if ALLOW_DEBUG_FILES
 class FFineGrainedPerformanceTracker;
@@ -71,7 +82,7 @@ enum class EGetWorldErrorMode
  * Enumerates types of fully loaded packages.
  */
 UENUM()
-enum EFullyLoadPackageType
+enum EFullyLoadPackageType : int
 {
 	/** Load the packages when the map in Tag is loaded. */
 	FULLYLOAD_Map,
@@ -131,10 +142,10 @@ struct FDynamicResolutionStateInfos
 
 	// Approximation of the resolution fraction being applied. This is only an approximation because
 	// of non (and unecessary) thread safety of this value between game thread, and render thread.
-	float ResolutionFractionApproximation;
+	DynamicRenderScaling::TMap<float> ResolutionFractionApproximations;
 
 	// Maximum resolution fraction set, always MaxResolutionFraction >= ResolutionFractionApproximation.
-	float ResolutionFractionUpperBound;
+	DynamicRenderScaling::TMap<float> ResolutionFractionUpperBounds;
 };
 
 
@@ -158,7 +169,7 @@ struct FFullyLoadedPackagesInfo
 
 	/** List of objects that were loaded, for faster cleanup */
 	UPROPERTY()
-	TArray<class UObject*> LoadedObjects;
+	TArray<TObjectPtr<class UObject>> LoadedObjects;
 
 
 	FFullyLoadedPackagesInfo()
@@ -223,12 +234,53 @@ struct FNetDriverDefinition
 	UPROPERTY()
 	FName DriverClassNameFallback;
 
+	UPROPERTY()
+	int32 MaxChannelsOverride;
+
 	FNetDriverDefinition() :
 		DefName(NAME_None),
 		DriverClassName(NAME_None),
-		DriverClassNameFallback(NAME_None)
+		DriverClassNameFallback(NAME_None),
+		MaxChannelsOverride(INDEX_NONE)
 	{
 	}
+};
+
+/**
+* Struct used to configure which NetDriver is started with Iris enabled or not
+* Only one attribute out of the NetDriverDefinition, NetDriverName or NetDriverWildcardName should be set along with the bEnableIris property
+*/
+USTRUCT()
+struct FIrisNetDriverConfig 
+{
+	GENERATED_BODY()
+
+	/**
+	 * Name of the net driver definition to configure
+	 * e.g. GameNetDriver, BeaconNetDriver, etc.
+	 */
+	UPROPERTY()
+	FName NetDriverDefinition;
+
+	/**
+	 * Name of the named driver to configure.
+	 * e.g. GameNetDriver, DemoNetDriver, etc.
+	 */
+	UPROPERTY()
+	FName NetDriverName;
+
+	/**
+	 * Wildcard match the netdriver name to configure
+	 * e.g. NetDriverWildcardName="UnitTestNetDriver*" matches with UnitTestNetDriver_1, UnitTestNetDriver_2, etc.
+	 */
+	UPROPERTY()
+	FString NetDriverWildcardName;
+
+	/**
+	 * Configurable property that decides if the NetDriver will use the Iris replication system or not if Iris is enabled
+	 */
+	UPROPERTY()
+	bool bCanUseIris = false;
 };
 
 
@@ -243,7 +295,7 @@ struct FNamedNetDriver
 
 	/** Instantiation of named net driver */
 	UPROPERTY(transient)
-	class UNetDriver* NetDriver;
+	TObjectPtr<class UNetDriver> NetDriver;
 
 	/** Definition associated with this net driver */
 	FNetDriverDefinition* NetDriverDef;
@@ -312,7 +364,7 @@ struct FWorldContext
 	struct FURL LastRemoteURL;
 
 	UPROPERTY()
-	UPendingNetGame * PendingNetGame;
+	TObjectPtr<UPendingNetGame>  PendingNetGame;
 
 	/** A list of tag/array pairs that is used at LoadMap time to fully load packages that may be needed for the map/game with DLC, but we can't use DynamicLoadObject to load from the packages */
 	UPROPERTY()
@@ -326,7 +378,7 @@ struct FWorldContext
 
 	/** Array of already loaded levels. The ordering is arbitrary and depends on what is already loaded and such.	*/
 	UPROPERTY()
-	TArray<class ULevel*> LoadedLevelsForPendingMapChange;
+	TArray<TObjectPtr<class ULevel>> LoadedLevelsForPendingMapChange;
 
 	/** Human readable error string for any failure during a map change request. Empty if there were no failures.	*/
 	FString PendingMapChangeFailureDescription;
@@ -336,16 +388,16 @@ struct FWorldContext
 
 	/** Handles to object references; used by the engine to e.g. the prevent objects from being garbage collected.	*/
 	UPROPERTY()
-	TArray<class UObjectReferencer*> ObjectReferencers;
+	TArray<TObjectPtr<class UObjectReferencer>> ObjectReferencers;
 
 	UPROPERTY()
 	TArray<struct FLevelStreamingStatus> PendingLevelStreamingStatusUpdates;
 
 	UPROPERTY()
-	class UGameViewportClient* GameViewport;
+	TObjectPtr<class UGameViewportClient> GameViewport;
 
 	UPROPERTY()
-	class UGameInstance* OwningGameInstance;
+	TObjectPtr<class UGameInstance> OwningGameInstance;
 
 	/** A list of active net drivers */
 	UPROPERTY(transient)
@@ -366,6 +418,9 @@ struct FWorldContext
 	/** Is this world context waiting for an online login to complete (for PIE) */
 	bool	bWaitingOnOnlineSubsystem;
 
+	/** Is this the 'primary' PIE instance.  Primary is preferred when, for example, unique hardware like a VR headset can be used by only one PIE instance. */
+	bool	bIsPrimaryPIEInstance;
+
 	/** Handle to this world context's audio device.*/
 	uint32 AudioDeviceID;
 
@@ -376,13 +431,21 @@ struct FWorldContext
 	float PIEFixedTickSeconds  = 0.f;
 	float PIEAccumulatedTickSeconds = 0.f;
 
+	/** On a transition to another level (e.g. LoadMap), the engine will verify that these objects have been cleaned up by garbage collection */
+	TSet<FObjectKey> GarbageObjectsToVerify;
+
 	/**************************************************************/
 
 	/** Outside pointers to CurrentWorld that should be kept in sync if current world changes  */
-	TArray<UWorld**> ExternalReferences;
+	TArray<TObjectPtr<UWorld>*> ExternalReferences;
 
 	/** Adds an external reference */
 	void AddRef(UWorld*& WorldPtr)
+	{
+		AddRef(ObjectPtrWrap(WorldPtr));
+	}
+
+	void AddRef(TObjectPtr<UWorld>& WorldPtr)
 	{
 		WorldPtr = ThisCurrentWorld;
 		ExternalReferences.AddUnique(&WorldPtr);
@@ -391,7 +454,7 @@ struct FWorldContext
 	/** Removes an external reference */
 	void RemoveRef(UWorld*& WorldPtr)
 	{
-		ExternalReferences.Remove(&WorldPtr);
+		ExternalReferences.Remove(&ObjectPtrWrap(WorldPtr));
 		WorldPtr = nullptr;
 	}
 
@@ -419,13 +482,14 @@ struct FWorldContext
 		, PIEWorldFeatureLevel(ERHIFeatureLevel::Num)
 		, RunAsDedicated(false)
 		, bWaitingOnOnlineSubsystem(false)
+		, bIsPrimaryPIEInstance(false)
 		, AudioDeviceID(INDEX_NONE)
 		, ThisCurrentWorld(nullptr)
 	{ }
 
 private:
 
-	UWorld*	ThisCurrentWorld;
+	TObjectPtr<UWorld>	ThisCurrentWorld;
 };
 
 
@@ -612,7 +676,6 @@ struct FPluginRedirect
 	FString NewPluginName;
 };
 
-
 /** Game thread events for dynamic resolution state. */
 enum class EDynamicResolutionStateEvent : uint8;
 
@@ -626,16 +689,30 @@ enum class EFrameHitchType : uint8;
 
 DECLARE_MULTICAST_DELEGATE_TwoParams(FEngineHitchDetectedDelegate, EFrameHitchType /*HitchType*/, float /*HitchDurationInSeconds*/);
 
-
 DECLARE_MULTICAST_DELEGATE(FPreRenderDelegate);
+DECLARE_MULTICAST_DELEGATE_OneParam(FPreRenderDelegateEx, class FRDGBuilder&);
 DECLARE_MULTICAST_DELEGATE(FPostRenderDelegate);
+DECLARE_MULTICAST_DELEGATE_OneParam(FPostRenderDelegateEx, class FRDGBuilder&);
+
+DECLARE_DELEGATE_RetVal_ThreeParams(EBrowseReturnVal::Type, FBrowseURL, FWorldContext& WorldContext, FURL URL, FString& Error);
+DECLARE_DELEGATE_TwoParams(FPendingLevelUpdate, FWorldContext& Context, float DeltaSeconds);
+
+/**
+ * Type of UObject purge type to be performed by the engine
+ */
+enum class EGarbageCollectionType
+{
+	None,
+	Incremental,
+	Full
+};
 
 /**
  * Abstract base class of all Engine classes, responsible for management of systems critical to editor or game systems.
  * Also defines default classes for certain engine systems.
  */
-UCLASS(abstract, config=Engine, defaultconfig, transient)
-class ENGINE_API UEngine
+UCLASS(abstract, config=Engine, defaultconfig, transient, MinimalAPI)
+class UEngine
 	: public UObject
 	, public FExec
 {
@@ -643,52 +720,52 @@ class ENGINE_API UEngine
 
 private:
 	UPROPERTY()
-	class UFont* TinyFont;
+	TObjectPtr<class UFont> TinyFont;
 
 public:
 	/** Sets the font used for the smallest engine text */
-	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="Font", DisplayName="Tiny Font"))
+	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="/Script/Engine.Font", DisplayName="Tiny Font", ConfigRestartRequired=true))
 	FSoftObjectPath TinyFontName;
 
 private:
 	UPROPERTY()
-	class UFont* SmallFont;
+	TObjectPtr<class UFont> SmallFont;
 
 public:
 	/** Sets the font used for small engine text, used for most debug displays */
-	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="Font", DisplayName="Small Font"))
+	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="/Script/Engine.Font", DisplayName="Small Font", ConfigRestartRequired=true))
 	FSoftObjectPath SmallFontName;
 
 private:
 	UPROPERTY()
-	class UFont* MediumFont;
+	TObjectPtr<class UFont> MediumFont;
 
 public:
 	/** Sets the font used for medium engine text */
-	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="Font", DisplayName="Medium Font"))
+	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="/Script/Engine.Font", DisplayName="Medium Font", ConfigRestartRequired=true))
 	FSoftObjectPath MediumFontName;
 
 private:
 	UPROPERTY()
-	class UFont* LargeFont;
+	TObjectPtr<class UFont> LargeFont;
 
 public:
 	/** Sets the font used for large engine text */
-	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="Font", DisplayName="Large Font"))
+	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="/Script/Engine.Font", DisplayName="Large Font", ConfigRestartRequired=true))
 	FSoftObjectPath LargeFontName;
 
 private:
 	UPROPERTY()
-	class UFont* SubtitleFont;
+	TObjectPtr<class UFont> SubtitleFont;
 
 public:
 	/** Sets the font used by the default Subtitle Manager */
-	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="Font", DisplayName="Subtitle Font"), AdvancedDisplay)
+	UPROPERTY(globalconfig, EditAnywhere, Category=Fonts, meta=(AllowedClasses="/Script/Engine.Font", DisplayName="Subtitle Font", ConfigRestartRequired=true), AdvancedDisplay)
 	FSoftObjectPath SubtitleFontName;
 
 private:
 	UPROPERTY()
-	TArray<class UFont*> AdditionalFonts;
+	TArray<TObjectPtr<class UFont>> AdditionalFonts;
 
 public:
 	/** Sets additional fonts that will be loaded at startup and available using GetAdditionalFont. */
@@ -699,31 +776,31 @@ public:
 	TSubclassOf<class UConsole>  ConsoleClass;
 
 	/** Sets the class to use for the game console summoned with ~ */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="Console", DisplayName="Console Class"))
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.Console", DisplayName="Console Class", ConfigRestartRequired=true))
 	FSoftClassPath ConsoleClassName;
 
 	UPROPERTY()
 	TSubclassOf<class UGameViewportClient>  GameViewportClientClass;
 
 	/** Sets the class to use for the game viewport client, which can be overridden to change game-specific input and display behavior. */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="GameViewportClient", DisplayName="Game Viewport Client Class"))
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.GameViewportClient", DisplayName="Game Viewport Client Class", ConfigRestartRequired=true))
 	FSoftClassPath GameViewportClientClassName;
 
 	UPROPERTY()
 	TSubclassOf<class ULocalPlayer>  LocalPlayerClass;
 
 	/** Sets the class to use for local players, which can be overridden to store game-specific information for a local player. */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="LocalPlayer", DisplayName="Local Player Class"))
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.LocalPlayer", DisplayName="Local Player Class", ConfigRestartRequired=true))
 	FSoftClassPath LocalPlayerClassName;
 
 	UPROPERTY()
 	TSubclassOf<class AWorldSettings>  WorldSettingsClass;
 
 	/** Sets the class to use for WorldSettings, which can be overridden to store game-specific information on map/world. */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="WorldSettings", DisplayName="World Settings Class"))
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.WorldSettings", DisplayName="World Settings Class", ConfigRestartRequired=true))
 	FSoftClassPath WorldSettingsClassName;
 
-	UPROPERTY(globalconfig, noclear, meta=(MetaClass="NavigationSystem", DisplayName="Navigation System Class"))
+	UPROPERTY(globalconfig, noclear, meta=(MetaClass="/Script/NavigationSystem.NavigationSystem", DisplayName="Navigation System Class"))
 	FSoftClassPath NavigationSystemClassName;
 
 	/** Sets the class to use for NavigationSystem, which can be overridden to change game-specific navigation/AI behavior. */
@@ -731,32 +808,32 @@ public:
 	TSubclassOf<class UNavigationSystemBase>  NavigationSystemClass;
 
 	/** Sets the Navigation System Config class, which can be overridden to change game-specific navigation/AI behavior. */
-	UPROPERTY(globalconfig, noclear, meta = (MetaClass = "NavigationSystem", DisplayName = "Navigation System Config Class"))
+	UPROPERTY(globalconfig, noclear, meta = (MetaClass = "/Script/NavigationSystem.NavigationSystem", DisplayName = "Navigation System Config Class"))
 	FSoftClassPath NavigationSystemConfigClassName;
 
 	UPROPERTY()
 	TSubclassOf<class UNavigationSystemConfig>  NavigationSystemConfigClass;
 	
 	/** Sets the AvoidanceManager class, which can be overridden to change AI crowd behavior. */
-	UPROPERTY(globalconfig, noclear, meta=(MetaClass="AvoidanceManager", DisplayName="Avoidance Manager Class"))
+	UPROPERTY(globalconfig, noclear, meta=(MetaClass="/Script/Engine.AvoidanceManager", DisplayName="Avoidance Manager Class"))
 	FSoftClassPath AvoidanceManagerClassName;
 	
 	UPROPERTY()
 	TSubclassOf<class UAvoidanceManager>  AvoidanceManagerClass;
 
 	/** Sets the class to be used as the default AIController class for pawns. */
-	UPROPERTY(globalconfig, noclear, meta = (MetaClass = "AI", DisplayName = "Default AIController class for all Pawns"))
+	UPROPERTY(globalconfig, noclear, meta = (MetaClass = "/Script/AIModule.AIController", DisplayName = "Default AIController class for all Pawns"))
 	FSoftClassPath AIControllerClassName;
 
 	UPROPERTY()
 	TSubclassOf<class UPhysicsCollisionHandler>	PhysicsCollisionHandlerClass;
 
 	/** Sets the PhysicsCollisionHandler class to use by default, which can be overridden to change game-specific behavior when objects collide using physics. */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="PhysicsCollisionHandler", DisplayName="Physics Collision Handler Class"), AdvancedDisplay)
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.PhysicsCollisionHandler", DisplayName="Physics Collision Handler Class", ConfigRestartRequired=true), AdvancedDisplay)
 	FSoftClassPath PhysicsCollisionHandlerClassName;
 
 	/** Sets the GameUserSettings class, which can be overridden to support game-specific options for Graphics/Sound/Gameplay. */
-	UPROPERTY(globalconfig, noclear, meta=(MetaClass="GameUserSettings", DisplayName="Game User Settings Class"))
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.GameUserSettings", DisplayName="Game User Settings Class", ConfigRestartRequired=true), AdvancedDisplay)
 	FSoftClassPath GameUserSettingsClassName;
 
 	UPROPERTY()
@@ -764,38 +841,38 @@ public:
 
 	/** Global instance of the user game settings */
 	UPROPERTY()
-	class UGameUserSettings* GameUserSettings;
+	TObjectPtr<class UGameUserSettings> GameUserSettings;
 
 	UPROPERTY()
 	TSubclassOf<class ALevelScriptActor>  LevelScriptActorClass;
 
 	/** Sets the Level Script Actor class, which can be overridden to allow game-specific behavior in per-map blueprint scripting */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="LevelScriptActor", DisplayName="Level Script Actor Class"))
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/Engine.LevelScriptActor", DisplayName="Level Script Actor Class", ConfigRestartRequired=true))
 	FSoftClassPath LevelScriptActorClassName;
 	
 	/** Sets the base class to use for new blueprints created in the editor, configurable on a per-game basis */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="Object", DisplayName="Default Blueprint Base Class", AllowAbstract, BlueprintBaseOnly), AdvancedDisplay)
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/CoreUObject.Object", DisplayName="Default Blueprint Base Class", AllowAbstract, BlueprintBaseOnly), AdvancedDisplay)
 	FSoftClassPath DefaultBlueprintBaseClassName;
 
 	/** Sets the class for a global object spawned at startup to handle game-specific data. If empty, it will not spawn one */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="Object", DisplayName="Game Singleton Class"), AdvancedDisplay)
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/CoreUObject.Object", DisplayName="Game Singleton Class", ConfigRestartRequired=true), AdvancedDisplay)
 	FSoftClassPath GameSingletonClassName;
 
 	/** A UObject spawned at initialization time to handle game-specific data */
 	UPROPERTY()
-	UObject *GameSingleton;
+	TObjectPtr<UObject> GameSingleton;
 
 	/** Sets the class to spawn as the global AssetManager, configurable per game. If empty, it will not spawn one */
-	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="Object", DisplayName="Asset Manager Class"), AdvancedDisplay)
+	UPROPERTY(globalconfig, noclear, EditAnywhere, Category=DefaultClasses, meta=(MetaClass="/Script/CoreUObject.Object", DisplayName="Asset Manager Class", ConfigRestartRequired=true), AdvancedDisplay)
 	FSoftClassPath AssetManagerClassName;
 
 	/** A UObject spawned at initialization time to handle runtime asset loading and management */
 	UPROPERTY()
-	class UAssetManager *AssetManager;
+	TObjectPtr<class UAssetManager> AssetManager;
 
 	/** A global default texture. */
 	UPROPERTY()
-	class UTexture2D* DefaultTexture;
+	TObjectPtr<class UTexture2D> DefaultTexture;
 
 	/** Path of the global default texture that is used when no texture is specified. */
 	UPROPERTY(globalconfig)
@@ -803,7 +880,7 @@ public:
 
 	/** A global default diffuse texture.*/
 	UPROPERTY()
-	class UTexture* DefaultDiffuseTexture;
+	TObjectPtr<class UTexture> DefaultDiffuseTexture;
 
 	/** Path of the global default diffuse texture.*/
 	UPROPERTY(globalconfig)
@@ -811,7 +888,7 @@ public:
 
 	/** Texture used to render a vertex in the editor */
 	UPROPERTY()
-	class UTexture2D* DefaultBSPVertexTexture;
+	TObjectPtr<class UTexture2D> DefaultBSPVertexTexture;
 
 	/** Path of the texture used to render a vertex in the editor */
 	UPROPERTY(globalconfig)
@@ -819,7 +896,7 @@ public:
 
 	/** Texture used to get random image grain values for post processing */
 	UPROPERTY()
-	class UTexture2D* HighFrequencyNoiseTexture;
+	TObjectPtr<class UTexture2D> HighFrequencyNoiseTexture;
 
 	/** Path of the texture used to get random image grain values for post processing */
 	UPROPERTY(globalconfig)
@@ -827,7 +904,7 @@ public:
 
 	/** Texture used to blur out of focus content, mimics the Bokeh shape of actual cameras */
 	UPROPERTY()
-	class UTexture2D* DefaultBokehTexture;
+	TObjectPtr<class UTexture2D> DefaultBokehTexture;
 
 	/** Path of the texture used to blur out of focus content, mimics the Bokeh shape of actual cameras */
 	UPROPERTY(globalconfig)
@@ -835,15 +912,23 @@ public:
 
 	/** Texture used to bloom when using FFT, mimics characteristic bloom produced in a camera from a signle bright source */
 	UPROPERTY()
-	class UTexture2D* DefaultBloomKernelTexture;
+	TObjectPtr<class UTexture2D> DefaultBloomKernelTexture;
 
 	/** Path of the texture used to bloom when using FFT, mimics characteristic bloom produced in a camera from a signle bright source */
 	UPROPERTY(globalconfig)
 	FSoftObjectPath DefaultBloomKernelTextureName;
+	
+	/** Texture used to film grain by default. */
+	UPROPERTY()
+	TObjectPtr<class UTexture2D> DefaultFilmGrainTexture;
+
+	/** Path of the texture used by film grain by default. */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath DefaultFilmGrainTextureName;
 
 	/** The material used to render wireframe meshes. */
 	UPROPERTY()
-	class UMaterial* WireframeMaterial;
+	TObjectPtr<class UMaterial> WireframeMaterial;
 	
 	/** Path of the material used to render wireframe meshes in the editor and debug tools. */
 	UPROPERTY(globalconfig)
@@ -852,7 +937,7 @@ public:
 #if WITH_EDITORONLY_DATA
 	/** A translucent material used to render things in geometry mode. */
 	UPROPERTY()
-	class UMaterial* GeomMaterial;
+	TObjectPtr<class UMaterial> GeomMaterial;
 
 	/** Path of the translucent material used to render things in geometry mode. */
 	UPROPERTY(globalconfig)
@@ -861,15 +946,23 @@ public:
 
 	/** A material used to render debug meshes. */
 	UPROPERTY()
-	class UMaterial* DebugMeshMaterial;
+	TObjectPtr<class UMaterial> DebugMeshMaterial;
 
 	/** Path of the default material for debug mesh */
 	UPROPERTY(globalconfig)
 	FSoftObjectPath DebugMeshMaterialName;
 
+	/** Material used for removing Nanite mesh sections from rasterization. */
+	UPROPERTY()
+	TObjectPtr<class UMaterial> NaniteHiddenSectionMaterial;
+
+	/** Path of the material used for removing Nanite mesh sections from rasterization. */
+	UPROPERTY(globalconfig)
+	FString NaniteHiddenSectionMaterialName;
+
 	/** A material used to render emissive meshes (e.g. light source surface). */
 	UPROPERTY()
-	class UMaterial* EmissiveMeshMaterial;
+	TObjectPtr<class UMaterial> EmissiveMeshMaterial;
 
 	/** Path of the default material for emissive mesh */
 	UPROPERTY(globalconfig)
@@ -877,7 +970,7 @@ public:
 
 	/** Material used for visualizing level membership in lit view port modes. */
 	UPROPERTY()
-	class UMaterial* LevelColorationLitMaterial;
+	TObjectPtr<class UMaterial> LevelColorationLitMaterial;
 
 	/** Path of the material used for visualizing level membership in lit view port modes. */
 	UPROPERTY(globalconfig)
@@ -885,7 +978,7 @@ public:
 
 	/** Material used for visualizing level membership in unlit view port modes. */
 	UPROPERTY()
-	class UMaterial* LevelColorationUnlitMaterial;
+	TObjectPtr<class UMaterial> LevelColorationUnlitMaterial;
 
 	/** Path of the material used for visualizing level membership in unlit view port modes. */
 	UPROPERTY(globalconfig)
@@ -893,7 +986,7 @@ public:
 
 	/** Material used for visualizing lighting only w/ lightmap texel density. */
 	UPROPERTY()
-	class UMaterial* LightingTexelDensityMaterial;
+	TObjectPtr<class UMaterial> LightingTexelDensityMaterial;
 
 	/** Path of the material used for visualizing lighting only w/ lightmap texel density. */
 	UPROPERTY(globalconfig)
@@ -901,7 +994,7 @@ public:
 
 	/** Material used for visualizing level membership in lit view port modes. Uses shading to show axis directions. */
 	UPROPERTY()
-	class UMaterial* ShadedLevelColorationLitMaterial;
+	TObjectPtr<class UMaterial> ShadedLevelColorationLitMaterial;
 
 	/** Path of the material used for visualizing level membership in lit view port modes. Uses shading to show axis directions. */
 	UPROPERTY(globalconfig)
@@ -909,7 +1002,7 @@ public:
 
 	/** Material used for visualizing level membership in unlit view port modes.  Uses shading to show axis directions. */
 	UPROPERTY()
-	class UMaterial* ShadedLevelColorationUnlitMaterial;
+	TObjectPtr<class UMaterial> ShadedLevelColorationUnlitMaterial;
 
 	/** Path of the material used for visualizing level membership in unlit view port modes.  Uses shading to show axis directions. */
 	UPROPERTY(globalconfig)
@@ -917,7 +1010,7 @@ public:
 
 	/** Material used to indicate that the associated BSP surface should be removed. */
 	UPROPERTY()
-	class UMaterial* RemoveSurfaceMaterial;
+	TObjectPtr<class UMaterial> RemoveSurfaceMaterial;
 
 	/** Path of the material used to indicate that the associated BSP surface should be removed. */
 	UPROPERTY(globalconfig)
@@ -925,7 +1018,7 @@ public:
 
 	/** Material used to visualize vertex colors as emissive */
 	UPROPERTY()
-	class UMaterial* VertexColorMaterial;
+	TObjectPtr<class UMaterial> VertexColorMaterial;
 
 	/** Path of the material used to visualize vertex colors as emissive */
 	UPROPERTY(globalconfig)
@@ -933,7 +1026,7 @@ public:
 
 	/** Material for visualizing vertex colors on meshes in the scene (color only, no alpha) */
 	UPROPERTY()
-	class UMaterial* VertexColorViewModeMaterial_ColorOnly;
+	TObjectPtr<class UMaterial> VertexColorViewModeMaterial_ColorOnly;
 
 	/** Path of the material for visualizing vertex colors on meshes in the scene (color only, no alpha) */
 	UPROPERTY(globalconfig)
@@ -941,7 +1034,7 @@ public:
 
 	/** Material for visualizing vertex colors on meshes in the scene (alpha channel as color) */
 	UPROPERTY()
-	class UMaterial* VertexColorViewModeMaterial_AlphaAsColor;
+	TObjectPtr<class UMaterial> VertexColorViewModeMaterial_AlphaAsColor;
 
 	/** Path of the material for visualizing vertex colors on meshes in the scene (alpha channel as color) */
 	UPROPERTY(globalconfig)
@@ -949,7 +1042,7 @@ public:
 
 	/** Material for visualizing vertex colors on meshes in the scene (red only) */
 	UPROPERTY()
-	class UMaterial* VertexColorViewModeMaterial_RedOnly;
+	TObjectPtr<class UMaterial> VertexColorViewModeMaterial_RedOnly;
 
 	/** Path of the material for visualizing vertex colors on meshes in the scene (red only) */
 	UPROPERTY(globalconfig)
@@ -957,7 +1050,7 @@ public:
 
 	/** Material for visualizing vertex colors on meshes in the scene (green only) */
 	UPROPERTY()
-	class UMaterial* VertexColorViewModeMaterial_GreenOnly;
+	TObjectPtr<class UMaterial> VertexColorViewModeMaterial_GreenOnly;
 
 	/** Path of the material for visualizing vertex colors on meshes in the scene (green only) */
 	UPROPERTY(globalconfig)
@@ -965,7 +1058,7 @@ public:
 
 	/** Material for visualizing vertex colors on meshes in the scene (blue only) */
 	UPROPERTY()
-	class UMaterial* VertexColorViewModeMaterial_BlueOnly;
+	TObjectPtr<class UMaterial> VertexColorViewModeMaterial_BlueOnly;
 
 	/** Path of the material for visualizing vertex colors on meshes in the scene (blue only) */
 	UPROPERTY(globalconfig)
@@ -974,7 +1067,7 @@ public:
 #if WITH_EDITORONLY_DATA
 	/** Material used to render bone weights on skeletal meshes */
 	UPROPERTY()
-	class UMaterial* BoneWeightMaterial;
+	TObjectPtr<class UMaterial> BoneWeightMaterial;
 
 	/** Path of the material used to render bone weights on skeletal meshes */
 	UPROPERTY(globalconfig)
@@ -982,13 +1075,13 @@ public:
 
 	/** Materials used to render cloth properties on skeletal meshes */
 	UPROPERTY()
-	class UMaterial* ClothPaintMaterial;
+	TObjectPtr<class UMaterial> ClothPaintMaterial;
 	UPROPERTY()
-	class UMaterial* ClothPaintMaterialWireframe;
+	TObjectPtr<class UMaterial> ClothPaintMaterialWireframe;
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ClothPaintMaterialInstance;
+	TObjectPtr<class UMaterialInstanceDynamic> ClothPaintMaterialInstance;
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ClothPaintMaterialWireframeInstance;
+	TObjectPtr<class UMaterialInstanceDynamic> ClothPaintMaterialWireframeInstance;
 
 	/** Name of the material used to render cloth in the clothing tools */
 	UPROPERTY(globalconfig)
@@ -1000,7 +1093,7 @@ public:
 
 	/** A material used to render physical material mask on mesh. */
 	UPROPERTY()
-	class UMaterial* PhysicalMaterialMaskMaterial;
+	TObjectPtr<class UMaterial> PhysicalMaterialMaskMaterial;
 
 	/** A material used to render physical material mask on mesh. */
 	UPROPERTY(globalconfig)
@@ -1008,7 +1101,34 @@ public:
 
 	/** A material used to render debug meshes. */
 	UPROPERTY()
-	class UMaterial* DebugEditorMaterial;
+	TObjectPtr<class UMaterial> DebugEditorMaterial;
+
+	/** A material used to flatten materials. */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath DefaultFlattenMaterialName;
+
+	/** A material used to flatten materials to VT textures. */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath DefaultHLODFlattenMaterialName;
+
+	/** A material used to flatten materials to VT textures, with the normals being in world space. */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath DefaultLandscapeFlattenMaterialName;
+
+	/** Materials used when flattening materials */
+	UPROPERTY()
+	TObjectPtr<class UMaterial> DefaultFlattenMaterial;
+	UPROPERTY()
+	TObjectPtr<class UMaterial> DefaultHLODFlattenMaterial;
+	UPROPERTY()
+	TObjectPtr<class UMaterial> DefaultLandscapeFlattenMaterial;
+	/** A material used to render the debug texture painting mask on mesh. */
+	UPROPERTY()
+	TObjectPtr<class UMaterial> TexturePaintingMaskMaterial;
+
+	/** A material used to render the debug texture painting mask on mesh. */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath TexturePaintingMaskMaterialName;
 #endif
 
 	/** A material used to render debug opaque material. Used in various animation editor viewport features. */
@@ -1017,30 +1137,30 @@ public:
 
 	/** Material used to render constraint limits */
 	UPROPERTY()
-	class UMaterial* ConstraintLimitMaterial;
+	TObjectPtr<class UMaterial> ConstraintLimitMaterial;
 
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialX;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialX;
 
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialXAxis;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialXAxis;
 
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialY;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialY;
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialYAxis;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialYAxis;
 
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialZ;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialZ;
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialZAxis;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialZAxis;
 
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ConstraintLimitMaterialPrismatic;
+	TObjectPtr<class UMaterialInstanceDynamic> ConstraintLimitMaterialPrismatic;
 
 	/** Material that renders a message about lightmap settings being invalid. */
 	UPROPERTY()
-	class UMaterial* InvalidLightmapSettingsMaterial;
+	TObjectPtr<class UMaterial> InvalidLightmapSettingsMaterial;
 
 	/** Path of the material that renders a message about lightmap settings being invalid. */
 	UPROPERTY(globalconfig)
@@ -1048,19 +1168,19 @@ public:
 
 	/** Material that renders a message about preview shadows being used. */
 	UPROPERTY()
-	class UMaterial* PreviewShadowsIndicatorMaterial;
+	TObjectPtr<class UMaterial> PreviewShadowsIndicatorMaterial;
 
 	/** Path of the material that renders a message about preview shadows being used. */
-	UPROPERTY(globalconfig, EditAnywhere, Category=DefaultMaterials, meta=(AllowedClasses="Material", DisplayName="Preview Shadows Indicator Material"))
+	UPROPERTY(globalconfig, EditAnywhere, Category=DefaultMaterials, meta=(AllowedClasses="/Script/Engine.Material", DisplayName="Preview Shadows Indicator Material"))
 	FSoftObjectPath PreviewShadowsIndicatorMaterialName;
 
 	/** Material that 'fakes' lighting, used for arrows, widgets. */
 	UPROPERTY()
-	class UMaterial* ArrowMaterial;
+	TObjectPtr<class UMaterial> ArrowMaterial;
 
 	/** Arrow material instance with yellow color. */
 	UPROPERTY()
-	class UMaterialInstanceDynamic* ArrowMaterialYellow;
+	TObjectPtr<class UMaterialInstanceDynamic> ArrowMaterialYellow;
 
 	/** Path of the material that 'fakes' lighting, used for arrows, widgets. */
 	UPROPERTY(globalconfig)
@@ -1097,6 +1217,36 @@ public:
 	/** The colors used for texture streaming accuracy debug view modes. */
 	UPROPERTY(globalconfig)
 	TArray<FLinearColor> StreamingAccuracyColors;
+
+	/** The visualization color when sk mesh not using skin cache. */
+	UPROPERTY(globalconfig)
+	FLinearColor GPUSkinCacheVisualizationExcludedColor;
+
+	/** The visualization color when sk mesh using skin cache. */
+	UPROPERTY(globalconfig)
+	FLinearColor GPUSkinCacheVisualizationIncludedColor;
+
+	/** The visualization color when sk mesh using recompute tangents. */
+	UPROPERTY(globalconfig)
+	FLinearColor GPUSkinCacheVisualizationRecomputeTangentsColor;
+
+	/** The memory visualization threshold in MB for a skin cache entry */
+	UPROPERTY(globalconfig)
+	float GPUSkinCacheVisualizationLowMemoryThresholdInMB;
+	UPROPERTY(globalconfig)
+	float GPUSkinCacheVisualizationHighMemoryThresholdInMB;
+
+	/** The memory visualization colors of skin cache */
+	UPROPERTY(globalconfig)
+	FLinearColor GPUSkinCacheVisualizationLowMemoryColor;
+	UPROPERTY(globalconfig)
+	FLinearColor GPUSkinCacheVisualizationMidMemoryColor;
+	UPROPERTY(globalconfig)
+	FLinearColor GPUSkinCacheVisualizationHighMemoryColor;
+
+	/** The visualization colors of ray tracing LOD index offset from raster LOD */
+	UPROPERTY(globalconfig)
+	TArray<FLinearColor> GPUSkinCacheVisualizationRayTracingLODOffsetColors;
 
 	/**
 	* Complexity limits for the various complexity view mode combinations.
@@ -1147,7 +1297,7 @@ public:
 #if WITH_EDITORONLY_DATA
 	/** A material used to render the sides of the builder brush/volumes/etc. */
 	UPROPERTY()
-	class UMaterial* EditorBrushMaterial;
+	TObjectPtr<class UMaterial> EditorBrushMaterial;
 
 	/** Path of the material used to render the sides of the builder brush/volumes/etc. */
 	UPROPERTY(globalconfig)
@@ -1156,11 +1306,19 @@ public:
 
 	/** PhysicalMaterial to use if none is defined for a particular object. */
 	UPROPERTY()
-	class UPhysicalMaterial* DefaultPhysMaterial;
+	TObjectPtr<class UPhysicalMaterial> DefaultPhysMaterial;
 
 	/** Path of the PhysicalMaterial to use if none is defined for a particular object. */
 	UPROPERTY(globalconfig)
 	FSoftObjectPath DefaultPhysMaterialName;
+
+	/** PhysicalMaterial to use if none is defined for a Destructible object. */
+	UPROPERTY()
+	TObjectPtr<class UPhysicalMaterial> DefaultDestructiblePhysMaterial;
+
+	/** Path of the PhysicalMaterial to use if none is defined for a particular object. */
+	UPROPERTY(globalconfig, EditAnywhere, Category = DefaultMaterials, meta = (AllowedClasses = "/Script/PhysicsCore.PhysicalMaterial", DisplayName = "Destructible Physics Material"))
+	FSoftObjectPath DefaultDestructiblePhysMaterialName;
 
 	/** Deprecated rules for redirecting renamed objects, replaced by the CoreRedirects system*/
 	UPROPERTY(config)
@@ -1177,7 +1335,7 @@ public:
 
 	/** Texture used for pre-integrated skin shading */
 	UPROPERTY()
-	class UTexture2D* PreIntegratedSkinBRDFTexture;
+	TObjectPtr<class UTexture2D> PreIntegratedSkinBRDFTexture;
 
 	/** Path of the texture used for pre-integrated skin shading */
 	UPROPERTY(globalconfig)
@@ -1185,15 +1343,55 @@ public:
 
 	/** Tiled blue-noise texture */
 	UPROPERTY()
-	class UTexture2D* BlueNoiseTexture;
+	TObjectPtr<class UTexture2D> BlueNoiseScalarTexture;
+
+	/** Spatial-temporal blue noise texture with two channel output */
+	UPROPERTY()
+	TObjectPtr<class UTexture2D> BlueNoiseVec2Texture;
 
 	/** Path of the tiled blue-noise texture */
 	UPROPERTY(globalconfig)
-	FSoftObjectPath BlueNoiseTextureName;
+	FSoftObjectPath BlueNoiseScalarTextureName;
+
+	/** Path of the tiled blue-noise texture */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath BlueNoiseVec2TextureName;
+	
+	/** Stable glint BSDF texture */
+	UPROPERTY()
+	TObjectPtr<class UTexture2DArray> GlintTexture;
+	
+	/** Stable glint BSDF texture with more variety to cover slope space and avoid circular artifact */
+	UPROPERTY()
+	TObjectPtr<class UTexture2DArray> GlintTexture2;
+
+	/** Path of the glint BSDF texture */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath GlintTextureName;
+
+	/** Path of the glint BSDF texture 2 */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath GlintTexture2Name;
+	
+	/** Simple volume LUT texture */
+	UPROPERTY()
+	TObjectPtr<class UVolumeTexture> SimpleVolumeTexture;
+
+	/** Path of the simple volume LUT texture */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath SimpleVolumeTextureName;
+	
+	/** Simple volume environment LUT texture */
+	UPROPERTY()
+	TObjectPtr<class UVolumeTexture> SimpleVolumeEnvTexture;
+
+	/** Path of the simple volume environment LUT texture */
+	UPROPERTY(globalconfig)
+	FSoftObjectPath SimpleVolumeEnvTextureName;
 
 	/** Texture used to do font rendering in shaders */
 	UPROPERTY()
-	class UTexture2D* MiniFontTexture;
+	TObjectPtr<class UTexture2D> MiniFontTexture;
 
 	/** Path of the texture used to do font rendering in shaders */
 	UPROPERTY(globalconfig)
@@ -1201,15 +1399,21 @@ public:
 
 	/** Texture used as a placeholder for terrain weight-maps to give the material the correct texture format. */
 	UPROPERTY()
-	class UTexture* WeightMapPlaceholderTexture;
+	TObjectPtr<class UTexture> WeightMapPlaceholderTexture;
 
+	UPROPERTY()
+	TObjectPtr<class UTexture> WeightMapArrayPlaceholderTexture;
+	
 	/** Path of the texture used as a placeholder for terrain weight-maps to give the material the correct texture format. */
 	UPROPERTY(globalconfig)
 	FSoftObjectPath WeightMapPlaceholderTextureName;
 
+	UPROPERTY(globalconfig)
+	FSoftObjectPath WeightMapArrayPlaceholderTextureName;
+
 	/** Texture used to display LightMapDensity */
 	UPROPERTY()
-	class UTexture2D* LightMapDensityTexture;
+	TObjectPtr<class UTexture2D> LightMapDensityTexture;
 
 	/** Path of the texture used to display LightMapDensity */
 	UPROPERTY(globalconfig)
@@ -1222,7 +1426,7 @@ public:
 
 	/** The view port representing the current game instance. Can be 0 so don't use without checking. */
 	UPROPERTY()
-	class UGameViewportClient* GameViewport;
+	TObjectPtr<class UGameViewportClient> GameViewport;
 
 	/** Array of deferred command strings/ execs that get executed at the end of the frame */
 	UPROPERTY()
@@ -1286,7 +1490,7 @@ public:
 private:
 	/** Controls how the Engine process the Framerate/Timestep */
 	UPROPERTY(transient)
-	UEngineCustomTimeStep* CustomTimeStep;
+	TObjectPtr<UEngineCustomTimeStep> CustomTimeStep;
 
 	/** Broadcasts whenever the custom time step changed. */
 	FSimpleMulticastDelegate CustomTimeStepChangedEvent;
@@ -1300,13 +1504,13 @@ public:
 	 * This class will be responsible of updating the application Time and DeltaTime.
 	 * Can be used to synchronize the engine with another process (gen-lock).
 	 */
-	UPROPERTY(AdvancedDisplay, config, EditAnywhere, Category=Framerate, meta=(MetaClass="EngineCustomTimeStep", DisplayName="Custom TimeStep"))
+	UPROPERTY(AdvancedDisplay, config, EditAnywhere, Category=Framerate, meta=(MetaClass="/Script/Engine.EngineCustomTimeStep", DisplayName="Custom TimeStep"))
 	FSoftClassPath CustomTimeStepClassName;
 
 private:
 	/** Controls the Engine's timecode. */
 	UPROPERTY(transient)
-	UTimecodeProvider* TimecodeProvider;
+	TObjectPtr<UTimecodeProvider> TimecodeProvider;
 
 	/** Broadcasts whenever the timecode provider changed. */
 	FSimpleMulticastDelegate TimecodeProviderChangedEvent;
@@ -1316,7 +1520,7 @@ private:
 
 public:
 	/** Set TimecodeProvider when the engine is started. */
-	UPROPERTY(config, EditAnywhere, Category=Timecode, meta=(MetaClass="TimecodeProvider", DisplayName="Timecode Provider"))
+	UPROPERTY(config, EditAnywhere, Category=Timecode, meta=(MetaClass="/Script/Engine.TimecodeProvider", DisplayName="Timecode Provider"))
 	FSoftClassPath TimecodeProviderClassName;
 
 	/**
@@ -1340,7 +1544,7 @@ public:
 	/** 
 	 * Whether we should check for more than N pawns spawning in a single frame.
 	 * Basically, spawning pawns and all of their attachments can be slow.  And on consoles it
-	 * can be really slow.  If this bool is true we will display a 
+	 * can be really slow.  If enabled, we will display an on-screen warning whenever this multi-spawn occurs.
 	 **/
 	UPROPERTY(config)
 	uint32 bCheckForMultiplePawnsSpawnedInAFrame:1;
@@ -1396,13 +1600,22 @@ public:
 	UPROPERTY()
 	FColor C_BrushShape;
 
-	/** Fudge factor for tweaking the distance based miplevel determination */
-	UPROPERTY(EditAnywhere, Category=LevelStreaming, AdvancedDisplay)
+	/** Fudge factor for tweaking the distance based miplevel determination. No longer used. */
+	UE_DEPRECATED(5.2, "This setting is no longer used.")
 	float StreamingDistanceFactor;
 
 	/** The save directory for newly created screenshots */
 	UPROPERTY(config, EditAnywhere, Category = Screenshots)
 	FDirectoryPath GameScreenshotSaveDirectory;
+
+	UPROPERTY(config, EditAnywhere, Category = PerQualityLevelProperty, AdvancedDisplay)
+	bool UseStaticMeshMinLODPerQualityLevels;
+
+	UPROPERTY(config, EditAnywhere, Category = PerQualityLevelProperty, AdvancedDisplay)
+	bool UseSkeletalMeshMinLODPerQualityLevels;
+
+	UPROPERTY(config, EditAnywhere, Category = PerQualityLevelProperty, AdvancedDisplay)
+	bool UseGrassVarityPerQualityLevels;
 
 	/** The state of the current map transition.  */
 	UPROPERTY()
@@ -1541,24 +1754,29 @@ public:
 	UPROPERTY(transient)
 	float SelectionHighlightIntensityBillboards;
 
-	/** The "outermost" active matinee, if any. */
-	TWeakObjectPtr<AMatineeActor> ActiveMatinee;
-
 	/** Delegate handling when streaming pause begins. Set initially in FStreamingPauseRenderingModule::StartupModule() but can then be overridden by games. */
-	void RegisterBeginStreamingPauseRenderingDelegate( FBeginStreamingPauseDelegate* InDelegate );
+	ENGINE_API void RegisterBeginStreamingPauseRenderingDelegate( FBeginStreamingPauseDelegate* InDelegate );
 	FBeginStreamingPauseDelegate* BeginStreamingPauseDelegate;
 
 	/** Delegate handling when streaming pause ends. Set initially in FStreamingPauseRenderingModule::StartupModule() but can then be overridden by games. */
-	void RegisterEndStreamingPauseRenderingDelegate( FEndStreamingPauseDelegate* InDelegate );
+	ENGINE_API void RegisterEndStreamingPauseRenderingDelegate( FEndStreamingPauseDelegate* InDelegate );
 	FEndStreamingPauseDelegate* EndStreamingPauseDelegate;
 
-
+private:
 	/** Delegate called just prior to rendering. */
 	FPreRenderDelegate PreRenderDelegate;
-	FPreRenderDelegate& GetPreRenderDelegate() { return PreRenderDelegate; }
+	FPreRenderDelegateEx PreRenderDelegateEx;
 	/** Delegate called just after to rendering. */
 	FPostRenderDelegate PostRenderDelegate;
+	FPostRenderDelegateEx PostRenderDelegateEx;
+
+public:
+	UE_DEPRECATED(5.0, "Please use GetPreRenderDelegateEx().")
+	FPreRenderDelegate& GetPreRenderDelegate() { return PreRenderDelegate; }
+	FPreRenderDelegateEx& GetPreRenderDelegateEx() { return PreRenderDelegateEx; }
+	UE_DEPRECATED(5.0, "Please use GetPostRenderDelegateEx().")
 	FPostRenderDelegate& GetPostRenderDelegate() { return PostRenderDelegate; }
+	FPostRenderDelegateEx& GetPostRenderDelegateEx() { return PostRenderDelegateEx; }
 
 	/** 
 	 * Error message event relating to server travel failures 
@@ -1640,18 +1858,18 @@ public:
 	 *
 	 * @param OverrideColor	The override color to use
 	 */
-	void OverrideSelectedMaterialColor( const FLinearColor& OverrideColor );
+	ENGINE_API void OverrideSelectedMaterialColor( const FLinearColor& OverrideColor );
 
 	/**
 	 * Restores the selected material color back to the user setting
 	 */
-	void RestoreSelectedMaterialColor();
+	ENGINE_API void RestoreSelectedMaterialColor();
 
 	/** Queries informations about the current state dynamic resolution. */
-	void GetDynamicResolutionCurrentStateInfos(FDynamicResolutionStateInfos& OutInfos) const;
+	ENGINE_API void GetDynamicResolutionCurrentStateInfos(FDynamicResolutionStateInfos& OutInfos) const;
 
 	/** Pause dynamic resolution for this frame. */
-	void PauseDynamicResolution();
+	ENGINE_API void PauseDynamicResolution();
 
 	/** Resume dynamic resolution for this frame. */
 	FORCEINLINE void ResumeDynamicResolution()
@@ -1663,7 +1881,7 @@ public:
 	}
 
 	/** Emit an event for dynamic resolution if not already done. */
-	void EmitDynamicResolutionEvent(EDynamicResolutionStateEvent Event);
+	ENGINE_API void EmitDynamicResolutionEvent(EDynamicResolutionStateEvent Event);
 
 	/** Get's global dynamic resolution state */
 	FORCEINLINE class IDynamicResolutionState* GetDynamicResolutionState()
@@ -1680,7 +1898,7 @@ public:
 	/** Override dynamic resolution state for next frame.
 	 * Old dynamic resolution state will be disabled, and the new one will be enabled automatically at next frame.
 	 */
-	void ChangeDynamicResolutionStateAtNextFrame(TSharedPtr< class IDynamicResolutionState > NewState);
+	ENGINE_API void ChangeDynamicResolutionStateAtNextFrame(TSharedPtr< class IDynamicResolutionState > NewState);
 
 	/** Get the user setting for dynamic resolution. */
 	FORCEINLINE bool GetDynamicResolutionUserSetting() const
@@ -1701,6 +1919,32 @@ public:
 		#endif
 	}
 
+	/** Delay loading this texture until it is needed by the renderer.
+	* The texture is uncompressed and contains no mips so it can't be streamed.
+	*/
+	ENGINE_API void LoadDefaultBloomTexture();
+
+	/** Delay loading this texture until it is needed by the renderer.
+	* The texture is uncompressed and contains no mips so it can't be streamed.
+	*/
+	ENGINE_API void LoadBlueNoiseTexture();
+
+	/** Delay loading this texture until it is needed by the renderer. */
+	ENGINE_API void LoadDefaultFilmGrainTexture();
+
+	/** Conditionally load this texture for a platform. Always loaded in Editor */
+	ENGINE_API void ConditionallyLoadPreIntegratedSkinBRDFTexture();
+
+	/** Delay loading the glint texture until it is needed by the renderer.
+	* This texture is not going to be streamed to be available right away.
+	*/
+	ENGINE_API void LoadGlintTextures();
+
+
+	/** Delay loading the SimpleVolume texture until it is needed by the renderer.
+	* This texture is not going to be streamed to be available right away.
+	*/
+	ENGINE_API void LoadSimpleVolumeTextures();
 
 private:
 	#if WITH_DYNAMIC_RESOLUTION
@@ -1720,16 +1964,16 @@ private:
 		bool bDynamicResolutionEnableUserSetting;
 
 		/** Returns whether should be enabled or not. */
-		bool ShouldEnableDynamicResolutionState() const;
+		ENGINE_API bool ShouldEnableDynamicResolutionState() const;
 
 		/** Enable/Disable dynamic resolution state according to ShouldEnableDynamicResolutionState(). */
-		void UpdateDynamicResolutionStatus();
+		ENGINE_API void UpdateDynamicResolutionStatus();
 	#endif
 
 protected:
 
 	/** The audio device manager */
-	FAudioDeviceManager* AudioDeviceManager;
+	FAudioDeviceManager* AudioDeviceManager = nullptr;
 
 	/** Audio device handle to the main audio device. */
 	FAudioDeviceHandle MainAudioDeviceHandle;
@@ -1742,22 +1986,22 @@ private:
 	TMap<int32, FScreenMessageString> ScreenMessages;
 
 public:
-	float DrawOnscreenDebugMessages(UWorld* World, FViewport* Viewport, FCanvas* Canvas, UCanvas* CanvasObject, float MessageX, float MessageY);
+	ENGINE_API float DrawOnscreenDebugMessages(UWorld* World, FViewport* Viewport, FCanvas* Canvas, UCanvas* CanvasObject, float MessageX, float MessageY);
 
 	/** Add a FString to the On-screen debug message system. bNewerOnTop only works with Key == INDEX_NONE */
-	void AddOnScreenDebugMessage(uint64 Key, float TimeToDisplay, FColor DisplayColor, const FString& DebugMessage, bool bNewerOnTop = true, const FVector2D& TextScale = FVector2D::UnitVector);
+	ENGINE_API void AddOnScreenDebugMessage(uint64 Key, float TimeToDisplay, FColor DisplayColor, const FString& DebugMessage, bool bNewerOnTop = true, const FVector2D& TextScale = FVector2D::UnitVector);
 
 	/** Add a FString to the On-screen debug message system. bNewerOnTop only works with Key == INDEX_NONE */
-	void AddOnScreenDebugMessage(int32 Key, float TimeToDisplay, FColor DisplayColor, const FString& DebugMessage, bool bNewerOnTop = true, const FVector2D& TextScale = FVector2D::UnitVector);
+	ENGINE_API void AddOnScreenDebugMessage(int32 Key, float TimeToDisplay, FColor DisplayColor, const FString& DebugMessage, bool bNewerOnTop = true, const FVector2D& TextScale = FVector2D::UnitVector);
 
 	/** Retrieve the message for the given key */
-	bool OnScreenDebugMessageExists(uint64 Key);
+	ENGINE_API bool OnScreenDebugMessageExists(uint64 Key);
 
 	/** Clear any existing debug messages */
-	void ClearOnScreenDebugMessages();
+	ENGINE_API void ClearOnScreenDebugMessages();
 
 	//Remove the message for the given key
-	void RemoveOnScreenDebugMessage(uint64 Key);
+	ENGINE_API void RemoveOnScreenDebugMessage(uint64 Key);
 
 	/** Reference to the stereoscopic rendering interface, if any */
 	TSharedPtr< class IStereoRendering, ESPMode::ThreadSafe > StereoRenderingDevice;
@@ -1784,19 +2028,19 @@ public:
 	FWorldDestroyedEvent&	OnWorldDestroyed() { return WorldDestroyedEvent; }
 	
 	/** Needs to be called when a world is added to broadcast messages. */	
-	virtual void			WorldAdded( UWorld* World );
+	ENGINE_API virtual void			WorldAdded( UWorld* World );
 	
 	/** Needs to be called when a world is destroyed to broadcast messages. */	
-	virtual void			WorldDestroyed( UWorld* InWorld );
+	ENGINE_API virtual void			WorldDestroyed( UWorld* InWorld );
 
 	virtual bool IsInitialized() const { return bIsInitialized; }
 
 	/** The feature used to create new worlds, by default. Overridden for feature level preview in the editor */
-	virtual ERHIFeatureLevel::Type GetDefaultWorldFeatureLevel() const;
+	ENGINE_API virtual ERHIFeatureLevel::Type GetDefaultWorldFeatureLevel() const;
 
 #if WITH_EDITOR
-	/** Return the platform group name and vanilla platform name the current preview platform, or false if there is no preview platform. */
-	virtual bool GetPreviewPlatformName(FName& PlatformGroupName, FName& VanillaPlatformName) const;
+	/** Return the ini platform name the current preview platform, or false if there is no preview platform. */
+	ENGINE_API virtual bool GetPreviewPlatformName(FName& PlatformName) const;
 
 	/** Editor-only event triggered when the actor list of the world has changed */
 	DECLARE_EVENT( UEngine, FLevelActorListChangedEvent );
@@ -1818,6 +2062,27 @@ public:
 
 	/** Called by internal engine systems after level actors have changed to notify other subsystems */
 	void BroadcastLevelActorDeleted(AActor* InActor) { LevelActorDeletedEvent.Broadcast(InActor); }
+
+	/** Editor-only event triggered when an actor folder is added to the world */
+	DECLARE_EVENT_OneParam(UEngine, FActorFolderAddedEvent, UActorFolder*);
+	FActorFolderAddedEvent& OnActorFolderAdded() { return ActorFolderAddedEvent; }
+
+	/** Called by internal engine systems after actor folder is added  */
+	void BroadcastActorFolderAdded(UActorFolder* InActorFolder) { ActorFolderAddedEvent.Broadcast(InActorFolder); }
+
+	/** Editor-only event triggered when an actor folder is removed from the world */
+	DECLARE_EVENT_OneParam(UEngine, FActorFolderRemovedEvent, UActorFolder*);
+	FActorFolderRemovedEvent& OnActorFolderRemoved() { return ActorFolderRemovedEvent; }
+
+	/** Called by internal engine systems after actor folder is removed  */
+	void BroadcastActorFolderRemoved(UActorFolder* InActorFolder) { ActorFolderRemovedEvent.Broadcast(InActorFolder); }
+
+	/** Editor-only event triggered when actor folders are updated for a level */
+	DECLARE_EVENT_OneParam(UEngine, FActorFoldersUpdatedEvent, ULevel*);
+	FActorFoldersUpdatedEvent& OnActorFoldersUpdatedEvent() { return ActorFoldersUpdatedEvent; }
+
+	/** Called by internal engine systems after a level has finished updating its actor folder list */
+	void BroadcastActorFoldersUpdated(ULevel* InLevel) { ActorFoldersUpdatedEvent.Broadcast(InLevel); }
 
 	/** Editor-only event triggered when actors outer changes */
 	DECLARE_EVENT_TwoParams(UEngine, FLevelActorOuterChangedEvent, AActor*, UObject*);
@@ -1912,13 +2177,14 @@ public:
 	/** Called by internal engine systems after a travel failure has occurred */
 	void BroadcastTravelFailure(UWorld* InWorld, ETravelFailure::Type FailureType, const FString& ErrorString = TEXT(""))
 	{
+		UE_LOGSTATUS(Warning, TEXT("Travel failed, type: %s, reason: \"%s\""), *UEnum::GetValueAsString(FailureType), *ErrorString);
 		TravelFailureEvent.Broadcast(InWorld, FailureType, ErrorString);
 	}
 
 	/** Event triggered after a network failure of any kind has occurred */
 	FOnNetworkFailure& OnNetworkFailure() { return NetworkFailureEvent; }
 	/** Called by internal engine systems after a network failure has occurred */
-	void BroadcastNetworkFailure(UWorld * World, UNetDriver *NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString = TEXT(""));
+	ENGINE_API void BroadcastNetworkFailure(UWorld * World, UNetDriver *NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString = TEXT(""));
 
 	/** Event triggered after network lag is being experienced or lag has ended */
 	FOnNetworkLagStateChanged& OnNetworkLagStateChanged() { return NetworkLagStateChangedEvent; }
@@ -1937,151 +2203,172 @@ public:
 	}
 
 	//~ Begin UObject Interface.
-	virtual void FinishDestroy() override;
-	virtual void Serialize(FArchive& Ar) override;
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	ENGINE_API virtual void FinishDestroy() override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
+	static ENGINE_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 	//~ End UObject Interface.
 
 	/** Initialize the game engine. */
-	virtual void Init(IEngineLoop* InEngineLoop);
+	ENGINE_API virtual void Init(IEngineLoop* InEngineLoop);
 
 	/** Start the game, separate from the initialize call to allow for post initialize configuration before the game starts. */
-	virtual void Start();
+	ENGINE_API virtual void Start();
 
 	/** Called at shutdown, just before the exit purge.	 */
-	virtual void PreExit();
-	virtual void ReleaseAudioDeviceManager();
+	ENGINE_API virtual void PreExit();
+	ENGINE_API virtual void ReleaseAudioDeviceManager();
 	
-	void ShutdownHMD();
+	ENGINE_API void ShutdownHMD();
 
 	/** Called at startup, in the middle of FEngineLoop::Init.	 */
-	void ParseCommandline();
+	ENGINE_API void ParseCommandline();
 
 	//~ Begin FExec Interface
-	virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Out=*GLog ) override;
+public:
+#if UE_ALLOW_EXEC_COMMANDS
+	ENGINE_API virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Out=*GLog ) override;
+#endif
+
+protected:
+	ENGINE_API virtual bool Exec_Dev( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Out=*GLog ) override;
+	ENGINE_API virtual bool Exec_Editor(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Out = *GLog) override;
 	//~ End FExec Interface
 
+public:
 	/** 
 	 * Exec command handlers
 	 */
-	bool HandleFlushLogCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleGameVerCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleStatCommand( UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleStopMovieCaptureCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleCrackURLCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDeferCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleFlushLogCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleGameVerCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleStatCommand( UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleStopMovieCaptureCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleCrackURLCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDeferCommand( const TCHAR* Cmd, FOutputDevice& Ar );
 
-	bool HandleCeCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDumpTicksCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleGammaCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleCeCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDumpTicksCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleGammaCommand( const TCHAR* Cmd, FOutputDevice& Ar );
 
-	bool HandleShowLogCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleShowLogCommand( const TCHAR* Cmd, FOutputDevice& Ar );
 
 	// Only compile in when STATS is set
 #if STATS
-	bool HandleDumpParticleMemCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDumpParticleMemCommand( const TCHAR* Cmd, FOutputDevice& Ar );
 #endif
 
 #if WITH_PROFILEGPU
-	bool HandleProfileGPUCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
+	ENGINE_API bool HandleProfileGPUCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
+#endif
+
+#if WITH_DUMPGPU
+	ENGINE_API bool HandleDumpGPUCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+#endif
+
+#if WITH_GPUDEBUGCRASH
+	ENGINE_API bool HandleGPUDebugCrashCommand( const TCHAR* Cmd, FOutputDevice& Ar );
 #endif
 
 	// Compile in Debug or Development
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && WITH_HOT_RELOAD
-	bool HandleHotReloadCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleHotReloadCommand( const TCHAR* Cmd, FOutputDevice& Ar );
 #endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && WITH_HOT_RELOAD
 
 	// Compile in Debug, Development, and Test
 #if !UE_BUILD_SHIPPING
-	bool HandleDumpConsoleCommandsCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleDumpAvailableResolutionsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleAnimSeqStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleCountDisabledParticleItemsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleViewnamesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleFreezeStreamingCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );		// Smedis
-	bool HandleFreezeAllCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );			// Smedis
+	ENGINE_API bool HandleDumpConsoleCommandsCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleDumpAvailableResolutionsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleAnimSeqStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleCountDisabledParticleItemsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleViewnamesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleFreezeStreamingCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );		// Smedis
+	ENGINE_API bool HandleFreezeAllCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );			// Smedis
 
-	bool HandleToggleRenderingThreadCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
-	bool HandleToggleAsyncComputeCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleRecompileShadersCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleRecompileGlobalShadersCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDumpShaderStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDumpMaterialStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleProfileCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleProfileGPUHitchesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleShaderComplexityCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleFreezeRenderingCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleStartFPSChartCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleStopFPSChartCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleDumpLevelScriptActorsCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleKismetEventCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleListTexturesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleListStaticMeshesCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	bool HandleListSkeletalMeshesCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	bool HandleListAnimsCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	bool HandleRemoteTextureStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleListParticleSystemsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleListSpawnedActorsCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleLogoutStatLevelsCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleMemReportCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleMemReportDeferredCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleParticleMeshUsageCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDumpParticleCountsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleListLoadedPackagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleMemCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDebugCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleMergeMeshCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-	bool HandleContentComparisonCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleTogglegtPsysLODCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleObjCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleTestslateGameUICommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDirCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleTrackParticleRenderingStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleDumpAllocatorStats( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleHeapCheckCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleToggleOnscreenDebugMessageDisplayCommand( const TCHAR* Cmd, FOutputDevice& Ar );
-	bool HandleToggleOnscreenDebugMessageSystemCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
-	bool HandleDisableAllScreenMessagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );			
-	bool HandleEnableAllScreenMessagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );			
-	bool HandleToggleAllScreenMessagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );			
-	bool HandleConfigHashCommand( const TCHAR* Cmd, FOutputDevice& Ar );						
-	bool HandleConfigMemCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
-	bool HandleGetIniCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	ENGINE_API bool HandleToggleRenderingThreadCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
+	ENGINE_API bool HandleToggleAsyncComputeCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleRecompileShadersCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleRecompileGlobalShadersCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDumpShaderStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDumpMaterialStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+#if WITH_EDITOR
+	ENGINE_API bool HandleDumpShaderCompileStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+#endif
+	ENGINE_API bool HandleProfileCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleProfileGPUHitchesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleShaderComplexityCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleFreezeRenderingCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleStartFPSChartCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleStopFPSChartCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleDumpLevelScriptActorsCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleKismetEventCommand( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleListTexturesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleListStaticMeshesCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	ENGINE_API bool HandleListSkeletalMeshesCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	ENGINE_API bool HandleListAnimsCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	ENGINE_API bool HandleRemoteTextureStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleListParticleSystemsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleListSpawnedActorsCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleLogoutStatLevelsCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleMemReportCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleMemReportDeferredCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleSkeletalMeshReportCommand(const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld);
+	ENGINE_API bool HandleParticleMeshUsageCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDumpParticleCountsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleListLoadedPackagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleMemCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDebugCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleMergeMeshCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API bool HandleContentComparisonCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleTogglegtPsysLODCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleObjCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleTestslateGameUICommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDirCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleTrackParticleRenderingStatsCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleDumpAllocatorStats( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleHeapCheckCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleToggleOnscreenDebugMessageDisplayCommand( const TCHAR* Cmd, FOutputDevice& Ar );
+	ENGINE_API bool HandleToggleOnscreenDebugMessageSystemCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
+	ENGINE_API bool HandleDisableAllScreenMessagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );			
+	ENGINE_API bool HandleEnableAllScreenMessagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );			
+	ENGINE_API bool HandleToggleAllScreenMessagesCommand( const TCHAR* Cmd, FOutputDevice& Ar );			
+	ENGINE_API bool HandleConfigHashCommand( const TCHAR* Cmd, FOutputDevice& Ar );						
+	ENGINE_API bool HandleConfigMemCommand( const TCHAR* Cmd, FOutputDevice& Ar );	
+	ENGINE_API bool HandleGetIniCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	ENGINE_API bool HandleRedirectOutputCommand(const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld);
 #endif // !UE_BUILD_SHIPPING
 
 	/** Update everything. */
-	virtual void Tick( float DeltaSeconds, bool bIdleMode ) PURE_VIRTUAL(UEngine::Tick,);
+	ENGINE_API virtual void Tick( float DeltaSeconds, bool bIdleMode ) PURE_VIRTUAL(UEngine::Tick,);
 
 	/**
 	 * Update FApp::CurrentTime / FApp::DeltaTime while taking into account max tick rate.
 	 */
-	virtual void UpdateTimeAndHandleMaxTickRate();
+	ENGINE_API virtual void UpdateTimeAndHandleMaxTickRate();
 
-	void SetInputSampleLatencyMarker(uint64 FrameNumber);
+	static ENGINE_API void SetInputSampleLatencyMarker(uint64 FrameNumber);
 
-	void SetSimulationLatencyMarkerStart(uint64 FrameNumber);
-	void SetSimulationLatencyMarkerEnd(uint64 FrameNumber);
+	static ENGINE_API void SetSimulationLatencyMarkerStart(uint64 FrameNumber);
+	static ENGINE_API void SetSimulationLatencyMarkerEnd(uint64 FrameNumber);
 
-	void SetPresentLatencyMarkerStart(uint64 FrameNumber);
-	void SetPresentLatencyMarkerEnd(uint64 FrameNumber);
+	static ENGINE_API void SetPresentLatencyMarkerStart(uint64 FrameNumber);
+	static ENGINE_API void SetPresentLatencyMarkerEnd(uint64 FrameNumber);
 
-	void SetRenderSubmitLatencyMarkerStart(uint64 FrameNumber);
-	void SetRenderSubmitLatencyMarkerEnd(uint64 FrameNumber);
+	static ENGINE_API void SetRenderSubmitLatencyMarkerStart(uint64 FrameNumber);
+	static ENGINE_API void SetRenderSubmitLatencyMarkerEnd(uint64 FrameNumber);
 
-	void SetFlashIndicatorLatencyMarker(uint64 FrameNumber);
+	static ENGINE_API void SetFlashIndicatorLatencyMarker(uint64 FrameNumber);
 
 	/**
 	 * Allows games to correct the negative delta
 	 *
 	 * @return new delta
 	 */
-	virtual double CorrectNegativeTimeDelta(double DeltaRealTime);
+	ENGINE_API virtual double CorrectNegativeTimeDelta(double DeltaRealTime);
 
 	/** Causes the current custom time step to be shut down and then reinitialized. */
-	void ReinitializeCustomTimeStep();
+	ENGINE_API void ReinitializeCustomTimeStep();
 
 	/**
 	 * Set the custom time step that will control the Engine Framerate/Timestep.
@@ -2090,7 +2377,7 @@ public:
 	 *
 	 * @return	the result of the custom time step initialization.
 	 */
-	bool SetCustomTimeStep(UEngineCustomTimeStep* InCustomTimeStep);
+	ENGINE_API bool SetCustomTimeStep(UEngineCustomTimeStep* InCustomTimeStep);
 
 	/** Get the custom time step that control the Engine Framerate/Timestep */
 	UEngineCustomTimeStep* GetCustomTimeStep() const { return CustomTimeStep; };
@@ -2099,28 +2386,31 @@ public:
 	FSimpleMulticastDelegate& OnCustomTimeStepChanged() { return CustomTimeStepChangedEvent; }
 
 	/** Executes the deferred commands */
-	void TickDeferredCommands();
+	ENGINE_API void TickDeferredCommands();
 
 	/** Get tick rate limiter. */
-	virtual float GetMaxTickRate(float DeltaTime, bool bAllowFrameRateSmoothing = true) const;
+	ENGINE_API virtual float GetMaxTickRate(float DeltaTime, bool bAllowFrameRateSmoothing = true) const;
 
 	/** Get max fps. */
-	virtual float GetMaxFPS() const;
+	ENGINE_API virtual float GetMaxFPS() const;
 
 	/** Set max fps. Overrides console variable. */
-	virtual void SetMaxFPS(const float MaxFPS);
+	ENGINE_API virtual void SetMaxFPS(const float MaxFPS);
 
 	/** Updates the running average delta time */
-	virtual void UpdateRunningAverageDeltaTime(float DeltaTime, bool bAllowFrameRateSmoothing = true);
+	ENGINE_API virtual void UpdateRunningAverageDeltaTime(float DeltaTime, bool bAllowFrameRateSmoothing = true);
 
 	/** Whether we're allowed to do frame rate smoothing */
-	virtual bool IsAllowedFramerateSmoothing() const;
+	ENGINE_API virtual bool IsAllowedFramerateSmoothing() const;
+
+	/** Whether the application should avoid rendering anything to give GPU resources to other applications */
+	virtual bool IsRenderingSuspended() const { return false; }
 
 	/** Update FApp::Timecode. */
-	void UpdateTimecode();
+	ENGINE_API void UpdateTimecode();
 
 	/** Causes the current timecode provider to be shut down and then reinitialized. */
-	void ReinitializeTimecodeProvider();
+	ENGINE_API void ReinitializeTimecodeProvider();
 
 	/**
 	 * Set the timecode provider that will control the Engine's timecode.
@@ -2129,7 +2419,7 @@ public:
 	 *
 	 * @return	the result value of the new timecode provider initialization.
 	 */
-	bool SetTimecodeProvider(UTimecodeProvider* InTimecodeProvider);
+	ENGINE_API bool SetTimecodeProvider(UTimecodeProvider* InTimecodeProvider);
 
 	/** Get the TimecodeProvider that control the Engine's Timecode. */
 	UTimecodeProvider* GetTimecodeProvider() const { return TimecodeProvider; };
@@ -2143,50 +2433,75 @@ public:
 	 * Pauses / un-pauses the game-play when focus of the game's window gets lost / gained.
 	 * @param EnablePause true to pause; false to unpause the game
 	 */
-	virtual void OnLostFocusPause( bool EnablePause );
+	ENGINE_API virtual void OnLostFocusPause( bool EnablePause );
 
 	/** 
 	 * Returns the average game/render/gpu/total time since this function was last called
 	 */
-	void GetAverageUnitTimes( TArray<float>& AverageTimes );
+	ENGINE_API void GetAverageUnitTimes( TArray<float>& AverageTimes );
 
 	/**
 	 * Updates the values used to calculate the average game/render/gpu/total time
 	 */
-	void SetAverageUnitTimes(float FrameTime, float RenderThreadTime, float GameThreadTime, float GPUFrameTime, float RHITFrameTime);
+	ENGINE_API void SetAverageUnitTimes(float FrameTime, float RenderThreadTime, float GameThreadTime, float GPUFrameTime, float RHITFrameTime);
 
 	/**
 	 * Returns the display color for a given frame time (based on t.TargetFrameTimeThreshold and t.UnacceptableFrameTimeThreshold)
 	 */
-	FColor GetFrameTimeDisplayColor(float FrameTimeMS) const;
+	ENGINE_API FColor GetFrameTimeDisplayColor(float FrameTimeMS) const;
 
 	/**
 	 * @return true to throttle CPU usage based on current state (usually editor minimized or not in foreground)
 	 */
-	virtual bool ShouldThrottleCPUUsage() const;
+	ENGINE_API virtual bool ShouldThrottleCPUUsage() const;
+
+	/**
+	 * @return true if all windows are minimized or hidden (Per OS definition)
+	 */
+	ENGINE_API bool AreAllWindowsHidden() const;
 
 public:
 	/** 
 	 * Return a reference to the GamePlayers array. 
 	 */
 
-	TArray<class ULocalPlayer*>::TConstIterator	GetLocalPlayerIterator(UWorld *World);
-	TArray<class ULocalPlayer*>::TConstIterator GetLocalPlayerIterator(const UGameViewportClient *Viewport);
+	ENGINE_API TArray<class ULocalPlayer*>::TConstIterator	GetLocalPlayerIterator(UWorld *World);
+	ENGINE_API TArray<class ULocalPlayer*>::TConstIterator GetLocalPlayerIterator(const UGameViewportClient *Viewport);
 
-	const TArray<class ULocalPlayer*>& GetGamePlayers(UWorld *World) const;
-	const TArray<class ULocalPlayer*>& GetGamePlayers(const UGameViewportClient *Viewport) const;
+	ENGINE_API const TArray<class ULocalPlayer*>& GetGamePlayers(UWorld *World) const;
+	ENGINE_API const TArray<class ULocalPlayer*>& GetGamePlayers(const UGameViewportClient *Viewport) const;
 
 	/**
 	 *	Returns the first ULocalPlayer that matches the given ControllerId. 
 	 *  This will search across all world contexts.
 	 */
-	class ULocalPlayer* FindFirstLocalPlayerFromControllerId(int32 ControllerId) const;
+	ENGINE_API ULocalPlayer* FindFirstLocalPlayerFromControllerId(int32 ControllerId) const;
+
+	/** 
+	 * If true, we're running in a backward compatible mode where FPlatformUserId and ControllerId are the same.
+	 * If false, there can be more than one local player with the same platform user id
+	 */
+	virtual bool IsControllerIdUsingPlatformUserId() const { return true; }
+
+	/**
+	 * Returns the first ULocalPlayer that matches the given platform user id, or the first player if the id is invalid
+	 * This will search across all world contexts.
+	 */
+	ENGINE_API ULocalPlayer* FindFirstLocalPlayerFromPlatformUserId(FPlatformUserId PlatformUserId) const;
+
+	/**
+	 * Returns the first LocalPlayer that matches the given platform user id
+	 *
+	 * @param	PlatformUserId	Platform user id to search for
+	 * @return	The player that has the PlatformUserId specified, or nullptr if no players have that PlatformUserId
+	 */
+	ENGINE_API ULocalPlayer* GetLocalPlayerFromPlatformUserId(UWorld* InWorld, const FPlatformUserId PlatformUserId) const;
 
 	/**
 	 * return the number of entries in the GamePlayers array
 	 */
-	int32 GetNumGamePlayers(UWorld *InWorld);
-	int32 GetNumGamePlayers(const UGameViewportClient *InViewport);
+	ENGINE_API int32 GetNumGamePlayers(UWorld *InWorld);
+	ENGINE_API int32 GetNumGamePlayers(const UGameViewportClient *InViewport);
 
 	/**
 	 * return the ULocalPlayer with the given index.
@@ -2195,17 +2510,17 @@ public:
 	 *
 	 * @returns	pointer to the LocalPlayer with the given index
 	 */
-	ULocalPlayer* GetGamePlayer( UWorld * InWorld, int32 InPlayer );
-	ULocalPlayer* GetGamePlayer( const UGameViewportClient* InViewport, int32 InPlayer );
+	ENGINE_API ULocalPlayer* GetGamePlayer( UWorld * InWorld, int32 InPlayer );
+	ENGINE_API ULocalPlayer* GetGamePlayer( const UGameViewportClient* InViewport, int32 InPlayer );
 	
 	/**
 	 * return the first ULocalPlayer in the GamePlayers array.
 	 *
 	 * @returns	first ULocalPlayer or nullptr if the array is empty
 	 */
-	ULocalPlayer* GetFirstGamePlayer( UWorld *InWorld );
-	ULocalPlayer* GetFirstGamePlayer(const UGameViewportClient *InViewport );
-	ULocalPlayer* GetFirstGamePlayer( UPendingNetGame *PendingNetGame );
+	ENGINE_API ULocalPlayer* GetFirstGamePlayer( UWorld *InWorld );
+	ENGINE_API ULocalPlayer* GetFirstGamePlayer(const UGameViewportClient *InViewport );
+	ENGINE_API ULocalPlayer* GetFirstGamePlayer( UPendingNetGame *PendingNetGame );
 
 	/**
 	 * returns the first ULocalPlayer that should be used for debug purposes.
@@ -2215,10 +2530,10 @@ public:
 	 *
 	 * @returns the first ULocalPlayer
 	 */
-	ULocalPlayer* GetDebugLocalPlayer();
+	ENGINE_API ULocalPlayer* GetDebugLocalPlayer();
 
 	/** Clean up the GameViewport */
-	void CleanupGameViewport();
+	ENGINE_API void CleanupGameViewport();
 
 	/** Allows the editor to accept or reject the drawing of wire frame brush shapes based on mode and tool. */
 	virtual bool ShouldDrawBrushWireframe( class AActor* InActor ) { return true; }
@@ -2239,17 +2554,8 @@ public:
 		// Intentionally empty.
 	}
 
-	/**
-	 * Computes a color to use for property coloration for the given object.
-	 *
-	 * @param	Object		The object for which to compute a property color.
-	 * @param	OutColor	[out] The returned color.
-	 * @return				true if a color was successfully set on OutColor, false otherwise.
-	 */
-	virtual bool GetPropertyColorationColor(class UObject* Object, FColor& OutColor);
-
 	/** Uses StatColorMappings to find a color for this stat's value. */
-	bool GetStatValueColoration(const FString& StatName, float Value, FColor& OutColor);
+	ENGINE_API bool GetStatValueColoration(const FString& StatName, float Value, FColor& OutColor);
 
 	/** @return true if selection of translucent objects in perspective view ports is allowed */
 	virtual bool AllowSelectTranslucent() const
@@ -2278,7 +2584,7 @@ public:
 	 *
 	 * @param bEnable	If true the enable the screen saver, if false disable it.
 	 */
-	void EnableScreenSaver( bool bEnable );
+	ENGINE_API void EnableScreenSaver( bool bEnable );
 	
 	/**
 	 * Get the index of the provided sprite category
@@ -2293,31 +2599,25 @@ public:
 		return INDEX_NONE;
 	}
 
-	/** Looks up the GUID of a package on disk. The package must NOT be in the auto-download cache.
-	 * This may require loading the header of the package in question and is therefore slow.
-	 */
-	UE_DEPRECATED(4.27, "UPackage::Guid has not been used by the engine for a long time and UEngine::GetPackageGuid will be removed.")
-	static FGuid GetPackageGuid(FName PackageName, bool bForPIE);
-
-	static void PreGarbageCollect();
+	static ENGINE_API void PreGarbageCollect();
 
 	/**
 	 *  Collect garbage once per frame driven by World ticks
 	 */
-	void ConditionalCollectGarbage();
+	ENGINE_API void ConditionalCollectGarbage();
 
 	/**
 	 *  Interface to allow WorldSettings to request immediate garbage collection
 	 */
-	void PerformGarbageCollectionAndCleanupActors();
+	ENGINE_API void PerformGarbageCollectionAndCleanupActors();
 
 	/** Updates the timer between garbage collection such that at the next opportunity garbage collection will be run. */
-	void ForceGarbageCollection(bool bFullPurge = false);
+	ENGINE_API void ForceGarbageCollection(bool bFullPurge = false);
 
 	/**
 	 *  Requests a one frame delay of Garbage Collection
 	 */
-	void DelayGarbageCollection();
+	ENGINE_API void DelayGarbageCollection();
 
 	/**
 	 * Updates the timer (as a one-off) that is used to trigger garbage collection; this should only be used for things
@@ -2325,25 +2625,25 @@ public:
 	 *
 	 * Note: Things that force a GC will still force a GC after using this method (and they will also reset the timer)
 	 */
-	void SetTimeUntilNextGarbageCollection(float MinTimeUntilNextPass);
+	ENGINE_API void SetTimeUntilNextGarbageCollection(float MinTimeUntilNextPass);
 
 	/**
 	 * Returns the current desired time between garbage collection passes (not the time remaining)
 	 */
-	float GetTimeBetweenGarbageCollectionPasses() const;
+	ENGINE_API float GetTimeBetweenGarbageCollectionPasses() const;
 
 #if !UE_BUILD_SHIPPING
 	/** 
 	 * Capture screenshots and performance metrics
-	 * @param EventTime time of the Matinee event
+	 * @param EventTime time of the Sequencer event
 	 */
-	void PerformanceCapture(UWorld* World, const FString& MapName, const FString& MatineeName, float EventTime);
+	ENGINE_API void PerformanceCapture(UWorld* World, const FString& MapName, const FString& SequenceName, float EventTime);
 
 	/**
 	 * Logs performance capture for use in automation analytics
-	 * @param EventTime time of the Matinee event
+	 * @param EventTime time of the Sequencer event
 	 */
-	void LogPerformanceCapture(UWorld* World, const FString& MapName, const FString& MatineeName, float EventTime);
+	ENGINE_API void LogPerformanceCapture(UWorld* World, const FString& MapName, const FString& SequenceName, float EventTime);
 #endif	// UE_BUILD_SHIPPING
 
 	/**
@@ -2352,31 +2652,31 @@ public:
 	 * @param	Label		Label for this run
 	 * @param	bRecordPerFrameTimes	Should we record per-frame times (potentially unbounded memory growth; used when triggered via the console but not when triggered by game code)
 	 */
-	virtual void StartFPSChart(const FString& Label, bool bRecordPerFrameTimes);
+	ENGINE_API virtual void StartFPSChart(const FString& Label, bool bRecordPerFrameTimes);
 
 	/**
 	 * Stops the FPS chart data capture (if no run is active then this command is ignored).
 	 */
-	virtual void StopFPSChart(const FString& MapName);
+	ENGINE_API virtual void StopFPSChart(const FString& MapName);
 
 	/**
 	* Attempts to reclaim any idle memory by performing a garbage collection and broadcasting FCoreDelegates::OnMemoryTrim. Pending rendering commands are first flushed. This is called
 	* between level loads and may be called at other times, but is expensive and should be used sparingly. Do
 	*/
-	static void TrimMemory();
+	static ENGINE_API void TrimMemory();
 
 	/**
 	 * Calculates information about the previous frame and passes it to all active performance data consumers.
 	 *
 	 * @param DeltaSeconds	Time in seconds passed since last tick.
 	 */
-	void TickPerformanceMonitoring(float DeltaSeconds);
+	ENGINE_API void TickPerformanceMonitoring(float DeltaSeconds);
 
 	/** Register a performance data consumer with the engine; it will be passed performance information each frame */
-	void AddPerformanceDataConsumer(TSharedPtr<IPerformanceDataConsumer> Consumer);
+	ENGINE_API void AddPerformanceDataConsumer(TSharedPtr<IPerformanceDataConsumer> Consumer);
 
 	/** Remove a previously registered performance data consumer */
-	void RemovePerformanceDataConsumer(TSharedPtr<IPerformanceDataConsumer> Consumer);
+	ENGINE_API void RemovePerformanceDataConsumer(TSharedPtr<IPerformanceDataConsumer> Consumer);
 
 public:
 	/** Delegate called when FPS charting detects a hitch (it is not triggered if there are no active performance data consumers). */
@@ -2389,9 +2689,12 @@ private:
 	 *
 	 * @param bInIsOpening			true if the UI is opening, false if it is being closed.
 	*/
-	void OnExternalUIChange(bool bInIsOpening);
+	ENGINE_API void OnExternalUIChange(bool bInIsOpening);
 
 protected:
+
+	/** Returns GetTimeBetweenGarbageCollectionPasses but tweaked if its an idle server or not */
+	ENGINE_API virtual float GetTimeBetweenGarbageCollectionPasses(bool bHasPlayersConnected) const;
 
 	/**
 	 * Handles freezing/unfreezing of rendering 
@@ -2415,30 +2718,47 @@ protected:
 	 *
 	 * @param Cmd			Error to perform. See implementation for options
 	 */
-	 bool PerformError(const TCHAR* Cmd, FOutputDevice& Out = *GLog);
+	 ENGINE_API bool PerformError(const TCHAR* Cmd, FOutputDevice& Out = *GLog);
+
+	 /**
+	  * Dispatches EndOfFrameUpdates for all UWorlds
+	  */
+	 static ENGINE_API void SendWorldEndOfFrameUpdates();
+
+	 /**
+	  * Allows derived classes to force garbage collection based on various factors (low on available UObject slots / other resources)
+	  */
+	 virtual EGarbageCollectionType ShouldForceGarbageCollection()
+	 {
+		 return EGarbageCollectionType::None;
+	 }
 
 public:
 	/** @return the GIsEditor flag setting */
-	bool IsEditor();
+	ENGINE_API bool IsEditor();
 
 	/** @return the audio device manager of the UEngine, this allows the creation and management of multiple audio devices. */
-	FAudioDeviceManager* GetAudioDeviceManager();
+	ENGINE_API FAudioDeviceManager* GetAudioDeviceManager();
 
 	/** @return the main audio device handle used by the engine. */
-	uint32 GetMainAudioDeviceID() const;
+	ENGINE_API uint32 GetMainAudioDeviceID() const;
 
 	/** @return the main audio device. */
-	FAudioDeviceHandle GetMainAudioDevice();
-	class FAudioDevice* GetMainAudioDeviceRaw();
+	ENGINE_API FAudioDeviceHandle GetMainAudioDevice();
+	ENGINE_API class FAudioDevice* GetMainAudioDeviceRaw();
 
 	/** @return the currently active audio device */
-	FAudioDeviceHandle GetActiveAudioDevice();
+	ENGINE_API FAudioDeviceHandle GetActiveAudioDevice();
 
-	/** @return whether we're currently running in split screen (more than one local player) */
-	virtual bool IsSplitScreen(UWorld *InWorld);
+	/** @return whether we currently have more than one local player */
+	UE_DEPRECATED(5.0, "IsSplitScreen was only ever checking if there are more than one local player. Use HasMultipleLocalPlayers instead.")
+	ENGINE_API virtual bool IsSplitScreen(UWorld *InWorld);
+
+	/** @returns whether there are currently multiple local players in the given world */
+	ENGINE_API virtual bool HasMultipleLocalPlayers(UWorld* InWorld);
 
 	/** @return whether we're currently running with stereoscopic 3D enabled for the specified viewport (or globally, if viewport is nullptr) */
-	bool IsStereoscopic3D(FViewport* InViewport = nullptr);
+	ENGINE_API bool IsStereoscopic3D(FViewport* InViewport = nullptr);
 
 	/**
 	 * Adds a world location as a secondary view location for purposes of texture streaming.
@@ -2449,7 +2769,13 @@ public:
 	 * @param bOverrideLocation		Whether this is an override location, which forces the streaming system to ignore all other locations
 	 * @param OverrideDuration		How long the streaming system should keep checking this location if bOverrideLocation is true, in seconds. 0 means just for the next Tick.
 	 */
-	void AddTextureStreamingSlaveLoc(FVector InLoc, float BoostFactor, bool bOverrideLocation, float OverrideDuration);
+	ENGINE_API void AddTextureStreamingLoc(FVector InLoc, float BoostFactor, bool bOverrideLocation, float OverrideDuration);
+
+	UE_DEPRECATED(5.1, "This is deprecated to follow inclusive naming rules. Use AddTextureStreamingLoc() instead.")
+	void AddTextureStreamingSlaveLoc(FVector InLoc, float BoostFactor, bool bOverrideLocation, float OverrideDuration)
+	{
+		AddTextureStreamingLoc(InLoc, BoostFactor, bOverrideLocation, OverrideDuration);
+	}
 
 	/** 
 	 * Obtain a world object pointer from an object with has a world context.
@@ -2458,7 +2784,7 @@ public:
 	 * @param ErrorMode		Controls what happens if the Object cannot be found
 	 * @return				The world to which the object belongs or nullptr if it cannot be found.
 	 */
-	UWorld* GetWorldFromContextObject(const UObject* Object, EGetWorldErrorMode ErrorMode) const;
+	ENGINE_API UWorld* GetWorldFromContextObject(const UObject* Object, EGetWorldErrorMode ErrorMode) const;
 
 	/** 
 	 * Obtain a world object pointer from an object with has a world context.
@@ -2469,16 +2795,6 @@ public:
 	UWorld* GetWorldFromContextObjectChecked(const UObject* Object) const
 	{
 		return GetWorldFromContextObject(Object, EGetWorldErrorMode::Assert);
-	}
-
-	/** 
-	 * This function is deprecated
-	 */
-	UE_DEPRECATED(4.17, "GetWorldFromContextObject(Object) and GetWorldFromContextObject(Object, boolean) are replaced by GetWorldFromContextObject(Object, Enum) or GetWorldFromContextObjectChecked(Object)")
-	UWorld* GetWorldFromContextObject(const UObject* Object, bool bChecked = true) const
-	{
-		// Note: The behavior in 4.16 and before was similar to Assert if bChecked was true, but almost no callers actually wanted to pass in bChecked=true
-		return GetWorldFromContextObject(Object, bChecked ? EGetWorldErrorMode::LogAndReturnNull : EGetWorldErrorMode::ReturnNull);
 	}
 
 	/** 
@@ -2493,22 +2809,27 @@ public:
 	 * @param	ControllerId	the game pad index of the player to search for
 	 * @return	The player that has the ControllerId specified, or nullptr if no players have that ControllerId
 	 */
-	ULocalPlayer* GetLocalPlayerFromControllerId( const UGameViewportClient* InViewport, const int32 ControllerId ) const;
-	ULocalPlayer* GetLocalPlayerFromControllerId( UWorld * InWorld, const int32 ControllerId ) const;
+	ENGINE_API ULocalPlayer* GetLocalPlayerFromControllerId( const UGameViewportClient* InViewport, const int32 ControllerId ) const;
+	ENGINE_API ULocalPlayer* GetLocalPlayerFromControllerId( UWorld * InWorld, const int32 ControllerId ) const;
 
-	void SwapControllerId(ULocalPlayer *NewPlayer, const int32 CurrentControllerId, const int32 NewControllerID) const;
+	ENGINE_API ULocalPlayer* GetLocalPlayerFromInputDevice(const UGameViewportClient* InViewport, const FInputDeviceId InputDevice) const;
+	ENGINE_API ULocalPlayer* GetLocalPlayerFromInputDevice(UWorld * InWorld, const FInputDeviceId InputDevice) const;
+
+	ENGINE_API void SwapControllerId(ULocalPlayer *NewPlayer, const int32 CurrentControllerId, const int32 NewControllerID) const;
+	
+	ENGINE_API void SwapPlatformUserId(ULocalPlayer *NewPlayer, const FPlatformUserId CurrentUserId, const FPlatformUserId NewUserID) const;
 
 	/** 
 	 * Find a Local Player Controller, which may not exist at all if this is a server.
 	 * @return first found LocalPlayerController. Fine for single player, in split screen, one will be picked. 
 	 */
-	class APlayerController* GetFirstLocalPlayerController(const UWorld* InWorld);
+	ENGINE_API class APlayerController* GetFirstLocalPlayerController(const UWorld* InWorld);
 
 	/** Gets all local players associated with the engine. 
 	 *	This function should only be used in rare cases where no UWorld* is available to get a player list associated with the world.
 	 *  E.g, - use GetFirstLocalPlayerController(UWorld *InWorld) when possible!
 	 */
-	void GetAllLocalPlayerControllers(TArray<APlayerController*>& PlayerList);
+	ENGINE_API void GetAllLocalPlayerControllers(TArray<APlayerController*>& PlayerList);
 
 	/** Returns the GameViewport widget */
 	virtual TSharedPtr<class SViewport> GetGameViewportWidget() const
@@ -2569,75 +2890,79 @@ public:
 	 *
 	 * @return Tiny font.
 	 */
-	static class UFont* GetTinyFont();
+	static ENGINE_API class UFont* GetTinyFont();
 
 	/**
 	 * Gets the engine's default small font
 	 *
 	 * @return Small font.
 	 */
-	static class UFont* GetSmallFont();
+	static ENGINE_API class UFont* GetSmallFont();
 
 	/**
 	 * Gets the engine's default medium font.
 	 *
 	 * @return Medium font.
 	 */
-	static class UFont* GetMediumFont();
+	static ENGINE_API class UFont* GetMediumFont();
 
 	/**
 	 * Gets the engine's default large font.
 	 *
 	 * @return Large font.
 	 */
-	static class UFont* GetLargeFont();
+	static ENGINE_API class UFont* GetLargeFont();
 
 	/**
 	 * Gets the engine's default subtitle font.
 	 *
 	 * @return Subtitle font.
 	 */
-	static class UFont* GetSubtitleFont();
+	static ENGINE_API class UFont* GetSubtitleFont();
 
 	/**
 	 * Gets the specified additional font.
 	 *
 	 * @param AdditionalFontIndex - Index into the AddtionalFonts array.
 	 */
-	static class UFont* GetAdditionalFont(int32 AdditionalFontIndex);
+	static ENGINE_API class UFont* GetAdditionalFont(int32 AdditionalFontIndex);
 
 	/** Makes a strong effort to copy everything possible from and old object to a new object of a different class, used for blueprint to update things after a recompile. */
 	struct FCopyPropertiesForUnrelatedObjectsParams
 	{
+		UE_DEPRECATED(5.1, "Aggressive Default Subobject Replacement is no longer being done. An ensure has been left in place to catch any cases that was making use of this feature.")
 		bool bAggressiveDefaultSubobjectReplacement;
 		bool bDoDelta;
 		bool bReplaceObjectClassReferences;
 		bool bCopyDeprecatedProperties;
 		bool bPreserveRootComponent;
+		bool bPerformDuplication;
+		bool bOnlyHandleDirectSubObjects;
 
 		/** Skips copying properties with BlueprintCompilerGeneratedDefaults metadata */
 		bool bSkipCompilerGeneratedDefaults;
 		bool bNotifyObjectReplacement;
 		bool bClearReferences;
+		UE_DEPRECATED(5.4, "This isn't used anymore by the code.")
+		bool bDontClearReferenceIfNewerClassExists;
+		bool bReplaceInternalReferenceUponRead; // While reading back object ptr, immediately replace them if they are in the replacement map.
 
-		FCopyPropertiesForUnrelatedObjectsParams()
-			: bAggressiveDefaultSubobjectReplacement(false)
-			, bDoDelta(true)
-			, bReplaceObjectClassReferences(true)
-			, bCopyDeprecatedProperties(false)
-			, bPreserveRootComponent(true)
-			, bSkipCompilerGeneratedDefaults(false)
-			, bNotifyObjectReplacement(false)
-			, bClearReferences(true)
-		{}
+		// In cases where the SourceObject will no longer be able to look up its correct Archetype, it can be supplied
+		UObject* SourceObjectArchetype;
+		TMap<UObject*, UObject*>* OptionalReplacementMappings;
+		const TMap<UClass*, UClass*>* OptionalOldToNewClassMappings; // Will be used along with the bReplaceInternalReferenceUponRead;
+
+		ENGINE_API FCopyPropertiesForUnrelatedObjectsParams();
+		ENGINE_API FCopyPropertiesForUnrelatedObjectsParams(const FCopyPropertiesForUnrelatedObjectsParams&);
 	};
-	static void CopyPropertiesForUnrelatedObjects(UObject* OldObject, UObject* NewObject, FCopyPropertiesForUnrelatedObjectsParams Params = FCopyPropertiesForUnrelatedObjectsParams());//bool bAggressiveDefaultSubobjectReplacement = false, bool bDoDelta = true);
+	static ENGINE_API void CopyPropertiesForUnrelatedObjects(UObject* OldObject, UObject* NewObject, FCopyPropertiesForUnrelatedObjectsParams Params = FCopyPropertiesForUnrelatedObjectsParams());
 	virtual void NotifyToolsOfObjectReplacement(const TMap<UObject*, UObject*>& OldToNewInstanceMap) { }
 
-	virtual bool UseSound() const;
+	ENGINE_API virtual bool UseSound() const;
 
 	// This should only ever be called for a EditorEngine
 	virtual UWorld* CreatePIEWorldByDuplication(FWorldContext &Context, UWorld* InWorld, FString &PlayWorldMapName) { check(false); return nullptr; }
+	virtual void PostCreatePIEWorld(UWorld* InWorld) { check(false); }
 
 	/** 
 	 *	If this function returns true, the DynamicSourceLevels collection will be duplicated for the given map.
@@ -2651,33 +2976,33 @@ protected:
 	/**
 	 *	Initialize the audio device manager
 	 */
-	virtual void InitializeAudioDeviceManager();
+	ENGINE_API virtual void InitializeAudioDeviceManager();
 
 	/**
 	 *	Detects and initializes any attached HMD devices
 	 *
 	 *	@return true if there is an initialized device, false otherwise
 	 */
-	virtual bool InitializeHMDDevice();
+	ENGINE_API virtual bool InitializeHMDDevice();
 
 	/**
 	 *	Detects and initializes any attached eye-tracking devices
 	 *
 	 *	@return true if there is an initialized device, false otherwise
 	 */
-	virtual bool InitializeEyeTrackingDevice();
+	ENGINE_API virtual bool InitializeEyeTrackingDevice();
 
 	/**	Record EngineAnalytics information for attached HMD devices. */
-	virtual void RecordHMDAnalytics();
+	ENGINE_API virtual void RecordHMDAnalytics();
 
 	/** Loads all Engine object references from their corresponding config entries. */
-	virtual void InitializeObjectReferences();
+	ENGINE_API virtual void InitializeObjectReferences();
 
 	/** Initialize Portal services. */
-	virtual void InitializePortalServices();
+	ENGINE_API virtual void InitializePortalServices();
 
 	/** Initializes the running average delta to some good initial framerate. */
-	virtual void InitializeRunningAverageDeltaTime();
+	ENGINE_API virtual void InitializeRunningAverageDeltaTime();
 
 	float RunningAverageDeltaTime;
 
@@ -2698,6 +3023,15 @@ private:
 
 	/** Broadcasts whenever an actor is removed. */
 	FLevelActorDeletedEvent LevelActorDeletedEvent;
+
+	/** Broadcasts whenever an actor folder is added. */
+	FActorFolderAddedEvent ActorFolderAddedEvent;
+
+	/** Broadcasts whenever an actor folder is removed. */
+	FActorFolderRemovedEvent ActorFolderRemovedEvent;
+
+	/** Broadcasts whenever a level rebuilds its actor folder list. */
+	FActorFoldersUpdatedEvent ActorFoldersUpdatedEvent;
 
 	/** Broadcasts whenever an actor's outer changes */
 	FLevelActorOuterChangedEvent LevelActorOuterChangedEvent;
@@ -2742,12 +3076,30 @@ private:
 	FScreenSaverInhibitor*  ScreenSaverInhibitorRunnable;
 
 
+	/** Increments every time a non-seamless travel happens on a server, to generate net session id's. Written to config to preserve id upon crash. */
+	UPROPERTY(Config)
+	uint32 GlobalNetTravelCount = 0;
+
+public:
+	void IncrementGlobalNetTravelCount()
+	{
+		GlobalNetTravelCount++;
+	}
+
+	uint32 GetGlobalNetTravelCount() const
+	{
+		return GlobalNetTravelCount;
+	}
 public:
 
 	/** A list of named UNetDriver definitions */
 	UPROPERTY(Config, transient)
 	TArray<FNetDriverDefinition> NetDriverDefinitions;
 
+	/** A list of Iris NetDriverConfigs */
+	UPROPERTY(Config, transient)
+	TArray<FIrisNetDriverConfig> IrisNetDriverConfigs;
+	
 	/** A configurable list of actors that are automatically spawned upon server startup (just prior to InitGame) */
 	UPROPERTY(config)
 	TArray<FString> ServerActors;
@@ -2761,7 +3113,7 @@ public:
 	float NetErrorLogInterval;
 
 	/** Spawns all of the registered server actors */
-	virtual void SpawnServerActors(UWorld *World);
+	ENGINE_API virtual void SpawnServerActors(UWorld *World);
 
 	/**
 	 * Notification of network error messages, allows the engine to handle the failure
@@ -2771,7 +3123,7 @@ public:
 	 * @param	FailureType	the type of error
 	 * @param	ErrorString	additional string detailing the error
 	 */
-	virtual void HandleNetworkFailure(UWorld *World, UNetDriver *NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString);
+	ENGINE_API virtual void HandleNetworkFailure(UWorld *World, UNetDriver *NetDriver, ENetworkFailure::Type FailureType, const FString& ErrorString);
 
 	/**
 	 * Notification of server travel error messages, generally network connection related (package verification, client server handshaking, etc) 
@@ -2781,7 +3133,7 @@ public:
 	 * @param	FailureType	the type of error
 	 * @param	ErrorString	additional string detailing the error
 	 */
-	virtual void HandleTravelFailure(UWorld* InWorld, ETravelFailure::Type FailureType, const FString& ErrorString);
+	ENGINE_API virtual void HandleTravelFailure(UWorld* InWorld, ETravelFailure::Type FailureType, const FString& ErrorString);
 
 	
 	/**
@@ -2791,14 +3143,14 @@ public:
 	 * @param	NetDriver associated with the lag
 	 * @param	LagType	Whether we started lagging or we are no longer lagging
 	 */
-	virtual void HandleNetworkLagStateChanged(UWorld* World, UNetDriver* NetDriver, ENetworkLagState::Type LagType);
+	ENGINE_API virtual void HandleNetworkLagStateChanged(UWorld* World, UNetDriver* NetDriver, ENetworkLagState::Type LagType);
 
 	/**
 	 * Shutdown any relevant net drivers
 	 */
-	void ShutdownWorldNetDriver(UWorld*);
+	ENGINE_API void ShutdownWorldNetDriver(UWorld*);
 
-	void ShutdownAllNetDrivers();
+	ENGINE_API void ShutdownAllNetDrivers();
 
 	/**
 	 * Finds a UNetDriver based on its name.
@@ -2807,8 +3159,8 @@ public:
 	 *
 	 * @return A pointer to the UNetDriver that was found, or nullptr if it wasn't found.
 	 */
-	UNetDriver* FindNamedNetDriver(const UWorld* InWorld, FName NetDriverName);
-	UNetDriver* FindNamedNetDriver(const UPendingNetGame* InPendingNetGame, FName NetDriverName);
+	ENGINE_API UNetDriver* FindNamedNetDriver(const UWorld* InWorld, FName NetDriverName);
+	ENGINE_API UNetDriver* FindNamedNetDriver(const UPendingNetGame* InPendingNetGame, FName NetDriverName);
 
 	/**
 	 * Returns the current netmode
@@ -2818,7 +3170,7 @@ public:
 	 * Note: if there is no valid net driver, returns NM_StandAlone
 	 */
 	//virtual ENetMode GetNetMode(FName NetDriverName = NAME_GameNetDriver) const;
-	ENetMode GetNetMode(const UWorld *World) const;
+	ENGINE_API ENetMode GetNetMode(const UWorld *World) const;
 
 	/**
 	 * Creates a UNetDriver with an engine assigned name
@@ -2828,7 +3180,7 @@ public:
 	 *
 	 * @return new netdriver if successful, nullptr otherwise
 	 */
-	UNetDriver* CreateNetDriver(UWorld *InWorld, FName NetDriverDefinition);
+	ENGINE_API UNetDriver* CreateNetDriver(UWorld *InWorld, FName NetDriverDefinition);
 
 	/**
 	 * Creates a UNetDriver and associates a name with it.
@@ -2839,7 +3191,7 @@ public:
 	 *
 	 * @return True if the driver was created successfully, false if there was an error.
 	 */
-	bool CreateNamedNetDriver(UWorld *InWorld, FName NetDriverName, FName NetDriverDefinition);
+	ENGINE_API bool CreateNamedNetDriver(UWorld *InWorld, FName NetDriverName, FName NetDriverDefinition);
 
 	/**
 	 * Creates a UNetDriver and associates a name with it.
@@ -2850,37 +3202,32 @@ public:
 	 *
 	 * @return True if the driver was created successfully, false if there was an error.
 	 */
-	bool CreateNamedNetDriver(UPendingNetGame *PendingNetGame, FName NetDriverName, FName NetDriverDefinition);
+	ENGINE_API bool CreateNamedNetDriver(UPendingNetGame *PendingNetGame, FName NetDriverName, FName NetDriverDefinition);
 	
 	/**
 	 * Destroys a UNetDriver based on its name.
 	 *
 	 * @param NetDriverName The name associated with the driver to destroy.
 	 */
-	void DestroyNamedNetDriver(UWorld *InWorld, FName NetDriverName);
-	void DestroyNamedNetDriver(UPendingNetGame *PendingNetGame, FName NetDriverName);
+	ENGINE_API void DestroyNamedNetDriver(UWorld *InWorld, FName NetDriverName);
+	ENGINE_API void DestroyNamedNetDriver(UPendingNetGame *PendingNetGame, FName NetDriverName);
 
-	UE_DEPRECATED(4.26, "Please use NetworkRemapPath that takes a connection instead.")
-	virtual bool NetworkRemapPath(UNetDriver* Driver, FString &Str, bool bReading=true) { return false; }
 	virtual bool NetworkRemapPath(UNetConnection* Connection, FString& Str, bool bReading=true) { return false; }
 	virtual bool NetworkRemapPath(UPendingNetGame *PendingNetGame, FString &Str, bool bReading=true) { return false; }
 
-	virtual bool HandleOpenCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld * InWorld );
+	ENGINE_API virtual bool HandleOpenCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld * InWorld );
 
-	virtual bool HandleTravelCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API virtual bool HandleTravelCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
 	
-	virtual bool HandleStreamMapCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld *InWorld );
+	ENGINE_API virtual bool HandleStreamMapCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld *InWorld );
 
 #if WITH_SERVER_CODE
-	virtual bool HandleServerTravelCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
-
-	UE_DEPRECATED(4.14, "Say Command moved to GameMode as an exec function")
-	virtual bool HandleSayCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
+	ENGINE_API virtual bool HandleServerTravelCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld* InWorld );
 #endif
 
-	virtual bool HandleDisconnectCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld *InWorld );
+	ENGINE_API virtual bool HandleDisconnectCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld *InWorld );
 
-	virtual bool HandleReconnectCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld *InWorld );
+	ENGINE_API virtual bool HandleReconnectCommand( const TCHAR* Cmd, FOutputDevice& Ar, UWorld *InWorld );
 
 	
 	/**
@@ -2890,7 +3237,7 @@ public:
 	 * @param NetDriver The net driver being disconnect (will be InWorld's net driver if there is a world)
 	 *	
 	 */
-	void HandleDisconnect( UWorld *InWorld, UNetDriver *NetDriver );
+	ENGINE_API void HandleDisconnect( UWorld *InWorld, UNetDriver *NetDriver );
 
 	/**
 	 * Makes sure map name is a long package name.
@@ -2898,22 +3245,22 @@ public:
 	 * @param InOutMapName Map name. In non-final builds code will attempt to convert to long package name if short name is provided.
 	 * @param true if the map name was valid, false otherwise.
 	 */
-	bool MakeSureMapNameIsValid(FString& InOutMapName);
+	ENGINE_API bool MakeSureMapNameIsValid(FString& InOutMapName);
 
-	void SetClientTravel( UWorld *InWorld, const TCHAR* NextURL, ETravelType InTravelType );
+	ENGINE_API void SetClientTravel( UWorld *InWorld, const TCHAR* NextURL, ETravelType InTravelType );
 
-	void SetClientTravel( UPendingNetGame *PendingNetGame, const TCHAR* NextURL, ETravelType InTravelType );
+	ENGINE_API void SetClientTravel( UPendingNetGame *PendingNetGame, const TCHAR* NextURL, ETravelType InTravelType );
 
-	void SetClientTravelFromPendingGameNetDriver( UNetDriver *PendingGameNetDriverGame, const TCHAR* NextURL, ETravelType InTravelType );
+	ENGINE_API void SetClientTravelFromPendingGameNetDriver( UNetDriver *PendingGameNetDriverGame, const TCHAR* NextURL, ETravelType InTravelType );
 
 	/** Browse to a specified URL, relative to the current one. */
-	virtual EBrowseReturnVal::Type Browse( FWorldContext& WorldContext, FURL URL, FString& Error );
+	ENGINE_API virtual EBrowseReturnVal::Type Browse( FWorldContext& WorldContext, FURL URL, FString& Error );
 
-	virtual void TickWorldTravel(FWorldContext& WorldContext, float DeltaSeconds);
+	ENGINE_API virtual void TickWorldTravel(FWorldContext& WorldContext, float DeltaSeconds);
 
-	void BrowseToDefaultMap( FWorldContext& WorldContext );
+	ENGINE_API void BrowseToDefaultMap( FWorldContext& WorldContext );
 
-	virtual bool LoadMap( FWorldContext& WorldContext, FURL URL, class UPendingNetGame* Pending, FString& Error );
+	ENGINE_API virtual bool LoadMap( FWorldContext& WorldContext, FURL URL, class UPendingNetGame* Pending, FString& Error );
 
 	virtual void RedrawViewports( bool bShouldPresent = true ) { }
 
@@ -2925,7 +3272,7 @@ public:
 	 *
 	 * @param InWorld Target world
 	 */
-	void BlockTillLevelStreamingCompleted(UWorld* InWorld);
+	ENGINE_API void BlockTillLevelStreamingCompleted(UWorld* InWorld);
 
 	/**
 	 * true if the loading movie was started during LoadMap().
@@ -2939,7 +3286,7 @@ public:
 	 * @param FullyLoadType When to load the packages (based on map, GameMode, etc)
 	 * @param Tag Name of the map/game to cleanup packages for
 	 */
-	void CleanupPackagesToFullyLoad(FWorldContext &Context, EFullyLoadPackageType FullyLoadType, const FString& Tag);
+	ENGINE_API void CleanupPackagesToFullyLoad(FWorldContext &Context, EFullyLoadPackageType FullyLoadType, const FString& Tag);
 
 	/**
 	 * Called to allow overloading by child engines
@@ -2949,7 +3296,7 @@ public:
 		RedrawViewports(false);
 	}
 
-	void ClearDebugDisplayProperties();
+	ENGINE_API void ClearDebugDisplayProperties();
 
 	/**
 	 * Loads the PerMapPackages for the given map, and adds them to the RootSet
@@ -2957,46 +3304,46 @@ public:
 	 * @param FullyLoadType When to load the packages (based on map, GameMode, etc)
 	 * @param Tag Name of the map/game to load packages for
 	 */
-	void LoadPackagesFully(UWorld * InWorld, EFullyLoadPackageType FullyLoadType, const FString& Tag);
+	ENGINE_API void LoadPackagesFully(UWorld * InWorld, EFullyLoadPackageType FullyLoadType, const FString& Tag);
 
-	void UpdateTransitionType(UWorld *CurrentWorld);
+	ENGINE_API void UpdateTransitionType(UWorld *CurrentWorld);
 
-	UPendingNetGame* PendingNetGameFromWorld( UWorld* InWorld );
+	ENGINE_API UPendingNetGame* PendingNetGameFromWorld( UWorld* InWorld );
 
 	/** Cancel pending level. */
-	virtual void CancelAllPending();
+	ENGINE_API virtual void CancelAllPending();
 
-	virtual void CancelPending(UWorld *InWorld, UPendingNetGame *NewPendingNetGame=nullptr );
+	ENGINE_API virtual void CancelPending(UWorld *InWorld, UPendingNetGame *NewPendingNetGame=nullptr );
 
-	virtual bool WorldIsPIEInNewViewport(UWorld *InWorld);
+	ENGINE_API virtual bool WorldIsPIEInNewViewport(UWorld *InWorld);
 
-	FWorldContext* GetWorldContextFromWorld(const UWorld* InWorld);
-	FWorldContext* GetWorldContextFromGameViewport(const UGameViewportClient *InViewport);
-	FWorldContext* GetWorldContextFromPendingNetGame(const UPendingNetGame *InPendingNetGame);	
-	FWorldContext* GetWorldContextFromPendingNetGameNetDriver(const UNetDriver *InPendingNetGame);	
-	FWorldContext* GetWorldContextFromHandle(const FName WorldContextHandle);
-	FWorldContext* GetWorldContextFromPIEInstance(const int32 PIEInstance);
+	ENGINE_API FWorldContext* GetWorldContextFromWorld(const UWorld* InWorld);
+	ENGINE_API FWorldContext* GetWorldContextFromGameViewport(const UGameViewportClient *InViewport);
+	ENGINE_API FWorldContext* GetWorldContextFromPendingNetGame(const UPendingNetGame *InPendingNetGame);	
+	ENGINE_API FWorldContext* GetWorldContextFromPendingNetGameNetDriver(const UNetDriver *InPendingNetGame);	
+	ENGINE_API FWorldContext* GetWorldContextFromHandle(const FName WorldContextHandle);
+	ENGINE_API FWorldContext* GetWorldContextFromPIEInstance(const int32 PIEInstance);
 
-	const FWorldContext* GetWorldContextFromWorld(const UWorld* InWorld) const;
-	const FWorldContext* GetWorldContextFromGameViewport(const UGameViewportClient *InViewport) const;
-	const FWorldContext* GetWorldContextFromPendingNetGame(const UPendingNetGame *InPendingNetGame) const;	
-	const FWorldContext* GetWorldContextFromPendingNetGameNetDriver(const UNetDriver *InPendingNetGame) const;	
-	const FWorldContext* GetWorldContextFromHandle(const FName WorldContextHandle) const;
-	const FWorldContext* GetWorldContextFromPIEInstance(const int32 PIEInstance) const;
+	ENGINE_API const FWorldContext* GetWorldContextFromWorld(const UWorld* InWorld) const;
+	ENGINE_API const FWorldContext* GetWorldContextFromGameViewport(const UGameViewportClient *InViewport) const;
+	ENGINE_API const FWorldContext* GetWorldContextFromPendingNetGame(const UPendingNetGame *InPendingNetGame) const;	
+	ENGINE_API const FWorldContext* GetWorldContextFromPendingNetGameNetDriver(const UNetDriver *InPendingNetGame) const;	
+	ENGINE_API const FWorldContext* GetWorldContextFromHandle(const FName WorldContextHandle) const;
+	ENGINE_API const FWorldContext* GetWorldContextFromPIEInstance(const int32 PIEInstance) const;
 
-	FWorldContext& GetWorldContextFromWorldChecked(const UWorld * InWorld);
-	FWorldContext& GetWorldContextFromGameViewportChecked(const UGameViewportClient *InViewport);
-	FWorldContext& GetWorldContextFromPendingNetGameChecked(const UPendingNetGame *InPendingNetGame);	
-	FWorldContext& GetWorldContextFromPendingNetGameNetDriverChecked(const UNetDriver *InPendingNetGame);	
-	FWorldContext& GetWorldContextFromHandleChecked(const FName WorldContextHandle);
-	FWorldContext& GetWorldContextFromPIEInstanceChecked(const int32 PIEInstance);
+	ENGINE_API FWorldContext& GetWorldContextFromWorldChecked(const UWorld * InWorld);
+	ENGINE_API FWorldContext& GetWorldContextFromGameViewportChecked(const UGameViewportClient *InViewport);
+	ENGINE_API FWorldContext& GetWorldContextFromPendingNetGameChecked(const UPendingNetGame *InPendingNetGame);	
+	ENGINE_API FWorldContext& GetWorldContextFromPendingNetGameNetDriverChecked(const UNetDriver *InPendingNetGame);	
+	ENGINE_API FWorldContext& GetWorldContextFromHandleChecked(const FName WorldContextHandle);
+	ENGINE_API FWorldContext& GetWorldContextFromPIEInstanceChecked(const int32 PIEInstance);
 
-	const FWorldContext& GetWorldContextFromWorldChecked(const UWorld * InWorld) const;
-	const FWorldContext& GetWorldContextFromGameViewportChecked(const UGameViewportClient *InViewport) const;
-	const FWorldContext& GetWorldContextFromPendingNetGameChecked(const UPendingNetGame *InPendingNetGame) const;	
-	const FWorldContext& GetWorldContextFromPendingNetGameNetDriverChecked(const UNetDriver *InPendingNetGame) const;	
-	const FWorldContext& GetWorldContextFromHandleChecked(const FName WorldContextHandle) const;
-	const FWorldContext& GetWorldContextFromPIEInstanceChecked(const int32 PIEInstance) const;
+	ENGINE_API const FWorldContext& GetWorldContextFromWorldChecked(const UWorld * InWorld) const;
+	ENGINE_API const FWorldContext& GetWorldContextFromGameViewportChecked(const UGameViewportClient *InViewport) const;
+	ENGINE_API const FWorldContext& GetWorldContextFromPendingNetGameChecked(const UPendingNetGame *InPendingNetGame) const;	
+	ENGINE_API const FWorldContext& GetWorldContextFromPendingNetGameNetDriverChecked(const UNetDriver *InPendingNetGame) const;	
+	ENGINE_API const FWorldContext& GetWorldContextFromHandleChecked(const FName WorldContextHandle) const;
+	ENGINE_API const FWorldContext& GetWorldContextFromPIEInstanceChecked(const int32 PIEInstance) const;
 
 	const TIndirectArray<FWorldContext>& GetWorldContexts() const { return WorldList;	}
 
@@ -3007,14 +3354,36 @@ public:
 	 * @param PossiblePlayWorld If set, this will be checked first and returned if valid. If this is not the active play world, null will be returned due to ambiguity
 	 * @return either nullptr or a World that is guaranteed to be of type Game or PIE
 	 */
-	UWorld* GetCurrentPlayWorld(UWorld* PossiblePlayWorld = nullptr) const;
+	ENGINE_API UWorld* GetCurrentPlayWorld(UWorld* PossiblePlayWorld = nullptr) const;
 
-	/** Verify any remaining World(s) are valid after ::LoadMap destroys a world */
-	virtual void VerifyLoadMapWorldCleanup();
+	/**
+	 * Finds any World(s) and related objects that are still referenced after being destroyed by ::LoadMap and logs which objects are holding the references.
+	 * May rename packages for the dangling objects to allow the world to be reloaded without conflicting with the existing one.
+	 * @param InWorldContext The optional world context for which we want to check references to additional "must-destroy" objects.
+	 */
+	ENGINE_API virtual void CheckAndHandleStaleWorldObjectReferences(FWorldContext* InWorldContext = nullptr);
 
-	FWorldContext& CreateNewWorldContext(EWorldType::Type WorldType);
+	/**
+	 * Attempts to find what is referencing a world that should have been garbage collected
+	 * @param ObjectToFindReferencesTo World or its package (or any object from the world package that should've been destroyed)
+	 * @param Verbosity Verbosity (can be fatal or non-fatal) with which to print the error message with
+	 */
+	UE_DEPRECATED(5.1, "Please use FReferenceChainSearch::FindAndPrintStaleReferencesToObject")
+	static ENGINE_API void FindAndPrintStaleReferencesToObject(UObject* ObjectToFindReferencesTo, ELogVerbosity::Type Verbosity);
 
-	virtual void DestroyWorldContext(UWorld * InWorld);
+	/**
+	 * Attempts to find a reference chain leading to a world that should have been garbage collected
+	 * @param ObjectToFindReferencesTo World or its package (or any object from the world package that should've been destroyed)
+	 * @param Options Determines how the stale references messages should be logged
+	 */
+	UE_DEPRECATED(5.3, "Please use FReferenceChainSearch::FindAndPrintStaleReferencesToObject")
+	static ENGINE_API FString FindAndPrintStaleReferencesToObject(UObject* ObjectToFindReferencesTo, EPrintStaleReferencesOptions Options);
+	UE_DEPRECATED(5.3, "Please use FReferenceChainSearch::FindAndPrintStaleReferencesToObjects")
+	static ENGINE_API TArray<FString> FindAndPrintStaleReferencesToObjects(TConstArrayView<UObject*> ObjectsToFindReferencesTo, EPrintStaleReferencesOptions Options);
+
+	ENGINE_API FWorldContext& CreateNewWorldContext(EWorldType::Type WorldType);
+
+	ENGINE_API virtual void DestroyWorldContext(UWorld * InWorld);
 
 #if WITH_EDITOR
 	/** Triggered when a world context is destroyed. */
@@ -3040,21 +3409,21 @@ public:
 	 * @param	FunctionTarget	Object this function will be called on, if not null this may be used to determine context
 	 * @param	Stack			Function call stack, if not null this may be used to determine context
 	 */
-	int32 GetGlobalFunctionCallspace(UFunction* Function, UObject* FunctionTarget, FFrame* Stack);
+	ENGINE_API int32 GetGlobalFunctionCallspace(UFunction* Function, UObject* FunctionTarget, FFrame* Stack);
 
 	/** 
 	 * Returns true if the global context is client-only and authority only events should always be ignored. 
 	 * This will return false if it is unknown, use GetCurrentPlayWorld if you have a possible world.
 	 */
-	bool ShouldAbsorbAuthorityOnlyEvent();
+	ENGINE_API bool ShouldAbsorbAuthorityOnlyEvent();
 
 	/** 
 	 * Returns true if the global context is dedicated server and cosmetic only events should always be ignored. 
 	 * This will return false if it is unknown, use GetCurrentPlayWorld if you have a possible world.
 	 */
-	bool ShouldAbsorbCosmeticOnlyEvent();
+	ENGINE_API bool ShouldAbsorbCosmeticOnlyEvent();
 
-	UGameViewportClient* GameViewportForWorld(const UWorld *InWorld) const;
+	ENGINE_API UGameViewportClient* GameViewportForWorld(const UWorld *InWorld) const;
 
 	/** @return true if editor analytics are enabled */
 	virtual bool AreEditorAnalyticsEnabled() const { return false; }
@@ -3068,12 +3437,25 @@ public:
 	bool IsVanillaProduct() const { return bIsVanillaProduct; }
 
 protected:
-	void SetIsVanillaProduct(bool bInIsVanillaProduct);
+	ENGINE_API void SetIsVanillaProduct(bool bInIsVanillaProduct);
 
 private:
 	bool bIsVanillaProduct;
 
 protected:
+	/**
+	 * Delegate for overriding the method Browse in the part that parses an URL
+	 * and loads specified level or creates PendingNetGame.
+	 * Parameter are the same as those passed to the calling method Browse
+	 */
+	FBrowseURL OnOverrideBrowseURL;
+
+	/**
+	 * Delegate for overriding the method TickWorldTravel in the part that
+	 * controls the state of PendingNetGame
+	 * Parameter are the same as those passed to the calling method Browse
+	 */
+	FPendingLevelUpdate OnOverridePendingNetGameUpdate;
 
 	TIndirectArray<FWorldContext>	WorldList;
 
@@ -3081,11 +3463,11 @@ protected:
 	int32	NextWorldContextHandle;
 
 
-	virtual void CancelPending(FWorldContext& WorldContext);
+	ENGINE_API virtual void CancelPending(FWorldContext& WorldContext);
 
-	virtual void CancelPending(UNetDriver* PendingNetGameDriver);
+	ENGINE_API virtual void CancelPending(UNetDriver* PendingNetGameDriver);
 
-	virtual void MovePendingLevel(FWorldContext &Context);
+	ENGINE_API virtual void MovePendingLevel(FWorldContext &Context);
 
 	/**
 	 *	Returns true if BROWSE should shuts down the current network driver.
@@ -3095,20 +3477,20 @@ protected:
 		return true;
 	}
 
-	bool WorldHasValidContext(UWorld *InWorld);
+	ENGINE_API bool WorldHasValidContext(UWorld *InWorld);
 
 	/**
 	 * Attempts to gracefully handle a failure to travel to the default map.
 	 *
 	 * @param Error the error string result from the LoadMap call that attempted to load the default map.
 	 */
-	virtual void HandleBrowseToDefaultMapFailure(FWorldContext& Context, const FString& TextURL, const FString& Error);
+	ENGINE_API virtual void HandleBrowseToDefaultMapFailure(FWorldContext& Context, const FString& TextURL, const FString& Error);
 
 	/**
 	 * Helper function that returns true if InWorld is the outer of a level in a collection of type DynamicDuplicatedLevels.
 	 * For internal engine use.
 	 */
-	bool IsWorldDuplicate(const UWorld* const InWorld);
+	ENGINE_API bool IsWorldDuplicate(const UWorld* const InWorld);
 
 protected:
 
@@ -3121,21 +3503,21 @@ protected:
 	 * @return	true if successful, false if there were errors (use GetMapChangeFailureDescription 
 	 *			for error description)
 	 */
-	bool CommitMapChange( FWorldContext &Context);
+	ENGINE_API bool CommitMapChange( FWorldContext &Context);
 
 	/**
 	 * Returns whether the prepared map change is ready for commit having called.
 	 *
 	 * @return true if we're ready to commit the map change, false otherwise
 	 */
-	bool IsReadyForMapChange(FWorldContext &Context);
+	ENGINE_API bool IsReadyForMapChange(FWorldContext &Context);
 
 	/**
 	 * Returns whether we are currently preparing for a map change or not.
 	 *
 	 * @return true if we are preparing for a map change, false otherwise
 	 */
-	bool IsPreparingMapChange(FWorldContext &Context);
+	ENGINE_API bool IsPreparingMapChange(FWorldContext &Context);
 
 	/**
 	 * Prepares the engine for a map change by pre-loading level packages in the background.
@@ -3147,20 +3529,20 @@ protected:
 	 *			false otherwise. false as a return value also indicates that the code has given
 	 *			up.
 	 */
-	bool PrepareMapChange(FWorldContext &WorldContext, const TArray<FName>& LevelNames);
+	ENGINE_API bool PrepareMapChange(FWorldContext &WorldContext, const TArray<FName>& LevelNames);
 
 	/**
 	 * Returns the failure description in case of a failed map change request.
 	 *
 	 * @return	Human readable failure description in case of failure, empty string otherwise
 	 */
-	FString GetMapChangeFailureDescription(FWorldContext &Context);
+	ENGINE_API FString GetMapChangeFailureDescription(FWorldContext &Context);
 
 	/** Commit map change if requested and map change is pending. Called every frame.	 */
-	void ConditionalCommitMapChange(FWorldContext &WorldContext);
+	ENGINE_API void ConditionalCommitMapChange(FWorldContext &WorldContext);
 
 	/** Cancels pending map change.	 */
-	void CancelPendingMapChange(FWorldContext &Context);
+	ENGINE_API void CancelPendingMapChange(FWorldContext &Context);
 
 public:
 
@@ -3177,35 +3559,36 @@ public:
 	/** Cancels pending map change.	 */
 	void CancelPendingMapChange(UWorld *InWorld) { return CancelPendingMapChange(GetWorldContextFromWorldChecked(InWorld)); }
 
-	void AddNewPendingStreamingLevel(UWorld *InWorld, FName PackageName, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, int32 LODIndex);
+	ENGINE_API void AddNewPendingStreamingLevel(UWorld *InWorld, FName PackageName, bool bNewShouldBeLoaded, bool bNewShouldBeVisible, int32 LODIndex);
 
-	bool ShouldCommitPendingMapChange(const UWorld *InWorld) const;
-	void SetShouldCommitPendingMapChange(UWorld *InWorld, bool NewShouldCommitPendingMapChange);
+	ENGINE_API bool ShouldCommitPendingMapChange(const UWorld *InWorld) const;
+	ENGINE_API void SetShouldCommitPendingMapChange(UWorld *InWorld, bool NewShouldCommitPendingMapChange);
 
-	FSeamlessTravelHandler&	SeamlessTravelHandlerForWorld(UWorld *World);
+	ENGINE_API FSeamlessTravelHandler&	SeamlessTravelHandlerForWorld(UWorld *World);
 
-	FURL & LastURLFromWorld(UWorld *World);
+	ENGINE_API FURL & LastURLFromWorld(UWorld *World);
 
 	/**
 	 * Returns the global instance of the game user settings class.
 	 */
-	const UGameUserSettings* GetGameUserSettings() const;
-	UGameUserSettings* GetGameUserSettings();
+	ENGINE_API const UGameUserSettings* GetGameUserSettings() const;
+	ENGINE_API UGameUserSettings* GetGameUserSettings();
 
 private:
-	void CreateGameUserSettings();
+	ENGINE_API void CreateGameUserSettings();
 
 	/** Allows subclasses to pass the failure to a UGameInstance if possible (mainly for blueprints) */
-	virtual void HandleNetworkFailure_NotifyGameInstance(UWorld* World, UNetDriver* NetDriver, ENetworkFailure::Type FailureType);
+	ENGINE_API virtual void HandleNetworkFailure_NotifyGameInstance(UWorld* World, UNetDriver* NetDriver, ENetworkFailure::Type FailureType);
 
 	/** Allows subclasses to pass the failure to a UGameInstance if possible (mainly for blueprints) */
-	virtual void HandleTravelFailure_NotifyGameInstance(UWorld* World, ETravelFailure::Type FailureType);
+	ENGINE_API virtual void HandleTravelFailure_NotifyGameInstance(UWorld* World, ETravelFailure::Type FailureType);
 
 public:
 #if WITH_EDITOR
 	//~ Begin Transaction Interfaces.
 	virtual int32 BeginTransaction(const TCHAR* TransactionContext, const FText& Description, UObject* PrimaryObject) { return INDEX_NONE; }
 	virtual int32 EndTransaction() { return INDEX_NONE; }
+	virtual bool CanTransact() { return false; }
 	virtual void CancelTransaction(int32 Index) { }
 #endif
 
@@ -3216,7 +3599,7 @@ public:
 	UEngineSubsystem* GetEngineSubsystemBase(TSubclassOf<UEngineSubsystem> SubsystemClass) const
 	{
 		checkSlow(this != nullptr);
-		return EngineSubsystemCollection->GetSubsystem<UEngineSubsystem>(SubsystemClass);
+		return EngineSubsystemCollection.GetSubsystem<UEngineSubsystem>(SubsystemClass);
 	}
 
 	/**
@@ -3226,7 +3609,7 @@ public:
 	TSubsystemClass* GetEngineSubsystem() const
 	{
 		checkSlow(this != nullptr);
-		return EngineSubsystemCollection->GetSubsystem<TSubsystemClass>(TSubsystemClass::StaticClass());
+		return EngineSubsystemCollection.GetSubsystem<TSubsystemClass>(TSubsystemClass::StaticClass());
 	}
 
 	/**
@@ -3235,15 +3618,11 @@ public:
 	template <typename TSubsystemClass>
 	const TArray<TSubsystemClass*>& GetEngineSubsystemArray() const
 	{
-		return EngineSubsystemCollection->GetSubsystemArray<TSubsystemClass>(TSubsystemClass::StaticClass());
+		return EngineSubsystemCollection.GetSubsystemArray<TSubsystemClass>(TSubsystemClass::StaticClass());
 	}
 
 private:
-	// TUniqueObj is used here to work around a hot reload issue caused by FSubsystemCollection inheriting FGCObject.
-	// When hot reload occurs, the CDO for this type can be reconstructed over the same object at the same address without
-	// destroying it first, which breaks FGCObject.
-	// TUniquePtr makes sure the object is allocated on the heap, giving it a unique address.
-	TUniqueObj<FSubsystemCollection<UEngineSubsystem>> EngineSubsystemCollection;
+	FObjectSubsystemCollection<UEngineSubsystem> EngineSubsystemCollection;
 
 public:
 	/**
@@ -3254,7 +3633,7 @@ public:
 	 * @param FText The description of the new stat.
 	 */
 	DECLARE_EVENT_ThreeParams(UEngine, FOnNewStatRegistered, const FName&, const FName&, const FText&);
-	static FOnNewStatRegistered NewStatDelegate;
+	static ENGINE_API FOnNewStatRegistered NewStatDelegate;
 	
 	/**
 	 * Wrapper for firing a simple stat exec.
@@ -3263,7 +3642,7 @@ public:
 	 * @param ViewportClient The viewport to apply the exec to.
 	 * @param InName The exec string.
 	 */
-	void ExecEngineStat(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* InName);
+	ENGINE_API void ExecEngineStat(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* InName);
 
 	/**
 	 * Check to see if the specified stat name is a simple stat.
@@ -3271,7 +3650,7 @@ public:
 	 * @param InName The name of the stat we're checking.
 	 * @returns true if the stat is a registered simple stat.
 	 */
-	bool IsEngineStat(const FString& InName);
+	ENGINE_API bool IsEngineStat(const FString& InName);
 
 	/**
 	 * Set the state of the specified stat.
@@ -3281,7 +3660,7 @@ public:
 	 * @param InName The stat name.
 	 * @param bShow The state we would like the stat to be in.
 	 */
-	void SetEngineStat(UWorld* World, FCommonViewportClient* ViewportClient, const FString& InName, const bool bShow);
+	ENGINE_API void SetEngineStat(UWorld* World, FCommonViewportClient* ViewportClient, const FString& InName, const bool bShow);
 
 	/**
 	 * Set the state of the specified stats (note: array processed in reverse order when !bShow).
@@ -3291,7 +3670,7 @@ public:
 	 * @param InNames The stat names.
 	 * @param bShow The state we would like the stat to be in.
 	 */
-	void SetEngineStats(UWorld* World, FCommonViewportClient* ViewportClient, const TArray<FString>& InNames, const bool bShow);
+	ENGINE_API void SetEngineStats(UWorld* World, FCommonViewportClient* ViewportClient, const TArray<FString>& InNames, const bool bShow);
 
 	/**
 	 * Function to render all the simple stats
@@ -3306,7 +3685,17 @@ public:
 	 * @param ViewLocation The world space view location.
 	 * @param ViewRotation The world space view rotation.
 	 */
-	void RenderEngineStats(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 LHSX, int32& InOutLHSY, int32 RHSX, int32& InOutRHSY, const FVector* ViewLocation, const FRotator* ViewRotation);
+	ENGINE_API void RenderEngineStats(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 LHSX, int32& InOutLHSY, int32 RHSX, int32& InOutRHSY, const FVector* ViewLocation, const FRotator* ViewRotation);
+
+	/**
+	 * Function to render text indicating whether named events are enabled.
+	 *
+	 * @param Canvas The canvas to use when drawing.
+	 * @param X The X position to start drawing from.
+	 * @param Y The Y position to start drawing from.
+	 * @return The ending Y position to continue rendering stats at.
+	 */
+	ENGINE_API int32 RenderNamedEventsEnabled(FCanvas* Canvas, int32 X, int32 Y);
 
 	/**
 	 * Function definition for those stats which have their own toggle functions (or toggle other stats).
@@ -3334,9 +3723,9 @@ public:
 
 	/** Allows external systems to add a new simple engine stat function. 
 	*/
-	void AddEngineStat(const FName& InCommandName, const FName& InCategoryName, const FText& InDescriptionString, FEngineStatRender InRenderFunc = nullptr, FEngineStatToggle InToggleFunc = nullptr, const bool bInIsRHS = false);
+	ENGINE_API void AddEngineStat(const FName& InCommandName, const FName& InCategoryName, const FText& InDescriptionString, FEngineStatRender InRenderFunc = nullptr, FEngineStatToggle InToggleFunc = nullptr, const bool bInIsRHS = false);
 
-	void RemoveEngineStat(const FName& InCommandName);
+	ENGINE_API void RemoveEngineStat(const FName& InCommandName);
 private:
 
 	/** Struct for keeping track off all the info regarding a specific simple stat exec */
@@ -3384,20 +3773,8 @@ private:
 
 	// Helper struct that registers itself with the output redirector and copies off warnings
 	// and errors that we'll overlay on the client viewport
-	struct FErrorsAndWarningsCollector : public FBufferedOutputDevice
-	{
-		FErrorsAndWarningsCollector();
-		~FErrorsAndWarningsCollector();
-
-		void Initialize();
-		bool Tick(float Seconds);
-
-		TMap<uint32, uint32>	MessagesToCountMap;
-		FDelegateHandle			TickerHandle;
-		float					DisplayTime;
-	};
-
-	FErrorsAndWarningsCollector	ErrorsAndWarningsCollector;
+	struct FErrorsAndWarningsCollector;
+	TPimplPtr<FErrorsAndWarningsCollector> ErrorsAndWarningsCollector;
 
 private:
 
@@ -3408,24 +3785,20 @@ private:
 	 * @param ViewportClient The viewport being drawn to.
 	 * @param Stream The remaining characters from the Exec call (optional).
 	 */
-	bool ToggleStatFPS(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatDetailed(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatHitches(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatNamedEvents(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatUnit(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatFPS(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatDetailed(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatHitches(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatNamedEvents(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatVerboseNamedEvents(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatUnit(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
 #if !UE_BUILD_SHIPPING
-	bool PostStatSoundModulatorHelp(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatUnitMax(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatUnitGraph(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatUnitTime(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatRaw(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatSoundWaves(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatSoundCues(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatSounds(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatAudioStreaming(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatSoundMixes(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatSoundModulators(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
-	bool ToggleStatParticlePerf(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool PostStatSoundModulatorHelp(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatUnitMax(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatUnitGraph(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatUnitTime(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatRaw(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatParticlePerf(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
+	ENGINE_API bool ToggleStatTSR(UWorld* World, FCommonViewportClient* ViewportClient, const TCHAR* Stream = nullptr);
 #endif
 
 	/**
@@ -3440,35 +3813,38 @@ private:
 	 * @param ViewRotation The world space view rotation.
 	 */
 #if !UE_BUILD_SHIPPING
-	int32 RenderStatVersion(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatVersion(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
 #endif // !UE_BUILD_SHIPPING
-	int32 RenderStatFPS(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatHitches(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatSummary(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatNamedEvents(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatColorList(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatLevels(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatLevelMap(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatUnit(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatDrawCount(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatFPS(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatHitches(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSummary(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatColorList(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatLevels(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatLevelMap(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatUnit(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatDrawCount(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
 #if !UE_BUILD_SHIPPING
-	int32 RenderStatSoundReverb(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
- 	int32 RenderStatSoundMixes(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatSoundModulators(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatSoundWaves(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatAudioStreaming(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatSoundCues(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatSounds(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatParticlePerf(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSoundReverb(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+ 	ENGINE_API int32 RenderStatSoundMixes(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSoundModulators(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSoundWaves(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatAudioStreaming(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSoundCues(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSounds(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatParticlePerf(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
 #endif // !UE_BUILD_SHIPPING
-	int32 RenderStatAI(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatTimecode(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
-	int32 RenderStatFrameCounter(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatAI(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatTimecode(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatFrameCounter(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
 #if STATS
-	int32 RenderStatSlateBatches(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
+	ENGINE_API int32 RenderStatSlateBatches(UWorld* World, FViewport* Viewport, FCanvas* Canvas, int32 X, int32 Y, const FVector* ViewLocation = nullptr, const FRotator* ViewRotation = nullptr);
 #endif
 
 	FDelegateHandle HandleScreenshotCapturedDelegateHandle;
+
+public:
+	/** Set priority and affinity on game thread either from ini file or from FPlatformAffinity::GetGameThreadPriority()*/
+	ENGINE_API void SetPriorityAndAffinityOnGameThread();
 };
 
 /** Global engine pointer. Can be 0 so don't use without checking. */

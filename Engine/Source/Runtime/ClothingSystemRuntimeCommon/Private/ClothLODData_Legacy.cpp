@@ -4,6 +4,8 @@
 #include "ClothLODData.h"
 #include "ClothPhysicalMeshDataBase_Legacy.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ClothLODData_Legacy)
+
 FClothParameterMask_Legacy::FClothParameterMask_Legacy()
 	: MaskName(NAME_None)
 	, CurrentTarget(EWeightMapTargetCommon::None)
@@ -67,12 +69,6 @@ void UClothLODDataCommon_Legacy::MigrateTo(FClothLODDataCommon& LodData)
 		LodData.PhysicalMeshData.MigrateFrom(ClothPhysicalMeshData);
 	}
 
-	// Migrate collision
-	LodData.CollisionData.Spheres = MoveTemp(CollisionData.Spheres);
-	LodData.CollisionData.SphereConnections = MoveTemp(CollisionData.SphereConnections);
-	LodData.CollisionData.Convexes = MoveTemp(CollisionData.Convexes);
-	LodData.CollisionData.Boxes = MoveTemp(CollisionData.Boxes);
-
 #if WITH_EDITORONLY_DATA
 	// Migrate editor maps
 	LodData.PointWeightMaps = MoveTemp(ParameterMasks);
@@ -82,3 +78,4 @@ void UClothLODDataCommon_Legacy::MigrateTo(FClothLODDataCommon& LodData)
 	LodData.TransitionUpSkinData = MoveTemp(TransitionUpSkinData);
 	LodData.TransitionDownSkinData = MoveTemp(TransitionDownSkinData);
 }
+

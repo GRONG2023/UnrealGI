@@ -2,13 +2,15 @@
 
 #pragma once
 
-#if WITH_EDITOR
-
-#include "Misc/Optional.h"
 #include "Misc/Guid.h"
-#include "UObject/WeakObjectPtr.h"
+#include "Misc/Optional.h"
 #include "MovieSceneSequence.h"
 #include "MovieSceneSequenceID.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class UMovieSceneSequence;
+class UObject;
 
 /**
  * An annotation that's added to spawned objects from movie scene spawnables
@@ -42,6 +44,3 @@ struct FMovieSceneSpawnableAnnotation
 	/** The sequence ID that spawned this object */
 	FMovieSceneSequenceID SequenceID;
 };
-
-
-#endif // WITH_EDITOR

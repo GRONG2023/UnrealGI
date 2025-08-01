@@ -5,6 +5,9 @@
 #include "VisualLogger/VisualLoggerTypes.h"
 #include "VisualLoggerDatabase.h"
 #include "VisualLogger/VisualLogger.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(LogVisualizerSettings)
+
 #if WITH_EDITOR
 #include "UnrealEdMisc.h"
 #endif // WITH_EDITOR
@@ -16,6 +19,7 @@ ULogVisualizerSettings::ULogVisualizerSettings(const FObjectInitializer& ObjectI
 	TrivialLogsThreshold = 1;
 	DefaultCameraDistance = 150;
 	bSearchInsideLogs = true;
+	bUseFilterVolumes = true;
 	GraphsBackgroundColor = FColor(0, 0, 0, 70);
 	bResetDataWithNewSession = false;
 	bDrawExtremesOnGraphs = false;
@@ -33,45 +37,45 @@ class UMaterial* ULogVisualizerSettings::GetDebugMeshMaterial()
 	return DebugMeshMaterialFakeLight;
 }
 
-void ULogVisualizerSettings::SavePresistentData()
+void ULogVisualizerSettings::SavePersistentData()
 {
-	if (bPresistentFilters)
+	if (bPersistentFilters)
 	{
-		PresistentFilters = FVisualLoggerFilters::Get();
-		for (int32 Index = PresistentFilters.Categories.Num() - 1; Index >= 0; --Index)
+		PersistentFilters = FVisualLoggerFilters::Get();
+		for (int32 Index = PersistentFilters.Categories.Num() - 1; Index >= 0; --Index)
 		{
-			FCategoryFilter& Category = PresistentFilters.Categories[Index];
+			FCategoryFilter& Category = PersistentFilters.Categories[Index];
 			if (Category.bIsInUse == false)
 			{
-				PresistentFilters.Categories.RemoveAt(Index);
+				PersistentFilters.Categories.RemoveAt(Index);
 			}
 		}
 	}
 	else
 	{
-		PresistentFilters = FVisualLoggerFilters();
+		PersistentFilters = FVisualLoggerFilters();
 	}
 	SaveConfig();
 }
 
-void ULogVisualizerSettings::ClearPresistentData()
+void ULogVisualizerSettings::ClearPersistentData()
 {
-	if (bPresistentFilters)
+	if (bPersistentFilters)
 	{
-		PresistentFilters = FVisualLoggerFilters();
+		PersistentFilters = FVisualLoggerFilters();
 	}
 }
 
-void ULogVisualizerSettings::LoadPresistentData()
+void ULogVisualizerSettings::LoadPersistentData()
 {
-	if (bPresistentFilters)
+	if (bPersistentFilters)
 	{
-		for (int32 Index = PresistentFilters.Categories.Num() - 1; Index >= 0; --Index)
+		for (int32 Index = PersistentFilters.Categories.Num() - 1; Index >= 0; --Index)
 		{
-			FCategoryFilter& Category = PresistentFilters.Categories[Index];
+			FCategoryFilter& Category = PersistentFilters.Categories[Index];
 			Category.bIsInUse = false;
 		}
-		FVisualLoggerFilters::Get().InitWith(PresistentFilters);
+		FVisualLoggerFilters::Get().InitWith(PersistentFilters);
 	}
 	else
 	{
@@ -282,20 +286,11 @@ void FVisualLoggerFilters::EnableAllCategories()
 	}
 }
 
-
 void FVisualLoggerFilters::Reset()
 {
-	if (ULogVisualizerSettings::StaticClass()->GetDefaultObject<ULogVisualizerSettings>()->bResetDataWithNewSession == false)
+	for (int32 Index = Categories.Num() - 1; Index >= 0; --Index)
 	{
-		for (int32 Index = Categories.Num() - 1; Index >= 0; --Index)
-		{
-			Categories[Index].bIsInUse = false;
-		}
-	}
-	else
-	{
-		FastCategoryFilterMap.Reset();
-		Categories.Reset();
+		Categories[Index].bIsInUse = false;
 	}
 
 	SearchBoxFilter = FString();
@@ -338,3 +333,4 @@ bool FVisualLoggerFilters::IsGraphDataDisabled(FName GraphName, FName DataName)
 	const FName FullName = *(GraphName.ToString() + TEXT("$") + DataName.ToString());
 	return DisabledGraphDatas.Find(FullName) != INDEX_NONE;
 }
+

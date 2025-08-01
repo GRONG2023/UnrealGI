@@ -2,23 +2,29 @@
 
 #include "HLOD/HLODEngineSubsystem.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(HLODEngineSubsystem)
+
 #if WITH_EDITOR
 
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetDependencyGatherer.h"
 #include "EngineUtils.h"
-#include "Engine/EngineTypes.h"
 #include "Engine/LODActor.h"
 #include "Engine/HLODProxy.h"
+#include "Engine/World.h"
 #include "Editor.h"
 #include "UnrealEngine.h"
 #include "HierarchicalLOD.h"
+#include "Misc/PathViews.h"
 #include "Modules/ModuleManager.h"
 #include "IHierarchicalLODUtilities.h"
 #include "HierarchicalLODUtilitiesModule.h"
-#include "GameFramework/WorldSettings.h"
+#include "UObject/ObjectSaveContext.h"
 
 void UHLODEngineSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	bDisableHLODCleanupOnLoad = false;
+	bDisableHLODSpawningOnLoad = false;
 
 	Super::Initialize(Collection);
 	RegisterRecreateLODActorsDelegates();
@@ -35,6 +41,14 @@ void UHLODEngineSubsystem::DisableHLODCleanupOnLoad(bool bInDisableHLODCleanup)
 	bDisableHLODCleanupOnLoad = bInDisableHLODCleanup;
 }
 
+void UHLODEngineSubsystem::DisableHLODSpawningOnLoad(bool bInDisableHLODSpawning)
+{
+	bDisableHLODSpawningOnLoad = bInDisableHLODSpawning;
+
+	UnregisterRecreateLODActorsDelegates();
+	RegisterRecreateLODActorsDelegates();
+}
+
 void UHLODEngineSubsystem::OnSaveLODActorsToHLODPackagesChanged()
 {
 	UnregisterRecreateLODActorsDelegates();
@@ -49,11 +63,11 @@ void UHLODEngineSubsystem::UnregisterRecreateLODActorsDelegates()
 
 void UHLODEngineSubsystem::RegisterRecreateLODActorsDelegates()
 {
-	if (GetDefault<UHierarchicalLODSettings>()->bSaveLODActorsToHLODPackages)
+	if (GetDefault<UHierarchicalLODSettings>()->bSaveLODActorsToHLODPackages && !bDisableHLODSpawningOnLoad)
 	{
 		OnPostWorldInitializationDelegateHandle = FWorldDelegates::OnPostWorldInitialization.AddUObject(this, &UHLODEngineSubsystem::RecreateLODActorsForWorld);
 		OnLevelAddedToWorldDelegateHandle = FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UHLODEngineSubsystem::RecreateLODActorsForLevel);
-		OnPreSaveWorlDelegateHandle = FEditorDelegates::PreSaveWorld.AddUObject(this, &UHLODEngineSubsystem::OnPreSaveWorld);
+		OnPreSaveWorlDelegateHandle = FEditorDelegates::PreSaveWorldWithContext.AddUObject(this, &UHLODEngineSubsystem::OnPreSaveWorld);
 	}	
 }
 
@@ -84,7 +98,7 @@ void UHLODEngineSubsystem::RecreateLODActorsForLevel(ULevel* InLevel, UWorld* In
 	}
 
 	// Look for HLODProxy packages associated with this level
-	int32 NumLODLevels = InLevel->GetWorldSettings()->bEnableHierarchicalLODSystem ? InLevel->GetWorldSettings()->GetHierarchicalLODSetup().Num() : 0;
+	int32 NumLODLevels = InLevel->GetWorldSettings()->GetHierarchicalLODSetup().Num();
 	for (int32 LODIndex = 0; LODIndex < NumLODLevels; ++LODIndex)
 	{
 		// Obtain HLOD package for the current HLOD level
@@ -128,7 +142,7 @@ bool UHLODEngineSubsystem::CleanupHLOD(ALODActor* InLODActor)
 {
 	bool bShouldDestroyActor = false;
 
-	if (!InLODActor->GetLevel()->GetWorldSettings()->bEnableHierarchicalLODSystem || InLODActor->GetLevel()->GetWorldSettings()->GetHierarchicalLODSetup().Num() == 0)
+	if (InLODActor->GetLevel()->GetWorldSettings()->GetHierarchicalLODSetup().Num() == 0)
 	{
 		UE_LOG(LogEngine, Warning, TEXT("Deleting LODActor %s found in map with no HLOD setup or disabled HLOD system. Resave %s to silence warning."), *InLODActor->GetName(), *InLODActor->GetOutermost()->GetPathName());
 		bShouldDestroyActor = true;
@@ -156,10 +170,10 @@ bool UHLODEngineSubsystem::CleanupHLOD(ALODActor* InLODActor)
 	return bShouldDestroyActor;
 }
 
-void UHLODEngineSubsystem::OnPreSaveWorld(uint32 InSaveFlags, UWorld* InWorld)
+void UHLODEngineSubsystem::OnPreSaveWorld(UWorld* InWorld, FObjectPreSaveContext ObjectSaveContext)
 {
 	// When cooking, make sure that the LODActors are not transient
-	if (InWorld && InWorld->PersistentLevel && GIsCookerLoadingPackage)
+	if (InWorld && InWorld->PersistentLevel && ObjectSaveContext.IsCooking())
 	{
 		for (AActor* Actor : InWorld->PersistentLevel->Actors)
 		{
@@ -184,4 +198,49 @@ void UHLODEngineSubsystem::OnPreSaveWorld(uint32 InSaveFlags, UWorld* InWorld)
 	}
 }
 
+class FHLODDependencyGatherer : public IAssetDependencyGatherer
+{
+public:
+	virtual void GatherDependencies(const FAssetData& AssetData, const FAssetRegistryState& AssetRegistryState,
+		TFunctionRef<FARCompiledFilter(const FARFilter&)> CompileFilterFunc,
+		TArray<IAssetDependencyGatherer::FGathereredDependency>& OutDependencies,
+		TArray<FString>& OutDependencyDirectories) const override;
+};
+
+void FHLODDependencyGatherer::GatherDependencies(const FAssetData& AssetData,
+	const FAssetRegistryState& AssetRegistryState, TFunctionRef<FARCompiledFilter(const FARFilter&)> CompileFilterFunc,
+	TArray<IAssetDependencyGatherer::FGathereredDependency>& OutDependencies,
+	TArray<FString>& OutDependencyDirectories) const
+{
+	if (!GetDefault<UHierarchicalLODSettings>()->bSaveLODActorsToHLODPackages)
+	{
+		return;
+	}
+
+	// Record a dependency on the paths to HLODProxy packages that can be associated with
+	// this level if they exist
+	FHierarchicalLODUtilitiesModule& Module = FModuleManager::LoadModuleChecked<FHierarchicalLODUtilitiesModule>("HierarchicalLODUtilities");
+	IHierarchicalLODUtilities* Utilities = Module.GetUtilities();
+
+	// TODO: GetHLODPackageName is usually constructed from the World's packagename, but this can be replaced by ULevelStreaming::PackageNameToLoad
+	// We need to write the list of LevelStreaming PackageNameToLoad into the AssetData so we can read it from here.
+	FString Wildcard = Utilities->GetWildcardOfHLODPackagesForPackage(AssetData.PackageName.ToString());
+	FARFilter PossibleAssetsFilter;
+	PossibleAssetsFilter.PackagePaths.Add(FName(FPathViews::GetPath(Wildcard)));
+	TArray<FAssetData> FilteredAssets;
+	AssetRegistryState.GetAssets(CompileFilterFunc(PossibleAssetsFilter), {}, FilteredAssets);
+	FString PackageName;
+	for (const FAssetData& FilteredAsset : FilteredAssets)
+	{
+		FilteredAsset.PackageName.ToString(PackageName);
+		if (PackageName.MatchesWildcard(Wildcard))
+		{
+			OutDependencies.Emplace(IAssetDependencyGatherer::FGathereredDependency{ FilteredAsset.PackageName,
+				UE::AssetRegistry::EDependencyProperty::Game | UE::AssetRegistry::EDependencyProperty::Build });
+		}
+	}
+}
+REGISTER_ASSETDEPENDENCY_GATHERER(FHLODDependencyGatherer, UWorld);
+
 #endif // WITH_EDITOR
+

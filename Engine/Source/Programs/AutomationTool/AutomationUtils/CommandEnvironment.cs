@@ -6,16 +6,18 @@ using System.Text;
 using System.Reflection;
 using Microsoft.Win32;
 using System.Diagnostics;
-using Tools.DotNETCommon;
-using UnrealBuildTool;
+using EpicGames.Core;
 using System.Text.RegularExpressions;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+using UnrealBuildTool;
 
 namespace AutomationTool
 {
 	/// <summary>
 	/// Defines the environment variable names that will be used to setup the environment.
 	/// </summary>
-	static class EnvVarNames
+	public static class EnvVarNames
 	{
 		// Command Environment
 		public const string LocalRoot = "uebp_LOCAL_ROOT";
@@ -45,8 +47,10 @@ namespace AutomationTool
 	/// </summary>
 	public class CommandEnvironment
 	{
+		static ILogger Logger => Log.Logger;
+
 		/// <summary>
-		/// Path to a file we know to always exist under the UE4 root directory.
+		/// Path to a file we know to always exist under the Unreal root directory.
 		/// </summary>
 		public static readonly string KnownFileRelativeToRoot = @"Engine/Config/BaseEngine.ini";
 
@@ -54,14 +58,15 @@ namespace AutomationTool
 		public string EngineSavedFolder { get; protected set; }
 		public string LogFolder { get; protected set; }
 		public string FinalLogFolder { get; protected set; }
-        public string CSVFile { get; protected set; }
+		public string CSVFile { get; protected set; }
 		public string RobocopyExe { get; protected set; }
 		public string MountExe { get; protected set; }
 		public string CmdExe { get; protected set; }
-		public string UATExe { get; protected set; }		
+		public string AutomationToolDll { get; protected set; }
 		public string TimestampAsString { get; protected set; }
 		public bool HasCapabilityToCompile { get; protected set; }
-		public string MsBuildExe { get; protected set; }
+		public string FrameworkMsbuildPath { get; protected set; }
+		public string DotnetMsbuildPath { get; protected set; }
 		public string MallocNanoZone { get; protected set; }
 		public bool IsChildInstance { get; protected set; }
 
@@ -70,18 +75,19 @@ namespace AutomationTool
 		/// </summary>
 		internal CommandEnvironment()
 		{
-			// Get the path to the UAT executable
-			UATExe = Assembly.GetEntryAssembly().GetOriginalLocation();
-			if (!CommandUtils.FileExists(UATExe))
+			// Get the path to AutomationTool.dll
+			AutomationToolDll = Assembly.GetEntryAssembly().GetOriginalLocation();
+
+			if (!CommandUtils.FileExists(AutomationToolDll))
 			{
-				throw new AutomationException("Could not find AutomationTool.exe. Reflection indicated it was here: {0}", UATExe);
+				throw new AutomationException("Could not find AutomationTool.dll. Reflection indicated it was here: {0}", AutomationToolDll);
 			}
 
 			// Find the root directory (containing the Engine folder)
 			LocalRoot = CommandUtils.GetEnvVar(EnvVarNames.LocalRoot);
 			if(String.IsNullOrEmpty(LocalRoot))
 			{
-				LocalRoot = CommandUtils.ConvertSeparators(PathSeparator.Slash, Path.GetFullPath(Path.Combine(Path.GetDirectoryName(UATExe), "..", "..", "..")));
+				LocalRoot = CommandUtils.ConvertSeparators(PathSeparator.Slash, Path.GetFullPath(Path.Combine(Path.GetDirectoryName(AutomationToolDll), "..", "..", "..", "..")));
 				CommandUtils.ConditionallySetEnvVar(EnvVarNames.LocalRoot, LocalRoot);
 			}
 
@@ -98,7 +104,7 @@ namespace AutomationTool
 			LogFolder = CommandUtils.GetEnvVar(EnvVarNames.LogFolder);
 			if (String.IsNullOrEmpty(LogFolder))
 			{
-				if (CommandUtils.IsEngineInstalled())
+				if (Unreal.IsEngineInstalled())
 				{
 					LogFolder = GetInstalledLogFolder();
 				}
@@ -110,7 +116,7 @@ namespace AutomationTool
 			}
 
 			// clear the logfolder if we're the only running instance
-			if (InternalUtils.IsSoleInstance)
+			if (ProcessSingleton.IsSoleInstance)
 			{
 				ClearLogFolder(LogFolder);
 			}
@@ -124,13 +130,18 @@ namespace AutomationTool
 
 			RobocopyExe = GetSystemExePath("robocopy.exe");
 			MountExe = GetSystemExePath("mount.exe");
-			CmdExe = Utils.IsRunningOnMono ? "/bin/sh" : GetSystemExePath("cmd.exe");
+			CmdExe = RuntimePlatform.IsWindows ? GetSystemExePath("cmd.exe") : "/bin/sh";
 			MallocNanoZone = "0";
 			CommandUtils.SetEnvVar(EnvVarNames.MacMallocNanoZone, MallocNanoZone);
 
 			int IsChildInstanceInt;
-			int.TryParse(CommandUtils.GetEnvVar("uebp_UATChildInstance", "0"), out IsChildInstanceInt);
+			int.TryParse(CommandUtils.GetEnvVar(EnvVarNames.IsChildInstance, "0"), out IsChildInstanceInt);
 			IsChildInstance = (IsChildInstanceInt != 0);
+
+			if (IsChildInstance)
+			{
+				Logger.LogInformation("AutomationTool is running as a child instance ({Name}={Value})", EnvVarNames.IsChildInstance, IsChildInstanceInt.ToString());
+			}
 
 			// Setup the timestamp string
 			DateTime LocalTime = DateTime.Now;
@@ -174,17 +185,18 @@ namespace AutomationTool
 
 		void LogSettings()
 		{
-			Log.TraceVerbose("Command Environment settings:");
-			Log.TraceVerbose("CmdExe={0}", CmdExe);
-			Log.TraceVerbose("EngineSavedFolder={0}", EngineSavedFolder);
-			Log.TraceVerbose("HasCapabilityToCompile={0}", HasCapabilityToCompile);
-			Log.TraceVerbose("LocalRoot={0}", LocalRoot);
-			Log.TraceVerbose("LogFolder={0}", LogFolder);
-			Log.TraceVerbose("MountExe={0}", MountExe);
-			Log.TraceVerbose("MsBuildExe={0}", MsBuildExe);
-			Log.TraceVerbose("RobocopyExe={0}", RobocopyExe);
-			Log.TraceVerbose("TimestampAsString={0}", TimestampAsString);
-			Log.TraceVerbose("UATExe={0}", UATExe);			
+			Logger.LogDebug("Command Environment settings:");
+			Logger.LogDebug("CmdExe={CmdExe}", CmdExe);
+			Logger.LogDebug("EngineSavedFolder={EngineSavedFolder}", EngineSavedFolder);
+			Logger.LogDebug("HasCapabilityToCompile={HasCapabilityToCompile}", HasCapabilityToCompile);
+			Logger.LogDebug("LocalRoot={LocalRoot}", LocalRoot);
+			Logger.LogDebug("LogFolder={LogFolder}", LogFolder);
+			Logger.LogDebug("MountExe={MountExe}", MountExe);
+			Logger.LogDebug("FrameworkMsbuildExe={FrameworkMsbuildPath}", FrameworkMsbuildPath);
+			Logger.LogDebug("DotnetMsbuildExe={DotnetMsbuildPath}", DotnetMsbuildPath);
+			Logger.LogDebug("RobocopyExe={RobocopyExe}", RobocopyExe);
+			Logger.LogDebug("TimestampAsString={TimestampAsString}", TimestampAsString);
+			Logger.LogDebug("AutomationToolDll={AutomationToolDll}", AutomationToolDll);
 		}
 
 		/// <summary>
@@ -195,23 +207,29 @@ namespace AutomationTool
 			// Assume we have the capability co compile.
 			HasCapabilityToCompile = true;
 
-			if (HasCapabilityToCompile)
+			if (BuildHostPlatform.Current.IsRunningOnWine())
 			{
-				try
-				{
-					MsBuildExe = HostPlatform.Current.GetMsBuildExe();
-				}
-				catch (Exception Ex)
-				{
-					Log.WriteLine(LogEventType.Warning, Ex.Message);
-					Log.WriteLine(LogEventType.Warning, "Assuming no compilation capability.");
-					HasCapabilityToCompile = false;
-					MsBuildExe = "";
-				}
+				// Just set an empty path as we currently compile .NET Framework/Core dependencies outside Wine
+				FrameworkMsbuildPath = "";
+				return;
 			}
 
-			Log.TraceVerbose("CompilationEvironment.HasCapabilityToCompile={0}", HasCapabilityToCompile);
-			Log.TraceVerbose("CompilationEvironment.MsBuildExe={0}", MsBuildExe);
+			try
+			{
+				FrameworkMsbuildPath = HostPlatform.Current.GetFrameworkMsbuildExe();
+			}
+			catch (Exception Ex)
+			{
+				Log.WriteLine(LogEventType.Log, Ex.Message);
+				Log.WriteLine(LogEventType.Log, "Assuming no compilation capability for NET Framework projects.");
+				HasCapabilityToCompile = false;
+				FrameworkMsbuildPath = "";
+			}
+			Logger.LogDebug("CompilationEvironment.HasCapabilityToCompile={HasCapabilityToCompile}", HasCapabilityToCompile);
+			Logger.LogDebug("CompilationEvironment.FrameworkMsbuildExe={FrameworkMsbuildPath}", FrameworkMsbuildPath);
+
+			DotnetMsbuildPath = Unreal.DotnetPath.FullName;
+			Logger.LogDebug("CompilationEvironment.DotnetMsbuildExe={DotnetMsbuildPath}", DotnetMsbuildPath);
 		}
 
 		/// <summary>
@@ -230,7 +248,7 @@ namespace AutomationTool
 			while (true)
 			{
 				var PathToCheck = Path.GetFullPath(CommandUtils.CombinePaths(CurrentPath, KnownFilePathFromRoot));
-				Log.TraceVerbose("Checking for {0}", PathToCheck);
+				Logger.LogDebug("Checking for {PathToCheck}", PathToCheck);
 				if (!File.Exists(PathToCheck))
 				{
 					var LastSeparatorIndex = CurrentPath.LastIndexOf('/');

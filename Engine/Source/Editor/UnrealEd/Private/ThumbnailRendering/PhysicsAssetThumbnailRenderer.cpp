@@ -13,27 +13,52 @@ UPhysicsAssetThumbnailRenderer::UPhysicsAssetThumbnailRenderer(const FObjectInit
 	ThumbnailScene = nullptr;
 }
 
+bool UPhysicsAssetThumbnailRenderer::CanVisualizeAsset(UObject* Object)
+{
+	if (!Super::CanVisualizeAsset(Object))
+	{
+		return false;
+	}
+	UPhysicsAsset* PhysicsAsset = Cast<UPhysicsAsset>(Object);
+	if (!PhysicsAsset)
+	{
+		return false;
+	}
+	USkeletalMesh* SkeletalMesh = PhysicsAsset->PreviewSkeletalMesh.LoadSynchronous();
+	const bool bValidRenderData = SkeletalMesh && SkeletalMesh->IsReadyToRenderInThumbnail();
+	if (!bValidRenderData)
+	{
+		return false;
+	}
+	return true;
+}
+
 void UPhysicsAssetThumbnailRenderer::Draw(UObject* Object, int32 X, int32 Y, uint32 Width, uint32 Height, FRenderTarget* RenderTarget, FCanvas* Canvas, bool bAdditionalViewFamily)
 {
 	UPhysicsAsset* PhysicsAsset = Cast<UPhysicsAsset>(Object);
-	if (PhysicsAsset != nullptr)
+	if (PhysicsAsset)
 	{
-		if ( ThumbnailScene == nullptr )
+		USkeletalMesh* SkeletalMesh = PhysicsAsset->PreviewSkeletalMesh.LoadSynchronous();
+		const bool bValidRenderData = SkeletalMesh && SkeletalMesh->IsReadyToRenderInThumbnail();
+		if (!bValidRenderData)
+		{
+			return;
+		}
+		if (!ThumbnailScene)
 		{
 			ThumbnailScene = new FPhysicsAssetThumbnailScene();
 		}
 
 		ThumbnailScene->SetPhysicsAsset(PhysicsAsset);
-		FSceneViewFamilyContext ViewFamily( FSceneViewFamily::ConstructionValues( RenderTarget, ThumbnailScene->GetScene(), FEngineShowFlags(ESFIM_Game) )
-			.SetWorldTimes(FApp::GetCurrentTime() - GStartTime, FApp::GetDeltaTime(), FApp::GetCurrentTime() - GStartTime)
+		FSceneViewFamilyContext ViewFamily(FSceneViewFamily::ConstructionValues(RenderTarget, ThumbnailScene->GetScene(), FEngineShowFlags(ESFIM_Game))
+			.SetTime(UThumbnailRenderer::GetTime())
 			.SetAdditionalViewFamily(bAdditionalViewFamily));
 
 		ViewFamily.EngineShowFlags.DisableAdvancedFeatures();
 		ViewFamily.EngineShowFlags.MotionBlur = 0;
 		ViewFamily.EngineShowFlags.LOD = 0;
 
-		ThumbnailScene->GetView(&ViewFamily, X, Y, Width, Height);
-		RenderViewFamily(Canvas,&ViewFamily);
+		RenderViewFamily(Canvas, &ViewFamily, ThumbnailScene->CreateView(&ViewFamily, X, Y, Width, Height));
 		ThumbnailScene->SetPhysicsAsset(nullptr);
 	}
 }

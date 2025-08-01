@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ObjectEditorUtils.h"
+#include "Internationalization/TextKey.h"
 #include "UObject/Package.h"
-#include "UObject/PropertyPortFlags.h"
 
 #if WITH_EDITOR
 #include "EditorCategoryUtils.h"
@@ -150,7 +150,6 @@ namespace FObjectEditorUtils
 	static void CopySinglePropertyRecursive(UObject* SourceObject, const void* const InSourcePtr, FProperty* InSourceProperty, void* const InTargetPtr, UObject* InDestinationObject, FProperty* InDestinationProperty)
 	{
 		bool bNeedsShallowCopy = true;
-		bool bNeedsStringCopy = false;
 
 		if (FStructProperty* const DestStructProperty = CastField<FStructProperty>(InDestinationProperty))
 		{
@@ -203,42 +202,47 @@ namespace FObjectEditorUtils
 
 			TargetMapHelper.EmptyValues();
 
-			int32 Num = SourceMapHelper.Num();
-			for ( int32 Index = 0; Num; Index++ )
+			for (FScriptMapHelper::FIterator It(SourceMapHelper); It; ++It)
 			{
-				if ( SourceMapHelper.IsValidIndex(Index) )
-				{
-					uint8* SrcPairPtr = SourceMapHelper.GetPairPtr(Index);
+				uint8* SrcPairPtr = SourceMapHelper.GetPairPtr(It);
 
-					int32 NewIndex = TargetMapHelper.AddDefaultValue_Invalid_NeedsRehash();
-					TargetMapHelper.Rehash();
+				int32 NewIndex = TargetMapHelper.AddDefaultValue_Invalid_NeedsRehash();
+				TargetMapHelper.Rehash();
 
-					uint8* PairPtr = TargetMapHelper.GetPairPtr(NewIndex);
+				uint8* PairPtr = TargetMapHelper.GetPairPtr(NewIndex);
 
-					CopySinglePropertyRecursive(SourceObject, SrcPairPtr, SrcMapProperty->KeyProp, PairPtr, InDestinationObject, DestMapProperty->KeyProp);
-					CopySinglePropertyRecursive(SourceObject, SrcPairPtr, SrcMapProperty->ValueProp, PairPtr, InDestinationObject, DestMapProperty->ValueProp);
+				CopySinglePropertyRecursive(SourceObject, SrcPairPtr, SrcMapProperty->KeyProp, PairPtr, InDestinationObject, DestMapProperty->KeyProp);
+				CopySinglePropertyRecursive(SourceObject, SrcPairPtr, SrcMapProperty->ValueProp, PairPtr, InDestinationObject, DestMapProperty->ValueProp);
 
-					TargetMapHelper.Rehash();
-
-					--Num;
-				}
+				TargetMapHelper.Rehash();
 			}
 
 			bNeedsShallowCopy = false;
-			bNeedsStringCopy = false;
 		}
 		else if ( FSetProperty* const DestSetProperty = CastField<FSetProperty>(InDestinationProperty) )
 		{
-			//FSetProperty* const SrcSetProperty = CastField<FSetProperty>(InSourceProperty);
+			FSetProperty* const SrcSetProperty = CastField<FSetProperty>(InSourceProperty);
 
-			//check(InDestinationProperty->ArrayDim == 1);
-			//FScriptSetHelper SourceSetHelper(SrcSetProperty, SrcSetProperty->ContainerPtrToValuePtr<void>(InSourcePtr));
-			//FScriptSetHelper TargetSetHelper(DestSetProperty, DestSetProperty->ContainerPtrToValuePtr<void>(InTargetPtr));
+			check(InDestinationProperty->ArrayDim == 1);
+			FScriptSetHelper SourceSetHelper(SrcSetProperty, SrcSetProperty->ContainerPtrToValuePtr<void>(InSourcePtr));
+			FScriptSetHelper TargetSetHelper(DestSetProperty, DestSetProperty->ContainerPtrToValuePtr<void>(InTargetPtr));
 
-			//TargetSetHelper.EmptyElements();
+			TargetSetHelper.EmptyElements();
+
+			for (FScriptSetHelper::FIterator It(SourceSetHelper); It; ++It)
+			{
+				uint8* SrcPtr = SourceSetHelper.GetElementPtr(It);
+
+				int32 NewIndex = TargetSetHelper.AddDefaultValue_Invalid_NeedsRehash();
+				TargetSetHelper.Rehash();
+
+				uint8* TargetPtr = TargetSetHelper.GetElementPtr(NewIndex);
+				CopySinglePropertyRecursive(SourceObject, SrcPtr, SrcSetProperty->ElementProp, TargetPtr, InDestinationObject, DestSetProperty->ElementProp);
+
+				TargetSetHelper.Rehash();
+			}
 
 			bNeedsShallowCopy = false;
-			bNeedsStringCopy = true;
 		}
 		else if ( FObjectPropertyBase* SourceObjectProperty = CastField<FObjectPropertyBase>(InSourceProperty) )
 		{
@@ -256,16 +260,26 @@ namespace FObjectEditorUtils
 						UObject* ExistingObject = StaticFindObject(UObject::StaticClass(), InDestinationObject, *Value->GetFName().ToString());
 						if (ExistingObject)
 						{
-							ExistingObject->Rename(nullptr, GetTransientPackage());
+							ExistingObject->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors);
 						}
 
-						UObject* DuplicateValue = StaticDuplicateObject(Value, InDestinationObject, Value->GetFName(), RF_AllFlags, nullptr, EDuplicateMode::Normal, EInternalObjectFlags::AllFlags);
+						UObject* DuplicateValue = StaticDuplicateObject(Value, InDestinationObject, Value->GetFName(), RF_AllFlags, nullptr, EDuplicateMode::Normal, EInternalObjectFlags_AllFlags);
+
+						// Ensure that we propagate the necessary flags from the destination object (outer) to the new subobject.
+						EObjectFlags FlagsToPropagate = InDestinationObject->GetMaskedFlags(RF_PropagateToSubObjects);
+						if (InDestinationObject->HasAnyFlags(RF_ClassDefaultObject) && !DuplicateValue->HasAnyFlags(RF_DefaultSubObject | RF_ArchetypeObject))
+						{
+							// Mark the new subobject as a template if its outer is a CDO and if it is not already flagged as a default subobject.
+							FlagsToPropagate |= RF_ArchetypeObject;
+						}
+
+						DuplicateValue->SetFlags(FlagsToPropagate);
 
 						FObjectPropertyBase* DestObjectProperty = CastFieldChecked<FObjectPropertyBase>(InDestinationProperty);
 						DestObjectProperty->SetObjectPropertyValue_InContainer(InTargetPtr, DuplicateValue);
 					}
 
-					// If the outers match, we should look for a corresponding object already in existance
+					// If the outers match, we should look for a corresponding object already in existence
 					// with the same name inside the destination object's outer.
 					if (Value->GetOuter() == SourceObject->GetOuter())
 					{
@@ -280,22 +294,12 @@ namespace FObjectEditorUtils
 			}
 		}
 
-		check(!( bNeedsShallowCopy && bNeedsStringCopy ));
-
 		if ( bNeedsShallowCopy )
 		{
 			const uint8* SourceAddr = InSourceProperty->ContainerPtrToValuePtr<uint8>(InSourcePtr);
 			uint8* DestinationAddr = InDestinationProperty->ContainerPtrToValuePtr<uint8>(InTargetPtr);
 
 			InSourceProperty->CopyCompleteValue(DestinationAddr, SourceAddr);
-		}
-		else if ( bNeedsStringCopy )
-		{
-			FString ExportedTextString;
-			if ( InSourceProperty->ExportText_InContainer(0, ExportedTextString, InSourcePtr, InSourcePtr, SourceObject, PPF_Copy, SourceObject) )
-			{
-				InDestinationProperty->ImportText(*ExportedTextString, InDestinationProperty->ContainerPtrToValuePtr<void>(InTargetPtr), 0, InDestinationObject);
-			}
 		}
 	}
 

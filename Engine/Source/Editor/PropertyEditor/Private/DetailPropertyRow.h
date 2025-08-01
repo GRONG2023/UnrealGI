@@ -20,21 +20,24 @@ struct FAddPropertyParams;
 class FCustomChildrenBuilder;
 class IDetailGroup;
 
-class FDetailPropertyRow : public IDetailPropertyRow, public IPropertyTypeCustomizationUtils, public TSharedFromThis<FDetailPropertyRow>
+class FDetailPropertyRow : public IDetailPropertyRow, public IPropertyTypeCustomizationUtils, public IDetailLayoutRow, public TSharedFromThis<FDetailPropertyRow>
 {
 public:
 	FDetailPropertyRow(TSharedPtr<FPropertyNode> InPropertyNode, TSharedRef<FDetailCategoryImpl> InParentCategory, TSharedPtr<FComplexPropertyNode> InExternalRootNode = nullptr);
 
 	/** IDetailPropertyRow interface */
-	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() override { return PropertyHandle; }
+	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() const override { return PropertyHandle; }
 	virtual IDetailPropertyRow& DisplayName( const FText& InDisplayName ) override;
 	virtual IDetailPropertyRow& ToolTip( const FText& InToolTip ) override;
 	virtual IDetailPropertyRow& ShowPropertyButtons( bool bInShowPropertyButtons ) override;
 	virtual IDetailPropertyRow& EditCondition( TAttribute<bool> EditConditionValue, FOnBooleanValueChanged OnEditConditionValueChanged ) override;
+	virtual IDetailPropertyRow& EditConditionHides(bool bEditConditionHideValue) override;
 	virtual IDetailPropertyRow& IsEnabled(TAttribute<bool> InIsEnabled) override;
 	virtual IDetailPropertyRow& ShouldAutoExpand(bool bForceExpansion) override;
 	virtual IDetailPropertyRow& Visibility( TAttribute<EVisibility> Visibility ) override;
 	virtual IDetailPropertyRow& OverrideResetToDefault(const FResetToDefaultOverride& ResetToDefault) override;
+	virtual IDetailPropertyRow& DragDropHandler(TSharedPtr<IDetailDragDropHandler> InDragDropHandler) override;
+	virtual bool IsExpanded() const override;
 	virtual FDetailWidgetRow& CustomWidget( bool bShowChildren = false ) override;
 	virtual FDetailWidgetDecl* CustomNameWidget() override;
 	virtual FDetailWidgetDecl* CustomValueWidget() override;
@@ -44,6 +47,11 @@ public:
 	/** IPropertyTypeCustomizationUtils interface */
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const override;
 	virtual TSharedPtr<class IPropertyUtilities> GetPropertyUtilities() const override;
+
+	/** IDetailLayoutRow interface */
+	virtual FName GetRowName() const override;
+	virtual TOptional<FResetToDefaultOverride> GetCustomResetToDefault() const override { return CustomResetToDefault; }
+
 
 	/** @return true if this row has widgets with columns */
 	bool HasColumns() const;
@@ -63,6 +71,12 @@ public:
 	/** @return Gets the custom name that should be used to save and restore this nodes expansion state */
 	FName GetCustomExpansionId() const { return CustomExpansionIdName; }
 
+	/** 
+	 * Sets whether or not we force only children to be shown regardless of what the customization wants.
+	 * Typically used when this row is only for organizational purposes and doesnt have anything valid to show (like external object nodes)
+	 */
+	void SetForceShowOnlyChildren(bool bInForceShowOnlyChildren) { bForceShowOnlyChildren = bInForceShowOnlyChildren; }
+
 	/**
 	 * Called when the owner node is initialized
 	 *
@@ -74,10 +88,13 @@ public:
 	/** @return The widget row that should be displayed for this property row */
 	FDetailWidgetRow GetWidgetRow();
 
+	/** returns only the widget for editing this property. Use GetWidgetRow to get the full row with property name */
+	TArrayView<TSharedPtr<IPropertyHandle>> GetPropertyHandles() const;
+
 	/**
 	 * @return The property node for this row
 	 */
-	TSharedPtr<FPropertyNode> GetPropertyNode() { return PropertyNode; }
+	TSharedPtr<FPropertyNode> GetPropertyNode() const { return PropertyNode; }
 
 	/**
 	 * @return The external root node for this row if it has one.
@@ -107,6 +124,7 @@ public:
 	EVisibility GetPropertyVisibility() const;
 
 	static void MakeExternalPropertyRowCustomization(TSharedPtr<FStructOnScope> StructData, FName PropertyName, TSharedRef<FDetailCategoryImpl> ParentCategory, struct FDetailLayoutCustomization& OutCustomization, const FAddPropertyParams& Parameters);
+	static void MakeExternalPropertyRowCustomization(TSharedPtr<IStructureDataProvider> StructDataProvider, FName PropertyName, TSharedRef<FDetailCategoryImpl> ParentCategory, struct FDetailLayoutCustomization& OutCustomization, const FAddPropertyParams& Parameters);
 	static void MakeExternalPropertyRowCustomization(const TArray<UObject*>& InObjects, FName PropertyName, TSharedRef<FDetailCategoryImpl> ParentCategory, struct FDetailLayoutCustomization& OutCustomization, const FAddPropertyParams& Parameters);
 
 private:
@@ -121,6 +139,11 @@ private:
 	void MakeValueWidget( FDetailWidgetRow& Row, const TSharedPtr<FDetailWidgetRow> InCustomRow, bool bAddWidgetDecoration = true ) const;
 
 	/**
+	 * Set the given widget row's custom properties. Note: Should be called before MakeNameOrKeyWidget and MakeValueWidget.
+	 */
+	void SetWidgetRowProperties( FDetailWidgetRow& Row ) const;
+
+	/**
 	 * @return true if this row has an edit condition
 	 */
 	bool HasEditCondition() const;
@@ -129,6 +152,16 @@ private:
 	 * @return Whether or not this row is enabled
 	 */
 	bool GetEnabledState() const;
+
+	/**
+	 * @return true if this row's edit condition has been met
+	 */
+	bool IsEditConditionMet() const;
+
+	/**
+	 * @return true if this row should be shown/hidden based on the edit condition state
+	 */
+	bool IsOnlyVisibleWhenEditConditionMet() const;
 
 	/** 
 	 * Looks up and caches (if not already) the associated type interface, and then returns it.
@@ -193,9 +226,15 @@ private:
 	/** Custom widgets to use for this row instead of the default ones */
 	TSharedPtr<FDetailWidgetRow> CustomPropertyWidget;
 	/** User customized edit condition */
-	TSharedPtr<struct FCustomEditCondition> CustomEditCondition;
+	TAttribute<bool> CustomEditConditionValue;
+	/** User customized edit condition change handler. */
+	FOnBooleanValueChanged CustomEditConditionValueChanged;
+	/** User customized edit condition hides specifier */
+	bool bCustomEditConditionHides = false;
 	/** User customized reset to default */
 	TOptional<FResetToDefaultOverride> CustomResetToDefault;
+	/** User customized drag/drop handler */
+	TSharedPtr<IDetailDragDropHandler> CustomDragDropHandler;
 	/** The category this row resides in */
 	TWeakPtr<FDetailCategoryImpl> ParentCategory;
 	/** Root of the property node if this node comes from an external tree */
@@ -212,4 +251,6 @@ private:
 	bool bForceAutoExpansion;
 	/** True if we've already attempted to fill out our CustomTypeInterface (no need to rerun the query) */
 	bool bCachedCustomTypeInterface;
+	/** True if this row is only for organizational purposes and doesnt have anything valid to show itself*/
+	bool bForceShowOnlyChildren = false;
 };

@@ -4,13 +4,16 @@
 
 #include "CoreMinimal.h"
 #include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "SlateSettings.generated.h"
 
 /**
 * Settings that control Slate functionality
 */
-UCLASS(config=Engine, defaultconfig, meta=(DisplayName="Slate"))
-class SLATE_API USlateSettings : public UObject
+UCLASS(config=Engine, defaultconfig, meta=(DisplayName="Slate"), MinimalAPI)
+class USlateSettings : public UObject
 {
 	GENERATED_UCLASS_BODY()
 

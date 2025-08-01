@@ -6,7 +6,7 @@
 #include "CoreMinimal.h"
 #include "Widgets/SWidget.h"
 #include "Framework/Commands/UICommandList.h"
-#include "Editor/LevelEditor/Private/SLevelEditor.h"
+#include "SLevelEditor.h"
 
 class UToolMenu;
 
@@ -24,8 +24,16 @@ public:
 	 * @return	New widget
 	 */
 	static TSharedRef< SWidget > MakeLevelEditorToolBar( const TSharedRef<FUICommandList>& InCommandList, const TSharedRef<SLevelEditor> InLevelEditor );
-
 	static void RegisterLevelEditorToolBar( const TSharedRef<FUICommandList>& InCommandList, const TSharedRef<SLevelEditor> InLevelEditor );
+
+	/**
+	 * Static: Creates a widget for the secondary tool bar which is displayed below the main toolbar
+	 *
+	 * @return	New widget
+	 */
+	static TSharedRef< SWidget > MakeLevelEditorSecondaryModeToolbar(TSharedRef<FUICommandList> InCommandList, TMap<FName, TSharedPtr<FLevelEditorModeUILayer>>& ModeUILayers );
+	static void RegisterLevelEditorSecondaryModeToolbar();
+	static FName GetSecondaryModeToolbarName();
 
 protected:
 
@@ -50,14 +58,6 @@ protected:
 	 */
 	static TSharedRef< SWidget > GenerateSourceControlMenu(TSharedRef<FUICommandList> InCommandList, TWeakPtr<SLevelEditor> InLevelEditor);
 
-	
-	/**
-	 * Generates menu content for the modes combo button drop down menu
-	 *
-	 * @return	Menu content widget
-	 */
-	static TSharedRef< SWidget > GenerateEditorModesMenu(TSharedRef<FUICommandList> InCommandList, TWeakPtr<SLevelEditor> InLevelEditor);
-
 	/**
 	 * Generates menu content for the compile combo button drop down menu
 	 *
@@ -71,6 +71,8 @@ protected:
 	 * @return	Menu content widget
 	 */
 	static TSharedRef< SWidget > GenerateCinematicsMenuContent(TSharedRef<FUICommandList> InCommandList, TWeakPtr<SLevelEditor> InLevelEditor);
+
+	static TSharedRef< SWidget > GenerateAddMenuWidget(TSharedRef<FUICommandList> InCommandList, TWeakPtr<SLevelEditor> InLevelEditor);
 
 	/**
 	 * Delegate for actor selection within the Cinematics popup menu's SceneOutliner.
@@ -86,19 +88,17 @@ protected:
 	static void OnOpenSubLevelBlueprint( ULevel* InLevel );
 
 private:
-
 	static void RegisterSourceControlMenu();
 	static void RegisterCinematicsMenu();
-	static void RegisterEditorModesMenu();
-	static void RegisterBuildMenu();
-
-#if WITH_LIVE_CODING
-	/**
-	 * Generates menu content for the compile combo button drop down menu
-	 */
-	static void RegisterCompileMenu();
-#endif
 
 	static void RegisterQuickSettingsMenu();
 	static void RegisterOpenBlueprintMenu();
+	static void RegisterAddMenu();
+
+	static FText GetActiveModeName(TWeakPtr<SLevelEditor> LevelEditorPtr);
+	static const FSlateBrush* GetActiveModeIcon(TWeakPtr<SLevelEditor> LevelEditorPtr);
+
+private:
+	static FName SecondaryModeToolbarName;
+
 };

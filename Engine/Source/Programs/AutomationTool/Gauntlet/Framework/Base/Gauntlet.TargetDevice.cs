@@ -85,24 +85,83 @@ namespace Gauntlet
 		/// <returns></returns>
 		Dictionary<EIntendedBaseCopyDirectory, string> GetPlatformDirectoryMappings();
 
-		/// <summary>
-		/// Checks the device's OS/Firmware version and returns whether an update is necessary
-		/// </summary>
-		/// <returns></returns>
-		bool IsOSOutOfDate();
-
-		/// <summary>
-		/// Pushes the latest version of the console's OS/Firmware to the device, returning false if the process fails
-		/// </summary>
-		/// <returns></returns>
-		bool UpdateOS();
-
 		IAppInstall InstallApplication(UnrealAppConfig AppConfiguration);
 
 		IAppInstance Run(IAppInstall App);
 
+		/// Begin new flow ///
+
+		/// <summary>
+		/// Fully cleans the device by deleting
+		///	 - Artifacts and other loose files associated with UE processes
+		///	 - Staged/Packaged builds
+		/// </summary>
+		void FullClean();
+
+		/// <summary>
+		/// Deletes artifacts and other loose files associated with UE processes
+		/// </summary>
+		void CleanArtifacts();
+
+		/// <summary>
+		/// Installs a build to the device
+		/// </summary>
+		/// <param name="AppConfiguration">The configuration containing the build to install</param>
+		void InstallBuild(UnrealAppConfig AppConfiguration);
+
+		/// <summary>
+		/// Create an IAppInstall that is configured by the provided AppConfiguration
+		/// </summary>
+		/// <param name="AppConfiguration">The configuration used to create the IAppInstall</param>
+		/// <returns>An AppInstall handle which can be used to run the process</returns>
+		IAppInstall CreateAppInstall(UnrealAppConfig AppConfiguration);
+
+		/// <summary>
+		/// Copies any additional files to the device
+		/// </summary>
+		/// <param name="FilesToCopy">The collection of files to copy</param>
+		void CopyAdditionalFiles(IEnumerable<UnrealFileToCopy> FilesToCopy);
+
+		/// End new flow ///
+
+		/// <summary>
+		/// Path to the crash dumps on a device
+		/// </summary>
+		string CrashDumpPath
+		{
+			get
+			{
+				return Path.Combine(Globals.TempDir, "CrashDumps", Platform.ToString() + "_" + Name);
+			}
+		}
+
+		/// <summary>
+		/// Ensures the crash dump copy has occurred already - and does the copy if it hasn't happened yet
+		/// Returns true if there were any crash dumps for the run, and false otherwise
+		/// </summary>
+		bool CopyCrashDumps() { return false; }
 	};
 
+	/// <summary>
+	/// Interface used by TargetDevice* classes to track spawned application running state.
+	/// </summary>
+	public interface IRunningStateOptions
+	{
+		/// <summary>
+		/// Whether or not to sleep after launching an app before querying for its running state.
+		/// </summary>
+		bool WaitForRunningState { get; set; }
+
+		/// <summary>
+		/// The number of seconds to sleep after launching an app before querying for its running state.
+		/// </summary>
+		int SecondsToRunningState { get; set; }
+
+		/// <summary>
+		/// Interval of time between app running state queries, in seconds.
+		/// </summary>
+		int CachedStateRefresh { get; set; }
+	}
 
 	/// <summary>
 	/// Represents a class able to provide devices
@@ -126,5 +185,54 @@ namespace Gauntlet
 	public interface IDeviceFactory : IDeviceSource
 	{
 		ITargetDevice CreateDevice(string InRef, string InLocalCache, string InParam=null);
+	}
+
+	/// <summary>
+	/// Represents a class that provides services for available devices
+	/// </summary>
+	public interface IDeviceService : IDeviceSource
+	{
+		void CleanupDevices();
+	}
+
+	/// <summary>
+	/// Represents a class that can provides virtual local devices 
+	/// </summary>
+	public interface IVirtualLocalDevice : IDeviceSource
+	{
+		bool CanRunVirtualFromPlatform(UnrealTargetPlatform? Platfrom);
+		UnrealTargetPlatform? GetPlatform();
+	}
+
+	/// <summary>
+	/// Represents a class that tell what build the device support
+	/// </summary>
+	public interface IDeviceBuildSupport : IDeviceSource
+	{
+		bool CanSupportBuildType(BuildFlags Flag);
+		UnrealTargetPlatform? GetPlatform();
+		bool NeedBuildDeployed();
+	}
+	public abstract class BaseBuildSupport : IDeviceBuildSupport
+	{
+		protected virtual BuildFlags SupportedBuildTypes => BuildFlags.None;
+		protected virtual UnrealTargetPlatform? Platform => null;
+
+		public bool CanSupportBuildType(BuildFlags Flag)
+		{
+			return (SupportedBuildTypes & Flag) == Flag;
+		}
+
+		public bool CanSupportPlatform(UnrealTargetPlatform? InPlatform)
+		{
+			return Platform == InPlatform;
+		}
+
+		public UnrealTargetPlatform? GetPlatform()
+		{
+			return Platform;
+		}
+
+		public virtual bool NeedBuildDeployed() => true;
 	}
 }

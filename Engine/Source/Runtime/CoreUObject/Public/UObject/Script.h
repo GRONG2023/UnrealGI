@@ -6,13 +6,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "HAL/ThreadSingleton.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Internationalization/Text.h"
+#endif
 #include "Stats/Stats.h"
 #include "Misc/EnumClassFlags.h"
 #include "Misc/CoreMisc.h"
+#include "Memory/VirtualStackAllocator.h"
 
 struct FFrame;
+struct FBlueprintExceptionInfo;
+namespace verse { class task; }
 
 // It's best to set only one of these, but strictly speaking you could set both.
 // The results will be confusing. Native time would be included only in a coarse 
@@ -61,6 +66,23 @@ typedef uint16 CodeSkipSizeType;
 typedef uint32 CodeSkipSizeType;
 #endif
 
+// Context object for data and utilities that may be needed throughout BP execution
+// In the future, it would be preferable for this not to be a thread singleton but to have
+// clearer initialization/termination semantics and per-thread tuning for the stack allocator
+class FBlueprintContext
+{
+public:
+
+	COREUOBJECT_API static FBlueprintContext* GetThreadSingleton();
+
+	FBlueprintContext();
+
+	FVirtualStackAllocator* GetVirtualStackAllocator() { return &VirtualStackAllocator; }
+
+private:
+
+	FVirtualStackAllocator VirtualStackAllocator;
+};
 
 //
 // Blueprint VM intrinsic return value declaration.
@@ -102,13 +124,16 @@ namespace FunctionCallspace
 // Function flags.
 //
 // Note: Please keep ParseFunctionFlags in sync when this enum is modified.
+//
+// This MUST be kept in sync with EEnumFlags defined in
+// Engine\Source\Programs\Shared\EpicGames.Core\UnrealEngineTypes.cs
 enum EFunctionFlags : uint32
 {
 	// Function flags.
 	FUNC_None				= 0x00000000,
 
 	FUNC_Final				= 0x00000001,	// Function is final (prebindable, non-overridable function).
-	FUNC_RequiredAPI			= 0x00000002,	// Indicates this function is DLL exported/imported.
+	FUNC_RequiredAPI		= 0x00000002,	// Indicates this function is DLL exported/imported.
 	FUNC_BlueprintAuthorityOnly= 0x00000004,   // Function will only run if the object has network authority
 	FUNC_BlueprintCosmetic	= 0x00000008,   // Function is cosmetic in nature and should not be invoked on dedicated servers
 	// FUNC_				= 0x00000010,   // unused.
@@ -160,7 +185,7 @@ ENUM_CLASS_FLAGS(EFunctionFlags)
 //
 // Evaluatable expression item types.
 //
-enum EExprToken
+enum EExprToken : uint8
 {
 	// Variable references.
 	EX_LocalVariable		= 0x00,	// A local variable.
@@ -175,12 +200,12 @@ enum EExprToken
 	EX_Assert				= 0x09,	// Assertion.
 	//						= 0x0A,
 	EX_Nothing				= 0x0B,	// No operation.
-	//						= 0x0C,
+	EX_NothingInt32			= 0x0C, // No operation with an int32 argument (useful for debugging script disassembly)
 	//						= 0x0D,
 	//						= 0x0E,
 	EX_Let					= 0x0F,	// Assign an arbitrary size value to a variable.
 	//						= 0x10,
-	//						= 0x11,
+	EX_BitFieldConst		= 0x11, // assign to a single bit, defined by an FProperty
 	EX_ClassContext			= 0x12,	// Class default object context.
 	EX_MetaCast             = 0x13, // Metaclass cast.
 	EX_LetBool				= 0x14, // Let boolean variable.
@@ -218,8 +243,8 @@ enum EExprToken
 	EX_UnicodeStringConst   = 0x34, // Unicode string constant.
 	EX_Int64Const			= 0x35,	// 64-bit integer constant.
 	EX_UInt64Const			= 0x36,	// 64-bit unsigned integer constant.
-	//						= 0x37,
-	EX_PrimitiveCast		= 0x38,	// A casting operator for primitives which reads the type as the subsequent byte
+	EX_DoubleConst			= 0x37, // Double constant.
+	EX_Cast					= 0x38,	// A casting operator which reads the type as the subsequent byte
 	EX_SetSet				= 0x39,
 	EX_EndSet				= 0x3A,
 	EX_SetMap				= 0x3B,
@@ -228,7 +253,7 @@ enum EExprToken
 	EX_EndSetConst			= 0x3E,
 	EX_MapConst				= 0x3F,
 	EX_EndMapConst			= 0x40,
-	//						= 0x41,
+	EX_Vector3fConst		= 0x41,	// A float vector constant.
 	EX_StructMemberContext	= 0x42, // Context expression to address a property within a struct
 	EX_LetMulticastDelegate	= 0x43, // Assignment to a multi-cast delegate
 	EX_LetDelegate			= 0x44, // Assignment to a delegate
@@ -273,16 +298,30 @@ enum EExprToken
 	EX_ArrayGetByRef		= 0x6B,
 	EX_ClassSparseDataVariable = 0x6C, // Sparse data variable
 	EX_FieldPathConst		= 0x6D,
-	EX_Max					= 0x100,
+	//						= 0x6E,
+	//						= 0x6F,
+	EX_AutoRtfmTransact     = 0x70, // AutoRTFM: run following code in a transaction
+	EX_AutoRtfmStopTransact = 0x71, // AutoRTFM: if in a transaction, abort or break, otherwise no operation
+	EX_AutoRtfmAbortIfNot   = 0x72, // AutoRTFM: evaluate bool condition, abort transaction on false
+	EX_Max					= 0xFF,
 };
 
-
-enum ECastToken
+enum EAutoRtfmStopTransactMode : uint8
 {
-	CST_ObjectToInterface	= 0x46,
-	CST_ObjectToBool		= 0x47,
-	CST_InterfaceToBool		= 0x49,
-	CST_Max					= 0xFF,
+	GracefulExit,
+	AbortingExit,
+	AbortingExitAndAbortParent,
+};
+
+enum ECastToken : uint8
+{
+	CST_ObjectToInterface		= 0x00,
+	CST_ObjectToBool			= 0x01,
+	CST_InterfaceToBool			= 0x02,
+	CST_DoubleToFloat			= 0x03,
+	CST_FloatToDouble			= 0x04,
+
+	CST_Max						= 0xFF,
 };
 
 // Kinds of text literals
@@ -299,21 +338,6 @@ enum class EBlueprintTextLiteralType : uint8
 	/** Text is from a string table. The bytecode will contain an object pointer (not used) and two strings - the table ID, and key - and should be found via FText::FromStringTable */
 	StringTableEntry,
 };
-
-// Kinds of Blueprint exceptions
-namespace EBlueprintExceptionType
-{
-	enum Type
-	{
-		Breakpoint,
-		Tracepoint,
-		WireTracepoint,
-		AccessViolation,
-		InfiniteLoop,
-		NonFatalError,
-		FatalError,
-	};
-}
 
 // Script instrumentation event types
 namespace EScriptInstrumentation
@@ -340,41 +364,12 @@ namespace EScriptInstrumentation
 	};
 }
 
-// Information about a blueprint exception
-struct FBlueprintExceptionInfo
-{
-public:
-	FBlueprintExceptionInfo(EBlueprintExceptionType::Type InEventType)
-		: EventType(InEventType)
-	{
-	}
-
-	FBlueprintExceptionInfo(EBlueprintExceptionType::Type InEventType, const FText& InDescription)
-		: EventType(InEventType)
-		, Description(InDescription)
-	{
-	}
-
-	EBlueprintExceptionType::Type GetType() const
-	{
-		return EventType;
-	}
-
-	const FText& GetDescription() const
-	{
-		return Description;
-	}
-protected:
-	EBlueprintExceptionType::Type EventType;
-	FText Description;
-};
-
 // Information about a blueprint instrumentation signal
-struct COREUOBJECT_API FScriptInstrumentationSignal
+struct FScriptInstrumentationSignal
 {
 public:
 
-	FScriptInstrumentationSignal(EScriptInstrumentation::Type InEventType, const UObject* InContextObject, const struct FFrame& InStackFrame, const FName EventNameIn = NAME_None);
+	COREUOBJECT_API FScriptInstrumentationSignal(EScriptInstrumentation::Type InEventType, const UObject* InContextObject, const struct FFrame& InStackFrame, const FName EventNameIn = NAME_None);
 
 	FScriptInstrumentationSignal(EScriptInstrumentation::Type InEventType, const UObject* InContextObject, UFunction* InFunction, const int32 LinkId = INDEX_NONE)
 		: EventType(InEventType)
@@ -405,16 +400,16 @@ public:
 	const FFrame& GetStackFrame() const { return *StackFramePtr; }
 
 	/** Returns the owner class name of the active instance */
-	const UClass* GetClass() const;
+	COREUOBJECT_API const UClass* GetClass() const;
 
 	/** Returns the function scope class */
-	const UClass* GetFunctionClassScope() const;
+	COREUOBJECT_API const UClass* GetFunctionClassScope() const;
 
 	/** Returns the name of the active function */
-	FName GetFunctionName() const;
+	COREUOBJECT_API FName GetFunctionName() const;
 
 	/** Returns the script code offset */
-	int32 GetScriptCodeOffset() const;
+	COREUOBJECT_API int32 GetScriptCodeOffset() const;
 
 	/** Returns the latent link id for latent events */
 	int32 GetLatentLinkId() const { return LatentLinkId; }
@@ -435,7 +430,7 @@ protected:
 };
 
 // Blueprint core runtime delegates
-class COREUOBJECT_API FBlueprintCoreDelegates
+class FBlueprintCoreDelegates
 {
 public:
 	// Callback for debugging events such as a breakpoint (Object that triggered event, active stack frame, Info)
@@ -445,24 +440,19 @@ public:
 	// Callback for blueprint instrumentation enable/disable events
 	DECLARE_MULTICAST_DELEGATE_OneParam(FOnToggleScriptProfiler, bool );
 
-	// Deprecated
-	DECLARE_MULTICAST_DELEGATE(FOnScriptExecutionEnd);
-
 public:
 	// Called when a script exception occurs
-	static FOnScriptDebuggingEvent OnScriptException;
+	static COREUOBJECT_API FOnScriptDebuggingEvent OnScriptException;
 	// Called when a script profiling event is fired
-	static FOnScriptInstrumentEvent OnScriptProfilingEvent;
+	static COREUOBJECT_API FOnScriptInstrumentEvent OnScriptProfilingEvent;
 	// Called when a script profiler is enabled/disabled
-	static FOnToggleScriptProfiler OnToggleScriptProfiler;
-
-	UE_DEPRECATED(4.26, "OnScriptExecutionEnd is deprecated, bind to delegate inside FBlueprintContextTracker instead")
-	static FOnScriptExecutionEnd OnScriptExecutionEnd;
+	static COREUOBJECT_API FOnToggleScriptProfiler OnToggleScriptProfiler;
 
 public:
-	static void ThrowScriptException(const UObject* ActiveObject, const struct FFrame& StackFrame, const FBlueprintExceptionInfo& Info);
-	static void InstrumentScriptEvent(const FScriptInstrumentationSignal& Info);
-	static void SetScriptMaximumLoopIterations( const int32 MaximumLoopIterations );
+	static COREUOBJECT_API void ThrowScriptException(const UObject* ActiveObject, struct FFrame& StackFrame, const FBlueprintExceptionInfo& Info);
+	static COREUOBJECT_API void InstrumentScriptEvent(const FScriptInstrumentationSignal& Info);
+	static COREUOBJECT_API void SetScriptMaximumLoopIterations( const int32 MaximumLoopIterations );
+	static COREUOBJECT_API bool IsDebuggingEnabled();
 };
 
 #if DO_BLUEPRINT_GUARD
@@ -508,11 +498,23 @@ struct COREUOBJECT_API FBlueprintContextTracker : TThreadSingleton<FBlueprintCon
 	{
 		return ScriptEntryTag;
 	}
-	
+
 	/** Returns current script stack frame */
-	FORCEINLINE const TArray<const FFrame*>& GetScriptStack() const
+	UE_DEPRECATED(5.1, "GetScriptStack() inefficiently copies the array to return and is now deprecated. Use GetCurrentScriptStack() which returns a TArrayView instead")
+	FORCEINLINE TArray<const FFrame*> GetScriptStack() const
 	{
-		return ScriptStack;
+		return TArray<const FFrame*>(GetCurrentScriptStack());
+	}
+
+	/** Returns current script stack frame */
+	FORCEINLINE TArrayView<const FFrame* const> GetCurrentScriptStack() const
+	{
+		return MakeArrayView<const FFrame* const>(ScriptStack.GetData(), ScriptStack.Num());
+	}
+
+	FORCEINLINE TArrayView<FFrame* const> GetCurrentScriptStackWritable() const
+	{
+		return MakeArrayView<FFrame* const>(ScriptStack.GetData(), ScriptStack.Num());
 	}
 
 	/** Delegate called from EnterScriptContext, could be called on any thread! This can be used to detect entries into script from native code */
@@ -534,7 +536,7 @@ private:
 	int32 ScriptEntryTag;
 
 	// Stack pointers from the VM to be unrolled when we assert
-	TArray<const FFrame*> ScriptStack;
+	TArray<FFrame*> ScriptStack;
 
 	// Map of reported access warnings in exception handler
 	TMap<FName, int32> DisplayedWarningsMap;
@@ -542,17 +544,18 @@ private:
 	// Only FFrame can modify the stack
 	friend FFrame;
 	friend void ProcessLocalScriptFunction(UObject* Context, FFrame& Stack, RESULT_DECL);
+	friend verse::task;
 };
 
 #endif // DO_BLUEPRINT_GUARD
 
 
 // Scoped struct to allow execution of script in editor, while resetting the runaway loop counts
-struct COREUOBJECT_API FEditorScriptExecutionGuard
+struct FEditorScriptExecutionGuard
 {
 public:
-	FEditorScriptExecutionGuard();
-	~FEditorScriptExecutionGuard();
+	COREUOBJECT_API FEditorScriptExecutionGuard();
+	COREUOBJECT_API ~FEditorScriptExecutionGuard();
 
 private:
 	bool bOldGAllowScriptExecutionInEditor;
@@ -639,3 +642,6 @@ COREUOBJECT_API FString ToValidCPPIdentifierChars(TCHAR Char);
 */
 COREUOBJECT_API FString UnicodeToCPPIdentifier(const FString& InName, bool bDeprecated, const TCHAR* Prefix);
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

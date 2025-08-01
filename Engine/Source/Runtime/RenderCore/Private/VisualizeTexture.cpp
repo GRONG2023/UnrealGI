@@ -1,193 +1,248 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VisualizeTexture.h"
+#include "Misc/App.h"
 #include "ShaderParameters.h"
+#include "Misc/WildcardString.h"
 #include "RHIStaticStates.h"
+#include "RenderingThread.h"
 #include "Shader.h"
-#include "StaticBoundShaderState.h"
 #include "RenderTargetPool.h"
 #include "GlobalShader.h"
 #include "PipelineStateCache.h"
-#include "CommonRenderResources.h"
 #include "PixelShaderUtils.h"
 #include "Misc/FileHelper.h"
+#include "RenderCore.h"
 
 void FVisualizeTexture::ParseCommands(const TCHAR* Cmd, FOutputDevice &Ar)
 {
 #if SUPPORTS_VISUALIZE_TEXTURE
-	Config = {};
-	uint32 ParameterCount = 0;
-	for (;;)
+	// Find out what command to do based on first parameter.
+	ECommand Command = ECommand::Unknown;
+	FString ResourceName;
+	TOptional<uint32> ResourceVersion;
+	TOptional<FWildcardString> ResourceListWildCard;
 	{
-		FString Parameter = FParse::Token(Cmd, 0);
+		FString FirstParameter = FParse::Token(Cmd, 0);
 
-		if (Parameter.IsEmpty())
-		{
-			break;
-		}
-		else if (ParameterCount == 0)
-		{
-			if (!FChar::IsDigit(**Parameter))
-			{
-				const TCHAR* AfterAt = *Parameter;
 
-				while (*AfterAt != 0 && *AfterAt != TCHAR('@'))
-				{
-					++AfterAt;
-				}
-
-				if (*AfterAt == TCHAR('@'))
-				{
-					FString NameWithoutAt = Parameter.Left(AfterAt - *Parameter);
-					Visualize(*NameWithoutAt, FCString::Atoi(AfterAt + 1));
-				}
-				else
-				{
-					Visualize(*Parameter);
-				}
-			}
-			else
-			{
-				Visualize({});
-			}
-		}
-		else if (Parameter == TEXT("fulllist") || Parameter == TEXT("full"))
+		if (FirstParameter.IsEmpty())
 		{
-			Config.Flags |= EFlags::FullList;
+			// NOP
 		}
-		else if (Parameter == TEXT("byname"))
+		else if (FChar::IsDigit(**FirstParameter))
 		{
-			Config.SortBy = ESortBy::Name;
+			Command = ECommand::DisableVisualization;
 		}
-		else if (Parameter == TEXT("bysize"))
+		else if (FirstParameter == TEXT("help"))
 		{
-			Config.SortBy = ESortBy::Size;
+			Command = ECommand::DisplayHelp;
 		}
-		else if (Parameter == TEXT("uv0"))
+		else if (FirstParameter == TEXT("pool"))
 		{
-			Config.InputUVMapping = EInputUVMapping::LeftTop;
-		}
-		else if (Parameter == TEXT("uv1"))
-		{
-			Config.InputUVMapping = EInputUVMapping::Whole;
-		}
-		else if (Parameter == TEXT("uv2"))
-		{
-			Config.InputUVMapping = EInputUVMapping::PixelPerfectCenter;
-		}
-		else if (Parameter == TEXT("pip"))
-		{
-			Config.InputUVMapping = EInputUVMapping::PictureInPicture;
-		}
-		else if (Parameter == TEXT("bmp"))
-		{
-			Config.Flags |= EFlags::SaveBitmap;
-		}
-		else if (Parameter == TEXT("stencil"))
-		{
-			Config.Flags |= EFlags::SaveBitmapAsStencil;
-		}
-		else if (Parameter == TEXT("frac"))
-		{
-			Config.ShaderOp = EShaderOp::Frac;
-		}
-		else if (Parameter == TEXT("sat"))
-		{
-			Config.ShaderOp = EShaderOp::Saturate;
-		}
-		else if (Parameter.Left(3) == TEXT("mip"))
-		{
-			Parameter.RightInline(Parameter.Len() - 3, false);
-			Config.MipIndex = FCString::Atoi(*Parameter);
-		}
-		else if (Parameter.Left(5) == TEXT("index"))
-		{
-			Parameter.RightInline(Parameter.Len() - 5, false);
-			Config.ArrayIndex = FCString::Atoi(*Parameter);
-		}
-		// e.g. RGB*6, A, *22, /2.7, A*7
-		else if (Parameter.Left(3) == TEXT("rgb")
-			|| Parameter.Left(1) == TEXT("a")
-			|| Parameter.Left(1) == TEXT("r")
-			|| Parameter.Left(1) == TEXT("g")
-			|| Parameter.Left(1) == TEXT("b")
-			|| Parameter.Left(1) == TEXT("*")
-			|| Parameter.Left(1) == TEXT("/"))
-		{
-			Config.SingleChannel = -1;
-
-			if (Parameter.Left(3) == TEXT("rgb"))
-			{
-				Parameter.RightInline(Parameter.Len() - 3, false);
-			}
-			else if (Parameter.Left(1) == TEXT("r")) Config.SingleChannel = 0;
-			else if (Parameter.Left(1) == TEXT("g")) Config.SingleChannel = 1;
-			else if (Parameter.Left(1) == TEXT("b")) Config.SingleChannel = 2;
-			else if (Parameter.Left(1) == TEXT("a")) Config.SingleChannel = 3;
-			if (Config.SingleChannel >= 0)
-			{
-				Parameter.RightInline(Parameter.Len() - 1, false);
-				Config.SingleChannelMul = 1.0f;
-				Config.RGBMul = 0.0f;
-			}
-
-			float Mul = 1.0f;
-
-			// * or /
-			if (Parameter.Left(1) == TEXT("*"))
-			{
-				Parameter.RightInline(Parameter.Len() - 1, false);
-				Mul = FCString::Atof(*Parameter);
-			}
-			else if (Parameter.Left(1) == TEXT("/"))
-			{
-				Parameter.RightInline(Parameter.Len() - 1, false);
-				Mul = 1.0f / FCString::Atof(*Parameter);
-			}
-			Config.RGBMul *= Mul;
-			Config.SingleChannelMul *= Mul;
-			Config.AMul *= Mul;
+			Command = ECommand::DisplayPoolResourceList;
 		}
 		else
 		{
-			Ar.Logf(TEXT("Error: parameter \"%s\" not recognized"), *Parameter);
-		}
+			const TCHAR* AfterAt = *FirstParameter;
 
-		++ParameterCount;
+			while (*AfterAt != 0 && *AfterAt != TCHAR('@'))
+			{
+				++AfterAt;
+			}
+
+			if (*AfterAt == TCHAR('@'))
+			{
+				ResourceName = FirstParameter.Left(AfterAt - *FirstParameter);
+				ResourceVersion = FCString::Atoi(AfterAt + 1);
+			}
+			else
+			{
+				ResourceName = FirstParameter;
+			}
+
+			if (ResourceName.Contains(TEXT("*")))
+			{
+				ResourceListWildCard = FWildcardString(ResourceName);
+				Command = ECommand::DisplayResourceList;
+			}
+			else
+			{
+				Command = ECommand::VisualizeResource;
+				Visualize(ResourceName, ResourceVersion);
+			}
+		}
 	}
 
-	if (!ParameterCount)
+	if (Command == ECommand::Unknown)
 	{
-		Ar.Logf(TEXT("VisualizeTexture/Vis <CheckpointName> [<Mode>] [PIP/UV0/UV1/UV2] [BMP] [FRAC/SAT] [FULL]:"));
-		Ar.Logf(TEXT("Mode (examples):"));
-		Ar.Logf(TEXT("  RGB      = RGB in range 0..1 (default)"));
-		Ar.Logf(TEXT("  *8       = RGB * 8"));
-		Ar.Logf(TEXT("  A        = alpha channel in range 0..1"));
-		Ar.Logf(TEXT("  R        = red channel in range 0..1"));
-		Ar.Logf(TEXT("  G        = green channel in range 0..1"));
-		Ar.Logf(TEXT("  B        = blue channel in range 0..1"));
-		Ar.Logf(TEXT("  A*16     = Alpha * 16"));
-		Ar.Logf(TEXT("  RGB/2    = RGB / 2"));
-		Ar.Logf(TEXT("SubResource:"));
-		Ar.Logf(TEXT("  MIP5     = Mip level 5 (0 is default)"));
-		Ar.Logf(TEXT("  INDEX5   = Array Element 5 (0 is default)"));
-		Ar.Logf(TEXT("InputMapping:"));
-		Ar.Logf(TEXT("  PIP      = like UV1 but as picture in picture with normal rendering  (default)"));
-		Ar.Logf(TEXT("  UV0      = UV in left top"));
-		Ar.Logf(TEXT("  UV1      = full texture"));
-		Ar.Logf(TEXT("  UV2      = pixel perfect centered"));
-		Ar.Logf(TEXT("Flags:"));
-		Ar.Logf(TEXT("  BMP      = save out bitmap to the screenshots folder (not on console, normalized)"));
-		Ar.Logf(TEXT("STENCIL    = Stencil normally displayed in alpha channel of depth.  This option is used for BMP to get a stencil only BMP."));
-		Ar.Logf(TEXT("  FRAC     = use frac() in shader (default)"));
-		Ar.Logf(TEXT("  SAT      = use saturate() in shader"));
-		Ar.Logf(TEXT("  FULLLIST = show full list, otherwise we hide some textures in the printout"));
-		Ar.Logf(TEXT("  BYNAME   = sort list by name"));
-		Ar.Logf(TEXT("  BYSIZE   = show list by size"));
-		Ar.Logf(TEXT("TextureId:"));
-		Ar.Logf(TEXT("  0        = <off>"));
+		FVisualizeTexture::DisplayHelp(Ar);
+		DisplayResourceListToLog(TOptional<FWildcardString>());
+	}
+	else if (Command == ECommand::DisplayHelp)
+	{
+		FVisualizeTexture::DisplayHelp(Ar);
+	}
+	else if (Command == ECommand::DisableVisualization)
+	{
+		Visualize({});
+	}
+	else if (Command == ECommand::VisualizeResource)
+	{
+		Config = {};
+		Visualize(ResourceName, ResourceVersion);
+		for (;;)
+		{
+			FString Parameter = FParse::Token(Cmd, 0);
 
-		DebugLog(EDebugLogVerbosity::Extended);
+			if (Parameter.IsEmpty())
+			{
+				break;
+			}
+			else if (Parameter == TEXT("uv0"))
+			{
+				Config.InputUVMapping = EInputUVMapping::LeftTop;
+			}
+			else if (Parameter == TEXT("uv1"))
+			{
+				Config.InputUVMapping = EInputUVMapping::Whole;
+			}
+			else if (Parameter == TEXT("uv2"))
+			{
+				Config.InputUVMapping = EInputUVMapping::PixelPerfectCenter;
+			}
+			else if (Parameter == TEXT("pip"))
+			{
+				Config.InputUVMapping = EInputUVMapping::PictureInPicture;
+			}
+			else if (Parameter == TEXT("bmp"))
+			{
+				Config.Flags |= EFlags::SaveBitmap;
+			}
+			else if (Parameter == TEXT("stencil"))
+			{
+				Config.Flags |= EFlags::SaveBitmapAsStencil;
+			}
+			else if (Parameter == TEXT("frac"))
+			{
+				Config.ShaderOp = EShaderOp::Frac;
+			}
+			else if (Parameter == TEXT("sat"))
+			{
+				Config.ShaderOp = EShaderOp::Saturate;
+			}
+			else if (Parameter.Left(3) == TEXT("mip"))
+			{
+				Parameter.RightInline(Parameter.Len() - 3, EAllowShrinking::No);
+				Config.MipIndex = FCString::Atoi(*Parameter);
+			}
+			else if (Parameter.Left(5) == TEXT("index"))
+			{
+				Parameter.RightInline(Parameter.Len() - 5, EAllowShrinking::No);
+				Config.ArrayIndex = FCString::Atoi(*Parameter);
+			}
+			// e.g. RGB*6, A, *22, /2.7, A*7
+			else if (Parameter.Left(3) == TEXT("rgb")
+				|| Parameter.Left(1) == TEXT("a")
+				|| Parameter.Left(1) == TEXT("r")
+				|| Parameter.Left(1) == TEXT("g")
+				|| Parameter.Left(1) == TEXT("b")
+				|| Parameter.Left(1) == TEXT("*")
+				|| Parameter.Left(1) == TEXT("/"))
+			{
+				Config.SingleChannel = -1;
+
+				if (Parameter.Left(3) == TEXT("rgb"))
+				{
+					Parameter.RightInline(Parameter.Len() - 3, EAllowShrinking::No);
+				}
+				else if (Parameter.Left(1) == TEXT("r")) Config.SingleChannel = 0;
+				else if (Parameter.Left(1) == TEXT("g")) Config.SingleChannel = 1;
+				else if (Parameter.Left(1) == TEXT("b")) Config.SingleChannel = 2;
+				else if (Parameter.Left(1) == TEXT("a")) Config.SingleChannel = 3;
+				if (Config.SingleChannel >= 0)
+				{
+					Parameter.RightInline(Parameter.Len() - 1, EAllowShrinking::No);
+					Config.SingleChannelMul = 1.0f;
+					Config.RGBMul = 0.0f;
+				}
+
+				float Mul = 1.0f;
+
+				// * or /
+				if (Parameter.Left(1) == TEXT("*"))
+				{
+					Parameter.RightInline(Parameter.Len() - 1, EAllowShrinking::No);
+					Mul = FCString::Atof(*Parameter);
+				}
+				else if (Parameter.Left(1) == TEXT("/"))
+				{
+					Parameter.RightInline(Parameter.Len() - 1, EAllowShrinking::No);
+					Mul = 1.0f / FCString::Atof(*Parameter);
+				}
+				Config.RGBMul *= Mul;
+				Config.SingleChannelMul *= Mul;
+				Config.AMul *= Mul;
+			}
+			else
+			{
+				Ar.Logf(TEXT("Error: parameter \"%s\" not recognized"), *Parameter);
+			}
+		}
+
+	}
+	else if (Command == ECommand::DisplayPoolResourceList)
+	{
+		ESortBy SortBy = ESortBy::Index;
+
+		for (;;)
+		{
+			FString Parameter = FParse::Token(Cmd, 0);
+
+			if (Parameter.IsEmpty())
+			{
+				break;
+			}
+			else if (Parameter == TEXT("byname"))
+			{
+				SortBy = ESortBy::Name;
+			}
+			else if (Parameter == TEXT("bysize"))
+			{
+				SortBy = ESortBy::Size;
+			}
+			else
+			{
+				Ar.Logf(TEXT("Error: parameter \"%s\" not recognized"), *Parameter);
+			}
+		}
+
+		DisplayPoolResourceListToLog(SortBy);
+	}
+	else if (Command == ECommand::DisplayResourceList) //-V547
+	{
+		bool bListAllocated = false;
+		ESortBy SortBy = ESortBy::Index;
+
+		for (;;)
+		{
+			FString Parameter = FParse::Token(Cmd, 0);
+
+			if (Parameter.IsEmpty())
+			{
+				break;
+			}
+			else
+			{
+				Ar.Logf(TEXT("Error: parameter \"%s\" not recognized"), *Parameter);
+			}
+		}
+
+		DisplayResourceListToLog(ResourceListWildCard);
+	}
+	else
+	{
+		unimplemented();
 	}
 #endif
 }
@@ -195,9 +250,8 @@ void FVisualizeTexture::ParseCommands(const TCHAR* Cmd, FOutputDevice &Ar)
 void FVisualizeTexture::DebugLogOnCrash()
 {
 #if SUPPORTS_VISUALIZE_TEXTURE
-	Config.SortBy = ESortBy::Size;
-	Config.Flags |= EFlags::FullList;
-	DebugLog(EDebugLogVerbosity::Default);
+	DisplayPoolResourceListToLog(ESortBy::Size);
+	DisplayResourceListToLog(TOptional<FWildcardString>());
 #endif
 }
 
@@ -230,216 +284,148 @@ TGlobalResource<FVisualizeTexture> GVisualizeTexture;
 
 #if SUPPORTS_VISUALIZE_TEXTURE
 
-void FVisualizeTexture::DebugLog(EDebugLogVerbosity Verbosity)
+void FVisualizeTexture::DisplayHelp(FOutputDevice &Ar)
 {
+	Ar.Logf(TEXT("VisualizeTexture/Vis <RDGResourceNameWildcard>:"));
+	Ar.Logf(TEXT("  Lists all RDG resource names with wildcard filtering."));
+	Ar.Logf(TEXT(""));
+	Ar.Logf(TEXT("VisualizeTexture/Vis <RDGResourceName>[@<Version>] [<Mode>] [PIP/UV0/UV1/UV2] [BMP] [FRAC/SAT] [FULL]:"));
+	Ar.Logf(TEXT("  RDGResourceName = Name of the resource set when creating it with RDG."));
+	Ar.Logf(TEXT("  Version = Integer to specify a specific intermediate version."));
+	Ar.Logf(TEXT("  Mode (examples):"));
+	Ar.Logf(TEXT("    RGB      = RGB in range 0..1 (default)"));
+	Ar.Logf(TEXT("    *8       = RGB * 8"));
+	Ar.Logf(TEXT("    A        = alpha channel in range 0..1"));
+	Ar.Logf(TEXT("    R        = red channel in range 0..1"));
+	Ar.Logf(TEXT("    G        = green channel in range 0..1"));
+	Ar.Logf(TEXT("    B        = blue channel in range 0..1"));
+	Ar.Logf(TEXT("    A*16     = Alpha * 16"));
+	Ar.Logf(TEXT("    RGB/2    = RGB / 2"));
+	Ar.Logf(TEXT("  SubResource:"));
+	Ar.Logf(TEXT("    MIP5     = Mip level 5 (0 is default)"));
+	Ar.Logf(TEXT("    INDEX5   = Array Element 5 (0 is default)"));
+	Ar.Logf(TEXT("  InputMapping:"));
+	Ar.Logf(TEXT("    PIP      = like UV1 but as picture in picture with normal rendering  (default)"));
+	Ar.Logf(TEXT("    UV0      = UV in left top"));
+	Ar.Logf(TEXT("    UV1      = full texture"));
+	Ar.Logf(TEXT("    UV2      = pixel perfect centered"));
+	Ar.Logf(TEXT("  Flags:"));
+	Ar.Logf(TEXT("    BMP      = save out bitmap to the screenshots folder (not on console, normalized)"));
+	Ar.Logf(TEXT("    STENCIL  = Stencil normally displayed in alpha channel of depth.  This option is used for BMP to get a stencil only BMP."));
+	Ar.Logf(TEXT("    FRAC     = use frac() in shader (default)"));
+	Ar.Logf(TEXT("    SAT      = use saturate() in shader"));
+	Ar.Logf(TEXT(""));
+	Ar.Logf(TEXT("VisualizeTexture/Vis 0"));
+	Ar.Logf(TEXT("  Stops visualizing a resource."));
+	Ar.Logf(TEXT(""));
+	Ar.Logf(TEXT("VisualizeTexture/Vis pool [BYNAME/BYSIZE]:"));
+	Ar.Logf(TEXT("  Shows list of all resources in the pool."));
+	Ar.Logf(TEXT("  BYNAME   = sort pool list by name"));
+	Ar.Logf(TEXT("  BYSIZE   = show pool list by size"));
+	Ar.Logf(TEXT(""));
+}
+
+void FVisualizeTexture::DisplayPoolResourceListToLog(FVisualizeTexture::ESortBy SortBy)
+{
+	struct FSortedLines
 	{
-		struct FSortedLines
+		FString Line;
+		int32   SortIndex = 0;
+		uint32  PoolIndex = 0;
+
+		bool operator < (const FSortedLines& B) const
 		{
-			FString Line;
-			int32   SortIndex = 0;
-			uint32  PoolIndex = 0;
-
-			bool operator < (const FSortedLines &B) const
+			// first large ones
+			if (SortIndex < B.SortIndex)
 			{
-				// first large ones
-				if (SortIndex < B.SortIndex)
-				{
-					return true;
-				}
-				if (SortIndex > B.SortIndex)
-				{
-					return false;
-				}
-
-				return Line < B.Line;
+				return true;
 			}
-		};
+			if (SortIndex > B.SortIndex)
+			{
+				return false;
+			}
 
-		TArray<FSortedLines> SortedLines;
+			return Line < B.Line;
+		}
+	};
 
-		for (uint32 Index = 0, Num = GRenderTargetPool.GetElementCount(); Index < Num; ++Index)
+	TArray<FSortedLines> SortedLines;
+
+	for (uint32 Index = 0, Num = GRenderTargetPool.GetElementCount(); Index < Num; ++Index)
+	{
+		FPooledRenderTarget* RenderTarget = GRenderTargetPool.GetElementById(Index);
+
+		if (!RenderTarget)
 		{
-			FPooledRenderTarget* RenderTarget = GRenderTargetPool.GetElementById(Index);
-
-			if (!RenderTarget)
-			{
-				continue;
-			}
-
-			const bool bFullList = EnumHasAnyFlags(Config.Flags, EFlags::FullList);
-
-			const FPooledRenderTargetDesc Desc = RenderTarget->GetDesc();
-
-			if (bFullList || (Desc.Flags & TexCreate_HideInVisualizeTexture) == 0)
-			{
-				const uint32 SizeInKB = (RenderTarget->ComputeMemorySize() + 1023) / 1024;
-
-				FString UnusedStr;
-
-				if (RenderTarget->GetUnusedForNFrames() > 0)
-				{
-					if (!bFullList)
-					{
-						continue;
-					}
-
-					UnusedStr = FString::Printf(TEXT(" unused(%d)"), RenderTarget->GetUnusedForNFrames());
-				}
-
-				FSortedLines Element;
-				Element.PoolIndex = Index;
-				Element.SortIndex = Index;
-
-				FString InfoString = Desc.GenerateInfoString();
-
-				switch (Config.SortBy)
-				{
-				case ESortBy::Index:
-				{
-					// Constant works well with the average name length
-					const uint32 TotalSpacerSize = 36;
-					const uint32 SpaceCount = FMath::Max<int32>(0, TotalSpacerSize - InfoString.Len());
-
-					for (uint32 Space = 0; Space < SpaceCount; ++Space)
-					{
-						InfoString.AppendChar((TCHAR)' ');
-					}
-
-					// Sort by index
-					Element.Line = FString::Printf(TEXT("%s %s %d KB%s"), *InfoString, Desc.DebugName, SizeInKB, *UnusedStr);
-				}
-				break;
-
-				case ESortBy::Name:
-				{
-					Element.Line = FString::Printf(TEXT("%s %s %d KB%s"), Desc.DebugName, *InfoString, SizeInKB, *UnusedStr);
-					Element.SortIndex = 0;
-				}
-				break;
-
-				case ESortBy::Size:
-				{
-					Element.Line = FString::Printf(TEXT("%d KB %s %s%s"), SizeInKB, *InfoString, Desc.DebugName, *UnusedStr);
-					Element.SortIndex = -(int32)SizeInKB;
-				}
-				break;
-
-				default:
-					checkNoEntry();
-				}
-
-				if (Desc.Flags & TexCreate_FastVRAM)
-				{
-					FRHIResourceInfo Info;
-
-					FTextureRHIRef Texture = RenderTarget->GetRenderTargetItem().ShaderResourceTexture;
-
-					if (!IsValidRef(Texture))
-					{
-						Texture = RenderTarget->GetRenderTargetItem().TargetableTexture;
-					}
-
-					if (IsValidRef(Texture))
-					{
-						RHIGetResourceInfo(Texture, Info);
-					}
-
-					if (Info.VRamAllocation.AllocationSize)
-					{
-						// Note we do KB for more readable numbers but this can cause quantization loss
-						Element.Line += FString::Printf(TEXT(" VRamInKB(Start/Size):%d/%d"),
-							Info.VRamAllocation.AllocationStart / 1024,
-							(Info.VRamAllocation.AllocationSize + 1023) / 1024);
-					}
-					else
-					{
-						Element.Line += TEXT(" VRamInKB(Start/Size):<NONE>");
-					}
-				}
-
-				SortedLines.Add(Element);
-			}
+			continue;
 		}
 
-		SortedLines.Sort();
+		const FPooledRenderTargetDesc Desc = RenderTarget->GetDesc();
 
-		for (int32 Index = 0; Index < SortedLines.Num(); Index++)
+		const uint32 SizeInKB = (RenderTarget->ComputeMemorySize() + 1023) / 1024;
+
+		FString UnusedStr;
+
+		if (RenderTarget->GetUnusedForNFrames() > 0)
 		{
-			const FSortedLines& Entry = SortedLines[Index];
-
-			UE_LOG(LogConsoleResponse, Log, TEXT("   %3d = %s"), Entry.PoolIndex + 1, *Entry.Line);
+			UnusedStr = FString::Printf(TEXT(" unused(%d)"), RenderTarget->GetUnusedForNFrames());
 		}
+
+		FSortedLines Element;
+		Element.PoolIndex = Index;
+		Element.SortIndex = Index;
+
+		FString InfoString = Desc.GenerateInfoString();
+
+		switch (SortBy)
+		{
+		case ESortBy::Index:
+		{
+			// Constant works well with the average name length
+			const uint32 TotalSpacerSize = 36;
+			const uint32 SpaceCount = FMath::Max<int32>(0, TotalSpacerSize - InfoString.Len());
+
+			for (uint32 Space = 0; Space < SpaceCount; ++Space)
+			{
+				InfoString.AppendChar((TCHAR)' ');
+			}
+
+			// Sort by index
+			Element.Line = FString::Printf(TEXT("%s %s %d KB%s"), *InfoString, Desc.DebugName, SizeInKB, *UnusedStr);
+		}
+		break;
+
+		case ESortBy::Name:
+		{
+			Element.Line = FString::Printf(TEXT("%s %s %d KB%s"), Desc.DebugName, *InfoString, SizeInKB, *UnusedStr);
+			Element.SortIndex = 0;
+		}
+		break;
+
+		case ESortBy::Size:
+		{
+			Element.Line = FString::Printf(TEXT("%d KB %s %s%s"), SizeInKB, *InfoString, Desc.DebugName, *UnusedStr);
+			Element.SortIndex = -(int32)SizeInKB;
+		}
+		break;
+
+		default:
+			checkNoEntry();
+		}
+
+		SortedLines.Add(Element);
+	}
+
+	SortedLines.Sort();
+
+	for (int32 Index = 0; Index < SortedLines.Num(); Index++)
+	{
+		const FSortedLines& Entry = SortedLines[Index];
+
+		UE_LOG(LogConsoleResponse, Log, TEXT("   %3d = %s"), Entry.PoolIndex + 1, *Entry.Line);
 	}
 
 	UE_LOG(LogConsoleResponse, Log, TEXT(""));
-
-	if (Verbosity == EDebugLogVerbosity::Extended)
-	{
-		UE_LOG(LogConsoleResponse, Log, TEXT("CheckpointName (what was rendered this frame, use <Name>@<Number> to get intermediate versions):"));
-
-		TArray<FString> Entries;
-		Entries.Reserve(VersionCountMap.Num());
-		for (auto KV : VersionCountMap)
-		{
-			Entries.Add(KV.Key);
-		}
-		Entries.Sort();
-
-		// Magic number works well with the name length we have
-		const uint32 ColumnCount = 5;
-		const uint32 SpaceBetweenColumns = 1;
-		const uint32 ColumnHeight = FMath::DivideAndRoundUp((uint32)Entries.Num(), ColumnCount);
-
-		// Width of the column in characters, init with 0
-		uint32 ColumnWidths[ColumnCount] = {};
-
-		for (uint32 Index = 0, Count = Entries.Num(); Index < Count; ++Index)
-		{
-			const FString& Entry = *Entries[Index];
-			const uint32 Column = Index / ColumnHeight;
-			ColumnWidths[Column] = FMath::Max(ColumnWidths[Column], (uint32)Entry.Len());
-		}
-
-		// Print them sorted, if possible multiple in a line
-		{
-			FString Line;
-
-			for (uint32 OutputIndex = 0, Count = Entries.Num(); OutputIndex < Count; ++OutputIndex)
-			{
-				// [0, ColumnCount-1]
-				const uint32 Column = OutputIndex % ColumnCount;
-				const uint32 Row = OutputIndex / ColumnCount;
-				const uint32 Index = Row + Column * ColumnHeight;
-
-				bool bLineEnd = true;
-
-				if (Index < Count)
-				{
-					bLineEnd = (Column + 1 == ColumnCount);
-
-					// Order per column for readability.
-					const FString& Entry = *Entries[Index];
-
-					Line += Entry;
-
-					const int32 SpaceCount = ColumnWidths[Column] + SpaceBetweenColumns - Entry.Len();
-					checkf(SpaceCount >= 0, TEXT("A previous pass produced bad data"));
-
-					for (int32 Space = 0; Space < SpaceCount; ++Space)
-					{
-						Line.AppendChar((TCHAR)' ');
-					}
-				}
-
-				if (bLineEnd)
-				{
-					Line.TrimEndInline();
-					UE_LOG(LogConsoleResponse, Log, TEXT("   %s"), *Line);
-					Line.Empty();
-				}
-			}
-		}
-	}
 
 	uint32 WholeCount;
 	uint32 WholePoolInKB;
@@ -447,6 +433,87 @@ void FVisualizeTexture::DebugLog(EDebugLogVerbosity Verbosity)
 	GRenderTargetPool.GetStats(WholeCount, WholePoolInKB, UsedInKB);
 
 	UE_LOG(LogConsoleResponse, Log, TEXT("Pool: %d/%d MB (referenced/allocated)"), (UsedInKB + 1023) / 1024, (WholePoolInKB + 1023) / 1024);
+
+	UE_LOG(LogConsoleResponse, Log, TEXT(""));
+}
+
+void FVisualizeTexture::DisplayResourceListToLog(const TOptional<FWildcardString>& Wildcard)
+{
+	UE_LOG(LogConsoleResponse, Log, TEXT("RDGResourceName (what was rendered this frame, use <RDGResourceName>@<Version> to get intermediate versions):"));
+
+	TArray<FString> Entries;
+	Entries.Reserve(VersionCountMap.Num());
+	for (auto KV : VersionCountMap)
+	{
+		if (Wildcard.IsSet())
+		{
+			if (Wildcard->IsMatch(KV.Key))
+			{
+				Entries.Add(KV.Key);
+			}
+		}
+		else
+		{
+			Entries.Add(KV.Key);
+		}
+	}
+	Entries.Sort();
+
+	// Magic number works well with the name length we have
+	const int32 MaxColumnCount = 5;
+	const int32 SpaceBetweenColumns = 1;
+	const int32 TargetColumnHeight = 8;
+
+	int32 ColumnCount = FMath::Clamp(FMath::DivideAndRoundUp(Entries.Num(), TargetColumnHeight), 1, MaxColumnCount);
+	int32 ColumnHeight = FMath::DivideAndRoundUp(Entries.Num(), ColumnCount);
+
+	// Width of the column in characters, init with 0
+	TStaticArray<int32, MaxColumnCount> ColumnWidths;
+	for (int32 ColumnId = 0; ColumnId < MaxColumnCount; ColumnId++)
+	{
+		ColumnWidths[ColumnId] = 0;
+	}
+
+	for (int32 Index = 0, Count = Entries.Num(); Index < Count; ++Index)
+	{
+		const FString& Entry = *Entries[Index];
+		const int32 Column = Index / ColumnHeight;
+		ColumnWidths[Column] = FMath::Max(ColumnWidths[Column], Entry.Len());
+	}
+
+	// Print them sorted, if possible multiple in a line
+	for (int32 RowId = 0; RowId < ColumnHeight; RowId++)
+	{
+		FString Line;
+		int32 ColumnAlignment = 0;
+
+		for (int32 ColumnId = 0; ColumnId < ColumnCount; ColumnId++)
+		{
+			int32 EntryId = ColumnId * ColumnHeight + RowId;
+
+			if (EntryId >= Entries.Num())
+			{
+				break;
+			}
+
+			const FString& Entry = *Entries[EntryId];
+
+			const int32 SpaceCount = ColumnAlignment - Line.Len();
+			check(SpaceCount >= 0);
+			for (int32 Space = 0; Space < SpaceCount; ++Space)
+			{
+				Line.AppendChar((TCHAR)' ');
+			}
+
+			Line += Entry;
+
+			ColumnAlignment += SpaceBetweenColumns + ColumnWidths[ColumnId];
+		}
+
+		UE_LOG(LogConsoleResponse, Log, TEXT("   %s"), *Line);
+	}
+
+	UE_LOG(LogConsoleResponse, Log, TEXT(""));
 }
 
 static TAutoConsoleVariable<int32> CVarAllowBlinking(
@@ -486,16 +553,16 @@ class FVisualizeTexturePS : public FGlobalShader
 	}
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER(FVector, TextureExtent)
-		SHADER_PARAMETER_ARRAY(FVector4, VisualizeParam, [3])
+		SHADER_PARAMETER(FVector3f, TextureExtent)
+		SHADER_PARAMETER_ARRAY(FVector4f, VisualizeParam, [3])
 
-		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, VisualizeTexture2D)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, VisualizeTexture2D)
 		SHADER_PARAMETER_SAMPLER(SamplerState, VisualizeTexture2DSampler)
-		SHADER_PARAMETER_RDG_TEXTURE(Texture3D, VisualizeTexture3D)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture3D, VisualizeTexture3D)
 		SHADER_PARAMETER_SAMPLER(SamplerState, VisualizeTexture3DSampler)
-		SHADER_PARAMETER_RDG_TEXTURE(TextureCube, VisualizeTextureCube)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(TextureCube, VisualizeTextureCube)
 		SHADER_PARAMETER_SAMPLER(SamplerState, VisualizeTextureCubeSampler)
-		SHADER_PARAMETER_RDG_TEXTURE(TextureCubeArray, VisualizeTextureCubeArray)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(TextureCubeArray, VisualizeTextureCubeArray)
 		SHADER_PARAMETER_SAMPLER(SamplerState, VisualizeTextureCubeArraySampler)
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<uint4>, VisualizeDepthStencil)
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2DMS<float4>, VisualizeTexture2DMS)
@@ -557,11 +624,132 @@ static EVisualisePSType GetVisualizePSType(const FRDGTextureDesc& Desc)
 	return EVisualisePSType::Texture3D;
 }
 
-void FVisualizeTexture::ReleaseDynamicRHI()
+void FVisualizeTexture::ReleaseRHI()
 {
 	Config = {};
 	Requested = {};
 	Captured = {};
+}
+
+// static
+FRDGTextureRef FVisualizeTexture::AddVisualizeTexturePass(
+	FRDGBuilder& GraphBuilder,
+	FGlobalShaderMap* ShaderMap,
+	const FRDGTextureRef InputTexture,
+	const FConfig& VisualizeConfig,
+	EInputValueMapping InputValueMapping,
+	uint32 CaptureId)
+{
+	check(InputTexture);
+	check(!EnumHasAnyFlags(InputTexture->Desc.Flags, TexCreate_CPUReadback));
+
+	const FRDGTextureDesc& InputDesc = InputTexture->Desc;
+	const FIntPoint InputExtent = InputDesc.Extent;
+
+	FIntPoint OutputExtent = InputExtent;
+
+	// Clamp to reasonable value to prevent crash
+	OutputExtent.X = FMath::Max(OutputExtent.X, 1);
+	OutputExtent.Y = FMath::Max(OutputExtent.Y, 1);
+
+	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(OutputExtent, PF_B8G8R8A8, FClearValueBinding(FLinearColor(1, 1, 0, 1)), TexCreate_RenderTargetable | TexCreate_ShaderResource), TEXT("VisualizeTexture"));
+
+	{
+		const EVisualisePSType VisualizeType = GetVisualizePSType(InputDesc);
+
+		FVisualizeTexturePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FVisualizeTexturePS::FParameters>();
+
+		{
+			PassParameters->TextureExtent = FVector3f(InputExtent.X, InputExtent.Y, InputDesc.Depth);
+
+			{
+				// Alternates between 0 and 1 with a short pause
+				const float FracTimeScale = 1.0f / 4.0f;
+				float FracTime = FApp::GetCurrentTime() * FracTimeScale - floor(FApp::GetCurrentTime() * FracTimeScale);
+				float BlinkState = (FracTime < 1.0f / 16.0f) ? 1.0f : 0.0f;
+
+				FVector4f VisualizeParamValue[3];
+
+				float Add = 0.0f;
+				float FracScale = 1.0f;
+
+				// w * almost_1 to avoid frac(1) => 0
+				PassParameters->VisualizeParam[0] = FVector4f(VisualizeConfig.RGBMul, VisualizeConfig.SingleChannelMul, Add, FracScale * 0.9999f);
+				PassParameters->VisualizeParam[1] = FVector4f(CVarAllowBlinking.GetValueOnRenderThread() ? BlinkState : 0.0f, (VisualizeConfig.ShaderOp == EShaderOp::Saturate) ? 1.0f : 0.0f, VisualizeConfig.ArrayIndex, VisualizeConfig.MipIndex);
+				PassParameters->VisualizeParam[2] = FVector4f((float)InputValueMapping, 0.0f, VisualizeConfig.SingleChannel);
+			}
+
+			FRDGTextureSRV* InputSRV = nullptr;
+			FRHISamplerState* PointSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+			if (InputTexture->Desc.Dimension == ETextureDimension::Texture2DArray)
+			{
+				InputSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::CreateForSlice(InputTexture, FMath::Clamp(int32(VisualizeConfig.ArrayIndex), 0, int32(InputDesc.ArraySize) - 1)));
+			}
+			else
+			{
+				InputSRV = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(InputTexture));
+			}
+
+			PassParameters->VisualizeTexture2D = InputSRV;
+			PassParameters->VisualizeTexture2DSampler = PointSampler;
+			PassParameters->VisualizeTexture3D = InputSRV;
+			PassParameters->VisualizeTexture3DSampler = PointSampler;
+			PassParameters->VisualizeTextureCube = InputSRV;
+			PassParameters->VisualizeTextureCubeSampler = PointSampler;
+			PassParameters->VisualizeTextureCubeArray = InputSRV;
+			PassParameters->VisualizeTextureCubeArraySampler = PointSampler;
+
+			if (VisualizeType == EVisualisePSType::Texture2DDepthStencilNoMSAA)
+			{
+				FRDGTextureSRVDesc SRVDesc = FRDGTextureSRVDesc::CreateWithPixelFormat(InputTexture, PF_X24_G8);
+				PassParameters->VisualizeDepthStencil = GraphBuilder.CreateSRV(SRVDesc);
+			}
+
+			PassParameters->VisualizeTexture2DMS = InputTexture;
+			PassParameters->VisualizeUINT8Texture2D = InputTexture;
+
+			PassParameters->RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::EClear);
+		}
+
+		FVisualizeTexturePS::FPermutationDomain PermutationVector;
+		PermutationVector.Set<FVisualizeTexturePS::FVisualisePSTypeDim>(VisualizeType);
+
+		TShaderMapRef<FVisualizeTexturePS> PixelShader(ShaderMap, PermutationVector);
+
+		FString ExtendedDrawEvent;
+		if (GetEmitRDGEvents())
+		{
+			if (InputDesc.IsTexture3D())
+			{
+				ExtendedDrawEvent += FString::Printf(TEXT("x%d CapturedSlice=%d"), InputDesc.Depth, VisualizeConfig.ArrayIndex);
+			}
+
+			if (InputDesc.IsTextureArray())
+			{
+				ExtendedDrawEvent += FString::Printf(TEXT(" ArraySize=%d CapturedSlice=%d"), InputDesc.ArraySize, VisualizeConfig.ArrayIndex);
+			}
+
+			// Precise the mip level being captured in the mip level when there is a mip chain.
+			if (InputDesc.IsMipChain())
+			{
+				ExtendedDrawEvent += FString::Printf(TEXT(" Mips=%d CapturedMip=%d"), InputDesc.NumMips, VisualizeConfig.MipIndex);
+			}
+		}
+
+		FPixelShaderUtils::AddFullscreenPass(
+			GraphBuilder,
+			ShaderMap,
+			RDG_EVENT_NAME("VisualizeTextureCapture(%s@%d %s %dx%d%s)",
+				InputTexture->Name, CaptureId,
+				GPixelFormats[InputDesc.Format].Name,
+				InputExtent.X, InputExtent.Y,
+				*ExtendedDrawEvent),
+			PixelShader,
+			PassParameters,
+			FIntRect(0, 0, OutputExtent.X, OutputExtent.Y));
+	}
+
+	return OutputTexture;
 }
 
 void FVisualizeTexture::CreateContentCapturePass(FRDGBuilder& GraphBuilder, const FRDGTextureRef InputTexture, uint32 CaptureId)
@@ -579,16 +767,7 @@ void FVisualizeTexture::CreateContentCapturePass(FRDGBuilder& GraphBuilder, cons
 		return;
 	}
 
-	FIntPoint OutputExtent = InputExtent;
-
-	// Clamp to reasonable value to prevent crash
-	OutputExtent.X = FMath::Max(OutputExtent.X, 1);
-	OutputExtent.Y = FMath::Max(OutputExtent.Y, 1);
-
-	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(FRDGTextureDesc::Create2D(OutputExtent, PF_B8G8R8A8, FClearValueBinding(FLinearColor(1, 1, 0, 1)), TexCreate_RenderTargetable | TexCreate_ShaderResource), TEXT("VisualizeTexture"));
-
 	EInputValueMapping InputValueMapping = EInputValueMapping::Color;
-
 	{
 		if (InputDesc.Format == PF_ShadowDepth)
 		{
@@ -598,87 +777,14 @@ void FVisualizeTexture::CreateContentCapturePass(FRDGBuilder& GraphBuilder, cons
 		{
 			InputValueMapping = EInputValueMapping::Depth;
 		}
-
-		const EVisualisePSType VisualizeType = GetVisualizePSType(InputDesc);
-
-		FVisualizeTexturePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FVisualizeTexturePS::FParameters>();
-
-		{
-			PassParameters->TextureExtent = FVector(InputExtent.X, InputExtent.Y, InputDesc.Depth);
-
-			{
-				// Alternates between 0 and 1 with a short pause
-				const float FracTimeScale = 2.0f;
-				float FracTime = FApp::GetCurrentTime() * FracTimeScale - floor(FApp::GetCurrentTime() * FracTimeScale);
-				float BlinkState = (FracTime > 0.5f) ? 1.0f : 0.0f;
-
-				FVector4 VisualizeParamValue[3];
-
-				float Add = 0.0f;
-				float FracScale = 1.0f;
-
-				// w * almost_1 to avoid frac(1) => 0
-				PassParameters->VisualizeParam[0] = FVector4(Config.RGBMul, Config.SingleChannelMul, Add, FracScale * 0.9999f);
-				PassParameters->VisualizeParam[1] = FVector4(CVarAllowBlinking.GetValueOnRenderThread() ? BlinkState : 1.0f, (Config.ShaderOp == EShaderOp::Saturate) ? 1.0f : 0.0f, Config.ArrayIndex, Config.MipIndex);
-				PassParameters->VisualizeParam[2] = FVector4((float)InputValueMapping, 0.0f, Config.SingleChannel);
-			}
-
-			FRHISamplerState* PointSampler = TStaticSamplerState<SF_Point, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-
-			PassParameters->VisualizeTexture2D = InputTexture;
-			PassParameters->VisualizeTexture2DSampler = PointSampler;
-			PassParameters->VisualizeTexture3D = InputTexture;
-			PassParameters->VisualizeTexture3DSampler = PointSampler;
-			PassParameters->VisualizeTextureCube = InputTexture;
-			PassParameters->VisualizeTextureCubeSampler = PointSampler;
-			PassParameters->VisualizeTextureCubeArray = InputTexture;
-			PassParameters->VisualizeTextureCubeArraySampler = PointSampler;
-
-			if (VisualizeType == EVisualisePSType::Texture2DDepthStencilNoMSAA)
-			{
-				FRDGTextureSRVDesc SRVDesc = FRDGTextureSRVDesc::CreateWithPixelFormat(InputTexture, PF_X24_G8);
-				PassParameters->VisualizeDepthStencil = GraphBuilder.CreateSRV(SRVDesc);
-			}
-
-			PassParameters->VisualizeTexture2DMS = InputTexture;
-			PassParameters->VisualizeUINT8Texture2D = InputTexture;
-
-			PassParameters->RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::EClear);
-		}
-
-		auto ShaderMap = GetGlobalShaderMap(FeatureLevel);
-		FVisualizeTexturePS::FPermutationDomain PermutationVector;
-		PermutationVector.Set<FVisualizeTexturePS::FVisualisePSTypeDim>(VisualizeType);
-
-		TShaderMapRef<FVisualizeTexturePS> PixelShader(ShaderMap, PermutationVector);
-
-		FString ExtendedDrawEvent;
-		if (GetEmitRDGEvents())
-		{
-			if (InputDesc.IsTexture3D())
-			{
-				ExtendedDrawEvent += FString::Printf(TEXT("x%d CapturedSlice=%d"), InputDesc.Depth, Config.ArrayIndex);
-			}
-
-			// Precise the mip level being captured in the mip level when there is a mip chain.
-			if (InputDesc.IsMipChain())
-			{
-				ExtendedDrawEvent += FString::Printf(TEXT(" Mips=%d CapturedMip=%d"), InputDesc.NumMips, Config.MipIndex);
-			}
-		}
-
-		FPixelShaderUtils::AddFullscreenPass(
-			GraphBuilder,
-			ShaderMap,
-			RDG_EVENT_NAME("VisualizeTextureCapture(%s@%d %s %dx%d%s)",
-				InputTexture->Name, CaptureId,
-				GPixelFormats[InputDesc.Format].Name,
-				InputExtent.X, InputExtent.Y,
-				*ExtendedDrawEvent),
-			PixelShader,
-			PassParameters,
-			FIntRect(0, 0, OutputExtent.X, OutputExtent.Y));
 	}
+
+	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(FeatureLevel);
+	FRDGTextureRef OutputTexture = AddVisualizeTexturePass(GraphBuilder, ShaderMap, InputTexture, Config, InputValueMapping, CaptureId);
+
+	FIntPoint OutputExtent = InputExtent;
+	OutputExtent.X = FMath::Max(OutputExtent.X, 1);
+	OutputExtent.Y = FMath::Max(OutputExtent.Y, 1);
 
 	{
 		Captured.Desc = Translate(InputDesc);
@@ -756,7 +862,7 @@ uint32 FVisualizeTexture::GetVersionCount(const TCHAR* InName) const
 	return 0;
 }
 
-void FVisualizeTexture::SetCheckPoint(FRHICommandListImmediate& RHICmdList, IPooledRenderTarget* PooledRenderTarget)
+void FVisualizeTexture::SetCheckPoint(FRDGBuilder& GraphBuilder, IPooledRenderTarget* PooledRenderTarget)
 {
 	check(IsInRenderingThread());
 
@@ -767,7 +873,7 @@ void FVisualizeTexture::SetCheckPoint(FRHICommandListImmediate& RHICmdList, IPoo
 
 	const FPooledRenderTargetDesc& Desc = PooledRenderTarget->GetDesc();
 
-	if ((Desc.TargetableFlags & TexCreate_ShaderResource) == 0)
+	if (!EnumHasAnyFlags(Desc.Flags, TexCreate_ShaderResource))
 	{
 		return;
 	}
@@ -778,9 +884,14 @@ void FVisualizeTexture::SetCheckPoint(FRHICommandListImmediate& RHICmdList, IPoo
 		return;
 	}
 
-	FRDGBuilder GraphBuilder(RHICmdList);
-	FRDGTextureRef TextureToCapture = GraphBuilder.RegisterExternalTexture(PooledRenderTarget, ERenderTargetTexture::Targetable);
+	FRDGTextureRef TextureToCapture = GraphBuilder.RegisterExternalTexture(PooledRenderTarget);
 	CreateContentCapturePass(GraphBuilder, TextureToCapture, CaptureId.GetValue());
+}
+
+void FVisualizeTexture::SetCheckPoint(FRHICommandListImmediate& RHICmdList, IPooledRenderTarget* PooledRenderTarget)
+{
+	FRDGBuilder GraphBuilder(RHICmdList);
+	SetCheckPoint(GraphBuilder, PooledRenderTarget);
 	GraphBuilder.Execute();
 }
 
@@ -791,3 +902,54 @@ void FVisualizeTexture::Visualize(const FString& InName, TOptional<uint32> InVer
 }
 
 #endif // SUPPORTS_VISUALIZE_TEXTURE
+
+// static
+FRDGTextureRef FVisualizeTexture::AddVisualizeTexturePass(
+	FRDGBuilder& GraphBuilder,
+	class FGlobalShaderMap* ShaderMap,
+	const FRDGTextureRef InputTexture)
+#if SUPPORTS_VISUALIZE_TEXTURE
+{
+	check(InputTexture);
+	EInputValueMapping InputValueMapping = EInputValueMapping::Color;
+	{
+		if (InputTexture->Desc.Format == PF_ShadowDepth)
+		{
+			InputValueMapping = EInputValueMapping::Shadow;
+		}
+		else if (EnumHasAnyFlags(InputTexture->Desc.Flags, TexCreate_DepthStencilTargetable))
+		{
+			InputValueMapping = EInputValueMapping::Depth;
+		}
+	}
+
+	FConfig VisualizeConfig;
+
+	return AddVisualizeTexturePass(GraphBuilder, ShaderMap, InputTexture, VisualizeConfig, InputValueMapping, /* CaptureId = */ 0);
+}
+#else
+{
+	return InputTexture;
+}
+#endif
+
+// static
+FRDGTextureRef FVisualizeTexture::AddVisualizeTextureAlphaPass(
+	FRDGBuilder& GraphBuilder,
+	class FGlobalShaderMap* ShaderMap,
+	const FRDGTextureRef InputTexture)
+#if SUPPORTS_VISUALIZE_TEXTURE
+{
+	check(InputTexture);
+	FConfig VisualizeConfig;
+	VisualizeConfig.SingleChannel = 3;
+	VisualizeConfig.SingleChannelMul = 1.0f;
+	VisualizeConfig.RGBMul = 0.0f;
+
+	return AddVisualizeTexturePass(GraphBuilder, ShaderMap, InputTexture, VisualizeConfig, EInputValueMapping::Color, /* CaptureId = */ 0);
+}
+#else
+{
+	return InputTexture;
+}
+#endif

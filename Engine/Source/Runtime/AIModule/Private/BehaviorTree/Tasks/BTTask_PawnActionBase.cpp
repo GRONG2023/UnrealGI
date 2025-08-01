@@ -5,6 +5,10 @@
 #include "AIController.h"
 #include "VisualLogger/VisualLogger.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTTask_PawnActionBase)
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
 UBTTask_PawnActionBase::UBTTask_PawnActionBase(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "Action Base";
@@ -18,7 +22,7 @@ EBTNodeResult::Type UBTTask_PawnActionBase::AbortTask(UBehaviorTreeComponent& Ow
 		? EBTNodeResult::InProgress : EBTNodeResult::Aborted;
 }
 
-EBTNodeResult::Type UBTTask_PawnActionBase::PushAction(UBehaviorTreeComponent& OwnerComp, UPawnAction& Action)
+EBTNodeResult::Type UBTTask_PawnActionBase::PushAction(UBehaviorTreeComponent& OwnerComp, UDEPRECATED_PawnAction& Action)
 {
 	EBTNodeResult::Type NodeResult = EBTNodeResult::Failed;
 
@@ -43,7 +47,7 @@ EBTNodeResult::Type UBTTask_PawnActionBase::PushAction(UBehaviorTreeComponent& O
 	return NodeResult;
 }
 
-void UBTTask_PawnActionBase::OnActionEvent(UPawnAction& Action, EPawnActionEventType::Type Event)
+void UBTTask_PawnActionBase::OnActionEvent(UDEPRECATED_PawnAction& Action, EPawnActionEventType::Type Event)
 {
 	EPawnActionTaskResult Result = ActionEventHandler(this, Action, Event);
 	if (Result == EPawnActionTaskResult::ActionLost)
@@ -52,7 +56,7 @@ void UBTTask_PawnActionBase::OnActionEvent(UPawnAction& Action, EPawnActionEvent
 	}
 }
 
-EPawnActionTaskResult UBTTask_PawnActionBase::ActionEventHandler(UBTTaskNode* TaskNode, UPawnAction& Action, EPawnActionEventType::Type Event)
+EPawnActionTaskResult UBTTask_PawnActionBase::ActionEventHandler(UBTTaskNode* TaskNode, UDEPRECATED_PawnAction& Action, EPawnActionEventType::Type Event)
 {
 	EPawnActionTaskResult Result = EPawnActionTaskResult::Unknown;
 
@@ -62,7 +66,7 @@ EPawnActionTaskResult UBTTask_PawnActionBase::ActionEventHandler(UBTTaskNode* Ta
 	{
 		UE_VLOG(Action.GetController(), LogBehaviorTree, Warning, TEXT("%s: Unhandled PawnAction event: %s, can't find owning component!"),
 			*UBehaviorTreeTypes::DescribeNodeHelper(TaskNode),
-			*UPawnActionsComponent::DescribeEventType(Event));
+			*UDEPRECATED_PawnActionsComponent::DescribeEventType(Event));
 
 		return Result;
 	}
@@ -96,14 +100,14 @@ EPawnActionTaskResult UBTTask_PawnActionBase::ActionEventHandler(UBTTaskNode* Ta
 	{
 		UE_VLOG(Action.GetController(), LogBehaviorTree, Verbose, TEXT("%s: Unhandled PawnAction event: %s TaskStatus: %s"),
 			*UBehaviorTreeTypes::DescribeNodeHelper(TaskNode),
-			*UPawnActionsComponent::DescribeEventType(Event),
+			*UDEPRECATED_PawnActionsComponent::DescribeEventType(Event),
 			*UBehaviorTreeTypes::DescribeTaskStatus(TaskStatus));
 	}
 
 	return Result;
 }
 
-void UBTTask_PawnActionBase::OnActionLost(UPawnAction& Action)
+void UBTTask_PawnActionBase::OnActionLost(UDEPRECATED_PawnAction& Action)
 {
 	AAIController* AIOwner = Cast<AAIController>(Action.GetController());
 	UBehaviorTreeComponent* OwnerComp = AIOwner ? Cast<UBehaviorTreeComponent>(AIOwner->BrainComponent) : nullptr;
@@ -113,3 +117,5 @@ void UBTTask_PawnActionBase::OnActionLost(UPawnAction& Action)
 		FinishLatentTask(*OwnerComp, EBTNodeResult::Failed);
 	}
 }
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

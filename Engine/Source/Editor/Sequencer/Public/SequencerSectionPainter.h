@@ -2,15 +2,28 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/SlateRect.h"
+#include "Containers/Array.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "CoreTypes.h"
 #include "Layout/Geometry.h"
+#include "Layout/SlateRect.h"
+#include "Math/Color.h"
+#include "Templates/SharedPointer.h"
 
 class FSlateWindowElementList;
+class IKeyArea;
 class UMovieSceneSection;
 class UMovieSceneTrack;
 struct FTimeToPixel;
-class IKeyArea;
+
+namespace UE
+{
+namespace Sequencer
+{
+	class FSectionModel;
+}
+}
+
 
 struct FKeyAreaElement
 {
@@ -27,8 +40,10 @@ struct FKeyAreaElement
 class SEQUENCER_API FSequencerSectionPainter
 {
 public:
+	UE_NONCOPYABLE(FSequencerSectionPainter)
+
 	/** Constructor */
-	FSequencerSectionPainter(FSlateWindowElementList& OutDrawElements, const FGeometry& InSectionGeometry, UMovieSceneSection& Section);
+	FSequencerSectionPainter(FSlateWindowElementList& OutDrawElements, const FGeometry& InSectionGeometry, TSharedPtr<UE::Sequencer::FSectionModel> Section);
 
 	/** Virtual destructor */
 	virtual ~FSequencerSectionPainter();
@@ -52,8 +67,8 @@ public:
 
 public:
 
-	/** The movie scene section we're painting */
-	UMovieSceneSection& Section;
+	/** The section we are painting */
+	TSharedPtr<UE::Sequencer::FSectionModel> SectionModel;
 
 	/** List of slate draw elements - publicly modifiable */
 	FSlateWindowElementList& DrawElements;
@@ -61,9 +76,6 @@ public:
 	/** The full geometry of the section. This is the width of the track area in the case of infinite sections */
 	FGeometry SectionGeometry;
 
-	/** Key area info with key area geometry for per key area track painting */
-	TArray<FKeyAreaElement> KeyAreaElements;
-	
 	/** The full clipping rectangle for the section */
 	FSlateRect SectionClippingRect;
 	

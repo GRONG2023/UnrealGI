@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WidgetBlueprint.h"
+
 #include "Components/Widget.h"
 #include "Blueprint/UserWidget.h"
 #include "MovieScene.h"
@@ -15,10 +16,13 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Binding/PropertyBinding.h"
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/PropertyTag.h"
 #include "WidgetBlueprintCompiler.h"
 #include "UObject/EditorObjectVersion.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
+#include "UObject/ObjectSaveContext.h"
 #include "WidgetGraphSchema.h"
 #include "UMGEditorProjectSettings.h"
 
@@ -26,16 +30,22 @@
 #include "Interfaces/ITargetPlatform.h"
 #include "Modules/ModuleManager.h"
 #include "DiffResults.h"
+#include "Misc/DataValidation.h"
 #endif
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_MacroInstance.h"
 #include "K2Node_Composite.h"
+#include "K2Node_FunctionResult.h"
 #include "Blueprint/WidgetNavigation.h"
+#include "WidgetEditingProjectSettings.h"
 
 #define LOCTEXT_NAMESPACE "UMG"
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 FWidgetBlueprintDelegates::FGetAssetTags FWidgetBlueprintDelegates::GetAssetTags;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+FWidgetBlueprintDelegates::FGetAssetTagsWithContext FWidgetBlueprintDelegates::GetAssetTagsWithContext;
 
 FEditorPropertyPathSegment::FEditorPropertyPathSegment()
 	: Struct(nullptr)
@@ -562,6 +572,7 @@ bool FWidgetAnimation_DEPRECATED::SerializeFromMismatchedTag(struct FPropertyTag
 
 UWidgetBlueprint::UWidgetBlueprint(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
+	, bCanCallInitializedWithoutPlayerContext(false)
 	, TickFrequency(EWidgetTickFrequency::Auto)
 {
 }
@@ -580,13 +591,132 @@ void UWidgetBlueprint::ReplaceDeprecatedNodes()
 		}
 	}
 
+#if WITH_EDITORONLY_DATA
+	if (GetLinkerCustomVersion(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::BlueprintPinsUseRealNumbers)
+	{
+		// Revert any overzealous PC_Float to PC_Real/PC_Double conversions.
+
+		// The Blueprint real number changes will automatically convert pin types to doubles if used in a non-native context.
+		// However, UMG property bindings are a special case: the BP functions that bind to the native delegate must agree on their underlying types.
+		// Specifically, bindings used with float properties *must* use the PC_Float type as the return value in a BP function.
+		// In order to correct this behavior, we need to:
+		// * Iterate through the property bindings.
+		// * Find the corresponding delegate signature.
+		// * Find the function graph that matches the binding.
+		// * Find the result node.
+		// * Change the pin type back to float if that's what the delegate signature expects.
+
+		TArray<UEdGraph*> Graphs;
+		GetAllGraphs(Graphs);
+
+		for (const FDelegateEditorBinding& Binding : Bindings)
+		{
+			if (Binding.IsAttributePropertyBinding(this))
+			{
+				check(WidgetTree);
+				if (UWidget* TargetWidget = WidgetTree->FindWidget(FName(*Binding.ObjectName)))
+				{
+					const FDelegateProperty* BindableProperty =
+						FindFProperty<FDelegateProperty>(TargetWidget->GetClass(), FName(*(Binding.PropertyName.ToString() + TEXT("Delegate"))));
+
+					if (BindableProperty)
+					{
+						FName FunctionName = Binding.FunctionName;
+
+						if (!Binding.SourcePath.IsEmpty())
+						{
+							check(Binding.SourcePath.Segments.Num() > 0);
+							const FEditorPropertyPathSegment& LastSegment = Binding.SourcePath.Segments[Binding.SourcePath.Segments.Num() - 1];
+							FunctionName = LastSegment.GetMemberName();
+						}
+
+						auto GraphMatchesBindingPredicate = [FunctionName](const UEdGraph* Graph) {
+							check(Graph);
+							return (FunctionName == Graph->GetFName());
+						};
+
+						if (UEdGraph** GraphEntry = Graphs.FindByPredicate(GraphMatchesBindingPredicate))
+						{
+							UEdGraph* CurrentGraph = *GraphEntry;
+							check(CurrentGraph);
+
+							for (UEdGraphNode* Node : CurrentGraph->Nodes)
+							{
+								check(Node);
+								if (Node->IsA<UK2Node_FunctionResult>())
+								{
+									for (UEdGraphPin* Pin : Node->Pins)
+									{
+										check(Pin);
+										if (Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
+										{
+											FName PinName = Pin->GetFName();
+
+											const UFunction* DelegateFunction = BindableProperty->SignatureFunction;
+											check(DelegateFunction);
+
+											auto OutputParameterMatchesPin = [PinName](FFloatProperty* FloatParam) {
+												check(FloatParam);
+												bool bHasMatch =
+													(FloatParam->PropertyFlags & CPF_OutParm) &&
+													(FloatParam->GetFName() == PinName);
+
+												return bHasMatch;
+											};
+
+											bool bFoundMatchingParam = false;
+											for (TFieldIterator<FFloatProperty> It(DelegateFunction); It; ++It)
+											{
+												if (OutputParameterMatchesPin(*It))
+												{
+													Pin->PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
+													bFoundMatchingParam = true;
+													break;
+												}
+											}
+
+											if (bFoundMatchingParam)
+											{
+												UK2Node_FunctionResult* FunctionResultNode = CastChecked<UK2Node_FunctionResult>(Node);
+												for (TSharedPtr<FUserPinInfo>& UserPin : FunctionResultNode->UserDefinedPins)
+												{
+													check(UserPin);
+													if (UserPin->PinName == PinName)
+													{
+														check(UserPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real);
+														UserPin->PinType.PinSubCategory = UEdGraphSchema_K2::PC_Float;
+														break;
+													}
+												}
+											}
+
+											break;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+#endif
+
 	Super::ReplaceDeprecatedNodes();
 }
 
 #if WITH_EDITORONLY_DATA
 void UWidgetBlueprint::PreSave(const class ITargetPlatform* TargetPlatform)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::PreSave(TargetPlatform);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UWidgetBlueprint::PreSave(FObjectPreSaveContext ObjectSaveContext)
+{
+	Super::PreSave(ObjectSaveContext);
 }
 #endif // WITH_EDITORONLY_DATA
 
@@ -594,9 +724,43 @@ void UWidgetBlueprint::PreSave(const class ITargetPlatform* TargetPlatform)
 
 void UWidgetBlueprint::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
 	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
 
-	FWidgetBlueprintDelegates::GetAssetTags.Broadcast(this, OutTags);
+void UWidgetBlueprint::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
+	Super::GetAssetRegistryTags(Context);
+
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	TArray<UObject::FAssetRegistryTag> DeprecatedFunctionTags;
+	FWidgetBlueprintDelegates::GetAssetTags.Broadcast(this, DeprecatedFunctionTags);
+	for (UObject::FAssetRegistryTag& Tag : DeprecatedFunctionTags)
+	{
+		Context.AddTag(MoveTemp(Tag));
+	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+
+	// Add AvailableNamedSlots,  also available on generated class, to the WidgetBlueprint
+	if (const UWidgetBlueprintGeneratedClass* WidgetBPGeneratedClass = Cast<const UWidgetBlueprintGeneratedClass>(GeneratedClass))
+	{
+		TStringBuilder<512> Builder;
+		for (FName NamedSlot : WidgetBPGeneratedClass->AvailableNamedSlots)
+		{
+			if (!NamedSlot.IsNone())
+			{
+				if (Builder.Len() > 0)
+				{
+					Builder << TEXT(',');
+				}
+				Builder << NamedSlot;
+			}
+		}
+		Context.AddTag(FAssetRegistryTag(FName("AvailableNamedSlots"), Builder.ToString(), FAssetRegistryTag::TT_Hidden));
+	}
+
+	FWidgetBlueprintDelegates::GetAssetTagsWithContext.Broadcast(this, Context);
 }
 
 void UWidgetBlueprint::NotifyGraphRenamed(class UEdGraph* Graph, FName OldName, FName NewName)
@@ -614,20 +778,27 @@ void UWidgetBlueprint::NotifyGraphRenamed(class UEdGraph* Graph, FName OldName, 
 	});
 }
 
-EDataValidationResult UWidgetBlueprint::IsDataValid(TArray<FText>& ValidationErrors)
+EDataValidationResult UWidgetBlueprint::IsDataValid(FDataValidationContext& Context) const
 {
-	EDataValidationResult Result = UBlueprint::IsDataValid(ValidationErrors);
+	EDataValidationResult Result = UBlueprint::IsDataValid(Context);
 
-	const bool bFoundLeak = DetectSlateWidgetLeaks(ValidationErrors);
+	const bool bFoundLeak = DetectSlateWidgetLeaks(Context);
 
 	return bFoundLeak ? EDataValidationResult::Invalid : Result;
 }
 
-bool UWidgetBlueprint::DetectSlateWidgetLeaks(TArray<FText>& ValidationErrors)
+bool UWidgetBlueprint::DetectSlateWidgetLeaks(FDataValidationContext& Context) const
 {
 	// We can't safely run this in anything but a running editor, since widgets
 	// rely on a functioning slate application.
 	if (IsRunningCommandlet())
+	{
+		return false;
+	}
+
+	// The detection relies on instantiation of the class: don't try to create an abstract class. 
+	// The validation will have to be run on the WBP inheriting from abstract ones.
+	if (GeneratedClass->HasAnyClassFlags(CLASS_Abstract))
 	{
 		return false;
 	}
@@ -645,7 +816,7 @@ bool UWidgetBlueprint::DetectSlateWidgetLeaks(TArray<FText>& ValidationErrors)
 
 	// Update the widget tree directly to match the blueprint tree.  That way the preview can update
 	// without needing to do a full recompile.
-	TempUserWidget->DuplicateAndInitializeFromWidgetTree(WidgetTree);
+	TempUserWidget->DuplicateAndInitializeFromWidgetTree(WidgetTree, TMap<FName, UWidget*>());
 
 	// We don't want this widget doing all the normal startup and acting like it's the real deal
 	// trying to do gameplay stuff, so make sure it's in design mode.
@@ -660,16 +831,16 @@ bool UWidgetBlueprint::DetectSlateWidgetLeaks(TArray<FText>& ValidationErrors)
 	//       those widgets will be handled by their own validation steps.
 
 	// Verify everything is going to be garbage collected.
-	TempUserWidget->WidgetTree->ForEachWidget([&ValidationErrors, &bFoundLeak](UWidget* Widget) {
+	TempUserWidget->WidgetTree->ForEachWidget([&Context, &bFoundLeak](UWidget* Widget) {
 		if (!bFoundLeak)
 		{
 			TWeakPtr<SWidget> PreviewChildWidget = Widget->GetCachedWidget();
 			if (PreviewChildWidget.IsValid())
 			{
 				bFoundLeak = true;
-				if (UPanelWidget* ParentWidget = Widget->GetParent())
+				if (const UPanelWidget* ParentWidget = Widget->GetParent())
 				{
-					ValidationErrors.Add(
+					Context.AddError(
 						FText::Format(
 							LOCTEXT("LeakingWidgetsWithParent_WarningFmt", "Leak Detected!  {0} ({1}) still has living Slate widgets, it or the parent {2} ({3}) is keeping them in memory.  Make sure all Slate resources (TSharedPtr<SWidget>'s) are being released in the UWidget's ReleaseSlateResources().  Also check the USlot's ReleaseSlateResources()."),
 							FText::FromString(Widget->GetName()),
@@ -681,7 +852,7 @@ bool UWidgetBlueprint::DetectSlateWidgetLeaks(TArray<FText>& ValidationErrors)
 				}
 				else
 				{
-					ValidationErrors.Add(
+					Context.AddError(
 						FText::Format(
 							LOCTEXT("LeakingWidgetsWithoutParent_WarningFmt", "Leak Detected!  {0} ({1}) still has living Slate widgets, it or the parent widget is keeping them in memory.  Make sure all Slate resources (TSharedPtr<SWidget>'s) are being released in the UWidget's ReleaseSlateResources().  Also check the USlot's ReleaseSlateResources()."),
 							FText::FromString(Widget->GetName()),
@@ -693,6 +864,7 @@ bool UWidgetBlueprint::DetectSlateWidgetLeaks(TArray<FText>& ValidationErrors)
 		}
 	});
 
+	DummyWorld->MarkObjectsPendingKill();
 	return bFoundLeak;
 }
 
@@ -740,7 +912,7 @@ bool UWidgetBlueprint::FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults&
 				Args.Add(TEXT("WidgetPath"), FText::FromString(Pair.Key));
 				Diff.ToolTip = FText::Format(LOCTEXT("DIF_RequestWidgetTooltip", "Widget {WidgetTitle}\nPath: {WidgetPath}"), Args);
 				Diff.DisplayString = FText::Format(LOCTEXT("DIF_RequestWidgetLabel", "Widget {WidgetTitle}"), Args);
-				Diff.DisplayColor = FLinearColor(1.f, 0.4f, 0.4f);
+				Diff.Category = EDiffType::CONTROL;
 
 				Results.Add(Diff);
 
@@ -759,7 +931,7 @@ bool UWidgetBlueprint::FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults&
 					SlotArgs.Add(TEXT("WidgetPath"), FText::FromString(Pair.Key));
 					SlotDiff.ToolTip = FText::Format(LOCTEXT("DIF_RequestSlotTooltip", "Slot for {WidgetTitle}\nPath: {WidgetPath}"), SlotArgs);
 					SlotDiff.DisplayString = FText::Format(LOCTEXT("DIF_RequestSlotLabel", "Slot for {WidgetTitle}"), SlotArgs);
-					SlotDiff.DisplayColor = FLinearColor(1.f, 0.4f, 0.4f);
+					Diff.Category = EDiffType::CONTROL;
 
 					Results.Add(SlotDiff);
 				}
@@ -780,7 +952,7 @@ bool UWidgetBlueprint::FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults&
 				Args.Add(TEXT("WidgetPath"), FText::FromString(Pair.Key));
 				Diff.ToolTip = FText::Format(LOCTEXT("DIF_AddedWidgetTooltip", "Added Widget {WidgetTitle}\nPath: {WidgetPath}"), Args);
 				Diff.DisplayString = FText::Format(LOCTEXT("DIF_AddedWidgetLabel", "Added Widget {WidgetTitle}"), Args);
-				Diff.DisplayColor = FLinearColor(1.f, 0.4f, 0.4f);
+				Diff.Category = EDiffType::ADDITION;
 			}
 
 			Results.Add(Diff);
@@ -807,7 +979,7 @@ bool UWidgetBlueprint::FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults&
 				Args.Add(TEXT("WidgetPath"), FText::FromString(Pair.Key));
 				Diff.ToolTip = FText::Format(LOCTEXT("DIF_RemovedWidgetTooltip", "Removed Widget {WidgetTitle}\nPath:{WidgetPath}"), Args);
 				Diff.DisplayString = FText::Format(LOCTEXT("DIF_RemovedWidgetLabel", "Removed Widget {WidgetTitle}"), Args);
-				Diff.DisplayColor = FLinearColor(1.f, 0.4f, 0.4f);
+				Diff.Category = EDiffType::SUBTRACTION;
 			}
 
 			Results.Add(Diff);
@@ -819,7 +991,7 @@ bool UWidgetBlueprint::FindDiffs(const UBlueprint* OtherBlueprint, FDiffResults&
 	{
 		FDiffSingleResult Diff;
 		Diff.Diff = EDiffType::INFO_MESSAGE;
-		Diff.DisplayColor = FLinearColor(.7f, .7f, .7f);
+		Diff.Category = EDiffType::CONTROL;
 		Diff.ToolTip = LOCTEXT("DIF_WidgetWarningMessage", "Warning: This may be missing changes to Animations and Bindings");
 		Diff.DisplayString = Diff.ToolTip;
 
@@ -837,6 +1009,7 @@ void UWidgetBlueprint::Serialize(FArchive& Ar)
 
 	Ar.UsingCustomVersion(FEditorObjectVersion::GUID);
 	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID);
 }
 
 void UWidgetBlueprint::PostLoad()
@@ -849,7 +1022,7 @@ void UWidgetBlueprint::PostLoad()
 		Widget->ConnectEditorData();
 	});
 
-	if( GetLinkerUE4Version() < VER_UE4_FIXUP_WIDGET_ANIMATION_CLASS )
+	if( GetLinkerUEVersion() < VER_UE4_FIXUP_WIDGET_ANIMATION_CLASS )
 	{
 		// Fixup widget animations.
 		for( auto& OldAnim : AnimationData_DEPRECATED )
@@ -872,7 +1045,7 @@ void UWidgetBlueprint::PostLoad()
 		AnimationData_DEPRECATED.Empty();
 	}
 
-	if ( GetLinkerUE4Version() < VER_UE4_RENAME_WIDGET_VISIBILITY )
+	if ( GetLinkerUEVersion() < VER_UE4_RENAME_WIDGET_VISIBILITY )
 	{
 		static const FName Visiblity(TEXT("Visiblity"));
 		static const FName Visibility(TEXT("Visibility"));
@@ -921,6 +1094,11 @@ UClass* UWidgetBlueprint::GetBlueprintClass() const
 }
 
 bool UWidgetBlueprint::AllowsDynamicBinding() const
+{
+	return true;
+}
+
+bool UWidgetBlueprint::SupportsInputEvents() const
 {
 	return true;
 }
@@ -1024,7 +1202,7 @@ bool UWidgetBlueprint::IsWidgetFreeFromCircularReferences(UUserWidget* UserWidge
 			if (GeneratedByBlueprint->WidgetTree && GeneratedByBlueprint->WidgetTree->RootWidget)
 			{
 				TArray<UWidget*> ChildWidgets;
-				GeneratedByBlueprint->WidgetTree->GetChildWidgets(GeneratedByBlueprint->WidgetTree->RootWidget, ChildWidgets);
+				GeneratedByBlueprint->WidgetTree->GetAllWidgets(ChildWidgets);
 				for (UWidget* ChildWidget : ChildWidgets)
 				{
 					if (UWidgetBlueprint* ChildGeneratedBlueprint = Cast<UWidgetBlueprint>(ChildWidget->WidgetGeneratedBy))
@@ -1057,6 +1235,63 @@ bool UWidgetBlueprint::IsWidgetFreeFromCircularReferences(UUserWidget* UserWidge
 	}
 
 	return true;
+}
+
+namespace UE::UMG::Private
+{
+bool HasCircularReferences(const UClass* CurrentClass, TArray<const UClass*, TInlineAllocator<32>> DiscoveredBlueprint, UWidget*& OutResult)
+{
+	if (DiscoveredBlueprint.ContainsByPredicate([CurrentClass](const UClass* Other) { return CurrentClass->IsChildOf(Other); }))
+	{
+		return true;
+	}
+	DiscoveredBlueprint.Add(CurrentClass);
+
+	if (const UWidgetBlueprintGeneratedClass* CurrentWidgetClass = Cast<const UWidgetBlueprintGeneratedClass>(CurrentClass))
+	{
+		TArray<UWidget*> AllWidgets;
+		if (const UWidgetBlueprint* WidgetBP = Cast<const UWidgetBlueprint>(CurrentWidgetClass->ClassGeneratedBy))
+		{
+			if (WidgetBP->WidgetTree)
+			{
+				WidgetBP->WidgetTree->GetAllWidgets(AllWidgets);
+			}
+		}
+		else if (UWidgetTree* CurrentWidgetTree = CurrentWidgetClass->GetWidgetTreeArchetype())
+		{
+			CurrentWidgetTree->GetAllWidgets(AllWidgets);
+
+		}
+
+		for (UWidget* Widget : AllWidgets)
+		{
+			if (UUserWidget* UserWidget = Cast<UUserWidget>(Widget))
+			{
+				if (HasCircularReferences(UserWidget->GetClass(), DiscoveredBlueprint, OutResult))
+				{
+					OutResult = Widget;
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+}
+
+TValueOrError<void, UWidget*> UWidgetBlueprint::HasCircularReferences() const
+{
+	if (GeneratedClass)
+	{
+		TArray<const UClass*, TInlineAllocator<32>> DiscoveredBlueprint;
+		UWidget* Result = nullptr;
+		if (UE::UMG::Private::HasCircularReferences(GeneratedClass, DiscoveredBlueprint, Result))
+		{
+			return MakeError(Result);
+		}
+	}
+	return MakeValue();
 }
 
 UPackage* UWidgetBlueprint::GetWidgetTemplatePackage() const
@@ -1214,7 +1449,27 @@ void UWidgetBlueprint::UpdateTickabilityStats(bool& OutHasLatentActions, bool& O
 
 bool UWidgetBlueprint::ArePropertyBindingsAllowed() const
 {
-	return GetDefault<UUMGEditorProjectSettings>()->CompilerOption_PropertyBindingRule(this) == EPropertyBindingPermissionLevel::Allow;
+	return GetRelevantSettings()->CompilerOption_PropertyBindingRule(this) == EPropertyBindingPermissionLevel::Allow;
+}
+
+TArray<FName> UWidgetBlueprint::GetInheritedAvailableNamedSlots() const
+{
+	if (const UWidgetBlueprintGeneratedClass* GeneratedBPClass = Cast<UWidgetBlueprintGeneratedClass>(GeneratedClass->GetSuperClass()))
+	{
+		return GeneratedBPClass->AvailableNamedSlots;
+	}
+	
+	return TArray<FName>();
+}
+
+UWidgetEditingProjectSettings* UWidgetBlueprint::GetRelevantSettings()
+{
+	return GetMutableDefault<UUMGEditorProjectSettings>();
+}
+
+const UWidgetEditingProjectSettings* UWidgetBlueprint::GetRelevantSettings() const
+{
+	return GetDefault<UUMGEditorProjectSettings>();
 }
 
 #if WITH_EDITOR

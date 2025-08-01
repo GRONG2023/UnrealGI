@@ -1,35 +1,71 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Modules/ModuleManager.h"
-#include "Interfaces/IInputBindingEditorModule.h"
-#include "Framework/Commands/InputBindingManager.h"
-#include "Misc/Paths.h"
-#include "UnrealEdMisc.h"
-#include "Logging/MessageLog.h"
-#include "Misc/MessageDialog.h"
-#include "IDetailCustomization.h"
-#include "ISettingsModule.h"
-#include "PropertyEditorModule.h"
-#include "EditorKeyboardShortcutSettings.h"
-#include "ISettingsSection.h"
-#include "HAL/FileManager.h"
-#include "Misc/ConfigCacheIni.h"
-
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/SChordEditBox.h"
-#include "Widgets/Input/SSearchBox.h"
-#include "Widgets/Text/STextBlock.h"
-#include "DetailLayoutBuilder.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "Delegates/Delegate.h"
 #include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "EditorKeyboardShortcutSettings.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Commands/InputBindingManager.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "IDetailCustomization.h"
 #include "IDetailGroup.h"
+#include "ISettingsModule.h"
+#include "ISettingsSection.h"
+#include "Interfaces/IInputBindingEditorModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Logging/MessageLog.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "SlotBase.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "TimerManager.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UnrealEdMisc.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SChordEditBox.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "InputBindingEditor"
 
-static FName SettingsModuleName("Settings");
-static FName PropertyEditorModuleName("PropertyEditor");
+namespace InputBindingEditorModule
+{
+static const FName SettingsModuleName("Settings");
+static const FName PropertyEditorModuleName("PropertyEditor");
+
+bool bShowBindingNames = false;
+static FAutoConsoleVariableRef CVarDebugBindingNames(TEXT("Input.Debug.ShowBindingNames"), bShowBindingNames, TEXT("True to show binding names in the input binding editor."));
+}
 
 /**
  * A gesture sort functor.  Sorts by name or gesture and ascending or descending
@@ -48,17 +84,17 @@ struct FChordSort
 			// Sort by command bundle, and then by command label. If a command has no bundle,
 			// it will compare its label to the other command's bundle.
 			const int32 CompareResult = GetPrimaryTextForCommand(A).CompareTo(GetPrimaryTextForCommand(B));
-			bool bFinalResult = CompareResult == -1;
+			bool bFinalResult = CompareResult < 0;
 			if (CompareResult == 0)
 			{
-				bFinalResult = A->GetLabel().CompareTo(B->GetLabel()) == -1;
+				bFinalResult = A->GetLabel().CompareTo(B->GetLabel()) < 0;
 			}
 			return bSortUp ? !bFinalResult : bFinalResult;
 		}
 		else
 		{
 			// Sort by binding
-			bool bResult = A->GetInputText().CompareTo( B->GetInputText() ) == -1;
+			bool bResult = A->GetInputText().CompareTo( B->GetInputText() ) < 0;
 			return bSortUp ? !bResult : bResult;
 		}
 	}
@@ -125,42 +161,46 @@ public:
 	{
 		DetailBuilder = &InDetailBuilder;
 
-		UpdateContextMasterList();
+		UpdateContextList();
 		UpdateUI();
 
 		FBindingContext::CommandsChanged.AddSP( SharedThis( this ), &FEditorKeyboardShortcutSettings::OnCommandsChanged );
 	}
 
-	/** Updates the master context list with new commands. */
-	void UpdateContextMasterList()
+	/** Updates the context list with new commands. */
+	void UpdateContextList()
 	{
-		TArray< TSharedPtr<FBindingContext> > Contexts;
-		FInputBindingManager::Get().GetKnownInputContexts( Contexts );
+		FInputBindingManager& InputBindingManager = FInputBindingManager::Get();
 
-		struct FContextNameSort
+		TArray< TSharedPtr<FBindingContext> > Contexts;
+		InputBindingManager.GetKnownInputContexts( Contexts );
+
+		// Filter to allowed bindings
+		Contexts.RemoveAll([&InputBindingManager](const TSharedPtr<FBindingContext>& Context)
 		{
-			bool operator()( const TSharedPtr<FBindingContext>& A, const TSharedPtr<FBindingContext>& B ) const
-			{
-				return A->GetContextDesc().CompareTo( B->GetContextDesc() ) == -1;
-			}
-		};
-		Contexts.Sort( FContextNameSort() );
+			return !InputBindingManager.CommandPassesFilter(FName(), Context->GetContextName());
+		});
+
+		Contexts.Sort([](const TSharedPtr<FBindingContext>& A, const TSharedPtr<FBindingContext>& B)
+		{
+			return A->GetContextDesc().CompareTo(B->GetContextDesc()) < 0;
+		});
 
 		/** List of all known contexts. */
-		ContextMasterList.Reset(Contexts.Num());
+		ContextList.Reset(Contexts.Num());
 
 		for (const TSharedPtr<FBindingContext>& Context : Contexts)
 		{
 			TSharedRef<FChordTreeItem> TreeItem( new FChordTreeItem );
 			TreeItem->BindingContext = Context;
-			ContextMasterList.Add( TreeItem );
+			ContextList.Add( TreeItem );
 		}
 	}
 
 	void ForceRefreshDetails()
 	{
 		bUpdateRequested = false;
-		UpdateContextMasterList();
+		UpdateContextList();
 
 		if (DetailBuilder)
 		{
@@ -183,14 +223,24 @@ public:
 
 	void UpdateUI()
 	{
-		for (TSharedPtr<FChordTreeItem>& TreeItem : ContextMasterList)
+		FInputBindingManager& InputBindingManager = FInputBindingManager::Get();
+
+		for (TSharedPtr<FChordTreeItem>& TreeItem : ContextList)
 		{
 			check(TreeItem->IsContext());
 
 			IDetailCategoryBuilder& CategoryBuilder = DetailBuilder->EditCategory(TreeItem->GetBindingContext()->GetContextName(), TreeItem->GetBindingContext()->GetContextDesc());
 
 			TArray<TSharedPtr<FUICommandInfo>> Commands;
-			GetCommandsForContext(TreeItem, Commands);
+			InputBindingManager.GetCommandInfosFromContext(TreeItem->GetBindingContext()->GetContextName(), Commands);
+
+			// Filter to allowed bindings
+			Commands.RemoveAll([&InputBindingManager](const TSharedPtr<FUICommandInfo>& CommandInfo)
+			{
+				return !InputBindingManager.CommandPassesFilter(CommandInfo->GetBindingContext(), CommandInfo->GetCommandName());
+			});
+			
+			Commands.Sort(FChordSort(true, false));
 
 			TMap<FName, IDetailGroup*> BundleMap;
 
@@ -226,6 +276,42 @@ public:
 					Row = &CategoryBuilder.AddCustomRow(CommandInfo->GetLabel());
 				}
 
+				// Set up search filter (for i.e. KeyBinding="F")
+				const TSharedRef<const FInputChord> FirstInputChord = CommandInfo->GetActiveChord(EMultipleKeyBindingIndex::Primary);
+				const TSharedRef<const FInputChord> SecondInputChord = CommandInfo->GetActiveChord(EMultipleKeyBindingIndex::Secondary);
+
+				const bool bFirstChordValid = FirstInputChord->IsValidChord();
+				const bool bSecondChordValid = SecondInputChord->IsValidChord();
+
+				if (bFirstChordValid || bSecondChordValid)
+				{
+					static const FTextFormat KeyFormat = LOCTEXT("SearchKeyFilter", "KeyBinding=\"{0}\"");
+					static const FTextFormat TokenCombineFormat = INVTEXT("{0} {1}");
+
+					FText FirstKeyFilter, SecondKeyFilter;
+					if (bFirstChordValid)
+					{
+						FirstKeyFilter = FText::FormatOrdered(KeyFormat, FirstInputChord->GetInputText());
+					}
+
+					if (bSecondChordValid)
+					{
+						SecondKeyFilter = FText::FormatOrdered(KeyFormat, FirstInputChord->GetInputText());
+					}
+
+					FText FilterText = bFirstChordValid && bSecondChordValid
+						? FText::FormatOrdered(TokenCombineFormat, FirstKeyFilter, SecondKeyFilter)
+						: (bFirstChordValid ? FirstKeyFilter : SecondKeyFilter);
+
+					// Command label and similar string might already be stored
+					if (!Row->FilterTextString.IsEmpty())
+					{
+						FilterText = FText::FormatOrdered(TokenCombineFormat, Row->FilterTextString, FilterText);
+					}
+
+					Row->FilterString(FilterText);
+				}
+
 				Row->NameContent()
 				.MaxDesiredWidth(0)
 				.MinDesiredWidth(500)
@@ -236,7 +322,17 @@ public:
 					[
 						SNew(STextBlock)
 						.Text(CommandInfo->GetLabel())
-						.ToolTipText(CommandInfo->GetDescription())
+						.ToolTipText_Lambda([CommandInfo]() -> FText
+						{
+							FText CommandInfoTooltip = CommandInfo->GetDescription();
+
+							if (InputBindingEditorModule::bShowBindingNames)
+							{
+								CommandInfoTooltip = FText::Format(LOCTEXT("CommandInfoDebugToolTip", "{0}\n\nBinding Context: {1}\nCommand Name: {2}"), CommandInfoTooltip, FText::FromName(CommandInfo->GetBindingContext()), FText::FromName(CommandInfo->GetCommandName()));
+							}
+
+							return CommandInfoTooltip;
+						})
 					]
 					+ SVerticalBox::Slot()
 					.Padding(0.0f, 3.0f, 0.0f, 3.0f)
@@ -272,20 +368,11 @@ public:
 		}
 	}
 
-	void GetCommandsForContext(TSharedPtr<FChordTreeItem> InTreeItem, TArray< TSharedPtr< FUICommandInfo > >& OutChildren)
-	{
-		if (InTreeItem->IsContext())
-		{
-			FInputBindingManager::Get().GetCommandInfosFromContext(InTreeItem->GetBindingContext()->GetContextName(), OutChildren);
-			OutChildren.Sort(FChordSort(true, false));
-		}
-	}
-
 private:
 	bool bUpdateRequested;
 	IDetailLayoutBuilder* DetailBuilder;
 	/** List of all known contexts. */
-	TArray< TSharedPtr<FChordTreeItem> > ContextMasterList;
+	TArray< TSharedPtr<FChordTreeItem> > ContextList;
 };
 
 class FInputBindingEditorModule
@@ -296,9 +383,9 @@ public:
 	// IInputBindingEditorModule interface
 	virtual void StartupModule() override
 	{
-		ISettingsModule& SettingsModule = FModuleManager::LoadModuleChecked<ISettingsModule>(SettingsModuleName);
+		ISettingsModule& SettingsModule = FModuleManager::LoadModuleChecked<ISettingsModule>(InputBindingEditorModule::SettingsModuleName);
 
-		FPropertyEditorModule& PropertyEditor = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(PropertyEditorModuleName);
+		FPropertyEditorModule& PropertyEditor = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(InputBindingEditorModule::PropertyEditorModuleName);
 
 		EditorKeyboardShortcutSettingsName = UEditorKeyboardShortcutSettings::StaticClass()->GetFName();
 		PropertyEditor.RegisterCustomClassLayout(EditorKeyboardShortcutSettingsName, FOnGetDetailCustomizationInstance::CreateStatic(&FEditorKeyboardShortcutSettings::MakeInstance));
@@ -321,9 +408,9 @@ public:
 
 	virtual void ShutdownModule() override
 	{
-		if(FModuleManager::Get().IsModuleLoaded(PropertyEditorModuleName))
+		if(FModuleManager::Get().IsModuleLoaded(InputBindingEditorModule::PropertyEditorModuleName))
 		{
-			FPropertyEditorModule& PropertyEditor = FModuleManager::GetModuleChecked<FPropertyEditorModule>(PropertyEditorModuleName);
+			FPropertyEditorModule& PropertyEditor = FModuleManager::GetModuleChecked<FPropertyEditorModule>(InputBindingEditorModule::PropertyEditorModuleName);
 
 			PropertyEditor.UnregisterCustomClassLayout(EditorKeyboardShortcutSettingsName);
 		}
@@ -334,7 +421,7 @@ private:
 	// Show a warning that the editor will require a restart and return its result
 	EAppReturnType::Type ShowRestartWarning(const FText& Title) const
 	{
-		return FMessageDialog::Open(EAppMsgType::OkCancel, LOCTEXT("ActionRestartMsg", "Imported settings won't be applied until the editor is restarted. Do you wish to restart now (you will be prompted to save any changes)?"), &Title);
+		return FMessageDialog::Open(EAppMsgType::OkCancel, LOCTEXT("ActionRestartMsg", "Imported settings won't be applied until the editor is restarted. Do you wish to restart now (you will be prompted to save any changes)?"), Title);
 	}
 
 	// Backup a file

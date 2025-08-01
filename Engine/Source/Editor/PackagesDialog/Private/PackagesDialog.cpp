@@ -8,13 +8,13 @@
 #include "Editor.h"
 #include "SPackagesDialog.h"
 #include "Widgets/Views/SListView.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "IAssetTools.h"
 #include "AssetToolsModule.h"
 
 IMPLEMENT_MODULE( FPackagesDialogModule, PackagesDialog );
 
-const FVector2D FPackagesDialogModule::DEFAULT_WINDOW_SIZE = FVector2D(600, 400);	// TODO: MIN SIZE SHOULD BE 270, 330 FOR AESTHETICS
+const FVector2D FPackagesDialogModule::DEFAULT_WINDOW_SIZE = FVector2D(640, 492);	
 const FVector2D FPackagesDialogModule::EXTRA_WINDOW_WIDTH = FVector2D(150, 0);
 
 /**
@@ -244,7 +244,12 @@ void FPackagesDialogModule::AddPackageItem(UPackage* InPackage, ECheckBoxState I
 		AssetName = *FPackageName::GetShortName(InPackage->GetFName());
 	}
 
-	FString FileName = FPaths::ConvertRelativePathToFull(FPackageName::LongPackageNameToFilename(InPackage->GetName()));
+	const FString Extension = (InPackage->GetPackageFlags() & PKG_ContainsMap) ? FPackageName::GetMapPackageExtension() : FPackageName::GetAssetPackageExtension();
+	FString FileName = FPaths::ConvertRelativePathToFull(FPackageName::LongPackageNameToFilename(InPackage->GetName(), Extension));
+
+	// Ensure that the filename is formatted in a way that the current platform natively understands. 
+	FPaths::MakePlatformFilename(FileName);
+	
 	PackagesDialogWidget.Get()->Add(MakeShareable(new FPackageItem(InPackage, AssetName.ToString(), FileName, OwnerName.ToString(), InChecked, InDisabled, InIconName, InIconToolTip)));
 }
 
@@ -258,7 +263,22 @@ void FPackagesDialogModule::AddPackageItem(UPackage* InPackage, ECheckBoxState I
  */
 void FPackagesDialogModule::AddButton(EDialogReturnType Type, const FText& Name, const FText& ToolTip/*=FText()*/,  TAttribute<bool> Disabled /*= false*/)
 {
-	PackagesDialogWidget.Get()->AddButton(MakeShareable(new FPackageButton(this, Type, Name, ToolTip, Disabled)));
+	EDialogButtonStyle Style = (Type == DRT_Save) || (Type == DRT_CheckOut) ? DBS_Primary : DBS_Normal;
+	PackagesDialogWidget.Get()->AddButton(MakeShareable(new FPackageButton(this, Type, Style, Name, ToolTip, Disabled)));
+}
+
+/**
+ * Adds a new button to the package dialog window
+ *
+ * @param	Type		The type of this button
+ * @param	Style		The style of this button
+ * @param	Name		The name to display
+ * @param	ToolTip		The tooltip to display
+ * @param	Disabled	If the button should be disabled
+ */
+void FPackagesDialogModule::AddButton(EDialogReturnType Type, EDialogButtonStyle Style, const FText& Name, const FText& ToolTip/*=FText()*/, TAttribute<bool> Disabled /*= false*/)
+{
+	PackagesDialogWidget.Get()->AddButton(MakeShareable(new FPackageButton(this, Type, Style, Name, ToolTip, Disabled)));
 }
 
 /**

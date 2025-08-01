@@ -24,6 +24,7 @@
 #include "Misc/CoreDelegates.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "Misc/DefaultValueHelper.h"
+#include "Tasks/Pipe.h"
 
 #if STATS
 
@@ -41,6 +42,8 @@ static float DumpCull = 1.0f;
 
 //Whether or not we render stats in certain modes
 bool GRenderStats = true;
+
+extern CORE_API UE::Tasks::FPipe GStatsPipe;
 
 static TAutoConsoleVariable<int32> GCVarDumpHitchesAllThreads(
 	TEXT("t.DumpHitches.AllThreads"),
@@ -426,7 +429,7 @@ void DumpEventsHistoryIfThreadValid( TArray<FEventData>& EventsHistoryForFrame, 
 			UE_LOG( LogStats, Log, TEXT( " Wait   : %s" ), *GetHumanReadableCallstack( EventStats.WaitStackStats ) );
 			UE_LOG( LogStats, Log, TEXT( " Trigger: %s" ), *GetHumanReadableCallstack( EventStats.TriggerStackStats ) );
 
-			EventsHistoryForFrame.RemoveAt( Index--, 1, false );
+			EventsHistoryForFrame.RemoveAt( Index--, 1, EAllowShrinking::No);
 		}	
 	}
 }
@@ -491,7 +494,7 @@ void DumpEventsOnce( int64 TargetFrame, float DumpEventsCullMS, bool bDisplayAll
 {
 	FStatsThreadState& Stats = FStatsThreadState::GetLocalState();
 	DumpEvents( TargetFrame, DumpEventsCullMS, bDisplayAllThreads );
-	StatsMasterEnableSubtract();
+	StatsPrimaryEnableSubtract();
 	Stats.NewFrameDelegate.Remove( DumpEventsDelegateHandle );
 }
 
@@ -1052,12 +1055,12 @@ struct FHUDGroupManager
 		{
 			bEnabled = true;
 			NewFrameDelegateHandle = Stats.NewFrameDelegate.AddRaw( this, &FHUDGroupManager::NewFrame );
-			StatsMasterEnableAdd();
+			StatsPrimaryEnableAdd();
 		}
 		else if( !EnabledGroups.Num() && bEnabled )
 		{
 			Stats.NewFrameDelegate.Remove( NewFrameDelegateHandle );
-			StatsMasterEnableSubtract();
+			StatsPrimaryEnableSubtract();
 			bEnabled = false;
 
 			DECLARE_CYCLE_STAT(TEXT("FSimpleDelegateGraphTask.StatsToGame"),
@@ -1143,7 +1146,7 @@ struct FHUDGroupManager
 		FHudFrame& NewFrame = History.FindOrAdd( TargetFrame );
 
 		FName RootName = Params.Root.Get();
-		FString RootString = RootName == NAME_None ? FString() : RootName.ToString();
+		FString RootString = (RootName == NAME_None) ? FString() : RootName.ToString();
 
 		const bool bUseSlowMode = Params.bSlowMode;
 		const bool bUseBudgetMode = Params.BudgetSection != NAME_None;
@@ -1201,14 +1204,24 @@ struct FHUDGroupManager
 				Stats.GetExclusiveAggregateStackStats( TargetFrame, NewFrame.ExclusiveAggregate, &Filter, false );
 
 				//Merge all task graph stats into 1
+				const TCHAR* TaskGraphWorkerPrefixes[] =
+				{
+					TEXT("TaskGraphThread"),
+					TEXT("Foreground Worker #"),
+					TEXT("Background Worker #")
+				};
 				TArray<FStatMessage> MergedTaskGraphThreads;
 				for(TMap<FName, TArray<FStatMessage>>::TIterator It(NewFrame.InclusiveAggregateThreadBreakdown); It; ++It)
 				{
-					const FName ThreadName = FStatNameAndInfo::GetShortNameFrom(It.Key());
-					if (ThreadName.ToString().Contains(TEXT("TaskGraphThread")))
+					const FString ThreadName = FStatNameAndInfo::GetShortNameFrom(It.Key()).ToString();
+					for (const TCHAR* Prefix : TaskGraphWorkerPrefixes)
 					{
-						FStatsUtils::AddMergeStatArray(MergedTaskGraphThreads, It.Value());
-						It.RemoveCurrent();
+						if (ThreadName.StartsWith(Prefix))
+						{
+							FStatsUtils::AddMergeStatArray(MergedTaskGraphThreads, It.Value());
+							It.RemoveCurrent();
+							break;
+						}
 					}
 				}
 				
@@ -1384,7 +1397,7 @@ struct FHUDGroupManager
 			for( int32 Index = 0; Index < TotalAggregateInclusive.Num(); ++Index )
 			{
 				const FStatMessage& StatMessage = TotalAggregateInclusive[Index];
-				new(AggregatedFlatHistory) FComplexStatMessage(StatMessage);
+				AggregatedFlatHistory.Emplace(StatMessage);
 			}
 
 			// Copy flat-stack stats by thread
@@ -1394,7 +1407,7 @@ struct FHUDGroupManager
 				TArray<FComplexStatMessage>& AggregatedFlatHistoryThreadBreakdownArray = AggregatedFlatHistoryThreadBreakdown.Add(It.Key());
 				for (const FStatMessage& StatMessage : It.Value())
 				{
-					new (AggregatedFlatHistoryThreadBreakdownArray)FComplexStatMessage(StatMessage);
+					AggregatedFlatHistoryThreadBreakdownArray.Emplace(StatMessage);
 				}
 			}
 
@@ -1403,7 +1416,7 @@ struct FHUDGroupManager
 			for( int32 Index = 0; Index < TotalNonStackStats.Num(); ++Index )
 			{
 				const FStatMessage& StatMessage = TotalNonStackStats[Index];
-				new(AggregatedNonStackStatsHistory) FComplexStatMessage(StatMessage);
+				AggregatedNonStackStatsHistory.Emplace(StatMessage);
 			}
 			
 			// Accumulate hierarchy, flat and non-stack stats.
@@ -1485,7 +1498,7 @@ struct FHUDGroupManager
 						const bool bToBeAdded = InternalGroup.EnabledItems.Contains( AggregatedStatMessage.NameAndInfo.GetRawName() );
 						if( bToBeAdded )
 						{
-							new(HudGroup.FlatAggregate) FComplexStatMessage( AggregatedStatMessage );
+							HudGroup.FlatAggregate.Add( AggregatedStatMessage );
 						}
 					}
 
@@ -1499,7 +1512,7 @@ struct FHUDGroupManager
 							if(bToBeAdded)
 							{
 								TArray<FComplexStatMessage>& DestArray = HudGroup.FlatAggregateThreadBreakdown.FindOrAdd(It.Key());	
-								new(DestArray) FComplexStatMessage( AggregatedStatMessage );
+								DestArray.Add( AggregatedStatMessage );
 							}
 						}
 					}
@@ -1515,8 +1528,8 @@ struct FHUDGroupManager
 					const bool bToBeAdded = InternalGroup.EnabledItems.Contains( AggregatedStatMessage.NameAndInfo.GetRawName() );
 					if( bToBeAdded )
 					{
-						new(Dest) FComplexStatMessage(AggregatedStatMessage);
-					}	
+						Dest.Add(AggregatedStatMessage);
+					}
 				}
 			}
 
@@ -1661,7 +1674,7 @@ static void DumpFrame(int64 Frame)
 	check(Latest > 0);
 	DumpHistoryFrame(Stats, Latest, DumpCull, GMaxDepth, *GNameFilter);
 	Stats.NewFrameDelegate.Remove(GDumpFrameDelegateHandle);
-	StatsMasterEnableSubtract();
+	StatsPrimaryEnableSubtract();
 }
 
 static void DumpCPU(int64 Frame)
@@ -1671,7 +1684,7 @@ static void DumpCPU(int64 Frame)
 	check(Latest > 0);
 	DumpCPUSummary(Stats, Latest);
 	Stats.NewFrameDelegate.Remove(GDumpCPUDelegateHandle);
-	StatsMasterEnableSubtract();
+	StatsPrimaryEnableSubtract();
 }
 
 static struct FDumpMultiple* DumpMultiple = NULL;
@@ -1694,7 +1707,7 @@ struct FDumpMultiple
 		, NumFramesToGo(0)
 		, Stack(NULL)
 	{
-		StatsMasterEnableAdd();
+		StatsPrimaryEnableAdd();
 		NewFrameDelegateHandle = Stats.NewFrameDelegate.AddRaw(this, &FDumpMultiple::NewFrame);
 	}
 
@@ -1740,7 +1753,7 @@ struct FDumpMultiple
 			Stack = NULL;
 		}
 		Stats.NewFrameDelegate.Remove(NewFrameDelegateHandle);
-		StatsMasterEnableSubtract();
+		StatsPrimaryEnableSubtract();
 		DumpMultiple = NULL;
 	}
 
@@ -1788,14 +1801,14 @@ struct FDumpSpam
 		, NumPackets(0)
 	{
 		FThreadStats::EnableRawStats();
-		StatsMasterEnableAdd();
+		StatsPrimaryEnableAdd();
 		NewRawStatPacketDelegateHandle = Stats.NewRawStatPacket.AddRaw(this, &FDumpSpam::NewFrame);
 	}
 
 	~FDumpSpam()
 	{
 		FThreadStats::DisableRawStats();
-		StatsMasterEnableSubtract();
+		StatsPrimaryEnableSubtract();
 		UE_LOG(LogStats, Log, TEXT("------------------ %d packets, %d total messages ---------------"), NumPackets, TotalCount);
 
 		Counts.ValueSort(TGreater<int32>());
@@ -1899,7 +1912,7 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 		FParse::Value(Cmd, TEXT("DEPTH="), GMaxDepth);
 		if (FParse::Command(&Cmd, TEXT("DUMPFRAME")))
 		{
-			StatsMasterEnableAdd();
+			StatsPrimaryEnableAdd();
 			GDumpFrameDelegateHandle = Stats.NewFrameDelegate.AddStatic(&DumpFrame);
 		}
 		else if (FParse::Command(&Cmd, TEXT("DUMPNONFRAME")))
@@ -1911,7 +1924,7 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 		}
 		else if (FParse::Command(&Cmd, TEXT("DUMPCPU")))
 		{
-			StatsMasterEnableAdd();
+			StatsPrimaryEnableAdd();
 			GDumpCPUDelegateHandle = Stats.NewFrameDelegate.AddStatic(&DumpCPU);
 		}
 		else if (FParse::Command(&Cmd, TEXT("STOP")))
@@ -1987,14 +2000,14 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 			bToggle = !bToggle;
 			if (bToggle)
 			{
-				StatsMasterEnableAdd();
+				StatsPrimaryEnableAdd();
 				HitchIndex = 0;
 				TotalHitchTime = 0.0;
 				DumpHitchDelegateHandle = Stats.NewFrameDelegate.AddStatic(&DumpHitch);
 			}
 			else
 			{
-				StatsMasterEnableSubtract();
+				StatsPrimaryEnableSubtract();
 				Stats.NewFrameDelegate.Remove(DumpHitchDelegateHandle);
 				UE_LOG(LogStats, Log, TEXT("**************************** %d hitches	%8.0fms total hitch time"), HitchIndex, TotalHitchTime);
 			}
@@ -2009,7 +2022,7 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 			FParse::Value(Cmd, TEXT("MS="), DumpEventsCullMS);
 			const bool bDisplayAllThreads = FParse::Param(Cmd, TEXT("all"));
 
-			StatsMasterEnableAdd();
+			StatsPrimaryEnableAdd();
 			DumpEventsDelegateHandle = Stats.NewFrameDelegate.AddStatic(&DumpEventsOnce, DumpEventsCullMS, bDisplayAllThreads);
 		}
 		else if (FParse::Command(&Cmd, TEXT("STARTFILE")))
@@ -2032,6 +2045,7 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 			FCommandStatsFile::Get().Stop();
 			FThreadStats::DisableRawStats();
 
+#if UE_STATS_MEMORY_PROFILER_ENABLED
 			if (FStatsMallocProfilerProxy::HasMemoryProfilerToken())
 			{
 				if (FStatsMallocProfilerProxy::Get()->GetState())
@@ -2041,15 +2055,25 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 					IStatGroupEnableManager::Get().StatGroupEnableManagerCommand(TEXT("default"));
 				}
 			}
+#endif //UE_STATS_MEMORY_PROFILER_ENABLED
 
 			Stats.ResetStatsForRawStats();
 
-			// Disable displaying the raw stats memory overhead.
-			FSimpleDelegateGraphTask::CreateAndDispatchWhenReady
-				(
-				FSimpleDelegateGraphTask::FDelegate::CreateRaw(&FLatestGameThreadStatsData::Get(), &FLatestGameThreadStatsData::NewData, (FGameThreadStatsData*)nullptr),
-				TStatId(), nullptr, ENamedThreads::GameThread
-				);
+			// stopfile command happens when some threads shutdown, and depending on order of shutdown operations, the taskgraph may
+			// shutdown before stopfile command is executed
+			if (FTaskGraphInterface::IsRunning())
+			{
+				// Disable displaying the raw stats memory overhead.
+				FSimpleDelegateGraphTask::CreateAndDispatchWhenReady
+					(
+					 FSimpleDelegateGraphTask::FDelegate::CreateRaw(&FLatestGameThreadStatsData::Get(), &FLatestGameThreadStatsData::NewData, (FGameThreadStatsData*)nullptr),
+					 TStatId(), nullptr, ENamedThreads::GameThread
+					 );
+			}
+			else
+			{
+				FLatestGameThreadStatsData::Get().NewData(nullptr);
+			}
 		}
 		else if (FParse::Command(&Cmd, TEXT("TESTFILE")))
 		{
@@ -2057,7 +2081,7 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 		}
 		else if (FParse::Command(&Cmd, TEXT("testdisable")))
 		{
-			FThreadStats::MasterDisableForever();
+			FThreadStats::PrimaryDisableForever();
 		}
 		else if (FParse::Command(&Cmd, TEXT("none")))
 		{
@@ -2121,7 +2145,7 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 				const bool bHierarchy = MaybeGroup[MaybeGroup.Len() - 1] == TEXT('+');
 				if (bHierarchy)
 				{
-					MaybeGroup.RemoveAt(PlusPos, 1, false);
+					MaybeGroup.RemoveAt(PlusPos, 1, EAllowShrinking::No);
 				}
 
 				const FName MaybeGroupFName = FName(*MaybeGroup);
@@ -2166,9 +2190,9 @@ static void StatCmd(FString InCmd, bool bStatCommand, FOutputDevice* Ar /*= null
 /** Exec used to execute core stats commands on the stats thread. */
 static class FStatCmdCore : private FSelfRegisteringExec
 {
-public:
+protected:
 	/** Console commands, see embeded usage statement **/
-	virtual bool Exec( UWorld*, const TCHAR* Cmd, FOutputDevice& Ar ) override
+	virtual bool Exec_Runtime( UWorld*, const TCHAR* Cmd, FOutputDevice& Ar ) override
 	{
 		// Block the thread as this affects external stat states now
 		return DirectStatsCommand(Cmd,true,&Ar);
@@ -2292,7 +2316,7 @@ bool DirectStatsCommand(const TCHAR* Cmd, bool bBlockForCompletion /*= false*/, 
 					const bool bHierarchy = MaybeGroup[MaybeGroup.Len() - 1] == TEXT('+');
 					if (bHierarchy)
 					{
-						MaybeGroup.RemoveAt(PlusPos, 1, false);
+						MaybeGroup.RemoveAt(PlusPos, 1, EAllowShrinking::No);
 					}
 
 					const FName MaybeGroupFName = FName(*(FString(TEXT("STATGROUP_")) + MaybeGroup));
@@ -2340,12 +2364,6 @@ bool DirectStatsCommand(const TCHAR* Cmd, bool bBlockForCompletion /*= false*/, 
 		{
 			const FString FullCmd = FString(Cmd) + AddArgs;
 #if STATS
-			ENamedThreads::Type ThreadType = ENamedThreads::GameThread;
-			if (FPlatformProcess::SupportsMultithreading())
-			{
-				ThreadType = ENamedThreads::StatsThread;
-			}
-
 			// make sure these are initialized on the game thread
 			FLatestGameThreadStatsData::Get();
 			FStatGroupGameThreadNotifier::Get();
@@ -2354,19 +2372,16 @@ bool DirectStatsCommand(const TCHAR* Cmd, bool bBlockForCompletion /*= false*/, 
 				STAT_FSimpleDelegateGraphTask_StatCmd,
 				STATGROUP_TaskGraphTasks);
 
-			FGraphEventRef CompleteHandle = FSimpleDelegateGraphTask::CreateAndDispatchWhenReady(
-				FSimpleDelegateGraphTask::FDelegate::CreateStatic(&StatCmd, FullCmd, bStatCommand, Ar),
-				GET_STATID(STAT_FSimpleDelegateGraphTask_StatCmd), NULL, ThreadType
-			);
-			if (bBlockForCompletion && FPlatformProcess::SupportsMultithreading())
+			UE::Tasks::FTask Task = GStatsPipe.Launch(UE_SOURCE_LOCATION, [FullCmd, bStatCommand, Ar] { StatCmd(FullCmd, bStatCommand, Ar); });
+			if (bBlockForCompletion)
 			{
-				FTaskGraphInterface::Get().WaitUntilTaskCompletes(CompleteHandle);
+				Task.Wait();
 				GLog->FlushThreadedLogs();
 			}
-#else
+#else // STATS
 			// If stats aren't enabled, broadcast so engine stats can still be triggered
 			StatCmd(FullCmd, bStatCommand, Ar);
-#endif
+#endif // STATS
 		}
 	}
 	return bResult;
@@ -2376,6 +2391,11 @@ bool DirectStatsCommand(const TCHAR* Cmd, bool bBlockForCompletion /*= false*/, 
 
 static void GetPermanentStats_StatsThread(TArray<FStatMessage>* OutStats)
 {
+	DECLARE_CYCLE_STAT(TEXT("FSimpleDelegateGraphTask.GetPermanentStatsString_StatsThread"),
+		STAT_FSimpleDelegateGraphTask_GetPermanentStatsString_StatsThread,
+		STATGROUP_TaskGraphTasks);
+	SCOPE_CYCLE_COUNTER(STAT_FSimpleDelegateGraphTask_GetPermanentStatsString_StatsThread);
+
 	FStatsThreadState& StatsData = FStatsThreadState::GetLocalState();
 	TArray<FStatMessage>& Stats = *OutStats;
 	for (auto It = StatsData.NotClearedEveryFrame.CreateConstIterator(); It; ++It)
@@ -2387,18 +2407,10 @@ static void GetPermanentStats_StatsThread(TArray<FStatMessage>* OutStats)
 
 void GetPermanentStats(TArray<FStatMessage>& OutStats)
 {
-	DECLARE_CYCLE_STAT(TEXT("FSimpleDelegateGraphTask.GetPermanentStatsString_StatsThread"),
-		STAT_FSimpleDelegateGraphTask_GetPermanentStatsString_StatsThread,
-		STATGROUP_TaskGraphTasks);
-
-	FGraphEventRef CompleteHandle = FSimpleDelegateGraphTask::CreateAndDispatchWhenReady(
-		FSimpleDelegateGraphTask::FDelegate::CreateStatic(&GetPermanentStats_StatsThread, &OutStats),
-		GET_STATID(STAT_FSimpleDelegateGraphTask_GetPermanentStatsString_StatsThread), NULL,
-		FPlatformProcess::SupportsMultithreading() ? ENamedThreads::StatsThread : ENamedThreads::GameThread
-	);
-	FTaskGraphInterface::Get().WaitUntilTaskCompletes(CompleteHandle);
+	GStatsPipe
+		.Launch(UE_SOURCE_LOCATION, [&OutStats] { GetPermanentStats_StatsThread(&OutStats); })
+		.Wait();
 }
-
 
 #endif
 

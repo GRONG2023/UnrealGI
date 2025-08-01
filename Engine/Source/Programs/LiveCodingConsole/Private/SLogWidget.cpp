@@ -2,6 +2,8 @@
 
 #include "SLogWidget.h"
 #include "Framework/Text/SlateTextRun.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "LiveCodingConsoleStyle.h"
 #include "SlateOptMacros.h"
 #include "HAL/FileManager.h"
@@ -103,10 +105,42 @@ void SLogWidget::Construct(const FArguments& InArgs)
 				.SelectWordOnMouseDoubleClick(false)
 		        .OnHScrollBarUserScrolled(this, &SLogWidget::OnScrollX)
 		        .OnVScrollBarUserScrolled(this, &SLogWidget::OnScrollY)
+				.ContextMenuExtender(this, &SLogWidget::ExtendTextBoxMenu)
 			]
 		];
 
 	RegisterActiveTimer(0.03f, FWidgetActiveTimerDelegate::CreateSP(this, &SLogWidget::OnTimerElapsed));
+}
+
+void SLogWidget::ExtendTextBoxMenu(FMenuBuilder& Builder)
+{
+	FUIAction ClearOutputLogAction(
+		FExecuteAction::CreateRaw(this, &SLogWidget::OnClearLog),
+		FCanExecuteAction::CreateSP(this, &SLogWidget::CanClearLog)
+	);
+
+	Builder.AddMenuEntry(
+		NSLOCTEXT("OutputLog", "ClearLogLabel", "Clear Log"),
+		NSLOCTEXT("OutputLog", "ClearLogTooltip", "Clears all log messages"),
+		FSlateIcon(),
+		ClearOutputLogAction
+	);
+}
+
+void SLogWidget::OnClearLog()
+{
+	// Make sure the cursor is back at the start of the log before we clear it
+	MessagesTextBox->GoTo(FTextLocation(0));
+
+	Clear();
+	MessagesTextBox->Refresh();
+	bIsUserScrolledX = false;
+	bIsUserScrolledY = false;
+}
+
+bool SLogWidget::CanClearLog() const
+{
+	return MessagesTextMarshaller->GetNumLines() > 0;
 }
 
 void SLogWidget::Clear()
@@ -123,12 +157,35 @@ void SLogWidget::ScrollToEnd()
 
 void SLogWidget::AppendLine(const FSlateColor& Color, const FString& Text)
 {
-	FLine Line;
-	Line.Color = Color;
-	Line.Text = Text;
-
-	FScopeLock Lock(&CriticalSection);
-	QueuedLines.Add(MoveTemp(Line));
+	// Split any multi line text block into multiple lines while removing the \r\n or \n from the string.
+	// The ParseIntoArray method will either leave the trailing blank line or eliminate all contained blank 
+	// lines so we use a hand written algorithm.
+	for (const TCHAR* Cur = *Text, *End = Cur + Text.Len(); Cur != End;)
+	{
+		const TCHAR* LineStart = Cur;
+		const TCHAR* LineEnd = End;
+		for (; Cur != End; ++Cur)
+		{
+			if (*Cur == '\n')
+			{
+				LineEnd = Cur;
+				++Cur;
+				break;
+			}
+			else if (*Cur == '\r')
+			{
+				LineEnd = Cur;
+				++Cur;
+				if (Cur != End && *Cur == '\n')
+				{
+					++Cur;
+				}
+				break;
+			}
+		}
+		FScopeLock Lock(&CriticalSection);
+		QueuedLines.Add(FLine{ Color, FString(LineEnd - LineStart, LineStart) });
+	}
 }
 
 void SLogWidget::OnScrollX(float ScrollOffset)

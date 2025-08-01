@@ -5,10 +5,24 @@
 =============================================================================*/ 
 
 #include "AnimEncoding_VariableKeyLerp.h"
-#include "Serialization/MemoryReader.h"
-#include "Serialization/MemoryWriter.h"
 #if INTEL_ISPC
 #include "AnimEncoding_VariableKeyLerp.ispc.generated.h"
+
+static_assert(sizeof(ispc::FTransform) == sizeof(FTransform), "sizeof(ispc::FTransform) != sizeof(FTransform)");
+static_assert(sizeof(ispc::BoneTrackPair) == sizeof(BoneTrackPair), "sizeof(ispc::BoneTrackPair) != sizeof(BoneTrackPair)");
+#endif
+
+#if !defined(ANIM_VARIABLE_KEY_LERP_ISPC_ENABLED_DEFAULT)
+#define ANIM_VARIABLE_KEY_LERP_ISPC_ENABLED_DEFAULT 1
+#endif
+
+// Support run-time toggling on supported platforms in non-shipping configurations
+#if !INTEL_ISPC || UE_BUILD_SHIPPING
+static constexpr bool bAnim_VariableKeyLerp_ISPC_Enabled = INTEL_ISPC && ANIM_VARIABLE_KEY_LERP_ISPC_ENABLED_DEFAULT;
+#else
+#include "HAL/IConsoleManager.h"
+static bool bAnim_VariableKeyLerp_ISPC_Enabled = ANIM_VARIABLE_KEY_LERP_ISPC_ENABLED_DEFAULT;
+static FAutoConsoleVariableRef CVarAnimVariableKeyLerpISPCEnabled(TEXT("a.VariableKeyLerp.ISPC"), bAnim_VariableKeyLerp_ISPC_Enabled, TEXT("Whether to use ISPC optimizations in variable key anim encoding"));
 #endif
 
 /**
@@ -35,7 +49,7 @@ void AEFVariableKeyLerpShared::ByteSwapRotationIn(
 		PadMemoryReader(&MemoryReader, TrackData, 4); 
 
 		// swap the track table
-		const size_t EntryStride = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+		const size_t EntryStride = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 		for (int32 KeyIndex = 0; KeyIndex < NumKeys; ++KeyIndex)
 		{
 			AC_UnalignedSwap(MemoryReader, TrackData, EntryStride);
@@ -67,7 +81,7 @@ void AEFVariableKeyLerpShared::ByteSwapTranslationIn(
 		PadMemoryReader(&MemoryReader, TrackData, 4); 
 
 		// swap the track table
-		const size_t EntryStride = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+		const size_t EntryStride = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 		for (int32 KeyIndex = 0; KeyIndex < NumKeys; ++KeyIndex)
 		{
 			AC_UnalignedSwap(MemoryReader, TrackData, EntryStride);
@@ -99,7 +113,7 @@ void AEFVariableKeyLerpShared::ByteSwapScaleIn(
 		PadMemoryReader(&MemoryReader, TrackData, 4); 
 
 		// swap the track table
-		const size_t EntryStride = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+		const size_t EntryStride = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 		for (int32 KeyIndex = 0; KeyIndex < NumKeys; ++KeyIndex)
 		{
 			AC_UnalignedSwap(MemoryReader, TrackData, EntryStride);
@@ -130,7 +144,7 @@ void AEFVariableKeyLerpShared::ByteSwapRotationOut(
 		PadMemoryWriter(&MemoryWriter, TrackData, 4);
 
 		// swap the track table
-		const size_t EntryStride = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+		const size_t EntryStride = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 		for (int32 KeyIndex = 0; KeyIndex < NumKeys; ++KeyIndex)
 		{
 			AC_UnalignedSwap(MemoryWriter, TrackData, EntryStride);
@@ -162,7 +176,7 @@ void AEFVariableKeyLerpShared::ByteSwapTranslationOut(
 		PadMemoryWriter(&MemoryWriter, TrackData, 4);
 
 		// swap the track table
-		const size_t EntryStride = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+		const size_t EntryStride = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 		for (int32 KeyIndex = 0; KeyIndex < NumKeys; ++KeyIndex)
 		{
 			AC_UnalignedSwap(MemoryWriter, TrackData, EntryStride);
@@ -195,7 +209,7 @@ void AEFVariableKeyLerpShared::ByteSwapScaleOut(
 		PadMemoryWriter(&MemoryWriter, TrackData, 4);
 
 		// swap the track table
-		const size_t EntryStride = (CompressedData.CompressedNumberOfFrames > 0xFF) ? sizeof(uint16) : sizeof(uint8);
+		const size_t EntryStride = (CompressedData.CompressedNumberOfKeys > 0xFF) ? sizeof(uint16) : sizeof(uint8);
 		for (int32 KeyIndex = 0; KeyIndex < NumKeys; ++KeyIndex)
 		{
 			AC_UnalignedSwap(MemoryWriter, TrackData, EntryStride);
@@ -225,7 +239,7 @@ void AEFVariableKeyLerp<FORMAT>::GetPoseRotations(
 		return;
 	}
 
-	if (INTEL_ISPC)
+	if (bAnim_VariableKeyLerp_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		const FUECompressedAnimData& AnimData = static_cast<const FUECompressedAnimData&>(DecompContext.CompressedAnimData);
@@ -235,8 +249,8 @@ void AEFVariableKeyLerp<FORMAT>::GetPoseRotations(
 			(ispc::BoneTrackPair*)&DesiredPairs[0],
 			AnimData.CompressedTrackOffsets.GetData(),
 			AnimData.CompressedByteStream.GetData(),
-			AnimData.CompressedNumberOfFrames,
-			DecompContext.RelativePos,
+			AnimData.CompressedNumberOfKeys,
+			DecompContext.GetRelativePosition(),
 			(uint8)DecompContext.Interpolation,
 			FORMAT,
 			PairCount);
@@ -277,7 +291,7 @@ void AEFVariableKeyLerp<FORMAT>::GetPoseTranslations(
 		return;
 	}
 
-	if (INTEL_ISPC)
+	if (bAnim_VariableKeyLerp_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		const FUECompressedAnimData& AnimData = static_cast<const FUECompressedAnimData&>(DecompContext.CompressedAnimData);
@@ -287,8 +301,8 @@ void AEFVariableKeyLerp<FORMAT>::GetPoseTranslations(
 			(ispc::BoneTrackPair*)&DesiredPairs[0],
 			AnimData.CompressedTrackOffsets.GetData(),
 			AnimData.CompressedByteStream.GetData(),
-			AnimData.CompressedNumberOfFrames,
-			DecompContext.RelativePos,
+			AnimData.CompressedNumberOfKeys,
+			DecompContext.GetRelativePosition(),
 			(uint8)DecompContext.Interpolation,
 			FORMAT,
 			PairCount);
@@ -329,7 +343,7 @@ void AEFVariableKeyLerp<FORMAT>::GetPoseScales(
 		return;
 	}
 
-	if (INTEL_ISPC)
+	if (bAnim_VariableKeyLerp_ISPC_Enabled)
 	{
 #if INTEL_ISPC
 		const FUECompressedAnimData& AnimData = static_cast<const FUECompressedAnimData&>(DecompContext.CompressedAnimData);
@@ -343,8 +357,8 @@ void AEFVariableKeyLerp<FORMAT>::GetPoseScales(
 			ScaleOffsets.GetData(),
 			StripSize,
 			AnimData.CompressedByteStream.GetData(),
-			AnimData.CompressedNumberOfFrames,
-			DecompContext.RelativePos,
+			AnimData.CompressedNumberOfKeys,
+			DecompContext.GetRelativePosition(),
 			(uint8)DecompContext.Interpolation,
 			FORMAT,
 			PairCount);

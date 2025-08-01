@@ -1,20 +1,44 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/ChildActorComponent.h"
+#include "Blueprint/BlueprintSupport.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/Package.h"
-#include "UObject/PropertyPortFlags.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/Engine.h"
+#include "Engine/DemoNetDriver.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogChildActorComponent, Warning, All);
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ChildActorComponent)
+
+#if WITH_EDITOR
+#include "WorldPartition/HLOD/HLODBuilder.h"
+#include "Misc/DataValidation.h"
+#endif
+#if UE_WITH_IRIS
+#include "Iris/ReplicationSystem/PropertyReplicationFragment.h"
+#endif // UE_WITH_IRIS
+
+DEFINE_LOG_CATEGORY_STATIC(LogChildActorComponent, Log, All);
+
+ENGINE_API int32 GExperimentalAllowPerInstanceChildActorProperties = 0;
+
+static FAutoConsoleVariableRef CVarExperimentalAllowPerInstanceChildActorProperties(
+	TEXT("cac.ExperimentalAllowPerInstanceChildActorProperties"),
+	GExperimentalAllowPerInstanceChildActorProperties,
+	TEXT("[EXPERIMENTAL] If true, allows properties to be modified on a per-instance basis for child actors."),
+	ECVF_Default
+);
 
 UChildActorComponent::UChildActorComponent(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, ActorOuter(nullptr)
+	, CachedInstanceData(nullptr)
+	, bNeedsRecreate(false)
+	, bChildActorNameIsExact(false)
 {
 	bAllowReregistration = false;
+	bChildActorIsTransient = false;
 
 #if WITH_EDITORONLY_DATA
 	EditorTreeViewVisualizationMode = EChildActorComponentTreeViewVisualizationMode::UseDefault;
@@ -56,6 +80,8 @@ void UChildActorComponent::OnRegister()
 			bool bChildActorPackageWasDirty = ChildActor->GetPackage()->IsDirty();
 			bool bPackageWasDirty = GetPackage()->IsDirty();
 
+			UE::Net::FScopedIgnoreStaticActorDestruction ScopedIgnoreDestruction;
+
 			DestroyChildActor();
 			CreateChildActor();
 			
@@ -69,6 +95,9 @@ void UChildActorComponent::OnRegister()
 		{
 			// Ensure the components replication is correctly initialized
 			SetIsReplicated(ChildActor->GetIsReplicated());
+
+			// All other paths register this delegate through CreateChildActor; this is the only path that doesn't go there
+			RegisterChildActorDestroyedDelegate();
 		}
 	}
 	else if (ChildActorClass)
@@ -95,7 +124,7 @@ void UChildActorComponent::Serialize(FArchive& Ar)
 
 			if (AActor* UnwantedDuplicate = static_cast<AActor*>(FindObjectWithOuter(this, AActor::StaticClass())))
 			{
-				UnwantedDuplicate->MarkPendingKill();
+				UnwantedDuplicate->MarkAsGarbage();
 			}
 		}
 		else if (!GIsEditor && !Ar.IsLoading() && !GIsDuplicatingClassForReinstancing)
@@ -251,11 +280,11 @@ void UChildActorComponent::PostEditUndo()
 	// This hack exists to fix up known cases where the AttachChildren array is broken in very problematic ways.
 	// The correct fix will be to use a Transaction Annotation at the SceneComponent level, however, it is too risky
 	// to do right now, so this will go away when that is done.
-	for (USceneComponent*& Component : FDirectAttachChildrenAccessor::Get(this))
+	for (auto& Component : FDirectAttachChildrenAccessor::Get(this))
 	{
 		if (Component)
 		{
-			if (Component->IsPendingKill() && Component->GetOwner() == ChildActor)
+			if (!IsValid(Component) && Component->GetOwner() == ChildActor)
 			{
 				Component = ChildActor->GetRootComponent();
 			}
@@ -264,6 +293,20 @@ void UChildActorComponent::PostEditUndo()
 	
 }
 #endif
+
+AActor* UChildActorComponent::GetSpawnableChildActorTemplate() const
+{
+	// Only use the instance if it's the same type as the class it was supposedly built from
+	if (ChildActorTemplate && ChildActorTemplate->GetClass() == ChildActorClass)
+	{
+		return ChildActorTemplate;
+	}
+	// Use the CDO of the class as the template if the instance is wrong.
+	else
+	{
+		return ChildActorClass ? ChildActorClass->GetDefaultObject<AActor>() : nullptr;
+	}
+}
 
 void UChildActorComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
@@ -323,6 +366,16 @@ FChildActorComponentInstanceData::FChildActorComponentInstanceData(const UChildA
 		if (ChildActorName.IsNone())
 		{
 			ChildActorName = ChildActor->GetFName();
+		}
+
+		if (GExperimentalAllowPerInstanceChildActorProperties)
+		{
+			ActorInstanceData = MakeShared<FActorInstanceData>(ChildActor);
+			// If it is empty dump it
+			if (!ActorInstanceData->HasInstanceData())
+			{
+				ActorInstanceData.Reset();
+			}
 		}
 
 		ComponentInstanceData = MakeShared<FComponentInstanceDataCache>(ChildActor);
@@ -445,6 +498,11 @@ void UChildActorComponent::ApplyComponentInstanceData(FChildActorComponentInstan
 			}
 		}
 
+		if (ChildActorInstanceData->ActorInstanceData)
+		{
+			ChildActorInstanceData->ActorInstanceData->ApplyToActor(ChildActor, CacheApplyPhase);
+		}
+
 		if (ChildActorInstanceData->ComponentInstanceData)
 		{
 			ChildActorInstanceData->ComponentInstanceData->ApplyToActor(ChildActor, CacheApplyPhase);
@@ -533,7 +591,7 @@ void UChildActorComponent::SetChildActorClass(TSubclassOf<AActor> Class, AActor*
 			DestroyChildActor();
 
 			// If an actor template was supplied, temporarily set ChildActorTemplate to create the new Actor with ActorTemplate used as the template
-			TGuardValue<AActor*> ChildActorTemplateGuard(ChildActorTemplate, (ActorTemplate ? ActorTemplate : ChildActorTemplate));
+			TGuardValue<decltype(ChildActorTemplate)> ChildActorTemplateGuard(ChildActorTemplate, (ActorTemplate ? ActorTemplate : ToRawPtr(ChildActorTemplate)));
 
 			CreateChildActor();
 		}
@@ -566,23 +624,131 @@ void UChildActorComponent::PostLoad()
 	}
 
 }
+
+EDataValidationResult UChildActorComponent::IsDataValid(FDataValidationContext& Context) const
+{
+	EDataValidationResult Result = Super::IsDataValid(Context);
+
+	// If a CAC is set to the class of the blueprint it is currently on, then there will be a cycle and the data is invalid
+	const UClass* const Outer = Cast<UClass>(GetOuter());
+	if (Outer && Outer == ChildActorClass)
+	{
+		Result = EDataValidationResult::Invalid;
+		Context.AddError(FText::Format(NSLOCTEXT("ChildActorComponent", "ChildActorCycle", "A Child Actor Component's class cannot be set to its owner! '{0}' is an invalid class choice for '{1}'."), FText::FromString(ChildActorClass->GetName()), FText::FromString(GetPathName())));
+	}
+	return Result;
+}
 #endif
 
-void UChildActorComponent::CreateChildActor()
+bool UChildActorComponent::IsChildActorReplicated() const
+{
+	AActor* ChildClassCDO = (ChildActorClass ? ChildActorClass->GetDefaultObject<AActor>() : nullptr);
+	const bool bChildActorClassReplicated = ChildClassCDO && ChildClassCDO->GetIsReplicated();
+	const bool bChildActorTemplateReplicated = ChildActorTemplate && (ChildActorTemplate->GetClass() == ChildActorClass) && ChildActorTemplate->GetIsReplicated();
+
+	return (bChildActorClassReplicated || bChildActorTemplateReplicated);
+}
+
+bool UChildActorComponent::IsBeingRemovedFromLevel() const
+{
+	if (AActor* MyOwner = GetOwner())
+	{
+		if (ULevel* MyLevel = MyOwner->GetLevel())
+		{
+			if (MyLevel->bIsBeingRemoved)
+			{
+				return true;
+			}
+
+#if WITH_EDITOR
+			// In the editor, the child actor can already be removed from the world if the component owner was removed first
+			UWorld* MyWorld = MyLevel->GetWorld();
+			if (MyWorld && !MyWorld->IsGameWorld() && !MyLevel->Actors.Contains(ChildActor))
+			{
+				return true;
+			}
+#endif
+		}
+	}
+
+	return false;
+}
+
+void UChildActorComponent::OnRep_ChildActor()
+{
+	RegisterChildActorDestroyedDelegate();
+}
+
+void UChildActorComponent::RegisterChildActorDestroyedDelegate()
+{
+	if (ChildActor)
+	{
+		ChildActor->OnDestroyed.AddUniqueDynamic(this, &ThisClass::OnChildActorDestroyed);
+	}
+}
+
+void UChildActorComponent::OnChildActorDestroyed(AActor* Actor)
+{
+	if (GExitPurge)
+	{
+		return;
+	}
+
+	if (Actor && (Actor->HasAuthority() || !IsChildActorReplicated()) && !IsBeingRemovedFromLevel())
+	{
+		UWorld* World = Actor->GetWorld();
+		// World may be nullptr during shutdown
+		if (World != nullptr)
+		{
+			UClass* ChildClass = Actor->GetClass();
+
+			// We would like to make certain that our name is not going to accidentally get taken from us while we're destroyed
+			// so we increment ClassUnique beyond our index to be certain of it.  This is ... a bit hacky.
+			if (!GFastPathUniqueNameGeneration)
+			{
+				UpdateSuffixForNextNewObject(Actor->GetOuter(), ChildClass, [Actor](int32& Index) { Index = FMath::Max(Index, Actor->GetFName().GetNumber()); });
+			}
+
+			// If we are getting here due to garbage collection we can't rename, so we'll have to abandon this child actor name and pick up a new one
+			if (!IsGarbageCollecting())
+			{
+				const FString ObjectBaseName = FString::Printf(TEXT("DESTROYED_%s_CHILDACTOR"), *ChildClass->GetName());
+				Actor->Rename(*MakeUniqueObjectName(Actor->GetOuter(), ChildClass, *ObjectBaseName).ToString(), nullptr, REN_DoNotDirty | REN_ForceNoResetLoaders);
+			}
+			else
+			{
+				ChildActorName = NAME_None;
+				if (CachedInstanceData)
+				{
+					CachedInstanceData->ChildActorName = NAME_None;
+				}
+			}
+		}
+	}
+
+	// While reinstancing we need the reference to remain valid so that we can
+	// overwrite it when references to old instances are updated to references
+	// to new instances:
+	if (!GIsReinstancing)
+	{
+		ChildActor = nullptr;
+	}
+}
+
+void UChildActorComponent::CreateChildActor(TFunction<void(AActor*)> CustomizerFunc)
 {
 	AActor* MyOwner = GetOwner();
 
 	if (MyOwner && !MyOwner->HasAuthority())
 	{
-		AActor* ChildClassCDO = (ChildActorClass ? ChildActorClass->GetDefaultObject<AActor>() : nullptr);
-		const bool bChildActorTemplateReplicated = ChildActorTemplate && ChildActorTemplate->GetClass() == ChildActorClass && ChildActorTemplate->GetIsReplicated();
-
-		if ((ChildClassCDO && ChildClassCDO->GetIsReplicated()) || bChildActorTemplateReplicated)
+		if (IsChildActorReplicated() && !GIsReconstructingBlueprintInstances)
 		{
 			// If we belong to an actor that is not authoritative and the child class is replicated then we expect that Actor will be replicated across so don't spawn one
 			return;
 		}
 	}
+
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_CreateChildActor);
 
 	// Kill spawned actor if we have one
 	DestroyChildActor();
@@ -593,6 +759,13 @@ void UChildActorComponent::CreateChildActor()
 		UWorld* World = GetWorld();
 		if(World != nullptr)
 		{
+			// If we're in a replay scrub and this is a startup actor and the class exists, assume the reference will be restored later
+			if (World->IsPlayingReplay() && World->GetDemoNetDriver()->IsRestoringStartupActors() && MyOwner && MyOwner->IsNetStartupActor() && ChildActorClass)
+			{
+				UE_LOG(LogChildActorComponent, Display, TEXT("Not creating child actor due to replay! Comp:%s ChildActor:%s"), *GetPathName(), *GetPathNameSafe(ChildActor));
+				return;
+			}
+
 			// Before we spawn let's try and prevent cyclic disaster
 			bool bSpawn = true;
 			AActor* Actor = MyOwner;
@@ -614,11 +787,26 @@ void UChildActorComponent::CreateChildActor()
 				Params.bAllowDuringConstructionScript = true;
 				Params.OverrideLevel = (MyOwner ? MyOwner->GetLevel() : nullptr);
 				Params.Name = ChildActorName;
-				Params.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
-#if WITH_EDITOR
-				Params.OverridePackage = GetOwner()->GetExternalPackage();
+
+				if (!bChildActorNameIsExact)
+				{
+					// Note: Requested will remove of _UAID_ from a name
+					Params.NameMode = FActorSpawnParameters::ESpawnActorNameMode::Requested;
+				}
+
 				Params.OverrideParentComponent = this;
+				
+				if (bChildActorIsTransient || HasAllFlags(RF_Transient) || (MyOwner && MyOwner->HasAllFlags(RF_Transient)))
+				{
+					// If this component or its owner are transient, set our created actor to transient. 
+					Params.ObjectFlags |= RF_Transient;
+				}
+
+#if WITH_EDITOR
+				Params.bCreateActorPackage = false;
+				Params.OverridePackage = (MyOwner && !(Params.ObjectFlags & RF_Transient)) ? MyOwner->GetExternalPackage() : nullptr;
 				Params.OverrideActorGuid = CachedInstanceData ? CachedInstanceData->ChildActorGUID : FGuid();
+				Params.bHideFromSceneOutliner = EditorTreeViewVisualizationMode == EChildActorComponentTreeViewVisualizationMode::Hidden;
 #endif
 				if (ChildActorTemplate && ChildActorTemplate->GetClass() == ChildActorClass)
 				{
@@ -629,12 +817,7 @@ void UChildActorComponent::CreateChildActor()
 				{
 					Params.ObjectFlags &= ~RF_Transactional;
 				}
-				if (HasAllFlags(RF_Transient) || IsEditorOnly() || (MyOwner && (MyOwner->HasAllFlags(RF_Transient) || MyOwner->IsEditorOnly())))
-				{
-					// If this component or its owner are transient or editor only, set our created actor to transient. 
-					// We can't programatically set editor only on an actor so this is the best option
-					Params.ObjectFlags |= RF_Transient;
-				}
+
 
 				// Spawn actor of desired class
 				ConditionalUpdateComponentToWorld();
@@ -645,10 +828,22 @@ void UChildActorComponent::CreateChildActor()
 				// If spawn was successful, 
 				if(ChildActor != nullptr)
 				{
+					if (IsEditorOnly() || (MyOwner && MyOwner->IsEditorOnly()))
+					{
+						// If this component or its owner are editor only, set our created actor to editor only. 
+						ChildActor->bIsEditorOnlyActor = true;
+					}
+					else
+					{
+						RegisterChildActorDestroyedDelegate();
+					}
+
 					ChildActorName = ChildActor->GetFName();
 
-					// Remember which component spawned it (for selection in editor etc)
-					FActorParentComponentSetter::Set(ChildActor, this);
+					if (CustomizerFunc)
+					{
+						CustomizerFunc(ChildActor);
+					}
 
 					// Parts that we deferred from SpawnActor
 					const FComponentInstanceDataCache* ComponentInstanceData = (CachedInstanceData ? CachedInstanceData->ComponentInstanceData.Get() : nullptr);
@@ -687,32 +882,49 @@ void UChildActorComponent::CreateChildActor()
 		delete CachedInstanceData;
 		CachedInstanceData = nullptr;
 	}
+
+	if (ChildActor)
+	{
+		OnChildActorCreatedDelegate.Broadcast(ChildActor);
+	}
+}
+
+void UChildActorComponent::SetChildActorName(const FName InName)
+{
+	ChildActorName = InName;
+}
+
+void UChildActorComponent::SetChildActorNameIsExact(bool bInExact)
+{
+	bChildActorNameIsExact = bInExact;
 }
 
 void UChildActorComponent::DestroyChildActor()
 {
+	UWorld* LocalWorld = GetWorld();
+	if (LocalWorld != nullptr)
+	{
+		AActor* MyOwner = GetOwner();
+		// If we're in a replay scrub and this is a startup actor and the class exists, assume the reference will be restored later
+		if (LocalWorld->IsPlayingReplay() && LocalWorld->GetDemoNetDriver()->IsRestoringStartupActors() && MyOwner && MyOwner->IsNetStartupActor() && ChildActorClass)
+		{
+			UE_LOG(LogChildActorComponent, Display, TEXT("Not creating destroying actor due to replay! Comp:%s ChildActor:%s"), *GetPathName(), *GetPathNameSafe(ChildActor));
+			return;
+		}
+	}
+
 	// If we own an Actor, kill it now unless we don't have authority on it, for that we rely on the server
 	// If the level is being removed then don't destroy the child actor so re-adding it doesn't
 	// need to create a new actor
-	auto IsLevelBeingRemoved = [this]() -> bool
-	{
-		if (AActor* MyOwner = GetOwner())
-		{
-			if (ULevel* MyLevel = MyOwner->GetLevel())
-			{
-				return MyLevel->bIsBeingRemoved;
-			}
-		}
 
-		return false;
-	};
-
-	if (ChildActor && ChildActor->HasAuthority() && !IsLevelBeingRemoved())
+	if (ChildActor && (ChildActor->HasAuthority() || !IsChildActorReplicated()) && !IsBeingRemovedFromLevel())
 	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_DestroyChildActor);
+
 		if (!GExitPurge)
 		{
 			// if still alive, destroy, otherwise just clear the pointer
-			const bool bIsChildActorPendingKillOrUnreachable = ChildActor->IsPendingKillOrUnreachable();
+			const bool bIsChildActorPendingKillOrUnreachable = !IsValidChecked(ChildActor) || ChildActor->IsUnreachable();
 			if (!bIsChildActorPendingKillOrUnreachable)
 			{
 #if WITH_EDITOR
@@ -735,30 +947,6 @@ void UChildActorComponent::DestroyChildActor()
 			// World may be nullptr during shutdown
 			if (World != nullptr)
 			{
-				UClass* ChildClass = ChildActor->GetClass();
-
-				// We would like to make certain that our name is not going to accidentally get taken from us while we're destroyed
-				// so we increment ClassUnique beyond our index to be certain of it.  This is ... a bit hacky.
-				if (!GFastPathUniqueNameGeneration)
-				{
-					UpdateSuffixForNextNewObject(ChildActor->GetOuter(), ChildClass, [this](int32& Index) { Index = FMath::Max(Index, ChildActor->GetFName().GetNumber()); });
-				}
-
-				// If we are getting here due to garbage collection we can't rename, so we'll have to abandon this child actor name and pick up a new one
-				if (!IsGarbageCollecting())
-				{
-					const FString ObjectBaseName = FString::Printf(TEXT("DESTROYED_%s_CHILDACTOR"), *ChildClass->GetName());
-					ChildActor->Rename(*MakeUniqueObjectName(ChildActor->GetOuter(), ChildClass, *ObjectBaseName).ToString(), nullptr, REN_DoNotDirty | REN_ForceNoResetLoaders);
-				}
-				else
-				{
-					ChildActorName = NAME_None;
-					if (CachedInstanceData)
-					{
-						CachedInstanceData->ChildActorName = NAME_None;
-					}
-				}
-
 				if (!bIsChildActorPendingKillOrUnreachable)
 				{
 					World->DestroyActor(ChildActor);
@@ -766,6 +954,10 @@ void UChildActorComponent::DestroyChildActor()
 			}
 		}
 
+		ChildActor = nullptr;
+	}
+	else if (!IsValid(ChildActor))
+	{
 		ChildActor = nullptr;
 	}
 }
@@ -782,7 +974,32 @@ void UChildActorComponent::BeginPlay()
 	}
 }
 
+bool UChildActorComponent::IsHLODRelevant() const
+{
+	const bool bIsHLODRelevant = ChildActor && ChildActor->IsHLODRelevant();
+	return bIsHLODRelevant;
+}
+
+#if UE_WITH_IRIS
+void UChildActorComponent::RegisterReplicationFragments(UE::Net::FFragmentRegistrationContext& Context, UE::Net::EFragmentRegistrationFlags RegistrationFlags)
+{
+	using namespace UE::Net;
+
+	// Fallback on default since archetype used on client and server differs giving different default values
+	Super::RegisterReplicationFragments(Context, RegistrationFlags | UE::Net::EFragmentRegistrationFlags::InitializeDefaultStateFromClassDefaults);
+}
+#endif // UE_WITH_IRIS
+
+
 #if WITH_EDITOR
+TSubclassOf<class UHLODBuilder> UChildActorComponent::GetCustomHLODBuilderClass() const
+{
+	// ChildActorComponents are only HLOD relevant so that their child actors are included in the HLOD generation.
+	// They don't provide any mesh/visual input, so we route them to be processed by the NullHLODBuilder which 
+	// ignores all components sent to it.
+	return UNullHLODBuilder::StaticClass();
+}
+
 void UChildActorComponent::SetEditorTreeViewVisualizationMode(EChildActorComponentTreeViewVisualizationMode InMode)
 {
 	Modify();

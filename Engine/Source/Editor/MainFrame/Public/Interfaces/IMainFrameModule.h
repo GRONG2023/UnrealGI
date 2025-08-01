@@ -53,6 +53,11 @@ public:
 	virtual void RecreateDefaultMainFrame(const bool bStartImmersive, const bool bStartPIE) = 0;
 
 	/**
+	 * Returns true if the Default Main Frame is being recreated. 
+	 */
+	virtual bool IsRecreatingDefaultMainFrame() const = 0;
+
+	/**
 	 * Generates a menu that includes application global commands, such as "Save All", "Exit", etc.  If you're building
 	 * a menu for your tab, you should call this function to create your menu, passing in an extender object to add your
 	 * tab-specific menu items!
@@ -73,7 +78,6 @@ public:
 	 *
 	 * @return	The newly-created menu widget
 	 */
-	virtual TSharedRef<SWidget> MakeMainTabMenu( const TSharedPtr<FTabManager>& TabManager, const FName MenuName, FToolMenuContext& ToolMenuContext ) const = 0;
 
 	/**
 	 * Generates a menu for status and developer
@@ -179,6 +183,13 @@ public:
 	virtual void BroadcastMainFrameSDKNotInstalled(const FString& PlatformName, const FString& DocLink) = 0;
 
 	/**
+	 * Delegate for making an open-ended request for a resource or link.
+	 */
+	DECLARE_EVENT_TwoParams(IMainFrameModule, FMainFrameRequestResource, const FString&, const FString&);
+	virtual FMainFrameRequestResource& OnMainFrameRequestResource() = 0;
+	virtual void BroadcastMainFrameRequestResource(const FString& Category, const FString& ResourceName) = 0;
+
+	/**
 	 * Enable external control of when main frame is shown
 	 */
 	virtual void EnableDelayedShowMainFrame() = 0;
@@ -204,6 +215,18 @@ public:
 	virtual void UnregisterCanCloseEditor(FDelegateHandle InHandle) = 0;
 
 	virtual bool ExecuteCanCloseEditorDelegates() = 0;
+
+	/**
+	 * Overrides the section that gets selected by default when opening editor settings
+	 * @note Call with default parameters to clear the override
+	 */
+	virtual void SetEditorSettingsDefaultSelectionOverride(FName CategoryName = FName(), FName SectionName = FName()) = 0;
+
+	/** 
+	 * Gets the override for the section that gets selected by default when opening editor settings
+	 * @note Returns None if there's no override
+	 */
+	virtual void GetEditorSettingsDefaultSelectionOverride(FName& OutCategoryName, FName& OutSectionName) = 0;
 
 public:
 

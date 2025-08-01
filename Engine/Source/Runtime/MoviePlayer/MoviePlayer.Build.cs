@@ -6,8 +6,6 @@ public class MoviePlayer : ModuleRules
 {
 	public MoviePlayer(ReadOnlyTargetRules Target) : base(Target)
 	{
-        PrivateIncludePaths.Add("Runtime/MoviePlayer/Private");
-
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 					"Engine",
@@ -21,6 +19,8 @@ public class MoviePlayer : ModuleRules
                     "InputCore",
                     "RenderCore",
                     "CoreUObject",
+					"HTTP",
+					"MoviePlayerProxy",
                     "RHI",
                     "Slate",
 					"SlateCore",

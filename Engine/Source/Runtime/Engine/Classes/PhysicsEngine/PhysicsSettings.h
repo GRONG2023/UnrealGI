@@ -13,6 +13,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "PhysicsSettingsEnums.h"
 #include "BodySetupEnums.h"
+#include "Chaos/ChaosEngineInterface.h"
 #include "GameFramework/WorldSettings.h"
 #include "PhysicsCoreTypes.h"
 #include "PhysicsSettingsCore.h"
@@ -47,11 +48,11 @@ struct FPhysicalSurfaceName
   * See: IChaosSettingsProvider
   */
 USTRUCT()
-struct ENGINE_API FChaosPhysicsSettings
+struct FChaosPhysicsSettings
 {
 	GENERATED_BODY()
 
-	FChaosPhysicsSettings();
+	ENGINE_API FChaosPhysicsSettings();
 
 	/** Default threading model to use on module initialisation. Can be switched at runtime using p.Chaos.ThreadingModel */
 	UPROPERTY(EditAnywhere, Category = ChaosPhysics)
@@ -65,13 +66,13 @@ struct ENGINE_API FChaosPhysicsSettings
 	UPROPERTY(EditAnywhere, Category = Framerate)
 	EChaosBufferMode DedicatedThreadBufferMode;
 
-	void OnSettingsUpdated();
+	ENGINE_API void OnSettingsUpdated();
 };
 
 UENUM()
 namespace ESettingsDOF
 {
-	enum Type
+	enum Type : int
 	{
 		/** Allows for full 3D movement and rotation. */
 		Full3D,
@@ -84,10 +85,44 @@ namespace ESettingsDOF
 	};
 }
 
+/** Physics Prediction Settings */
+USTRUCT()
+struct FPhysicsPredictionSettings
+{
+	GENERATED_BODY();
+
+	/** Enable networked physics prediction (experimental)
+	* Note: If an AActor::PhysicsReplicationMode is set to use Resimulation this will allow physics to cache history which is required by resimulation replication.
+	* Note: This can also affect how physics is solved even when not using resimulation. */
+	UPROPERTY(EditAnywhere, Category = "Replication")
+	bool bEnablePhysicsPrediction;
+
+	/** Forces the PlayerController to sync inputs as used in Physics Prediction.
+	* Only enable this if actively using a custom solution that needs this enabled for resimulation.
+	* This is automatically enabled when using the recommended NetworkPhysicsComponent on a pawn to handle Rewind / Resimulation. */
+	UPROPERTY(EditAnywhere, Category = "Replication", meta = (editcondition = "bEnablePhysicsPrediction"))
+	bool bEnablePhysicsResimulation;
+
+	/** Distance in centimeters before a state discrepancy triggers a resimulation */
+	UPROPERTY(EditAnywhere, Category = "Replication", meta = (editcondition = "bEnablePhysicsPrediction"))
+	float ResimulationErrorThreshold;
+
+	/** Amount of RTT (Round Trip Time) latency for the prediction to support in milliseconds. */
+	UPROPERTY(EditAnywhere, Category = "Replication", meta = (editcondition = "bEnablePhysicsPrediction"))
+	float MaxSupportedLatencyPrediction;
+
+	FPhysicsPredictionSettings()
+		: bEnablePhysicsPrediction(false)
+		, bEnablePhysicsResimulation(false)
+		, ResimulationErrorThreshold(10.0)
+		, MaxSupportedLatencyPrediction(1000)
+	{ }
+};
+
 UENUM()
 namespace ESettingsLockedAxis
 {
-	enum Type
+	enum Type : int
 	{
 		/** No axis is locked. */
 		None,
@@ -105,10 +140,14 @@ namespace ESettingsLockedAxis
 /**
  * Default physics settings.
  */
-UCLASS(config=Engine, defaultconfig, meta=(DisplayName="Physics"))
-class ENGINE_API UPhysicsSettings : public UPhysicsSettingsCore
+UCLASS(config=Engine, defaultconfig, meta=(DisplayName="Physics"), MinimalAPI)
+class UPhysicsSettings : public UPhysicsSettingsCore
 {
 	GENERATED_UCLASS_BODY()
+
+	/** Settings for Networked Physics Prediction, experimental. */
+	UPROPERTY(Config, EditAnywhere, Category = Replication, meta = (DisplayName = "Physics Prediction (Experimental)"))
+	FPhysicsPredictionSettings PhysicsPrediction;
 
 	/** Error correction data for replicating simulated physics (rigid bodies) */
 	UPROPERTY(config, EditAnywhere, Category = Replication)
@@ -148,10 +187,6 @@ class ENGINE_API UPhysicsSettings : public UPhysicsSettingsCore
 	UPROPERTY(config, EditAnywhere, Category = Simulation)
 	bool bDisableCCD;
 
-	/** If set to true, the scene will use enhanced determinism at the cost of a bit more resources. See eENABLE_ENHANCED_DETERMINISM to learn about the specifics */
-	UPROPERTY(config, EditAnywhere, Category = Simulation)
-	bool bEnableEnhancedDeterminism;
-
 	/** Min Delta Time below which anim dynamics and rigidbody nodes will not simulate. */
 	UPROPERTY(config, EditAnywhere, meta = (ClampMin = "0.0", UIMin = "0.0", ClampMax = "1.0", UIMax = "1.0"), Category = Framerate)
 	float AnimPhysicsMinDeltaTime;
@@ -159,6 +194,10 @@ class ENGINE_API UPhysicsSettings : public UPhysicsSettingsCore
 	/** Whether to simulate anim physics nodes in the tick where they're reset. */
 	UPROPERTY(config, EditAnywhere, Category = Simulation)
 	bool bSimulateAnimPhysicsAfterReset;
+
+	/** Min Physics Delta Time; the simulation will not step if the delta time is below this value */
+	UPROPERTY(config, EditAnywhere, meta = (ClampMin = "0.0", UIMin = "0.0", ClampMax = "0.0001", UIMax = "0.0001"), Category = Framerate)
+	float MinPhysicsDeltaTime;
 
 	/** Max Physics Delta Time to be clamped. */
 	UPROPERTY(config, EditAnywhere, meta=(ClampMin="0.0013", UIMin = "0.0013", ClampMax="1.0", UIMax="1.0"), Category=Framerate)
@@ -171,6 +210,14 @@ class ENGINE_API UPhysicsSettings : public UPhysicsSettingsCore
 	/** Whether to substep the async physics simulation. This feature is still experimental. Certain functionality might not work correctly*/
 	UPROPERTY(config, EditAnywhere, Category = Framerate)
 	bool bSubsteppingAsync;
+
+	/** Whether to tick physics simulation on an async thread. This feature is still experimental. Certain functionality might not work correctly*/
+	UPROPERTY(config, EditAnywhere, Category = Framerate)
+	bool bTickPhysicsAsync;
+
+	/** If using async, the time step size to tick at. This feature is still experimental. Certain functionality might not work correctly*/
+	UPROPERTY(config, EditAnywhere, Category = Framerate, meta=(editcondition = "bTickPhysicsAsync"))
+	float AsyncFixedTimeStepSize;
 
 	/** Max delta time (in seconds) for an individual simulation substep. */
 	UPROPERTY(config, EditAnywhere, meta = (ClampMin = "0.0013", UIMin = "0.0013", ClampMax = "1.0", UIMax = "1.0", editcondition = "bSubStepping"), Category=Framerate)
@@ -212,15 +259,21 @@ public:
 
 	static UPhysicsSettings* Get() { return CastChecked<UPhysicsSettings>(UPhysicsSettings::StaticClass()->GetDefaultObject()); }
 
-	virtual void PostInitProperties() override;
+	UFUNCTION(BlueprintCallable, Category = "Physics")
+	int32 GetPhysicsHistoryCount() const
+	{
+		return FMath::Max<int32>(1, FMath::CeilToInt(0.001f * PhysicsPrediction.MaxSupportedLatencyPrediction / AsyncFixedTimeStepSize));
+	}
+
+	ENGINE_API virtual void PostInitProperties() override;
 
 #if WITH_EDITOR
-	virtual bool CanEditChange( const FProperty* Property ) const override;
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual bool CanEditChange( const FProperty* Property ) const override;
+	ENGINE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 
 	/** Load Material Type data from INI file **/
 	/** this changes displayname meta data. That means we won't need it outside of editor*/
-	void LoadSurfaceType();
+	ENGINE_API void LoadSurfaceType();
 
 #endif // WITH_EDITOR
 };

@@ -14,21 +14,22 @@
 #include "PhysicsProxy/SingleParticlePhysicsProxy.h"
 #include "PhysicsSolver.h"
 #include "Chaos/PullPhysicsDataImp.h"
+#include "Chaos/PhysicsObjectInternal.h"
 
-
-FJointConstraintPhysicsProxy::FJointConstraintPhysicsProxy(Chaos::FJointConstraint* InConstraint, FConstraintHandle* InHandle, UObject* InOwner)
-	: Base(InOwner)
-	, Constraint(InConstraint) // This proxy assumes ownership of the Constraint, and will free it during DestroyOnPhysicsThread
-	, Handle(InHandle)
-	, bInitialized(false)
+namespace Chaos
 {
-	check(Constraint!=nullptr);
-	Constraint->SetProxy(this);
-	JointSettingsBuffer = Constraint->GetJointSettings();
 
+FJointConstraintPhysicsProxy::FJointConstraintPhysicsProxy(FJointConstraint* InConstraint, FPBDJointConstraintHandle* InHandle, UObject* InOwner)
+	: Base(EPhysicsProxyType::JointConstraintType, InOwner, MakeShared<FProxyTimestampBase>())
+	, Constraint_GT(InConstraint) // This proxy assumes ownership of the Constraint, and will free it during DestroyOnPhysicsThread
+	, Constraint_PT(InHandle)
+	, OriginalParticleHandles_PT(nullptr, nullptr)
+{
+	check(Constraint_GT !=nullptr);
+	Constraint_GT->SetProxy(this);
 }
 
-Chaos::TGeometryParticleHandle<Chaos::FReal, 3>*
+FGeometryParticleHandle*
 FJointConstraintPhysicsProxy::GetParticleHandleFromProxy(IPhysicsProxyBase* ProxyBase)
 {
 	if (ProxyBase)
@@ -42,336 +43,185 @@ FJointConstraintPhysicsProxy::GetParticleHandleFromProxy(IPhysicsProxyBase* Prox
 }
 
 /**/
-void FJointConstraintPhysicsProxy::BufferPhysicsResults(Chaos::FDirtyJointConstraintData& Buffer)
+void FJointConstraintPhysicsProxy::BufferPhysicsResults(FDirtyJointConstraintData& Buffer)
 {
 	Buffer.SetProxy(*this);
-	if (Constraint != nullptr && Constraint->IsValid() )
+	if (Constraint_PT != nullptr && (Constraint_PT->IsValid() || Constraint_PT->IsConstraintBreaking() || Constraint_PT->IsDriveTargetChanged()))
 	{
-		if (Handle != nullptr && Handle->IsValid())
-		{
-			Buffer.OutputData.bIsBroken = !Handle->IsConstraintEnabled();
-			Buffer.OutputData.Force = Handle->GetLinearImpulse();
-			Buffer.OutputData.Torque = Handle->GetAngularImpulse();
-		}
+		Buffer.OutputData.bIsBreaking = Constraint_PT->IsConstraintBreaking();
+		Buffer.OutputData.bIsBroken = !Constraint_PT->IsConstraintEnabled();
+		Buffer.OutputData.bDriveTargetChanged = Constraint_PT->IsDriveTargetChanged();
+		Buffer.OutputData.Force = Constraint_PT->GetLinearImpulse();
+		Buffer.OutputData.Torque = Constraint_PT->GetAngularImpulse();
+
+		Constraint_PT->ClearConstraintBreaking(); // it's a single frame event, so reset
+		Constraint_PT->ClearDriveTargetChanged(); // it's a single frame event, so reset
 	}
 }
 
 /**/
-bool FJointConstraintPhysicsProxy::PullFromPhysicsState(const Chaos::FDirtyJointConstraintData& Buffer, const int32 SolverSyncTimestamp)
+bool FJointConstraintPhysicsProxy::PullFromPhysicsState(const FDirtyJointConstraintData& Buffer, const int32 SolverSyncTimestamp)
 {
-	if (Constraint != nullptr && Constraint->IsValid())
+	if (Constraint_GT != nullptr && Constraint_GT->IsValid())
 	{
-		if (Handle != nullptr && Handle->IsValid())
+		if (Buffer.OutputData.bIsBreaking || Buffer.OutputData.bDriveTargetChanged)
 		{
-			Constraint->GetOutputData().bIsBroken = Buffer.OutputData.bIsBroken;
-			Constraint->GetOutputData().Force = Buffer.OutputData.Force;
-			Constraint->GetOutputData().Torque = Buffer.OutputData.Torque;
+			Constraint_GT->GetOutputData().bIsBreaking = Buffer.OutputData.bIsBreaking;
+			Constraint_GT->GetOutputData().bIsBroken = Buffer.OutputData.bIsBroken;
+			Constraint_GT->GetOutputData().bDriveTargetChanged = Buffer.OutputData.bDriveTargetChanged;
 		}
+		Constraint_GT->GetOutputData().Force = Buffer.OutputData.Force;
+		Constraint_GT->GetOutputData().Torque = Buffer.OutputData.Torque;
 	}
 
 	return true;
 }
 
-void FJointConstraintPhysicsProxy::InitializeOnPhysicsThread(Chaos::FPBDRigidsSolver* InSolver)
+template <typename TransformType>
+static void FixConnectorTransformsForRoot(const FParticlePair& OriginalHandles, const FParticlePair& RootHandles, TransformType& InOutTransformsToFix)
+{
+	for (int32 Index = 0; Index < 2; Index++)
+	{
+		if (OriginalHandles[Index] && RootHandles[Index] && RootHandles[Index] != OriginalHandles[Index])
+		{
+			const FTransform TransformOffset = OriginalHandles[Index]->GetTransformXR().GetRelativeTransform(RootHandles[Index]->GetTransformXR());
+			InOutTransformsToFix[Index] *= TransformOffset;
+		}
+	}
+}
+
+void FJointConstraintPhysicsProxy::InitializeOnPhysicsThread(FPBDRigidsSolver* InSolver, FDirtyPropertiesManager& Manager, int32 DataIdx, FDirtyChaosProperties& RemoteData)
 {
 	auto& Handles = InSolver->GetParticles().GetParticleHandles();
-	if (Handles.Size() && IsValid())
+	if (Handles.Size())
 	{
 		auto& JointConstraints = InSolver->GetJointConstraints();
-		if (Constraint != nullptr)
+		if(const FPhysicsObjectPairProperty* BodyPairs = RemoteData.FindJointPhysicsObjects(Manager, DataIdx))
 		{
-			Chaos::FConstraintBase::FProxyBasePair& BasePairs = Constraint->GetParticleProxies();
-
-			Chaos::TGeometryParticleHandle<Chaos::FReal, 3>* Handle0 = GetParticleHandleFromProxy(BasePairs[0]);
-			Chaos::TGeometryParticleHandle<Chaos::FReal, 3>* Handle1 = GetParticleHandleFromProxy(BasePairs[1]);
-			if (Handle0 && Handle1)
+			FParticlePair RootHandles
 			{
-				Handle = JointConstraints.AddConstraint({ Handle0,Handle1 }, Constraint->GetJointTransforms());
-				Handle->SetSettings(JointSettingsBuffer);
+				BodyPairs->PhysicsBodies[0]->GetRootParticle<Chaos::EThreadContext::Internal>(),
+				BodyPairs->PhysicsBodies[1]->GetRootParticle<Chaos::EThreadContext::Internal>(),
+			};
 
-				Handle0->AddConstraintHandle(Handle);
-				Handle1->AddConstraintHandle(Handle);
-			}
-
-		}
-	}
-}
-
-void FJointConstraintPhysicsProxy::DestroyOnPhysicsThread(Chaos::FPBDRigidsSolver* InSolver)
-{
-	if (Handle && Handle->IsValid())
-	{
-		auto& JointConstraints = InSolver->GetJointConstraints();
-		JointConstraints.RemoveConstraint(Handle->GetConstraintIndex());
-
-		delete Constraint;
-		Constraint = nullptr;
-	}
-}
-
-
-void FJointConstraintPhysicsProxy::PushStateOnGameThread(Chaos::FPBDRigidsSolver* InSolver)
-{
-	if (Constraint != nullptr && Constraint->IsValid())
-	{
-		if (Constraint->IsDirty())
-		{
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::CollisionEnabled))
+			if (RootHandles[0] && RootHandles[1])
 			{
-				JointSettingsBuffer.bCollisionEnabled = Constraint->GetCollisionEnabled();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::CollisionEnabled);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::Projection))
-			{
-				JointSettingsBuffer.bProjectionEnabled = Constraint->GetProjectionEnabled();
-				JointSettingsBuffer.LinearProjection = Constraint->GetProjectionLinearAlpha();
-				JointSettingsBuffer.AngularProjection = Constraint->GetProjectionAngularAlpha();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::Projection);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::ParentInvMassScale))
-			{
-				JointSettingsBuffer.ParentInvMassScale = Constraint->GetParentInvMassScale();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::ParentInvMassScale);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::LinearBreakForce))
-			{
-				JointSettingsBuffer.LinearBreakForce = Constraint->GetLinearBreakForce();
-				JointSettingsBuffer.LinearPlasticityLimit = Constraint->GetLinearPlasticityLimit();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::LinearBreakForce);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::AngularBreakTorque))
-			{
-				JointSettingsBuffer.AngularBreakTorque = Constraint->GetAngularBreakTorque();
-				JointSettingsBuffer.AngularPlasticityLimit = Constraint->GetAngularPlasticityLimit();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::AngularBreakTorque);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::UserData))
-			{
-				JointSettingsBuffer.UserData = Constraint->GetUserData();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::UserData);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::LinearDrive))
-			{
-				JointSettingsBuffer.bLinearPositionDriveEnabled[0] = Constraint->GetLinearPositionDriveXEnabled();
-				JointSettingsBuffer.bLinearPositionDriveEnabled[1] = Constraint->GetLinearPositionDriveYEnabled();
-				JointSettingsBuffer.bLinearPositionDriveEnabled[2] = Constraint->GetLinearPositionDriveZEnabled();
-				JointSettingsBuffer.LinearDrivePositionTarget = Constraint->GetLinearDrivePositionTarget();
-				JointSettingsBuffer.bLinearVelocityDriveEnabled[0] = Constraint->GetLinearVelocityDriveXEnabled();
-				JointSettingsBuffer.bLinearVelocityDriveEnabled[1] = Constraint->GetLinearVelocityDriveYEnabled();
-				JointSettingsBuffer.bLinearVelocityDriveEnabled[2] = Constraint->GetLinearVelocityDriveZEnabled();
-				JointSettingsBuffer.LinearDriveVelocityTarget = Constraint->GetLinearDriveVelocityTarget();
-				JointSettingsBuffer.LinearDriveForceMode = Constraint->GetLinearDriveForceMode();
-				JointSettingsBuffer.LinearMotionTypes[0] = Constraint->GetLinearMotionTypesX();
-				JointSettingsBuffer.LinearMotionTypes[1] = Constraint->GetLinearMotionTypesY();
-				JointSettingsBuffer.LinearMotionTypes[2] = Constraint->GetLinearMotionTypesZ();
-				JointSettingsBuffer.LinearDriveStiffness = Constraint->GetLinearDriveStiffness();
-				JointSettingsBuffer.LinearDriveDamping = Constraint->GetLinearDriveDamping();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::LinearDrive);
-			}
-
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::AngularDrive))
-			{
-				JointSettingsBuffer.bAngularSLerpPositionDriveEnabled = Constraint->GetAngularSLerpPositionDriveEnabled();
-				JointSettingsBuffer.bAngularTwistPositionDriveEnabled = Constraint->GetAngularTwistPositionDriveEnabled();
-				JointSettingsBuffer.bAngularSwingPositionDriveEnabled = Constraint->GetAngularSwingPositionDriveEnabled();
-				JointSettingsBuffer.AngularDrivePositionTarget = Constraint->GetAngularDrivePositionTarget();
-				JointSettingsBuffer.bAngularSLerpVelocityDriveEnabled = Constraint->GetAngularSLerpVelocityDriveEnabled();
-				JointSettingsBuffer.bAngularTwistVelocityDriveEnabled = Constraint->GetAngularTwistVelocityDriveEnabled();
-				JointSettingsBuffer.bAngularSwingVelocityDriveEnabled = Constraint->GetAngularSwingVelocityDriveEnabled();
-				JointSettingsBuffer.AngularDriveVelocityTarget = Constraint->GetAngularDriveVelocityTarget();
-				JointSettingsBuffer.AngularDriveForceMode = Constraint->GetAngularDriveForceMode();
-				JointSettingsBuffer.AngularMotionTypes[0] = Constraint->GetAngularMotionTypesX();
-				JointSettingsBuffer.AngularMotionTypes[1] = Constraint->GetAngularMotionTypesY();
-				JointSettingsBuffer.AngularMotionTypes[2] = Constraint->GetAngularMotionTypesZ();
-				JointSettingsBuffer.AngularDriveStiffness = Constraint->GetAngularDriveStiffness();
-				JointSettingsBuffer.AngularDriveDamping = Constraint->GetAngularDriveDamping();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::AngularDrive);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::Stiffness))
-			{
-				JointSettingsBuffer.Stiffness = Constraint->GetStiffness();
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::Stiffness);
-			}
-
-			if (Constraint->IsDirty(Chaos::EJointConstraintFlags::Limits))
-			{
-				JointSettingsBuffer.bSoftLinearLimitsEnabled = Constraint->GetSoftLinearLimitsEnabled();
-				JointSettingsBuffer.bSoftTwistLimitsEnabled = Constraint->GetSoftTwistLimitsEnabled();
-				JointSettingsBuffer.bSoftSwingLimitsEnabled = Constraint->GetSoftSwingLimitsEnabled();
-				JointSettingsBuffer.LinearSoftForceMode = Constraint->GetLinearSoftForceMode();
-				JointSettingsBuffer.AngularSoftForceMode = Constraint->GetAngularSoftForceMode();
-				JointSettingsBuffer.SoftLinearStiffness = Constraint->GetSoftLinearStiffness();
-				JointSettingsBuffer.SoftLinearDamping = Constraint->GetSoftLinearDamping();
-				JointSettingsBuffer.SoftTwistStiffness = Constraint->GetSoftTwistStiffness();
-				JointSettingsBuffer.SoftTwistDamping = Constraint->GetSoftTwistDamping();
-				JointSettingsBuffer.SoftSwingStiffness = Constraint->GetSoftSwingStiffness();
-				JointSettingsBuffer.SoftSwingDamping = Constraint->GetSoftSwingDamping();
-				JointSettingsBuffer.LinearLimit = Constraint->GetLinearLimit();
-				JointSettingsBuffer.AngularLimits = Constraint->GetAngularLimits();
-				JointSettingsBuffer.LinearContactDistance = Constraint->GetLinearContactDistance();
-				JointSettingsBuffer.TwistContactDistance = Constraint->GetTwistContactDistance();
-				JointSettingsBuffer.SwingContactDistance = Constraint->GetSwingContactDistance();
-				JointSettingsBuffer.LinearRestitution = Constraint->GetLinearRestitution();
-				JointSettingsBuffer.TwistRestitution = Constraint->GetTwistRestitution();
-				JointSettingsBuffer.SwingRestitution = Constraint->GetSwingRestitution();
-
-				DirtyFlagsBuffer.MarkDirty(Chaos::EJointConstraintFlags::Limits);
-			}
-
-			Constraint->ClearDirtyFlags();
-		}
-	}
-}
-
-
-void FJointConstraintPhysicsProxy::PushStateOnPhysicsThread(Chaos::FPBDRigidsSolver* InSolver)
-{
-	typedef typename Chaos::FPBDRigidsSolver::FPBDRigidsEvolution::FCollisionConstraints FCollisionConstraints;
-	if (Handle && Handle->IsValid())
-	{
-		if (DirtyFlagsBuffer.IsDirty())
-		{
-			FConstraintData ConstraintSettings = Handle->GetSettings();
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::CollisionEnabled))
-			{
-				if (!JointSettingsBuffer.bCollisionEnabled)
+				if (const FPBDJointSettings* JointSettings = RemoteData.FindJointSettings(Manager, DataIdx))
 				{
-					Chaos::FConstraintBase::FProxyBasePair& BasePairs = Constraint->GetParticleProxies();
-					Chaos::TGeometryParticleHandle<Chaos::FReal, 3>* Handle0 = GetParticleHandleFromProxy(BasePairs[0]);
-					Chaos::TGeometryParticleHandle<Chaos::FReal, 3>* Handle1 = GetParticleHandleFromProxy(BasePairs[1]);
+					FTransformPair ConnectorTransforms{ JointSettings->ConnectorTransforms };
 
-					// Three pieces of state to update on the physics thread. 
-					// .. Mask on the particle array
-					// .. Constraint collisions enabled array
-					// .. IgnoreCollisionsManager
-					if (Handle0 && Handle1)
+					// if the root particles do not match the actual particles
+					// we need to adjust the frames to be in the root particle space 
+					OriginalParticleHandles_PT =
 					{
-						Chaos::TPBDRigidParticleHandle<FReal, 3>* ParticleHandle0 = Handle0->CastToRigidParticle();
-						Chaos::TPBDRigidParticleHandle<FReal, 3>* ParticleHandle1 = Handle1->CastToRigidParticle();
+						BodyPairs->PhysicsBodies[0]->GetParticle<Chaos::EThreadContext::Internal>(),
+						BodyPairs->PhysicsBodies[1]->GetParticle<Chaos::EThreadContext::Internal>(),
+					};
 
-						if (ParticleHandle0 && ParticleHandle1)
-						{
-							Chaos::FIgnoreCollisionManager& IgnoreCollisionManager = InSolver->GetEvolution()->GetBroadPhase().GetIgnoreCollisionManager();
-							Chaos::FUniqueIdx ID0 = ParticleHandle0->UniqueIdx();
-							Chaos::FUniqueIdx ID1 = ParticleHandle1->UniqueIdx();
+					FixConnectorTransformsForRoot(OriginalParticleHandles_PT, RootHandles, ConnectorTransforms);
+
+					Constraint_PT = JointConstraints.AddConstraint(RootHandles, ConnectorTransforms);
+
+					RootHandles[0]->AddConstraintHandle(Constraint_PT);
+					RootHandles[1]->AddConstraintHandle(Constraint_PT);
+
+					// We added a joint to the particles, so we need to modify the inertia (See FPBDRigidsEvolutionGBF::UpdateInertiaConditioning)
+					FGenericParticleHandle(RootHandles[0])->SetInertiaConditioningDirty();
+					FGenericParticleHandle(RootHandles[1])->SetInertiaConditioningDirty();
+				}
+			}
+		}
+	}
+}
+
+void FJointConstraintPhysicsProxy::DestroyOnPhysicsThread(FPBDRigidsSolver* InSolver)
+{
+	if (Constraint_PT)
+	{
+		TVec2<FGeometryParticleHandle*> Particles = Constraint_PT->GetConstrainedParticles();
+		
+		const FPBDJointSettings Settings = Constraint_PT->GetSettings();
+		const bool bValidPair = InSolver && Particles[0] && Particles[1];
+
+		// If this constraint disables collisions - need to restore the collisions after we destroy the constraint
+		if(bValidPair && !Settings.bCollisionEnabled)
+		{
+			InSolver->GetEvolution()->GetBroadPhase().GetIgnoreCollisionManager().RemoveIgnoreCollisions(Particles[0], Particles[1]);
+		}
+
+		// Ensure that our connected particles are aware that this constraint no longer exists
+		if(Particles[0])
+		{
+			Particles[0]->RemoveConstraintHandle(Constraint_PT);
+		}
+
+		if(Particles[1])
+		{
+			Particles[1]->RemoveConstraintHandle(Constraint_PT);
+		}
+
+		// @todo(chaos): clean up constraint management
+		if(Constraint_PT->IsInConstraintGraph())
+		{
+			InSolver->GetEvolution()->RemoveConstraintFromConstraintGraph(Constraint_PT);
+		}
+
+		FPBDRigidsSolver::FJointConstraints& JointConstraints = InSolver->GetJointConstraints();
+		JointConstraints.RemoveConstraint(Constraint_PT->GetConstraintIndex());
+		Constraint_PT = nullptr;
+		OriginalParticleHandles_PT = { nullptr, nullptr };
+	}
+}
+
+void FJointConstraintPhysicsProxy::DestroyOnGameThread()
+{
+	delete Constraint_GT;
+	Constraint_GT = nullptr;
+}
 
 
-							ParticleHandle0->AddCollisionConstraintFlag(Chaos::ECollisionConstraintFlags::CCF_BroadPhaseIgnoreCollisions);
-							IgnoreCollisionManager.AddIgnoreCollisionsFor(ID0, ID1);
+void FJointConstraintPhysicsProxy::PushStateOnGameThread(FDirtyPropertiesManager& Manager, int32 DataIdx, FDirtyChaosProperties& RemoteData)
+{
+	if (Constraint_GT && Constraint_GT->IsValid())
+	{
+		Constraint_GT->SyncRemoteData(Manager, DataIdx, RemoteData);
+	}
+}
 
-							ParticleHandle1->AddCollisionConstraintFlag(Chaos::ECollisionConstraintFlags::CCF_BroadPhaseIgnoreCollisions);
-							IgnoreCollisionManager.AddIgnoreCollisionsFor(ID1, ID0);
-							ConstraintSettings.bCollisionEnabled = JointSettingsBuffer.bCollisionEnabled;
-						}
-					}
+
+void FJointConstraintPhysicsProxy::PushStateOnPhysicsThread(FPBDRigidsSolver* InSolver, const FDirtyPropertiesManager& Manager, int32 DataIdx, const FDirtyChaosProperties& RemoteData)
+{
+	if (Constraint_PT && Constraint_PT->IsValid())
+	{
+		if (const FPBDJointSettings* Data = RemoteData.FindJointSettings(Manager, DataIdx))
+		{
+			const FPBDJointSettings& JointSettingsBuffer = *Data;
+			const FPBDJointSettings& CurrentConstraintSettings = Constraint_PT->GetSettings();
+
+			// Handle changes to the CollisionEnabled flag
+			if (CurrentConstraintSettings.bCollisionEnabled != JointSettingsBuffer.bCollisionEnabled)
+			{
+				const TVector<FGeometryParticleHandle*, 2>& Particles = Constraint_PT->GetConstrainedParticles();
+				if (JointSettingsBuffer.bCollisionEnabled)
+				{
+					InSolver->GetEvolution()->GetBroadPhase().GetIgnoreCollisionManager().RemoveIgnoreCollisions(Particles[0], Particles[1]);
+				}
+				else
+				{
+					InSolver->GetEvolution()->GetBroadPhase().GetIgnoreCollisionManager().AddIgnoreCollisions(Particles[0], Particles[1]);
 				}
 			}
 
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::Projection))
-			{
-				ConstraintSettings.bProjectionEnabled = JointSettingsBuffer.bProjectionEnabled;
-				ConstraintSettings.LinearProjection = JointSettingsBuffer.LinearProjection;
-				ConstraintSettings.AngularProjection = JointSettingsBuffer.AngularProjection;
-			}
+			FPBDJointSettings JointSettingsToSet{ JointSettingsBuffer };
 
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::ParentInvMassScale))
-			{
-				ConstraintSettings.ParentInvMassScale = JointSettingsBuffer.ParentInvMassScale;
-			}
+			// PushStateOnPhysicsThread is always called right after InitializeOnPhysicsThread
+			// so we need to make sure the root space correction logic is also run here to avoid resetting the transform in the wrong space
+			FixConnectorTransformsForRoot(OriginalParticleHandles_PT, Constraint_PT->GetConstrainedParticles(), JointSettingsToSet.ConnectorTransforms);
 
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::LinearBreakForce))
-			{
-				ConstraintSettings.LinearBreakForce = JointSettingsBuffer.LinearBreakForce;
-				ConstraintSettings.LinearPlasticityLimit = FMath::Clamp((float)JointSettingsBuffer.LinearPlasticityLimit, 0.f, 1.f);
-			}
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::AngularBreakTorque))
-			{
-				ConstraintSettings.AngularBreakTorque = JointSettingsBuffer.AngularBreakTorque;
-				ConstraintSettings.AngularPlasticityLimit = JointSettingsBuffer.AngularPlasticityLimit;
-			}
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::UserData))
-			{
-				ConstraintSettings.UserData = JointSettingsBuffer.UserData;
-			}
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::LinearDrive))
-			{
-				ConstraintSettings.bLinearPositionDriveEnabled[0] = JointSettingsBuffer.bLinearPositionDriveEnabled[0];
-				ConstraintSettings.bLinearPositionDriveEnabled[1] = JointSettingsBuffer.bLinearPositionDriveEnabled[1];
-				ConstraintSettings.bLinearPositionDriveEnabled[2] = JointSettingsBuffer.bLinearPositionDriveEnabled[2];
-				ConstraintSettings.LinearDrivePositionTarget = JointSettingsBuffer.LinearDrivePositionTarget;
-				ConstraintSettings.bLinearVelocityDriveEnabled[0] = JointSettingsBuffer.bLinearVelocityDriveEnabled[0];
-				ConstraintSettings.bLinearVelocityDriveEnabled[1] = JointSettingsBuffer.bLinearVelocityDriveEnabled[1];
-				ConstraintSettings.bLinearVelocityDriveEnabled[2] = JointSettingsBuffer.bLinearVelocityDriveEnabled[2];
-				ConstraintSettings.LinearDriveVelocityTarget = JointSettingsBuffer.LinearDriveVelocityTarget;
-				ConstraintSettings.LinearDriveForceMode = JointSettingsBuffer.LinearDriveForceMode;
-				ConstraintSettings.LinearMotionTypes[0] = JointSettingsBuffer.LinearMotionTypes[0];
-				ConstraintSettings.LinearMotionTypes[1] = JointSettingsBuffer.LinearMotionTypes[1];
-				ConstraintSettings.LinearMotionTypes[2] = JointSettingsBuffer.LinearMotionTypes[2];
-				ConstraintSettings.LinearDriveStiffness = JointSettingsBuffer.LinearDriveStiffness;
-				ConstraintSettings.LinearDriveDamping = JointSettingsBuffer.LinearDriveDamping;
-			}
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::AngularDrive))
-			{
-				ConstraintSettings.bAngularSLerpPositionDriveEnabled = JointSettingsBuffer.bAngularSLerpPositionDriveEnabled;
-				ConstraintSettings.bAngularTwistPositionDriveEnabled = JointSettingsBuffer.bAngularTwistPositionDriveEnabled;
-				ConstraintSettings.bAngularSwingPositionDriveEnabled = JointSettingsBuffer.bAngularSwingPositionDriveEnabled;
-				ConstraintSettings.AngularDrivePositionTarget = JointSettingsBuffer.AngularDrivePositionTarget;
-				ConstraintSettings.bAngularSLerpVelocityDriveEnabled = JointSettingsBuffer.bAngularSLerpVelocityDriveEnabled;
-				ConstraintSettings.bAngularTwistVelocityDriveEnabled = JointSettingsBuffer.bAngularTwistVelocityDriveEnabled;
-				ConstraintSettings.bAngularSwingVelocityDriveEnabled = JointSettingsBuffer.bAngularSwingVelocityDriveEnabled;
-				ConstraintSettings.AngularDriveVelocityTarget = JointSettingsBuffer.AngularDriveVelocityTarget;
-				ConstraintSettings.AngularDriveForceMode = JointSettingsBuffer.AngularDriveForceMode;
-				ConstraintSettings.AngularMotionTypes[0] = JointSettingsBuffer.AngularMotionTypes[0];
-				ConstraintSettings.AngularMotionTypes[1] = JointSettingsBuffer.AngularMotionTypes[1];
-				ConstraintSettings.AngularMotionTypes[2] = JointSettingsBuffer.AngularMotionTypes[2];
-				ConstraintSettings.AngularDriveStiffness = JointSettingsBuffer.AngularDriveStiffness;
-				ConstraintSettings.AngularDriveDamping = JointSettingsBuffer.AngularDriveDamping;
-			}
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::Stiffness))
-			{
-				ConstraintSettings.Stiffness = JointSettingsBuffer.Stiffness;
-			}
-
-			if (DirtyFlagsBuffer.IsDirty(Chaos::EJointConstraintFlags::Limits))
-			{
-				ConstraintSettings.bSoftLinearLimitsEnabled = JointSettingsBuffer.bSoftLinearLimitsEnabled;
-				ConstraintSettings.bSoftTwistLimitsEnabled = JointSettingsBuffer.bSoftTwistLimitsEnabled;
-				ConstraintSettings.bSoftSwingLimitsEnabled = JointSettingsBuffer.bSoftSwingLimitsEnabled;
-				ConstraintSettings.LinearSoftForceMode = JointSettingsBuffer.LinearSoftForceMode;
-				ConstraintSettings.AngularSoftForceMode = JointSettingsBuffer.AngularSoftForceMode;
-				ConstraintSettings.SoftLinearStiffness = JointSettingsBuffer.SoftLinearStiffness;
-				ConstraintSettings.SoftLinearDamping = JointSettingsBuffer.SoftLinearDamping;
-				ConstraintSettings.SoftTwistStiffness = JointSettingsBuffer.SoftTwistStiffness;
-				ConstraintSettings.SoftTwistDamping = JointSettingsBuffer.SoftTwistDamping;
-				ConstraintSettings.SoftSwingStiffness = JointSettingsBuffer.SoftSwingStiffness;
-				ConstraintSettings.SoftSwingDamping = JointSettingsBuffer.SoftSwingDamping;
-				ConstraintSettings.LinearLimit = JointSettingsBuffer.LinearLimit;
-				ConstraintSettings.AngularLimits = JointSettingsBuffer.AngularLimits;
-				ConstraintSettings.LinearContactDistance = JointSettingsBuffer.LinearContactDistance;
-				ConstraintSettings.TwistContactDistance = JointSettingsBuffer.TwistContactDistance;
-				ConstraintSettings.SwingContactDistance = JointSettingsBuffer.SwingContactDistance;
-				ConstraintSettings.LinearRestitution = JointSettingsBuffer.LinearRestitution;
-				ConstraintSettings.TwistRestitution = JointSettingsBuffer.TwistRestitution;
-				ConstraintSettings.SwingRestitution = JointSettingsBuffer.SwingRestitution;
-			}
-
-			Handle->SetSettings(ConstraintSettings);
-
-			DirtyFlagsBuffer.Clear();
+			// Update the joint settings
+			Constraint_PT->SetSettings(JointSettingsToSet);
 		}
 	}
+}
+
 }

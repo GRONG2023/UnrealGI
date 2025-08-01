@@ -5,8 +5,10 @@
 #include "EntitySystem/MovieSceneEntitySystem.h"
 #include "Containers/ChunkedArray.h"
 #include "Misc/Optional.h"
-#include "Components/SceneComponent.h"
+#include "Engine/ScopedMovementUpdate.h"
 #include "MovieSceneDeferredComponentMovementSystem.generated.h"
+
+class USceneComponent;
 
 /**
  * System that maintains a FScopedMovementUpdate for any USceneComponent that has an
@@ -40,13 +42,18 @@ private:
 	virtual void BeginDestroy() override;
 
 	virtual bool IsRelevantImpl(UMovieSceneEntitySystemLinker* InLinker) const override;
+	virtual void OnSchedulePersistentTasks(UE::MovieScene::IEntitySystemScheduler* TaskScheduler) override;
 	virtual void OnRun(FSystemTaskPrerequisites& InPrerequisites, FSystemSubsequentTasks& Subsequents) override;
+	virtual void OnUnlink() override final;
 
 	/** Apply all currently pending movement updates */
 	void ApplyMovementUpdates();
 
 	/** Output the current movement updates to the log */
 	void OutputDeferredMovements();
+
+	/** Check all movements have been flush */
+	void EnsureMovementsFlushed();
 
 	/**
 	 * WARNING: FScopedMovementUpdate is very specifically designed with strict ordering constraints on

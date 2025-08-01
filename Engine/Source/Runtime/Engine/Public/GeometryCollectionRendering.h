@@ -10,19 +10,31 @@
 #include "Rendering/SkinWeightVertexBuffer.h"
 #include "ShaderParameterUtils.h"
 
-class FGeometryCollectionVertexFactoryShaderParameters : public FLocalVertexFactoryShaderParameters
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FGeometryCollectionVertexFactoryUniformShaderParameters, ENGINE_API)
+	SHADER_PARAMETER(FIntVector4,VertexFetch_Parameters)
+	SHADER_PARAMETER(uint32,LODLightmapDataIndex)
+	SHADER_PARAMETER_SRV(Buffer<float2>, VertexFetch_TexCoordBuffer)
+	SHADER_PARAMETER_SRV(Buffer<float>, VertexFetch_PositionBuffer)
+	SHADER_PARAMETER_SRV(Buffer<float4>, VertexFetch_PackedTangentsBuffer)
+	SHADER_PARAMETER_SRV(Buffer<float4>, VertexFetch_ColorComponentsBuffer)
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+
+typedef TUniformBufferRef<FGeometryCollectionVertexFactoryUniformShaderParameters> FGeometryCollectionVertexFactoryUniformShaderParametersRef;
+
+BEGIN_GLOBAL_SHADER_PARAMETER_STRUCT(FGCBoneLooseParameters, ENGINE_API)
+	SHADER_PARAMETER_SRV(Buffer<float4>, VertexFetch_BoneTransformBuffer)
+	SHADER_PARAMETER_SRV(Buffer<float4>, VertexFetch_BonePrevTransformBuffer)
+	SHADER_PARAMETER_SRV(Buffer<uint>, VertexFetch_BoneMapBuffer)
+END_GLOBAL_SHADER_PARAMETER_STRUCT()
+
+typedef TUniformBufferRef<FGCBoneLooseParameters> FGCBoneLooseParametersRef;
+
+class FGeometryCollectionVertexFactoryShaderParameters : public FVertexFactoryShaderParameters
 {
 	DECLARE_TYPE_LAYOUT(FGeometryCollectionVertexFactoryShaderParameters, NonVirtual);
 public:
-
-	// #note: We are reusing VertexFetch_InstanceTransformBuffer that was created for instanced static mesh 
 	void Bind(const FShaderParameterMap& ParameterMap)
 	{
-		FLocalVertexFactoryShaderParameters::Bind(ParameterMap);
-
-		VertexFetch_InstanceTransformBufferParameter.Bind(ParameterMap, TEXT("VertexFetch_InstanceTransformBuffer"));
-		VertexFetch_InstancePrevTransformBufferParameter.Bind(ParameterMap, TEXT("VertexFetch_InstancePrevTransformBuffer"));
-		VertexFetch_InstanceBoneMapBufferParameter.Bind(ParameterMap, TEXT("VertexFetch_InstanceBoneMapBuffer"));
 	}	
 
 	void GetElementShaderBindings(
@@ -36,53 +48,53 @@ public:
 		class FMeshDrawSingleShaderBindings& ShaderBindings,
 		FVertexInputStreamArray& VertexStreams) const;
 
-private:
-	
-		LAYOUT_FIELD(FShaderResourceParameter, VertexFetch_InstanceTransformBufferParameter)
-		LAYOUT_FIELD(FShaderResourceParameter, VertexFetch_InstancePrevTransformBufferParameter)
-		LAYOUT_FIELD(FShaderResourceParameter, VertexFetch_InstanceBoneMapBufferParameter)
-	
 };
 
 /**
  * A vertex factory for Geometry Collections
  */
-struct ENGINE_API FGeometryCollectionVertexFactory : public FLocalVertexFactory
+struct FGeometryCollectionVertexFactory : public FVertexFactory
 {
-    DECLARE_VERTEX_FACTORY_TYPE(FGeometryCollectionVertexFactory);
+	DECLARE_VERTEX_FACTORY_TYPE_API(FGeometryCollectionVertexFactory, ENGINE_API);
+
 public:
-	FGeometryCollectionVertexFactory(ERHIFeatureLevel::Type InFeatureLevel)
-		: FLocalVertexFactory(InFeatureLevel, "FGeometryCollectionVertexFactory")
+	FGeometryCollectionVertexFactory(ERHIFeatureLevel::Type InFeatureLevel, bool EnableLooseParameter = false)
+	: FVertexFactory(InFeatureLevel)
+	, LooseParameterUniformBuffer(nullptr)
+	, EnableLooseParameter(EnableLooseParameter)
 	{
 	}
 
 	// Data includes what we need for transform and everything in local vertex factory too
-	struct FDataType : public FLocalVertexFactory::FDataType
+	struct FDataType : public FStaticMeshDataType
 	{
-		FRHIShaderResourceView* InstanceTransformSRV = nullptr;
-		FRHIShaderResourceView* InstancePrevTransformSRV = nullptr;
-		FRHIShaderResourceView* InstanceBoneMapSRV = nullptr;
+		FRHIShaderResourceView* BoneTransformSRV = nullptr;
+		FRHIShaderResourceView* BonePrevTransformSRV = nullptr;
+		FRHIShaderResourceView* BoneMapSRV = nullptr;
 	};
 
 	//
 	// Permutations are controlled by the material flag
 	//
-	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+	static ENGINE_API bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
 
 	//
 	// Modify compile environment to enable instancing
 	// @param OutEnvironment - shader compile environment to modify
 	//
-	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+	static ENGINE_API void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+
+	static ENGINE_API void ValidateCompiledResult(const FVertexFactoryType* Type, EShaderPlatform Platform, const FShaderParameterMap& ParameterMap, TArray<FString>& OutErrors);
+
+	static ENGINE_API void GetPSOPrecacheVertexFetchElements(EVertexInputStreamType VertexInputStreamType, FVertexDeclarationElementList& Elements);
 
 	//
 	// Set the data on the vertex factory
 	//
-	void SetData(const FDataType& InData)
+	void SetData(FRHICommandListBase& RHICmdList, const FDataType& InData)
 	{
-		FLocalVertexFactory::Data = InData;
 		Data = InData;
-		UpdateRHI();
+		UpdateRHI(RHICmdList);
 	}
 
 	//
@@ -101,37 +113,90 @@ public:
 		BeginUpdateResourceRHI(this);
 	}
 
-	// FRenderResource interface.	
-	virtual void InitRHI() override
+	// FRenderResource interface.
+	ENGINE_API virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	ENGINE_API virtual void ReleaseRHI() override;
+
+	inline FRHIShaderResourceView* GetPositionsSRV() const
 	{
-		FLocalVertexFactory::InitRHI();
+		return Data.PositionComponentSRV;
 	}
 
-	inline void SetInstanceTransformSRV(FRHIShaderResourceView* InstanceTransformSRV)
+	inline FRHIShaderResourceView* GetTangentsSRV() const
 	{
-		Data.InstanceTransformSRV = InstanceTransformSRV;
+		return Data.TangentsSRV;
+	}
+
+	inline FRHIShaderResourceView* GetTextureCoordinatesSRV() const
+	{
+		return Data.TextureCoordinatesSRV;
+	}
+
+	inline FRHIShaderResourceView* GetColorComponentsSRV() const
+	{
+		return Data.ColorComponentsSRV;
+	}
+
+	inline const uint32 GetColorIndexMask() const
+	{
+		return Data.ColorIndexMask;
+	}
+
+	inline const int GetLightMapCoordinateIndex() const
+	{
+		return Data.LightMapCoordinateIndex;
+	}
+
+	inline const int GetNumTexcoords() const
+	{
+		return Data.NumTexCoords;
+	}
+
+	FRHIUniformBuffer* GetUniformBuffer() const
+	{
+		return UniformBuffer.GetReference();
+	}
+
+	FUniformBufferRHIRef GetLooseParameterBuffer() const
+	{
+		return LooseParameterUniformBuffer;
+	}
+
+	inline void SetBoneTransformSRV(FRHIShaderResourceView* BoneTransformSRV)
+	{
+		Data.BoneTransformSRV = BoneTransformSRV;
 	}
 	
-	inline FRHIShaderResourceView* GetInstanceTransformSRV() const
+	inline FRHIShaderResourceView* GetBoneTransformSRV() const
 	{
-		return Data.InstanceTransformSRV;
+		return Data.BoneTransformSRV;
 	}
 
-	inline void SetInstancePrevTransformSRV(FRHIShaderResourceView* InstancePrevTransformSRV)
+	inline void SetBonePrevTransformSRV(FRHIShaderResourceView* BonePrevTransformSRV)
 	{
-		Data.InstancePrevTransformSRV = InstancePrevTransformSRV;
+		Data.BonePrevTransformSRV = BonePrevTransformSRV;
 	}
 
-	inline FRHIShaderResourceView* GetInstancePrevTransformSRV() const
+	inline FRHIShaderResourceView* GetBonePrevTransformSRV() const
 	{
-		return Data.InstancePrevTransformSRV;
+		return Data.BonePrevTransformSRV;
 	}
 
-	inline FRHIShaderResourceView* GetInstanceBoneMapSRV() const
+	inline void SetBoneMapSRV(FRHIShaderResourceView* BoneMapSRV)
 	{
-		return Data.InstanceBoneMapSRV;
+		Data.BoneMapSRV = BoneMapSRV;
 	}
-	
+
+	inline FRHIShaderResourceView* GetBoneMapSRV() const
+	{
+		return Data.BoneMapSRV;
+	}
+
+	FUniformBufferRHIRef LooseParameterUniformBuffer;
+	bool EnableLooseParameter;
+
 private:
 	FDataType Data;
+	TUniformBufferRef<FGeometryCollectionVertexFactoryUniformShaderParameters> UniformBuffer;
+	int32 ColorStreamIndex = INDEX_NONE;
 };

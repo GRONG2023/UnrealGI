@@ -3,23 +3,28 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "HAL/ThreadSafeCounter.h"
-#include "Interfaces/IHttpResponse.h"
 #include "IHttpThreadedRequest.h"
-#include "Containers/Queue.h"
-#include "GenericPlatform/HttpRequestPayload.h"
+#include "Containers/SpscQueue.h"
+#include "GenericPlatform/HttpResponseCommon.h"
 #include "HAL/ThreadSafeBool.h"
 
 class FCurlHttpResponse;
 
-#if WITH_LIBCURL
-#if PLATFORM_WINDOWS || PLATFORM_HOLOLENS
-#include "Windows/WindowsHWrapper.h"
-#include "Windows/AllowWindowsPlatformTypes.h"
+#if WITH_CURL
+#if PLATFORM_MICROSOFT
+#include "Microsoft/AllowMicrosoftPlatformTypes.h"
 #endif
+
+#ifdef PLATFORM_CURL_INCLUDE
+	#include PLATFORM_CURL_INCLUDE
+#else
 	#include "curl/curl.h"
-#if PLATFORM_WINDOWS || PLATFORM_HOLOLENS
-#include "Windows/HideWindowsPlatformTypes.h"
+#endif
+
+#if PLATFORM_MICROSOFT
+#include "Microsoft/HideMicrosoftPlatformTypes.h"
 #endif
 
 #if !defined(CURL_ENABLE_DEBUG_CALLBACK)
@@ -40,7 +45,7 @@ namespace
 	*/
 	void* CurlMalloc(size_t Size)
 	{
-		check(Size);
+		LLM_SCOPE_BYNAME(TEXT("Networking/Curl"));
 		return FMemory::Malloc(Size);
 	}
 
@@ -51,6 +56,7 @@ namespace
 	*/
 	void CurlFree(void* Ptr)
 	{
+		LLM_SCOPE_BYNAME(TEXT("Networking/Curl"));
 		FMemory::Free(Ptr);
 	}
 
@@ -63,8 +69,15 @@ namespace
 	*/
 	void* CurlRealloc(void* Ptr, size_t Size)
 	{
-		check(Size);
-		return FMemory::Realloc(Ptr, Size);
+		void* Return = NULL;
+
+		if (Size)
+		{
+			LLM_SCOPE_BYNAME(TEXT("Networking/Curl"));
+			Return = FMemory::Realloc(Ptr, Size);
+		}
+
+		return Return;
 	}
 
 	/**
@@ -79,6 +92,8 @@ namespace
 		check(ZeroTerminatedString);
 		if (ZeroTerminatedString)
 		{
+			LLM_SCOPE_BYNAME(TEXT("Networking/Curl"));
+
 			SIZE_T StrLen = FCStringAnsi::Strlen(ZeroTerminatedString);
 			Copy = reinterpret_cast<char*>(FMemory::Malloc(StrLen + 1));
 			if (Copy)
@@ -103,6 +118,8 @@ namespace
 		const size_t Size = NumElems * ElemSize;
 		if (Size)
 		{
+			LLM_SCOPE_BYNAME(TEXT("Networking/Curl"));
+
 			Return = FMemory::Malloc(Size);
 
 			if (Return)
@@ -127,11 +144,10 @@ public:
 
 	//~ Begin IHttpBase Interface
 	virtual FString GetURL() const override;
-	virtual FString GetURLParameter(const FString& ParameterName) const override;
 	virtual FString GetHeader(const FString& HeaderName) const override;
 	virtual TArray<FString> GetAllHeaders() const override;
 	virtual FString GetContentType() const override;
-	virtual int32 GetContentLength() const override;
+	virtual uint64 GetContentLength() const override;
 	virtual const TArray<uint8>& GetContent() const override;
 	//~ End IHttpBase Interface
 
@@ -147,9 +163,6 @@ public:
 	virtual void SetHeader(const FString& HeaderName, const FString& HeaderValue) override;
 	virtual void AppendToHeader(const FString& HeaderName, const FString& AdditionalHeaderValue) override;
 	virtual bool ProcessRequest() override;
-	virtual void CancelRequest() override;
-	virtual EHttpRequestStatus::Type GetStatus() const override;
-	virtual const FHttpResponsePtr GetResponse() const override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual float GetElapsedTime() const override;
 	//~ End IHttpRequest Interface
@@ -186,11 +199,7 @@ public:
 	 *
 	 * @param CurlCompletionResult Operation result code as returned by libcurl
 	 */
-	inline void MarkAsCompleted(CURLcode InCurlCompletionResult)
-	{
-		CurlCompletionResult = InCurlCompletionResult;
-		bCurlRequestCompleted = true;
-	}
+	void MarkAsCompleted(CURLcode InCurlCompletionResult);
 	
 	/** 
 	 * Set the result for adding the easy handle to curl multi
@@ -324,13 +333,9 @@ private:
 	 *
 	 * @return true if the request was successfully setup
 	 */
-	bool SetupRequest();
+	virtual bool SetupRequest() override;
 
-	/**
-	 * Process state for a finished request that no longer needs to be ticked
-	 * Calls the completion delegate
-	 */
-	void FinishedRequest();
+	virtual void AbortRequest() override;
 
 	/**
 	 * Trigger the request progress delegate if progress has changed
@@ -342,7 +347,13 @@ private:
 
 	/** Combine a header's key/value in the format "Key: Value" */
 	static FString CombineHeaderKeyValue(const FString& HeaderKey, const FString& HeaderValue);
-	
+
+	virtual void CleanupRequest() override;
+
+	void OnAnyActivityOccur(FStringView Reason);
+
+	virtual void ClearInCaseOfRetry() override;
+
 private:
 
 	/** Pointer to an easy handle specific to this request */
@@ -353,40 +364,34 @@ private:
 	FString			URL;
 	/** Cached verb */
 	FString			Verb;
-	/** Set to true if request has been canceled */
-	bool			bCanceled;
 	/** Set to true when request has been completed */
-	FThreadSafeBool	bCurlRequestCompleted;
+	std::atomic<bool> bCurlRequestCompleted;
 	/** Set to true when request has "30* Multiple Choices" (e.g. 301 Moved Permanently, 302 temporary redirect, 308 Permanent Redirect, etc.) */
 	bool			bRedirected;
 	/** Set to true if request failed to be added to curl multi */
 	CURLMcode		CurlAddToMultiResult;
 	/** Operation result code as returned by libcurl */
 	CURLcode		CurlCompletionResult;
-	/** The response object which we will use to pair with this request */
-	TSharedPtr<class FCurlHttpResponse,ESPMode::ThreadSafe> Response;
-	/** Payload to use with the request. Typically for POST, PUT, or PATCH */
-	TUniquePtr<FRequestPayload> RequestPayload;
 	/** Is the request payload seekable? */
 	bool bIsRequestPayloadSeekable = false;
-	/** Current status of request being processed */
-	EHttpRequestStatus::Type CompletionStatus;
 	/** Mapping of header section to values. */
 	TMap<FString, FString> Headers;
 	/** Total elapsed time in seconds since the start of the request */
 	float ElapsedTime;
-	/** Elapsed time since the last received HTTP response. */
-	float TimeSinceLastResponse;
 	/** Have we had any HTTP activity with the host? Sending headers, SSL handshake, etc */
 	bool bAnyHttpActivity;
+	/** Newly received headers we need to inform listeners about */
+	TSpscQueue<TPair<FString, FString>> NewlyReceivedHeaders;
 	/** Number of bytes sent already */
-	FThreadSafeCounter BytesSent;
+	std::atomic<int64> BytesSent;
 	/** Total number of bytes sent already (includes data re-sent by seek attempts) */
-	FThreadSafeCounter TotalBytesSent;
+	std::atomic<int64> TotalBytesSent;
+	/** Caches how many bytes of the response we've read so far */
+	std::atomic<int64> TotalBytesRead;
 	/** Last bytes read reported to progress delegate */
-	int32 LastReportedBytesRead;
+	uint64 LastReportedBytesRead;
 	/** Last bytes sent reported to progress delegate */
-	int32 LastReportedBytesSent;
+	uint64 LastReportedBytesSent;
 	/** Number of info channel messages to cache */
 	static const constexpr int32 NumberOfInfoMessagesToCache = 50;
 	/** Index of least recently cached message */
@@ -400,25 +405,17 @@ private:
 /**
  * Curl implementation of an HTTP response
  */
-class FCurlHttpResponse : public IHttpResponse
+class FCurlHttpResponse : public FHttpResponseCommon
 {
-private:
-
-	/** Request that owns this response */
-	FCurlHttpRequest& Request;
-
-
 public:
 	// implementation friends
 	friend class FCurlHttpRequest;
 
 	//~ Begin IHttpBase Interface
-	virtual FString GetURL() const override;
-	virtual FString GetURLParameter(const FString& ParameterName) const override;
 	virtual FString GetHeader(const FString& HeaderName) const override;
 	virtual TArray<FString> GetAllHeaders() const override;	
 	virtual FString GetContentType() const override;
-	virtual int32 GetContentLength() const override;
+	virtual uint64 GetContentLength() const override;
 	virtual const TArray<uint8>& GetContent() const override;
 	//~ End IHttpBase Interface
 
@@ -432,31 +429,23 @@ public:
 	 *
 	 * @param InRequest - original request that created this response
 	 */
-	FCurlHttpResponse(FCurlHttpRequest& InRequest);
-
-	/**
-	 * Destructor
-	 */
-	virtual ~FCurlHttpResponse();
+	FCurlHttpResponse(const FCurlHttpRequest& InRequest);
 
 private:
-
 	/** BYTE array to fill in as the response is read via didReceiveData */
 	TArray<uint8> Payload;
-	/** Caches how many bytes of the response we've read so far */
-	FThreadSafeCounter TotalBytesRead;
+	/** The stream to receive response body */
+	TSharedPtr<FArchive> ResponseBodyReceiveStream;
 	/** Cached key/value header pairs. Parsed once request completes. Only accessible on the game thread. */
 	TMap<FString, FString> Headers;
-	/** Newly received headers we need to inform listeners about */
-	TQueue<TPair<FString, FString>> NewlyReceivedHeaders;
 	/** Cached code from completed response */
 	int32 HttpCode;
 	/** Cached content length from completed response */
-	int32 ContentLength;
+	uint64 ContentLength;
 	/** True when the response has finished async processing */
 	int32 volatile bIsReady;
 	/** True if the response was successfully received/processed */
 	int32 volatile bSucceeded;
 };
 
-#endif //WITH_LIBCURL
+#endif //WITH_CURL

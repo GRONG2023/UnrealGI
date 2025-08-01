@@ -1,20 +1,66 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimSequenceDetails.h"
-#include "Animation/AnimSequence.h"
-#include "SlateOptMacros.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/SViewport.h"
-#include "Animation/DebugSkelMeshComponent.h"
-#include "Viewports.h"
-#include "PropertyHandle.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailWidgetRow.h"
-#include "DetailCategoryBuilder.h"
-#include "IDetailsView.h"
+
 #include "AnimMontageSegmentDetails.h"
 #include "AnimPreviewInstance.h"
+#include "Animation/AnimEnums.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimSequence.h"
+#include "Animation/AnimSingleNodeInstance.h"
+#include "Animation/AnimTypes.h"
+#include "Animation/DebugSkelMeshComponent.h"
+#include "Components/SceneComponent.h"
+#include "Components/SkinnedMeshComponent.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Editor/UnrealEdTypes.h"
+#include "EditorViewportClient.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/World.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Math/BoxSphereBounds.h"
+#include "Math/Transform.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "PreviewScene.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SSearchableComboBox.h"
+#include "SceneInterface.h"
 #include "Slate/SceneViewport.h"
+#include "SlateOptMacros.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/SoftObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Viewports.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SViewport.h"
+#include "Widgets/Text/STextBlock.h"
+#include "PropertyCustomizationHelpers.h"
+#include "IDetailChildrenBuilder.h"
+
+class SWidget;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE	"AnimSequenceDetails"
 
@@ -30,9 +76,11 @@ BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 void FAnimSequenceDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 {
 	/////////////////////////////////////////////////////////////////////////////////
-	// retarget source handler in Animation
+	// Animation
 	/////////////////////////////////////////////////////////////////////////////////
 	IDetailCategoryBuilder& AnimationCategory = DetailBuilder.EditCategory("Animation");
+
+	// *** Retarget source handler ***
 	RetargetSourceNameHandler = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UAnimSequence, RetargetSource));
 	RetargetSourceAssetHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UAnimSequence, RetargetSourceAsset));
 
@@ -79,12 +127,17 @@ void FAnimSequenceDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 	if (TargetSkeleton.IsValid())
 	{
 		RegisterRetargetSourceChanged();
-		// go through profile and see if it has mine
-		for (auto Iter = TargetSkeleton->AnimRetargetSources.CreateConstIterator(); Iter; ++Iter)
-		{
-			RetargetSourceComboList.Add( MakeShareable( new FString ( Iter.Key().ToString() )));
 
-			if (Iter.Key() == CurrentPoseName) 
+		// Add each retarget source
+		TArray<FName> RetargetSources;
+		TargetSkeleton->GetRetargetSources(RetargetSources);
+		
+		// go through profile and see if it has mine
+		for (FName& RetargetSource : RetargetSources)
+		{
+			RetargetSourceComboList.Add( MakeShareable( new FString ( RetargetSource.ToString() )));
+
+			if (RetargetSource == CurrentPoseName) 
 			{
 				InitialSelected = RetargetSourceComboList.Last();
 			}
@@ -92,7 +145,9 @@ void FAnimSequenceDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 	}
 
 	// add widget for editing retarget source
-	AnimationCategory.AddCustomRow(RetargetSourceNameHandler->GetPropertyDisplayName())
+	AnimationCategory
+	.AddCustomRow(RetargetSourceNameHandler->GetPropertyDisplayName())
+	.RowTag(RetargetSourceNameHandler->GetProperty()->GetFName())
 	.NameContent()
 	[
 		RetargetSourceNameHandler->CreatePropertyNameWidget()
@@ -116,7 +171,9 @@ void FAnimSequenceDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 		]	
 	];
 
-	AnimationCategory.AddCustomRow(RetargetSourceAssetHandle->GetPropertyDisplayName())
+	AnimationCategory
+	.AddCustomRow(RetargetSourceAssetHandle->GetPropertyDisplayName())
+	.RowTag(RetargetSourceAssetHandle->GetProperty()->GetFName())
 	.NameContent()
 	[
 		RetargetSourceAssetHandle->CreatePropertyNameWidget()
@@ -145,6 +202,38 @@ void FAnimSequenceDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 
 	DetailBuilder.HideProperty(RetargetSourceNameHandler);
 	DetailBuilder.HideProperty(RetargetSourceAssetHandle);
+
+	// *** Animation Track Names ***
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	AnimationTrackNamesHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UAnimSequence, AnimationTrackNames));
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	if (AnimationTrackNamesHandle.IsValid())
+	{
+		TArray<TWeakObjectPtr<UAnimSequence>> AnimSequences = DetailBuilder.GetSelectedObjectsOfType<UAnimSequence>();
+		AnimationTrackNamesList.Empty();
+
+		if (!AnimSequences.IsEmpty())
+		{
+			for (const TWeakObjectPtr<UAnimSequence>& AnimSequenceWeak : AnimSequences)
+			{
+				if(AnimSequenceWeak.IsValid())
+				{ 
+					if (AnimSequenceWeak->IsDataModelValid())
+					{
+						AnimSequenceWeak->GetDataModelInterface()->GetBoneTrackNames(AnimationTrackNamesList);
+					}
+				}
+			}
+		}
+
+		TSharedRef<FDetailArrayBuilder> AnimationTrackNamesArrayBuilder = MakeShareable(new FDetailArrayBuilder(AnimationTrackNamesHandle.ToSharedRef(), true, false, true));
+		AnimationTrackNamesArrayBuilder->OnGenerateArrayElementWidget(FOnGenerateArrayElementWidget::CreateSP(this, &FAnimSequenceDetails::GenerateAnimationTrackNameArrayElementWidget, &DetailBuilder));
+		AnimationCategory.AddCustomBuilder(AnimationTrackNamesArrayBuilder);
+
+		DetailBuilder.HideProperty(AnimationTrackNamesHandle);
+	}
+
 
 	/////////////////////////////////////////////////////////////////////////////
 	// Additive settings category
@@ -192,6 +281,43 @@ void FAnimSequenceDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 }
 END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
+void FAnimSequenceDetails::GenerateAnimationTrackNameArrayElementWidget(TSharedRef<IPropertyHandle> PropertyHandle, int32 ArrayIndex, IDetailChildrenBuilder& ChildrenBuilder, IDetailLayoutBuilder* DetailLayout)
+{
+	IDetailPropertyRow& PropRow = ChildrenBuilder.AddProperty(PropertyHandle);
+	PropRow.ShowPropertyButtons(false);
+	PropRow.OverrideResetToDefault(FResetToDefaultOverride::Hide());
+
+	FDetailWidgetRow& WidgetRow = PropRow.CustomWidget(true);
+
+	WidgetRow.NameContent()
+	[
+		PropertyHandle->CreatePropertyNameWidget()
+	];
+
+	WidgetRow.ValueContent()
+	[
+		SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.HAlign(HAlign_Fill)
+			.Padding(5, 0, 0, 0)
+			.AutoWidth()
+			[
+				SNew(SEditableTextBox)
+					.Text_Lambda([this, ArrayIndex]()
+					{
+						if (AnimationTrackNamesList.IsValidIndex(ArrayIndex))
+						{
+							return FText::FromName(AnimationTrackNamesList[ArrayIndex]);
+						}
+						
+						return FText::GetEmpty();
+					})
+					.IsReadOnly(true)
+			]
+	];
+}
+
 void FAnimSequenceDetails::CreateOverridenProperty(IDetailLayoutBuilder& DetailBuilder, IDetailCategoryBuilder& AdditiveSettingsCategory, TSharedPtr<IPropertyHandle> PropertyHandle, TAttribute<EVisibility> VisibilityAttribute)
 {
 	DetailBuilder.HideProperty(PropertyHandle);
@@ -230,7 +356,7 @@ EVisibility FAnimSequenceDetails::ShouldShowRefFrameIndex() const
 	uint8 RefPoseType = ABPT_None; 
 	AdditiveAnimTypeHandle->GetValue(AdditiveAnimType);
 	RefPoseTypeHandle->GetValue(RefPoseType);
-	return TargetSkeleton.IsValid() && AdditiveAnimType != AAT_None && RefPoseType == ABPT_AnimFrame? EVisibility::Visible : EVisibility::Collapsed;
+	return TargetSkeleton.IsValid() && AdditiveAnimType != AAT_None && (RefPoseType == ABPT_AnimFrame || RefPoseType == ABPT_LocalAnimFrame)? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 
@@ -354,7 +480,7 @@ EVisibility FAnimSequenceDetails::UpdateRetargetSourceAssetDataVisibility() cons
 
 FReply FAnimSequenceDetails::UpdateRetargetSourceAssetData()
 {
-	RetargetSourceAssetHandle->NotifyPostChange();
+	RetargetSourceAssetHandle->NotifyPostChange(EPropertyChangeType::Unspecified);
 	return FReply::Handled();
 }
 
@@ -471,41 +597,55 @@ END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
 void SAnimationRefPoseViewport::InitSkeleton()
 {
-	UObject *Object = NULL;
+	UObject *Object = nullptr;
 	AnimRefPropertyHandle->GetValue(Object);
-	AnimRef = Cast<UAnimSequence>(Object);
-	USkeleton *Skeleton = NULL;
-	if(AnimRef != NULL)
+	PreviewAnimationSequence = Cast<UAnimSequence>(Object);
+	const USkeleton* Skeleton = nullptr;
+	if(PreviewAnimationSequence != nullptr)
 	{
-		Skeleton = AnimRef->GetSkeleton();
-	}
-	else
-	{
-		Skeleton = TargetSkeleton;
+		Skeleton = PreviewAnimationSequence->GetSkeleton();
 	}
 
 	// if skeleton doesn't match with target skeleton, this is error, we can't support it
-	if ( Skeleton == TargetSkeleton)
-	{
-		if(PreviewComponent != NULL && Skeleton != NULL)
+	if (PreviewComponent && Skeleton && (Skeleton == TargetSkeleton))
+	{	
+		UAnimSingleNodeInstance* PreviewAnimInstance = PreviewComponent->PreviewInstance;
+		USkeletalMesh* PreviewSkeletalMesh = [Skeleton, this]() -> USkeletalMesh*
 		{
-			UAnimSingleNodeInstance * Preview = PreviewComponent->PreviewInstance;
-			USkeletalMesh* PreviewSkeletalMesh = Skeleton->GetPreviewMesh();
-			if((Preview == NULL || Preview->GetCurrentAsset() != AnimRef) || PreviewComponent->SkeletalMesh != PreviewSkeletalMesh)
+			// Try preview mesh on Anim Sequence
+			USkeletalMesh* Mesh = PreviewAnimationSequence->GetPreviewMesh(); 
+			
+			// Otherwise try skeleton preview mesh
+			if (Mesh == nullptr)
 			{
-				PreviewComponent->SetSkeletalMesh(PreviewSkeletalMesh);
-				PreviewComponent->EnablePreview(true, AnimRef);
-				PreviewComponent->PreviewInstance->SetLooping(true);
-
-				//Place the camera at a good viewer position
-				FVector NewPosition = LevelViewportClient->GetViewLocation();
-				NewPosition.Normalize();
-				if(PreviewSkeletalMesh)
-				{
-					NewPosition *= (PreviewSkeletalMesh->GetImportedBounds().SphereRadius*1.5f);
-				}
-				LevelViewportClient->SetViewLocation( NewPosition );
+				Mesh = Skeleton->GetPreviewMesh();
 			}
+
+			// Last resort try to find a _any_ compatible mesh for the skeleton
+			if (Mesh == nullptr)
+			{
+				Mesh = Skeleton->FindCompatibleMesh();
+			}
+
+			return Mesh;
+		}();
+		
+		const bool bInvalidPreviewInstance = PreviewAnimInstance == nullptr || PreviewAnimInstance->GetCurrentAsset() != PreviewAnimationSequence;
+		const bool bPreviewMeshMismatch = PreviewComponent->GetSkeletalMeshAsset() != PreviewSkeletalMesh;
+		if(bInvalidPreviewInstance || bPreviewMeshMismatch)
+		{
+			PreviewComponent->SetSkeletalMesh(PreviewSkeletalMesh);
+			PreviewComponent->EnablePreview(true, PreviewAnimationSequence);
+			PreviewComponent->PreviewInstance->SetLooping(true);
+
+			//Place the camera at a good viewer position
+			FVector NewPosition = LevelViewportClient->GetViewLocation();
+			NewPosition.Normalize();
+			if(PreviewSkeletalMesh)
+			{
+				NewPosition *= (PreviewSkeletalMesh->GetImportedBounds().SphereRadius*1.5f);
+			}
+			LevelViewportClient->SetViewLocation( NewPosition );
 		}
 	}
 }
@@ -526,7 +666,7 @@ void SAnimationRefPoseViewport::Tick( const FGeometry& AllottedGeometry, const d
 		// Reinit the skeleton if the anim ref has changed
 		InitSkeleton();
 
-		if ( Component->IsPreviewOn() && AnimRef != NULL )
+		if ( Component->IsPreviewOn() && PreviewAnimationSequence != NULL )
 		{
 			if ( PreviewComponent != NULL && PreviewComponent->PreviewInstance != NULL )
 			{
@@ -536,8 +676,8 @@ void SAnimationRefPoseViewport::Tick( const FGeometry& AllottedGeometry, const d
 				{
 					int RefFrameIndex;
 					RefFrameIndexPropertyHandle->GetValue( RefFrameIndex );
-					float Fraction = ( AnimRef->GetRawNumberOfFrames() > 0 ) ? FMath::Clamp<float>( (float)RefFrameIndex / (float)AnimRef->GetRawNumberOfFrames(), 0.f, 1.f ) : 0.f;
-					float RefTime = AnimRef->SequenceLength * Fraction;
+					float Fraction = ( PreviewAnimationSequence->GetNumberOfSampledKeys() > 0 ) ? FMath::Clamp<float>( (float)RefFrameIndex / (float)PreviewAnimationSequence->GetNumberOfSampledKeys(), 0.f, 1.f ) : 0.f;
+					float RefTime = PreviewAnimationSequence->GetPlayLength() * Fraction;
 					PreviewComponent->PreviewInstance->SetPosition( RefTime, false );
 					PreviewComponent->PreviewInstance->SetPlaying( false );
 					LevelViewportClient->Invalidate();
@@ -550,11 +690,11 @@ void SAnimationRefPoseViewport::Tick( const FGeometry& AllottedGeometry, const d
 		{
 			Description->SetText( FText::Format( LOCTEXT( "Previewing", "Previewing {0}" ), FText::FromString( Component->AnimClass->GetName() ) ) );
 		}
-		else if ( AnimRef && AnimRef->GetSkeleton() != TargetSkeleton )
+		else if ( PreviewAnimationSequence && !PreviewAnimationSequence->GetSkeleton()->IsCompatibleForEditor(TargetSkeleton) )
 		{
-			Description->SetText( FText::Format( LOCTEXT( "IncorrectSkeleton", "The preview asset doesn't work for the skeleton '{0}'" ), FText::FromString( TargetSkeletonName ) ) );
+			Description->SetText( FText::Format( LOCTEXT( "IncorrectSkeleton", "The preview asset is incompatible with the skeleton '{0}'" ), FText::FromString( TargetSkeletonName ) ) );
 		}
-		else if ( Component->SkeletalMesh == NULL )
+		else if ( Component->GetSkeletalMeshAsset() == NULL )
 		{
 			Description->SetText( FText::Format( LOCTEXT( "NoMeshFound", "No skeletal mesh found for skeleton '{0}'" ), FText::FromString( TargetSkeletonName ) ) );
 		}
@@ -617,12 +757,12 @@ float SAnimationRefPoseViewport::GetViewMaxInput() const
 TArray<float> SAnimationRefPoseViewport::GetBars() const
 {
 	TArray<float> Bars;
-	if (AnimRef)
+	if (PreviewAnimationSequence)
 	{
-		int RefFrameIndex;
+		int32 RefFrameIndex;
 		RefFrameIndexPropertyHandle->GetValue(RefFrameIndex);
-		float Fraction = (AnimRef->GetRawNumberOfFrames() > 0)? FMath::Clamp<float>((float)RefFrameIndex/(float)AnimRef->GetRawNumberOfFrames(), 0.f, 1.f) : 0.f;
-		Bars.Add(AnimRef->SequenceLength * Fraction);
+		float Fraction = (PreviewAnimationSequence->GetNumberOfSampledKeys() > 0)? FMath::Clamp<float>((float)RefFrameIndex/(float)PreviewAnimationSequence->GetNumberOfSampledKeys(), 0.f, 1.f) : 0.f;
+		Bars.Add(PreviewAnimationSequence->GetPlayLength() * Fraction);
 	}
 	else
 	{
@@ -633,9 +773,9 @@ TArray<float> SAnimationRefPoseViewport::GetBars() const
 
 void SAnimationRefPoseViewport::OnBarDrag(int32 Index, float Position)
 {
-	if (AnimRef)
+	if (PreviewAnimationSequence)
 	{
-		int RefFrameIndex = FMath::Clamp<int>(AnimRef->SequenceLength > 0.0f? (int)(Position * (float)AnimRef->GetRawNumberOfFrames() / AnimRef->SequenceLength + 0.5f) : 0.0f, 0, AnimRef->GetRawNumberOfFrames() - 1);
+		int RefFrameIndex = FMath::Clamp<int>(PreviewAnimationSequence->GetPlayLength() > 0.0f? (int)(Position * (float)PreviewAnimationSequence->GetNumberOfSampledKeys() / PreviewAnimationSequence->GetPlayLength() + 0.5f) : 0.0f, 0, PreviewAnimationSequence->GetNumberOfSampledKeys() - 1);
 		RefFrameIndexPropertyHandle->SetValue(RefFrameIndex);
 	}
 }

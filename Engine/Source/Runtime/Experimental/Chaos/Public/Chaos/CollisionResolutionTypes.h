@@ -2,21 +2,48 @@
 #pragma once
 
 #include "Chaos/Core.h"
+#include "Chaos/ObjectPool.h"
 #include "Chaos/ParticleHandleFwd.h"
-#include "Chaos/Vector.h"
+
+// Whether to use a pool for MidPhases and Collision Constraints
+#define CHAOS_COLLISION_OBJECTPOOL_ENABLED 1
+#define CHAOS_MIDPHASE_OBJECTPOOL_ENABLED 0
 
 namespace Chaos
 {
+	namespace Private
+	{
+		template<typename T> class TConvexContactPoint;
+		using FConvexContactPoint = TConvexContactPoint<FReal>;
+		using FConvexContactPointf = TConvexContactPoint<FRealSingle>;
+
+		enum class EConvexFeatureType : int8;
+	}
+
+	// Float and Double versions of ContactPoint
+	template<typename T> class TContactPoint;
+	using FContactPoint = TContactPoint<FReal>;
+	using FContactPointf = TContactPoint<FRealSingle>;
+
+	// C-Style array type
+	template<typename T, int32 N> class TCArray;
+
+	// A set of contact points for a manifold (standard size is up to 4 contacts)
+	using FContactPointManifold = TCArray<FContactPoint, 4>;
+
+	// A set of contact points for a manifold that may be more than 4 points
+	using FContactPointLargeManifold = TArray<FContactPoint>;
+
 
 	/** Specifies the type of work we should do*/
-	enum class CHAOS_API ECollisionUpdateType
+	enum class ECollisionUpdateType
 	{
 		Any,	//stop if we have at least one deep penetration. Does not compute location or normal
 		Deepest	//find the deepest penetration. Compute location and normal
 	};
 
 	/** Return value of the collision modification callback */
-	enum class CHAOS_API ECollisionModifierResult
+	enum class ECollisionModifierResult
 	{
 		Unchanged,	/** No change to the collision */
 		Modified,	/** Modified the collision, but want it to remain enabled */
@@ -24,7 +51,7 @@ namespace Chaos
 	};
 
 	/** The shape types involved in a contact constraint. Used to look up the collision detection function */
-	enum class CHAOS_API EContactShapesType
+	enum class EContactShapesType : int8
 	{
 		Unknown,
 		SphereSphere,
@@ -53,59 +80,51 @@ namespace Chaos
 		NumShapesTypes
 	};
 
-	enum class CHAOS_API EContactManifoldType
+	/** How to treat collisions between two particles that both have OneWayInteraction enabled */
+	enum class EOneWayInteractionPairCollisionMode
 	{
-		None,			// No manifold - run collision detection whenever we need latest contact
-		OneShot,		// A manifold is created once and reused. The manifold consists of a plane attached to one shape and a set of points on the other
-		Incremental,	// Run collision detection whenever we need the latest contact point, but keep track of and match contact points
+		// Ignore collisions
+		IgnoreCollision,
+
+		// Collide using particle's regular shapes
+		NormalCollision,
+
+		// Collide as spheres
+		SphereCollision,
 	};
 
 	//
 	//
 	//
 
-	struct CHAOS_API FRigidBodyContactConstraintPGS
-	{
-		FRigidBodyContactConstraintPGS() : AccumulatedImpulse(0.f) {}
-		TGeometryParticleHandle<FReal, 3>* Particle;
-		TGeometryParticleHandle<FReal, 3>* Levelset;
-		TArray<FVec3> Normal;
-		TArray<FVec3> Location;
-		TArray<FReal> Phi;
-		FVec3 AccumulatedImpulse;
-	};
-
-
-	//TODO: move into a better forward declare location
+	class FCollisionContext;
+	class FGenericParticlePairMidPhase;
+	class FParticlePairMidPhase;
+	class FPBDCollisionConstraints;
+	class FPBDCollisionConstraint;
 	class FPBDCollisionConstraintHandle;
+	class FPerShapeData;
+	class FShapePairParticlePairMidPhase;
 
-	/** Used to modify collision constraints via callback */
-	class CHAOS_API FPBDCollisionConstraintHandleModification
-	{
-	public:
-		FPBDCollisionConstraintHandleModification(FPBDCollisionConstraintHandle* InHandle)
-			: Handle(InHandle)
-			, Result(ECollisionModifierResult::Unchanged)
-		{
-		}
+// Collision and MidPhases are stored in an ObjectPool (if CHAOS_COLLISION_OBJECTPOOL_ENABLED or CHAOS_MIDPHASE_OBJECTPOOL_ENABLED is set). 
+// @see FCollisionConstraintAllocator
+#if CHAOS_COLLISION_OBJECTPOOL_ENABLED 
+	using FPBDCollisionConstraintPool = TObjectPool<FPBDCollisionConstraint>;
+	using FPBDCollisionConstraintDeleter = TObjectPoolDeleter<FPBDCollisionConstraintPool>;
+	using FPBDCollisionConstraintPtr = TUniquePtr<FPBDCollisionConstraint, FPBDCollisionConstraintDeleter>;
+#else 
+	using FPBDCollisionConstraintPtr = TUniquePtr<FPBDCollisionConstraint>;
+#endif
 
-		void DisableConstraint() { Result = ECollisionModifierResult::Disabled; }
-
-		//TODO: a better API would be to only return a mutable handle when this is set.
-		//The problem is the current callback logic makes this cumbersome
-		void ModifyConstraint()
-		{
-			Result = ECollisionModifierResult::Modified;
-		}
-
-		FPBDCollisionConstraintHandle* GetHandle() const { return Handle; }
-
-		ECollisionModifierResult GetResult() const { return Result; }
-
-	private:
-		FPBDCollisionConstraintHandle* Handle;
-		ECollisionModifierResult Result;
-	};
-
-	using FCollisionModifierCallback = TFunction<void(const TArrayView<FPBDCollisionConstraintHandleModification>& Handle)>;
+#if CHAOS_MIDPHASE_OBJECTPOOL_ENABLED
+	// Not yet supported due to awkwardness of defining a deleter for FParticlePairMidPhasePtr when we have pools of derived types.
+	// We probably need a custom deleter (not TObjectPoolDeleter) and to store a pointer to the CollisionConstraintAllocator.
+	static_assert(false, "CHAOS_MIDPHASE_OBJECTPOOL_ENABLED not supported yet")
+	using FGenericParticlePairMidPhasePool = TObjectPool<FGenericParticlePairMidPhase>;
+	using FShapePairParticlePairMidPhasePool = TObjectPool<FShapePairParticlePairMidPhase>;
+	using FParticlePairMidPhaseDeleter = TObjectPoolDeleter<???>;
+	using FParticlePairMidPhasePtr = TUniquePtr<FParticlePairMidPhase, FParticlePairMidPhaseDeleter>;
+#else
+	using FParticlePairMidPhasePtr = TUniquePtr<FParticlePairMidPhase>;
+#endif
 }

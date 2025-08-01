@@ -8,6 +8,7 @@
 #include "Styling/SlateColor.h"
 #include "Styling/SlateTypes.h"
 #include "Widgets/SWidget.h"
+#include "Binding/States/WidgetStateRegistration.h"
 #include "Components/ContentWidget.h"
 
 #include "CheckBox.generated.h"
@@ -26,91 +27,49 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam( FOnCheckBoxComponentStateChanged, b
  * * Single Child
  * * Toggle
  */
-UCLASS()
-class UMG_API UCheckBox : public UContentWidget
+UCLASS(MinimalAPI)
+class UCheckBox : public UContentWidget
 {
 	GENERATED_UCLASS_BODY()
 
 public:
+	UE_DEPRECATED(5.1, "Direct access to CheckedState is deprecated. Please use the getter or setter.")
 	/** Whether the check box is currently in a checked state */
-	UPROPERTY(EditAnywhere, Category=Appearance)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintGetter="GetCheckedState", BlueprintSetter="SetCheckedState", FieldNotify, Category="Appearance")
 	ECheckBoxState CheckedState;
 
+	UE_DEPRECATED(5.2, "Direct access to CheckedStateDelegate is deprecated. Please use the InitCheckedStateDelegate() function.")
 	/** A bindable delegate for the IsChecked. */
 	UPROPERTY()
 	FGetCheckBoxState CheckedStateDelegate;
 
-public:
+	UE_DEPRECATED(5.1, "Direct access to WidgetStyle is deprecated. Please use the getter or setter.")
 	/** The checkbox bar style */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Style", meta=( DisplayName="Style" ))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, Category="Style", meta = (DisplayName="Style"))
 	FCheckBoxStyle WidgetStyle;
 
-	/** Style of the check box */
-	UPROPERTY()
-	USlateWidgetStyleAsset* Style_DEPRECATED;
-
-	/** Image to use when the checkbox is unchecked */
-	UPROPERTY()
-	USlateBrushAsset* UncheckedImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is unchecked and hovered */
-	UPROPERTY()
-	USlateBrushAsset* UncheckedHoveredImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is unchecked and pressed */
-	UPROPERTY()
-	USlateBrushAsset* UncheckedPressedImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is checked */
-	UPROPERTY()
-	USlateBrushAsset* CheckedImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is checked and hovered */
-	UPROPERTY()
-	USlateBrushAsset* CheckedHoveredImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is checked and pressed */
-	UPROPERTY()
-	USlateBrushAsset* CheckedPressedImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is in an ambiguous state and hovered */
-	UPROPERTY()
-	USlateBrushAsset* UndeterminedImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is checked and hovered */
-	UPROPERTY()
-	USlateBrushAsset* UndeterminedHoveredImage_DEPRECATED;
-	
-	/** Image to use when the checkbox is in an ambiguous state and pressed */
-	UPROPERTY()
-	USlateBrushAsset* UndeterminedPressedImage_DEPRECATED;
-
 	/** How the content of the toggle button should align within the given space */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category=Appearance)
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Appearance")
 	TEnumAsByte<EHorizontalAlignment> HorizontalAlignment;
 
-	/** Spacing between the check box image and its content */
-	UPROPERTY()
-	FMargin Padding_DEPRECATED;
-
-	/** The color of the background border */
-	UPROPERTY()
-	FSlateColor BorderBackgroundColor_DEPRECATED;
-
+	UE_DEPRECATED(5.1, "Direct access to ClickMethod is deprecated. Please use the getter or setter.")
 	/** The type of mouse action required by the user to trigger the buttons 'Click' */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction", AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter="SetClickMethod", Category="Interaction", AdvancedDisplay)
 	TEnumAsByte<EButtonClickMethod::Type> ClickMethod;
 
+	UE_DEPRECATED(5.1, "Direct access to TouchMethod is deprecated. Please use the getter or setter.")
 	/** The type of touch action required by the user to trigger the buttons 'Click' */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction", AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter="SetTouchMethod", Category="Interaction", AdvancedDisplay)
 	TEnumAsByte<EButtonTouchMethod::Type> TouchMethod;
 
+	UE_DEPRECATED(5.1, "Direct access to PressMethod is deprecated. Please use the getter or setter.")
 	/** The type of keyboard/gamepad button press action required by the user to trigger the buttons 'Click' */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction", AdvancedDisplay)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Getter, Setter, BlueprintSetter="SetPressMethod", Category="Interaction", AdvancedDisplay)
 	TEnumAsByte<EButtonPressMethod::Type> PressMethod;
 
+	UE_DEPRECATED(5.2, "Direct access to bIsFocusable is deprecated. Please use the getter. Note that this property is only set at construction and is not modifiable at runtime.")
 	/** Sometimes a button should only be mouse-clickable and never keyboard focusable. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Interaction")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Getter, Category="Interaction")
 	bool IsFocusable;
 
 public:
@@ -123,74 +82,130 @@ public:
 
 	/** Returns true if this button is currently pressed */
 	UFUNCTION(BlueprintCallable, Category="Widget")
-	bool IsPressed() const;
+	UMG_API bool IsPressed() const;
 	
 	/** Returns true if the checkbox is currently checked */
 	UFUNCTION(BlueprintCallable, Category="Widget")
-	bool IsChecked() const;
+	UMG_API bool IsChecked() const;
 
 	/** Returns the full current checked state. */
 	UFUNCTION(BlueprintCallable, Category="Widget")
-	ECheckBoxState GetCheckedState() const;
+	UMG_API ECheckBoxState GetCheckedState() const;
 
 	/** Sets the checked state. */
 	UFUNCTION(BlueprintCallable, Category="Widget")
-	void SetIsChecked(bool InIsChecked);
+	UMG_API void SetIsChecked(bool InIsChecked);
 
 	/** Sets the checked state. */
 	UFUNCTION(BlueprintCallable, Category="Widget")
-	void SetCheckedState(ECheckBoxState InCheckedState);
+	UMG_API void SetCheckedState(ECheckBoxState InCheckedState);
 
-	UFUNCTION(BlueprintCallable, Category = "Button")
-	void SetClickMethod(EButtonClickMethod::Type InClickMethod);
+	/** Returns the local style. */
+	UMG_API const FCheckBoxStyle& GetWidgetStyle() const;
 
-	UFUNCTION(BlueprintCallable, Category = "Button")
-	void SetTouchMethod(EButtonTouchMethod::Type InTouchMethod);
+	/** Sets the style. */
+	UMG_API void SetWidgetStyle(const FCheckBoxStyle& InStyle);
 
-	UFUNCTION(BlueprintCallable, Category = "Button")
-	void SetPressMethod(EButtonPressMethod::Type InPressMethod);
+	/** Returns the click method. */
+	UMG_API EButtonClickMethod::Type GetClickMethod() const;
+
+	/** Sets the click method. */
+	UFUNCTION(BlueprintCallable, Category="Button")
+	UMG_API void SetClickMethod(EButtonClickMethod::Type InClickMethod);
+
+	/** Returns the touch method. */
+	UMG_API EButtonTouchMethod::Type GetTouchMethod() const;
+
+	/** Sets the touch method. */
+	UFUNCTION(BlueprintCallable, Category="Button")
+	UMG_API void SetTouchMethod(EButtonTouchMethod::Type InTouchMethod);
+
+	/** Returns the press method. */
+	UMG_API EButtonPressMethod::Type GetPressMethod() const;
+
+	/** Sets the press method. */
+	UFUNCTION(BlueprintCallable, Category="Button")
+	UMG_API void SetPressMethod(EButtonPressMethod::Type InPressMethod);
+
+	/** Is the checkbox focusable. */
+	UMG_API bool GetIsFocusable() const;
 
 public:
 	
 	//~ Begin UWidget Interface
-	virtual void SynchronizeProperties() override;
+	UMG_API virtual void SynchronizeProperties() override;
 	//~ End UWidget Interface
 
 	//~ Begin UVisual Interface
-	virtual void ReleaseSlateResources(bool bReleaseChildren) override;
+	UMG_API virtual void ReleaseSlateResources(bool bReleaseChildren) override;
 	//~ End UVisual Interface
 
-	//~ Begin UObject Interface
-	virtual void PostLoad() override;
-	//~ End UObject Interface
-
 #if WITH_EDITOR
-	virtual const FText GetPaletteCategory() override;
+	UMG_API virtual const FText GetPaletteCategory() override;
 #endif
 
 protected:
 
 	// UPanelWidget
-	virtual void OnSlotAdded(UPanelSlot* Slot) override;
-	virtual void OnSlotRemoved(UPanelSlot* Slot) override;
+	UMG_API virtual void OnSlotAdded(UPanelSlot* Slot) override;
+	UMG_API virtual void OnSlotRemoved(UPanelSlot* Slot) override;
 	// End UPanelWidget
 
+	/** Initialize IsFocusable in the constructor before the SWidget is constructed. */
+	UMG_API void InitIsFocusable(bool InIsFocusable);
+
+	UMG_API void InitCheckedStateDelegate(FGetCheckBoxState InCheckedStateDelegate);
 protected:
 	//~ Begin UWidget Interface
-	virtual TSharedRef<SWidget> RebuildWidget() override;
+	UMG_API virtual TSharedRef<SWidget> RebuildWidget() override;
 #if WITH_EDITOR
-	virtual TSharedRef<SWidget> RebuildDesignWidget(TSharedRef<SWidget> Content) override { return Content; }
+	virtual TSharedRef<SWidget> RebuildDesignWidget(TSharedRef<SWidget> Content) override
+	{
+		return Content;
+	}
 #endif
 	//~ End UWidget Interface
 
-	void SlateOnCheckStateChangedCallback(ECheckBoxState NewState);
+	UMG_API void SlateOnCheckStateChangedCallback(ECheckBoxState NewState);
 
 #if WITH_ACCESSIBILITY
-	virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
+	UMG_API virtual TSharedPtr<SWidget> GetAccessibleWidget() const override;
 #endif
 	
 protected:
 	TSharedPtr<SCheckBox> MyCheckbox;
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	PROPERTY_BINDING_IMPLEMENTATION(ECheckBoxState, CheckedState)
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+};
+
+UCLASS(Transient, MinimalAPI)
+class UWidgetCheckedStateRegistration : public UWidgetEnumStateRegistration
+{
+	GENERATED_BODY()
+
+public:
+
+	/** Post-load initialized values corresponding to this enum state */
+	static UMG_API inline FWidgetStateBitfield Unchecked;
+	static UMG_API inline FWidgetStateBitfield Checked;
+	static UMG_API inline FWidgetStateBitfield Undetermined;
+
+	static const inline FName StateName = FName("CheckedState");
+
+	//~ Begin UWidgetEnumStateRegistration Interface.
+	UMG_API virtual FName GetStateName() const override;
+	UMG_API virtual uint8 GetRegisteredWidgetState(const UWidget* InWidget) const override;
+	//~ End UWidgetEnumStateRegistration Interface
+
+	/** Convenience method to get widget state bitfield from enum value */
+	static UMG_API const FWidgetStateBitfield& GetBitfieldFromValue(uint8 InValue);
+
+protected:
+	friend UWidgetStateSettings;
+
+	//~ Begin UWidgetEnumStateRegistration Interface.
+	UMG_API virtual void InitializeStaticBitfields() const override;
+	//~ End UWidgetEnumStateRegistration Interface
 };

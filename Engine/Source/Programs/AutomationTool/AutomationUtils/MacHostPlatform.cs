@@ -1,40 +1,36 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Diagnostics;
 using System.IO;
 using UnrealBuildTool;
-using System.Text.RegularExpressions;
-using Tools.DotNETCommon;
 
 namespace AutomationTool
 {
 	class MacHostPlatform : HostPlatform
 	{
-		static string CachedMsBuildTool = "";
+		static string CachedFrameworkMsbuildExe = string.Empty;
 
-		public override string GetMsBuildExe()
+		public override string GetFrameworkMsbuildExe()
 		{
-			// As of 5.0 mono comes with msbuild which performs better. If that's installed then use it
-			if (string.IsNullOrEmpty(CachedMsBuildTool))
+			// Look for dotnet, we only support dotnet.
+			if (string.IsNullOrEmpty(CachedFrameworkMsbuildExe))
 			{
-				bool CanUseMsBuild = string.IsNullOrEmpty(CommandUtils.WhichApp("msbuild")) == false;
-
-				if (CanUseMsBuild)
+				FileReference dotnet = FileReference.FromString(CommandUtils.WhichApp("dotnet"));
+				if (dotnet != null && FileReference.Exists(dotnet))
 				{
-					CachedMsBuildTool = "msbuild";
+					Logger.LogInformation("Using {DotNet}", dotnet.FullName);
+					CachedFrameworkMsbuildExe = "dotnet msbuild";
 				}
 				else
 				{
-					Log.TraceInformation("Using xbuild. Install Mono 5.0 or greater for faster builds!");
-					CachedMsBuildTool = "xbuild";
+					throw new BuildException("Unable to find installation of dotnet.");
 				}
 			}
 
-			return CachedMsBuildTool;
+			return CachedFrameworkMsbuildExe;
 		}
 
 		public override string RelativeBinariesFolder
@@ -42,34 +38,34 @@ namespace AutomationTool
 			get { return @"Engine/Binaries/Mac/"; }
 		}
 
-		public override string GetUE4ExePath(string UE4Exe)
+		public override string GetUnrealExePath(string UnrealExe)
 		{
-			if(Path.IsPathRooted(UE4Exe))
+			if(Path.IsPathRooted(UnrealExe))
 			{
-				return CommandUtils.CombinePaths(UE4Exe);
+				return CommandUtils.CombinePaths(UnrealExe);
 			}
 
-			int CmdExeIndex = UE4Exe.IndexOf("-Cmd.exe");
+			int CmdExeIndex = UnrealExe.IndexOf("-Cmd.exe");
 			if (CmdExeIndex != -1)
 			{
-				UE4Exe = UE4Exe.Substring(0, CmdExeIndex + 4);
+				UnrealExe = UnrealExe.Substring(0, CmdExeIndex + 4);
 			}
 			else
 			{
-				CmdExeIndex = UE4Exe.IndexOf(".exe");
+				CmdExeIndex = UnrealExe.IndexOf(".exe");
 				if (CmdExeIndex != -1)
 				{
-					UE4Exe = UE4Exe.Substring(0, CmdExeIndex);
+					UnrealExe = UnrealExe.Substring(0, CmdExeIndex);
 				}
 			}
 
-			if (UE4Exe.EndsWith("-Cmd", StringComparison.OrdinalIgnoreCase))
+			if (UnrealExe.EndsWith("-Cmd", StringComparison.OrdinalIgnoreCase))
 			{
-				return CommandUtils.CombinePaths(CommandUtils.CmdEnv.LocalRoot, RelativeBinariesFolder, UE4Exe);
+				return CommandUtils.CombinePaths(CommandUtils.CmdEnv.LocalRoot, RelativeBinariesFolder, UnrealExe);
 			}
 			else
 			{
-				return CommandUtils.CombinePaths(CommandUtils.CmdEnv.LocalRoot, RelativeBinariesFolder, UE4Exe + ".app/Contents/MacOS", UE4Exe);
+				return CommandUtils.CombinePaths(CommandUtils.CmdEnv.LocalRoot, RelativeBinariesFolder, UnrealExe + ".app/Contents/MacOS", UnrealExe);
 			}
 		}
 
@@ -86,10 +82,19 @@ namespace AutomationTool
 			{
 				if (P4ExePath == null)
 				{
-					P4ExePath = "/usr/bin/p4";
-					if (!File.Exists(P4ExePath))
+					string[] p4Paths = { 
+						"/usr/bin/p4", // Default path
+						"/opt/homebrew/bin/p4", // Apple Silicon Homebrew Path
+						"/usr/local/bin/p4" // Apple Intel Homebrew Path
+					};
+					
+					foreach (string path in p4Paths)
 					{
-						P4ExePath = "/usr/local/bin/p4";
+						if (File.Exists(path))
+						{
+							P4ExePath = path;
+							break;
+						}
 					}
 				}
 				return P4ExePath;
@@ -99,27 +104,14 @@ namespace AutomationTool
 		public override Process CreateProcess(string AppName)
 		{
 			var NewProcess = new Process();
-			if (AppName == "mono")
-			{
-				// Enable case-insensitive mode for Mono
-				if (!NewProcess.StartInfo.EnvironmentVariables.ContainsKey("MONO_IOMAP"))
-				{
-					NewProcess.StartInfo.EnvironmentVariables.Add("MONO_IOMAP", "case");
-				}
-			}
 			return NewProcess;
 		}
 
 		public override void SetupOptionsForRun(ref string AppName, ref CommandUtils.ERunOptions Options, ref string CommandLine)
 		{
-			if (AppName == "sh" || AppName == "xbuild" || AppName == "codesign")
+			if (AppName == "sh" || AppName == "codesign")
 			{
 				Options &= ~CommandUtils.ERunOptions.AppMustExist;
-			}
-			if (AppName == "xbuild")
-			{
-				AppName = "sh";
-				CommandLine = "-c 'xbuild " + (String.IsNullOrEmpty(CommandLine) ? "" : CommandLine) + " /p:DefineConstants=MONO /p:DefineConstants=__MonoCS__ /verbosity:quiet /nologo |grep -i error; if [ $? -ne 1 ]; then exit 1; else exit 0; fi'";
 			}
 			if (AppName.EndsWith(".exe") || ((AppName.Contains("/Binaries/Win64/") || AppName.Contains("/Binaries/Mac/")) && string.IsNullOrEmpty(Path.GetExtension(AppName))))
 			{
@@ -135,11 +127,16 @@ namespace AutomationTool
 						AppName = AppName + ".app/Contents/MacOS/" + AppFilename;
 					}
 				}
+				// some of our C# applications are converted to dotnet core, do not run those via mono
+				else if (AppName.Contains("UnrealBuildTool") || AppName.Contains("AutomationTool"))
+				{
+					Options &= ~CommandUtils.ERunOptions.AppMustExist;
+				}
 				else
 				{
-					// It's a C# app, so run it with Mono
+					// It's a C# app, so run it with dotnet
 					CommandLine = "\"" + AppName + "\" " + (String.IsNullOrEmpty(CommandLine) ? "" : CommandLine);
-					AppName = "mono";
+					AppName = "dotnet";
 					Options &= ~CommandUtils.ERunOptions.AppMustExist;
 				}
 			}
@@ -147,25 +144,7 @@ namespace AutomationTool
 
 		public override void SetConsoleCtrlHandler(ProcessManager.CtrlHandlerDelegate Handler)
 		{
-			// @todo: add mono support
-		}
-
-		public override bool IsScriptModuleSupported(string ModuleName)
-		{
-			// @todo: add more unsupported modules here
-			List<string> UnsupportedModules = new List<string>()
-			{
-				"GauntletExtras", "Anvil", "WinAnvil", "XboxCommonAnvil", "XboxOneAnvil", "MPX",
-				"FortniteGame", "PS4"
-			};
-			foreach (string UnsupportedModule in UnsupportedModules)
-			{
-				if (ModuleName.StartsWith(UnsupportedModule, StringComparison.OrdinalIgnoreCase))
-				{
-					return false;
-				}
-			}
-			return true;
+			// @todo: add dotnet support
 		}
 
 		public override UnrealTargetPlatform HostEditorPlatform

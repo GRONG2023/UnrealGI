@@ -1,18 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "NavMesh/NavTestRenderingComponent.h"
-#include "EngineGlobals.h"
-#include "Engine/Engine.h"
-#include "Engine/Canvas.h"
-#include "SceneManagement.h"
 #include "NavigationTestingActor.h"
 #include "NavMesh/RecastNavMesh.h"
+
+#if UE_ENABLE_DEBUG_DRAWING
+#include "Engine/Canvas.h"
+#include "Engine/Engine.h"
+#include "SceneManagement.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "Debug/DebugDrawService.h"
 
-static const FColor NavMeshRenderColor_OpenSet(255,128,0,255);
-static const FColor NavMeshRenderColor_ClosedSet(255,196,0,255);
-static const uint8 NavMeshRenderAlpha_Modifed = 255;
-static const uint8 NavMeshRenderAlpha_NonModified = 64;
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavTestRenderingComponent)
+
+static constexpr FColor NavMeshRenderColor_OpenSet(255,128,0,255);
+static constexpr FColor NavMeshRenderColor_ClosedSet(255,196,0,255);
+static constexpr uint8 NavMeshRenderAlpha_Modified = 255;
+static constexpr uint8 NavMeshRenderAlpha_NonModified = 64;
 
 SIZE_T FNavTestSceneProxy::GetTypeHash() const
 {
@@ -23,15 +27,17 @@ SIZE_T FNavTestSceneProxy::GetTypeHash() const
 FNavTestSceneProxy::FNavTestSceneProxy(const UNavTestRenderingComponent* InComponent)
 	: FDebugRenderSceneProxy(InComponent)
 	, NavMeshDrawOffset(0,0,10)
-	, NavTestActor(NULL)
+	, NavTestActor(nullptr)
 {
-	if (InComponent == NULL)
+	ViewFlagName = TEXT("Navigation");
+
+	if (InComponent == nullptr)
 	{
 		return;
 	}
 
 	NavTestActor = Cast<ANavigationTestingActor>(InComponent->GetOwner());
-	if (NavTestActor == NULL)
+	if (NavTestActor == nullptr)
 	{
 		return;
 	}
@@ -49,6 +55,8 @@ FNavTestSceneProxy::FNavTestSceneProxy(const UNavTestRenderingComponent* InCompo
 
 void FNavTestSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>& Views, const FSceneViewFamily& ViewFamily, uint32 VisibilityMap, FMeshElementCollector& Collector) const
 {
+	FRHICommandList& RHICmdList = Collector.GetRHICommandList();
+
 	for (int32 ViewIndex = 0; ViewIndex < Views.Num(); ViewIndex++)
 	{
 		if (VisibilityMap & (1 << ViewIndex))
@@ -64,18 +72,21 @@ void FNavTestSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>&
 
 				//@todo - the rendering thread should never read from UObjects directly!  These are race conditions, the properties should be mirrored on the proxy
 				const FVector ActorLocation = NavTestActor->GetActorLocation();
-				const FVector ProjectedLocation = NavTestActor->ProjectedLocation + NavMeshDrawOffset;
-				const FColor ProjectedColor = NavTestActor->bProjectedLocationValid ? FColor(0, 255, 0, 120) : FColor(255, 0, 0, 120);
+				const FVector ProjectedLocation = NavTestActor->bProjectedLocationValid ? (NavTestActor->ProjectedLocation + (FVector)NavMeshDrawOffset) : (ActorLocation - FVector(0, 0, NavTestActor->QueryingExtent.Z));
+				const FColor ProjectedColor = (NavTestActor->bProjectedLocationValid ? FColor::Green : FColor::Red).WithAlpha(120);
 				const FColor ClosestWallColor = FColorList::Orange;
 				const FVector BoxExtent(20, 20, 20);
 
-				FMaterialRenderProxy* const ColoredMeshInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), ProjectedColor);
+				const FMaterialRenderProxy* const ColoredMeshInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), ProjectedColor);
 				//DrawBox(PDI, FTransform(ProjectedLocation).ToMatrixNoScale(),BoxExtent, ColoredMeshInstance, SDPG_World);
-				GetSphereMesh(ProjectedLocation, BoxExtent, 10, 7, ColoredMeshInstance, SDPG_World, false, ViewIndex, Collector);
+				if (NavTestActor->bProjectedLocationValid)
+				{
+					GetSphereMesh(ProjectedLocation, BoxExtent, 10, 7, ColoredMeshInstance, SDPG_World, false, ViewIndex, Collector);
+				}
 
 				//DrawWireBox(PDI, FBox(ProjectedLocation-BoxExtent, ProjectedLocation+BoxExtent), ProjectedColor, false);
 				DrawWireBox(PDI, FBox(ActorLocation - BoxExtent, ActorLocation + BoxExtent), FColor::White, false);
-				const FVector LineEnd = ProjectedLocation - (ProjectedLocation - ActorLocation).GetSafeNormal()*BoxExtent.X;
+				const FVector LineEnd = NavTestActor->bProjectedLocationValid ? ProjectedLocation - (ProjectedLocation - ActorLocation).GetSafeNormal()*BoxExtent.X : ProjectedLocation;
 				PDI->DrawLine(LineEnd, ActorLocation, ProjectedColor, SDPG_World, 2.5);
 				DrawArrowHead(PDI, LineEnd, ActorLocation, 20.f, ProjectedColor, SDPG_World, 2.5f);
 
@@ -85,6 +96,16 @@ void FNavTestSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>&
 				if (FNavigationSystem::IsValidLocation(ClosestWallLocation))
 				{
 					PDI->DrawLine(ClosestWallLocation, ActorLocation, ClosestWallColor, SDPG_World, 2.5);
+				}
+
+				if (NavTestActor->bDrawIfNavDataIsReadyInRadius)
+				{
+					constexpr double HalfHeight = 1000;
+					constexpr int32 NumSides = 32;
+					DrawWireCylinder(PDI, ActorLocation, FVector(1, 0, 0), FVector(0, 1, 0), FVector(0, 0, 1),
+						NavTestActor->bNavDataIsReadyInRadius ? FColor::Green : FColor::Red, 
+						NavTestActor->RadiusUsedToValidateNavData, HalfHeight,  
+						NumSides, SDPG_World);
 				}
 			}
 
@@ -103,20 +124,20 @@ void FNavTestSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>&
 			{
 				if (ClosedSetIndices.Num())
 				{
-					const FColoredMaterialRenderProxy *MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), NavMeshRenderColor_ClosedSet);						
+					const FColoredMaterialRenderProxy *MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), NavMeshRenderColor_ClosedSet);						
 					FDynamicMeshBuilder	MeshBuilder(View->GetFeatureLevel());
 					MeshBuilder.AddVertices(ClosedSetVerts);
 					MeshBuilder.AddTriangles(ClosedSetIndices);
-					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, GetDepthPriorityGroup(View), false, false, ViewIndex, Collector);
+					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, IntCastChecked<uint8>((int32)GetDepthPriorityGroup(View)), false, false, ViewIndex, Collector);
 				}
 
 				if (OpenSetIndices.Num())
 				{
-					const FColoredMaterialRenderProxy *MeshColorInstance = new(FMemStack::Get()) FColoredMaterialRenderProxy(GEngine->DebugMeshMaterial->GetRenderProxy(), NavMeshRenderColor_OpenSet);						
+					const FColoredMaterialRenderProxy *MeshColorInstance = &Collector.AllocateOneFrameResource<FColoredMaterialRenderProxy>(GEngine->DebugMeshMaterial->GetRenderProxy(), NavMeshRenderColor_OpenSet);						
 					FDynamicMeshBuilder	MeshBuilder(View->GetFeatureLevel());
 					MeshBuilder.AddVertices(OpenSetVerts);
 					MeshBuilder.AddTriangles(OpenSetIndices);
-					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, GetDepthPriorityGroup(View), false, false, ViewIndex, Collector);
+					MeshBuilder.GetMesh(FMatrix::Identity, MeshColorInstance, IntCastChecked<uint8>((int32)GetDepthPriorityGroup(View)), false, false, ViewIndex, Collector);
 				}
 			}
 
@@ -132,7 +153,7 @@ void FNavTestSceneProxy::GetDynamicMeshElements(const TArray<const FSceneView*>&
 
 				if (bShowDiff)
 				{
-					LineColor.A = NodeData.bModified ? NavMeshRenderAlpha_Modifed : NavMeshRenderAlpha_NonModified;
+					LineColor.A = NodeData.bModified ? NavMeshRenderAlpha_Modified : NavMeshRenderAlpha_NonModified;
 				}
 
 				FVector ParentPos(NodeData.ParentId.IsValidId() ? NodeDebug[NodeData.ParentId].Position : NodeData.Position);
@@ -182,6 +203,7 @@ void FNavTestSceneProxy::GatherPathStep()
 	BestNodeId = FSetElementId();
 
 #if WITH_EDITORONLY_DATA && WITH_RECAST
+	// DebugSteps are only available for: WITH_EDITORONLY_DATA && WITH_RECAST
 	if (NavTestActor && NavTestActor->DebugSteps.Num() && NavTestActor->ShowStepIndex >= 0)
 	{
 		const int32 ShowIdx = FMath::Min(NavTestActor->ShowStepIndex, NavTestActor->DebugSteps.Num() - 1);
@@ -227,7 +249,7 @@ void FNavTestSceneProxy::GatherPathStep()
 
 			FNodeDebugData NewNodeData;
 
-			float DisplayedCost = FLT_MAX; 
+			FVector::FReal DisplayedCost = TNumericLimits<FVector::FReal>::Max();
 			switch (NavTestActor->CostDisplayMode)
 			{
 			case ENavCostDisplay::TotalCost:
@@ -285,7 +307,7 @@ void FNavTestSceneProxy::GatherPathStep()
 			BestPathId = MyDebugNode.ParentId;
 		}
 	}
-#endif
+#endif // WITH_EDITORONLY_DATA && WITH_RECAST
 }
 
 FPrimitiveViewRelevance FNavTestSceneProxy::GetViewRelevance(const FSceneView* View) const
@@ -298,27 +320,24 @@ FPrimitiveViewRelevance FNavTestSceneProxy::GetViewRelevance(const FSceneView* V
 	return Result;
 }
 
-uint32 FNavTestSceneProxy::GetAllocatedSize(void) const
+uint32 FNavTestSceneProxy::GetAllocatedSizeInternal() const
 {
-	int32 InternalAllocSize = 0;
+	SIZE_T InternalAllocSize = 0;
 	for (TSet<FNodeDebugData>::TConstIterator It(NodeDebug); It; ++It)
 	{
 		InternalAllocSize += (*It).Desc.GetAllocatedSize();
 	}
 
-	return FDebugRenderSceneProxy::GetAllocatedSize() + PathPoints.GetAllocatedSize()
+	return IntCastChecked<uint32>(FDebugRenderSceneProxy::GetAllocatedSize() + PathPoints.GetAllocatedSize()
 		+ PathPointFlags.GetAllocatedSize()
 		+ OpenSetVerts.GetAllocatedSize() + OpenSetIndices.GetAllocatedSize()
 		+ ClosedSetVerts.GetAllocatedSize() + ClosedSetIndices.GetAllocatedSize()
-		+ NodeDebug.GetAllocatedSize() + InternalAllocSize;
+		+ NodeDebug.GetAllocatedSize() + InternalAllocSize);
 
 }
 
-#if WITH_RECAST && WITH_EDITOR
-void FNavTestDebugDrawDelegateHelper::InitDelegateHelper(const FNavTestSceneProxy* InSceneProxy)
+void FNavTestDebugDrawDelegateHelper::SetupFromProxy(const FNavTestSceneProxy* InSceneProxy)
 {
-	Super::InitDelegateHelper(InSceneProxy);
-
 	PathPoints.Reset();
 	PathPoints.Append(InSceneProxy->PathPoints);
 	PathPointFlags.Reset();
@@ -331,31 +350,9 @@ void FNavTestDebugDrawDelegateHelper::InitDelegateHelper(const FNavTestSceneProx
 	bShowDiff = InSceneProxy->bShowDiff;
 }
 
-void FNavTestDebugDrawDelegateHelper::RegisterDebugDrawDelgate()
-{
-	ensureMsgf(State != RegisteredState, TEXT("RegisterDebugDrawDelgate is already Registered!"));
-	if (State == InitializedState)
-	{
-		DebugTextDrawingDelegate = FDebugDrawDelegate::CreateRaw(this, &FNavTestDebugDrawDelegateHelper::DrawDebugLabels);
-		DebugTextDrawingDelegateHandle = UDebugDrawService::Register(TEXT("Navigation"), DebugTextDrawingDelegate);
-		State = RegisteredState;
-	}
-}
-
-void FNavTestDebugDrawDelegateHelper::UnregisterDebugDrawDelgate()
-{
-	ensureMsgf(State != InitializedState, TEXT("UnegisterDebugDrawDelgate is in an invalid State: %i !"), State);
-	if (State == RegisteredState)
-	{
-		check(DebugTextDrawingDelegate.IsBound());
-		UDebugDrawService::Unregister(DebugTextDrawingDelegateHandle);
-		State = InitializedState;
-	}
-}
-
 void FNavTestDebugDrawDelegateHelper::DrawDebugLabels(UCanvas* Canvas, APlayerController*)
 {
-	if (NavTestActor == NULL)
+	if (NavTestActor == nullptr)
 	{
 		return;
 	}
@@ -364,10 +361,9 @@ void FNavTestDebugDrawDelegateHelper::DrawDebugLabels(UCanvas* Canvas, APlayerCo
 	Canvas->SetDrawColor(FColor::White);
 	const FSceneView* View = Canvas->SceneView;
 
-#if WITH_EDITORONLY_DATA && WITH_RECAST
 	if (NodeDebug.Num())
 	{
-		UFont* RenderFont = GEngine->GetSmallFont();
+		const UFont* RenderFont = GEngine->GetSmallFont();
 		for (TSet<FNavTestSceneProxy::FNodeDebugData>::TConstIterator It(NodeDebug); It; ++It)
 		{
 			const FNavTestSceneProxy::FNodeDebugData& NodeData = *It;
@@ -381,49 +377,42 @@ void FNavTestDebugDrawDelegateHelper::DrawDebugLabels(UCanvas* Canvas, APlayerCo
 				}
 				if (bShowDiff)
 				{
-					MyColor.A = NodeData.bModified ? NavMeshRenderAlpha_Modifed : NavMeshRenderAlpha_NonModified;
+					MyColor.A = NodeData.bModified ? NavMeshRenderAlpha_Modified : NavMeshRenderAlpha_NonModified;
 				}
 
 				Canvas->SetDrawColor(MyColor);
 
-				const FVector ScreenLoc = Canvas->Project(NodeData.Position) + FVector(NavTestActor->TextCanvasOffset, 0.f);
+				const FVector3f ScreenLoc(Canvas->Project(NodeData.Position) + FVector(NavTestActor->TextCanvasOffset, 0.f));
 				Canvas->DrawText(RenderFont, NodeData.Desc, ScreenLoc.X, ScreenLoc.Y);
 			}
 		}
 	}
 	else
 	{
-#endif
 		for (int32 PointIndex = 0; PointIndex < PathPoints.Num(); ++PointIndex)
 		{
 			if (FNavTestSceneProxy::LocationInView(PathPoints[PointIndex], View))
 			{
-				const FVector PathPointLoc = Canvas->Project(PathPoints[PointIndex]);
-				UFont* RenderFont = GEngine->GetSmallFont();
+				const FVector3f PathPointLoc(Canvas->Project(PathPoints[PointIndex]));
+				const UFont* RenderFont = GEngine->GetSmallFont();
 				Canvas->DrawText(RenderFont, PathPointFlags[PointIndex], PathPointLoc.X, PathPointLoc.Y);
+
 			}
 		}
-
-#if WITH_EDITORONLY_DATA && WITH_RECAST
 	}
-#endif
+
 	Canvas->SetDrawColor(OldDrawColor);
 }
-#endif //WITH_RECAST && WITH_EDITOR
+#endif // UE_ENABLE_DEBUG_DRAWING
 
-UNavTestRenderingComponent::UNavTestRenderingComponent(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
+#if UE_ENABLE_DEBUG_DRAWING
+FDebugRenderSceneProxy* UNavTestRenderingComponent::CreateDebugSceneProxy()
 {
+	FNavTestSceneProxy* NewSceneProxy = new FNavTestSceneProxy(this);
+	NavTestDebugDrawDelegateHelper.SetupFromProxy(NewSceneProxy);
+	return NewSceneProxy;
 }
-
-FPrimitiveSceneProxy* UNavTestRenderingComponent::CreateSceneProxy()
-{
-	FNavTestSceneProxy* SceneProxy2 = new FNavTestSceneProxy(this);
-#if WITH_RECAST && WITH_EDITOR
-	NavTestDebugDrawDelegateHelper.InitDelegateHelper(SceneProxy2);
-	NavTestDebugDrawDelegateHelper.ReregisterDebugDrawDelgate();
 #endif
-	return SceneProxy2;
-}
 
 FBoxSphereBounds UNavTestRenderingComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
@@ -442,6 +431,7 @@ FBoxSphereBounds UNavTestRenderingComponent::CalcBounds(const FTransform& LocalT
 			}
 		}
 #if WITH_EDITORONLY_DATA && WITH_RECAST
+		// DebugSteps are only available for: WITH_EDITORONLY_DATA && WITH_RECAST
 		if (TestActor->DebugSteps.Num() && TestActor->ShowStepIndex >= 0)
 		{
 			const int32 ShowIdx = FMath::Min(TestActor->ShowStepIndex, TestActor->DebugSteps.Num() - 1);
@@ -451,30 +441,13 @@ FBoxSphereBounds UNavTestRenderingComponent::CalcBounds(const FTransform& LocalT
 				const FRecastDebugPathfindingNode& DebugNode = *It;
 				for (int32 iv = 0; iv < DebugNode.Verts.Num(); iv++)
 				{
-					BoundingBox += DebugNode.Verts[iv];
+					BoundingBox += (FVector)DebugNode.Verts[iv];
 				}
 			}
 		}
-#endif
+#endif // WITH_EDITORONLY_DATA && WITH_RECAST
 	}
 
 	return FBoxSphereBounds(BoundingBox);
 }
 
-void UNavTestRenderingComponent::CreateRenderState_Concurrent(FRegisterComponentContext* Context)
-{
-	Super::CreateRenderState_Concurrent(Context);
-
-#if WITH_RECAST && WITH_EDITOR
-	NavTestDebugDrawDelegateHelper.RegisterDebugDrawDelgate();
-#endif
-}
-
-void UNavTestRenderingComponent::DestroyRenderState_Concurrent()
-{
-#if WITH_RECAST && WITH_EDITOR
-	NavTestDebugDrawDelegateHelper.UnregisterDebugDrawDelgate();
-#endif
-
-	Super::DestroyRenderState_Concurrent();
-}

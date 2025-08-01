@@ -2,38 +2,32 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include "Containers/Array.h"
 #include "Containers/Map.h"
-#include "UObject/ObjectKey.h"
+#include "CoreTypes.h"
 #include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStateExtension.h"
 #include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStorageID.h"
+#include "UObject/ObjectKey.h"
+
+class UClass;
+class UObject;
 
 namespace UE
 {
 namespace MovieScene
 {
+struct FPreAnimatedStorageGroupHandle;
+template <typename StorageType> struct TAutoRegisterPreAnimatedStorageID;
 
-struct MOVIESCENE_API FPreAnimatedObjectGroupManager : IPreAnimatedStateGroupManager, TSharedFromThis<FPreAnimatedObjectGroupManager>
+struct FPreAnimatedObjectGroupManager : TPreAnimatedStateGroupManager<FObjectKey>
 {
-	static TAutoRegisterPreAnimatedStorageID<FPreAnimatedObjectGroupManager> GroupManagerID;
+	static MOVIESCENE_API TAutoRegisterPreAnimatedStorageID<FPreAnimatedObjectGroupManager> GroupManagerID;
 
-	void InitializeGroupManager(FPreAnimatedStateExtension* Extension) override;
-	void OnGroupDestroyed(FPreAnimatedStorageGroupHandle Group) override;
+	MOVIESCENE_API void OnObjectsReplaced(const TMap<UObject*, UObject*>& ReplacementMap);
 
-	FPreAnimatedStorageGroupHandle FindGroupForObject(const FObjectKey& Object) const;
+	MOVIESCENE_API void GetGroupsByClass(UClass* GeneratedClass, TArray<FPreAnimatedStorageGroupHandle>& OutGroupHandles);
 
-	FPreAnimatedStorageGroupHandle MakeGroupForObject(const FObjectKey& Object);
-
-	void OnObjectsReplaced(const TMap<UObject*, UObject*>& ReplacementMap);
-
-	void GetGroupsByClass(UClass* GeneratedClass, TArray<FPreAnimatedStorageGroupHandle>& OutGroupHandles);
-
-private:
-
-	TMap<FObjectKey, FPreAnimatedStorageGroupHandle> StorageGroupsByObject;
-	TMap<FPreAnimatedStorageGroupHandle, FObjectKey> StorageGroupsToObject;
-
-	FPreAnimatedStateExtension* Extension;
+	MOVIESCENE_API void GatherStaleStorageGroups(TArray<FPreAnimatedStorageGroupHandle>& StaleGroupStorage) const override;
 };
 
 

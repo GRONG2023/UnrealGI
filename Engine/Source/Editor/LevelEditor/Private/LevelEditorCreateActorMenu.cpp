@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LevelEditorCreateActorMenu.h"
+#include "Engine/Blueprint.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Class.h"
 #include "Styling/SlateColor.h"
@@ -13,7 +14,7 @@
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
 #include "ActorFactories/ActorFactory.h"
 #include "ActorFactories/ActorFactoryBoxVolume.h"
@@ -30,12 +31,12 @@
 #include "ActorFactories/ActorFactoryTriggerSphere.h"
 #include "GameFramework/Volume.h"
 #include "Engine/BlockingVolume.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "AssetThumbnail.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "LevelEditor.h"
 #include "AssetSelection.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Styling/SlateIconFinder.h"
 #include "ClassIconFinder.h"
 #include "LevelEditorActions.h"
@@ -43,6 +44,10 @@
 #include "IPlacementModeModule.h"
 #include "Engine/TriggerBase.h"
 #include "LevelEditorMenuContext.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
+#include "Engine/Selection.h"
+#include "ActorEditorUtils.h"
+#include "Widgets/Layout/SBorder.h"
 
 class SMenuThumbnail : public SCompoundWidget
 {
@@ -59,14 +64,15 @@ public:
 	{
 		Asset = InAsset;
 
-		FLevelEditorModule& LevelEditorModule = FModuleManager::LoadModuleChecked<FLevelEditorModule>("LevelEditor");
-		TSharedPtr<FAssetThumbnailPool> ThumbnailPool = LevelEditorModule.GetFirstLevelEditor()->GetThumbnailPool();
+		Thumbnail = MakeShareable( new FAssetThumbnail(Asset, InArgs._Width, InArgs._Height, UThumbnailManager::Get().GetSharedThumbnailPool()));
 
-		Thumbnail = MakeShareable( new FAssetThumbnail( Asset, InArgs._Width, InArgs._Height, ThumbnailPool ) );
+		FAssetThumbnailConfig ThumbnailConfig;
+		ThumbnailConfig.ColorStripOrientation = EThumbnailColorStripOrientation::VerticalRightEdge;
+		ThumbnailConfig.Padding = FMargin(2.0f); // Prevents overlap with rounded corners; this matches what the Content Browser tiles do
 
 		ChildSlot
 		[
-			Thumbnail->MakeThumbnailWidget()
+			Thumbnail->MakeThumbnailWidget(ThumbnailConfig)
 		];
 	}
 
@@ -75,6 +81,48 @@ private:
 	FAssetData Asset;
 	TSharedPtr< FAssetThumbnail > Thumbnail;
 };
+
+static void GetMenuEntryText(const FAssetData& Asset, const TArray<FActorFactoryAssetProxy::FMenuItem>& AssetMenuOptions, FText& OutAssetDisplayName, FText& OutActorTypeDisplayName)
+{
+	const bool IsClass = Asset.GetClass() == UClass::StaticClass();
+	const bool IsVolume = IsClass ? Cast<UClass>(Asset.GetAsset())->IsChildOf(AVolume::StaticClass()) : false;
+
+	if (IsClass)
+	{
+		OutAssetDisplayName = Asset.GetClass()->GetDisplayNameText();
+	}
+	else
+	{
+		OutAssetDisplayName = FText::FromName(Asset.AssetName);
+	}
+
+	if (AssetMenuOptions.Num() == 1)
+	{
+		const FActorFactoryAssetProxy::FMenuItem& MenuItem = AssetMenuOptions[0];
+		if (IsClass)
+		{
+			UClass* MenuItemClass = Cast<UClass>(MenuItem.AssetData.GetAsset());
+			if (MenuItemClass && MenuItemClass->IsChildOf(AActor::StaticClass()))
+			{
+				AActor* DefaultActor = Cast<AActor>(Cast<UClass>(MenuItem.AssetData.GetAsset())->ClassDefaultObject);
+				OutActorTypeDisplayName = DefaultActor->GetClass()->GetDisplayNameText();
+			}
+		}
+
+		// If the class type name wasn't set above, then use the factory's display name
+		if (OutActorTypeDisplayName.IsEmpty() && MenuItem.FactoryToUse != nullptr)
+		{
+			OutActorTypeDisplayName = MenuItem.FactoryToUse->GetDisplayName();
+		}
+
+		// For non-volume classes, use the type display name as the primary label (in place of the actor display name)
+		if (IsClass && !IsVolume && !OutActorTypeDisplayName.IsEmpty())
+		{
+			OutAssetDisplayName = OutActorTypeDisplayName;
+			OutActorTypeDisplayName = FText::GetEmpty();
+		}
+	}
+}
 
 class SAssetMenuEntry : public SCompoundWidget
 {
@@ -93,118 +141,74 @@ class SAssetMenuEntry : public SCompoundWidget
 	 */
 	void Construct( const FArguments& InArgs, const FAssetData& Asset, const TArray< FActorFactoryAssetProxy::FMenuItem >& AssetMenuOptions )
 	{
-		TSharedPtr< SHorizontalBox > ActorType = SNew(SHorizontalBox);
-
-		const bool IsClass = Asset.GetClass() == UClass::StaticClass();
-		const bool IsVolume = IsClass ? Cast<UClass>( Asset.GetAsset() )->IsChildOf( AVolume::StaticClass() ) : false;
-
-		FText AssetDisplayName = FText::FromName( Asset.AssetName );
-		if ( IsClass )
-		{
-			AssetDisplayName = FText::FromString( FName::NameToDisplayString( Asset.AssetName.ToString(), false ) );
-		}
-
+		FText AssetDisplayName;
 		FText ActorTypeDisplayName;
-		if ( AssetMenuOptions.Num() == 1 )
-		{
-			const FActorFactoryAssetProxy::FMenuItem& MenuItem = AssetMenuOptions[0];
-
-			AActor* DefaultActor = NULL;
-			if ( IsClass && Cast<UClass>( MenuItem.AssetData.GetAsset() )->IsChildOf( AActor::StaticClass() ) )
-			{
-				DefaultActor = Cast<AActor>( Cast<UClass>( MenuItem.AssetData.GetAsset() )->ClassDefaultObject );
-				ActorTypeDisplayName = FText::FromString( FName::NameToDisplayString( DefaultActor->GetClass()->GetName(), false ) );
-			}
-
-			const FSlateBrush* IconBrush = NULL;
-			if ( MenuItem.FactoryToUse != NULL )
-			{
-				DefaultActor = MenuItem.FactoryToUse->GetDefaultActor( MenuItem.AssetData );
-
-				// Prefer the class type name set above over the factory's display name
-				if (ActorTypeDisplayName.IsEmpty())
-				{
-					ActorTypeDisplayName = MenuItem.FactoryToUse->GetDisplayName();
-				}
-
-				IconBrush = FSlateIconFinder::FindIconBrushForClass(MenuItem.FactoryToUse->GetClass());
-			}
-
-			if ( DefaultActor != NULL && ( MenuItem.FactoryToUse != NULL || !IsClass ) )
-			{
-				if ( !IconBrush )
-				{
-					IconBrush = FClassIconFinder::FindIconForActor( DefaultActor );
-				}
-
-				if ( !IsClass || IsVolume )
-				{
-					ActorType->AddSlot()
-					.HAlign(HAlign_Right)
-					.VAlign(VAlign_Center)
-					.Padding( 2, 0 )
-					.AutoWidth()
-					[
-						SNew( STextBlock )
-						.Text( ActorTypeDisplayName )
-						.Font( FEditorStyle::GetFontStyle("LevelViewportContextMenu.ActorType.Text.Font") )
-						.ColorAndOpacity( FSlateColor::UseSubduedForeground() )
-					];
-
-					ActorType->AddSlot()
-					.HAlign(HAlign_Right)
-					.VAlign(VAlign_Center)
-					.AutoWidth()
-					[
-						SNew( SImage )
-						.Image( IconBrush )
-						.ToolTipText( ActorTypeDisplayName )
-					];
-				}
-			}
-		}
+		GetMenuEntryText(Asset, AssetMenuOptions, AssetDisplayName, ActorTypeDisplayName);
 
 		if ( !InArgs._LabelOverride.IsEmpty() )
 		{
 			AssetDisplayName = InArgs._LabelOverride;
 		}
 
-		ChildSlot
-		[
-			SNew( SHorizontalBox )
-			+SHorizontalBox::Slot()
-			.Padding( 4, 0, 0, 0 )
-			.VAlign(VAlign_Center)
-			.AutoWidth()
-			[
-				SNew( SBox )
-				.WidthOverride( 35 )
-				.HeightOverride( 35 )
-				[
-					SNew( SMenuThumbnail, Asset )
-				]
-			]
-
-			+SHorizontalBox::Slot()
-			.VAlign(VAlign_Center)
-			.Padding(2, 0, 4, 0)
-			[
-				SNew( SVerticalBox )
-				+SVerticalBox::Slot()
-				.Padding(0, 0, 0, 1)
-				.AutoHeight()
+		TSharedRef<SWidget> ActorType =
+			ActorTypeDisplayName.IsEmpty()
+			? SNullWidget::NullWidget
+			: SNew(SBox)
+				.Padding(FMargin(0, 8, 0, 0))
 				[
 					SNew(STextBlock)
-					.Font( FEditorStyle::GetFontStyle("LevelViewportContextMenu.AssetLabel.Text.Font") )
-					.Text( ( IsClass && !IsVolume && !ActorTypeDisplayName.IsEmpty() ) ? ActorTypeDisplayName : AssetDisplayName )
+					.Text(ActorTypeDisplayName)
+					.TextStyle(FAppStyle::Get(), "LevelViewportContextMenu.ActorType.Text")
+					.TransformPolicy(ETextTransformPolicy::ToUpper)
+				];
+
+		ChildSlot
+		.Padding( FMargin(0, 0, 8, 0) )
+		[
+			SNew( SBorder )
+			.Padding( 0 )
+			.BorderImage( FAppStyle::Get().GetBrush("LevelViewportContextMenu.AssetTileItem.NameAreaBackground") )
+			[
+				SNew( SHorizontalBox )
+				+SHorizontalBox::Slot()
+				.Padding( 0, 0, 0, 0 )
+				.VAlign( VAlign_Center )
+				.AutoWidth()
+				[
+					SNew( SBorder )
+					//.Padding( FMargin(4, 0, 0, 0) ) // prevent contents from overlapping the rounded corners
+					.Padding(0)
+					.BorderImage( FAppStyle::Get().GetBrush("LevelViewportContextMenu.AssetTileItem.ThumbnailAreaBackground") )
+					[
+						SNew( SBox )
+						.WidthOverride( 48 )
+						.HeightOverride( 48 )
+						[
+							SNew( SMenuThumbnail, Asset )
+							.Width(48)
+							.Height(48)
+						]
+					]
 				]
 
-				+SVerticalBox::Slot()
-				.Padding(0, 1, 0, 0)
-				.AutoHeight()
-				.HAlign(HAlign_Right)
+				+SHorizontalBox::Slot()
+				.VAlign(VAlign_Center)
+				.Padding(5, 0, 10, 0)
 				[
-					ActorType.ToSharedRef()
+					SNew( SVerticalBox )
+					+SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						SNew(STextBlock)
+						.TextStyle( FAppStyle::Get(), "LevelViewportContextMenu.AssetLabel.Text" )
+						.Text( AssetDisplayName )
+					]
+
+					+SVerticalBox::Slot()
+					.AutoHeight()
+					[
+						ActorType
+					]
 				]
 			]
 		];
@@ -213,7 +217,22 @@ class SAssetMenuEntry : public SCompoundWidget
 
 static bool CanReplaceActors()
 {
-	return ( GEditor->GetSelectedActorCount() > 0 && !AssetSelectionUtils::IsBuilderBrushSelected() );
+	bool bCanReplace = false;
+
+	for (FSelectionIterator SelectionIter = GEditor->GetSelectedActorIterator(); SelectionIter; ++SelectionIter)
+	{
+		if (AActor* Actor = Cast<AActor>(*SelectionIter))
+		{ 
+			bCanReplace = true;
+			if(!Actor->IsUserManaged() || FActorEditorUtils::IsABuilderBrush(Actor))
+			{
+				bCanReplace = false;
+				break;
+			}
+		}
+	}
+
+	return bCanReplace;
 }
 
 /**
@@ -233,13 +252,14 @@ static void GetContentBrowserSelectionFactoryMenuEntries( FAssetData& TargetAsse
 		TargetAssetData = SelectedAssets.Top();
 	}
 
-	if ( TargetAssetData.GetClass() == UClass::StaticClass() )
+	UClass* AssetClass = TargetAssetData.GetClass();
+	if (AssetClass == UClass::StaticClass() )
 	{
 		UClass* Class = Cast<UClass>( TargetAssetData.GetAsset() );
 
 		bPlaceable = AssetSelectionUtils::IsClassPlaceable( Class );
 	}
-	else if (TargetAssetData.GetClass()->IsChildOf<UBlueprint>())
+	else if (AssetClass && AssetClass->IsChildOf<UBlueprint>())
 	{
 		// For blueprints, attempt to determine placeability from its tag information
 
@@ -248,10 +268,7 @@ static void GetContentBrowserSelectionFactoryMenuEntries( FAssetData& TargetAsse
 		if ( TargetAssetData.GetTagValue( FBlueprintTags::NativeParentClassPath, TagValue ) && !TagValue.IsEmpty() )
 		{
 			// If the native parent class can't be placed, neither can the blueprint
-
-			UObject* Outer = nullptr;
-			ResolveName( Outer, TagValue, false, false );
-			UClass* NativeParentClass = FindObject<UClass>( ANY_PACKAGE, *TagValue );
+			UClass* NativeParentClass = UClass::TryFindTypeSlow<UClass>(FPackageName::ExportTextPathToObjectPath(TagValue));
 
 			bPlaceable = AssetSelectionUtils::IsChildBlueprintPlaceable( NativeParentClass );
 		}
@@ -320,12 +337,23 @@ static void FillAssetAddReplaceActorMenu(UToolMenu* Menu, const FAssetData Asset
  * @param	CreateMode			The creation mode to use
  * @param	LabelOverride		The lable to use, if any.
  */
-static void BuildSingleAssetAddReplaceActorMenu(FToolMenuSection& Section, const FAssetData& Asset, const TArray< FActorFactoryAssetProxy::FMenuItem >& AssetMenuOptions, EActorCreateMode::Type CreateMode, const FText& LabelOverride = FText::GetEmpty())
+static void BuildSingleAssetAddReplaceActorMenu(FToolMenuSection& Section, const FAssetData& Asset, const TArray< FActorFactoryAssetProxy::FMenuItem >& AssetMenuOptions, EActorCreateMode::Type CreateMode, const FText& LabelOverride = FText::GetEmpty(), bool bUseAssetTile=false)
 {
 	if ( !Asset.IsValid() || AssetMenuOptions.Num() == 0 )
 	{
 		return;
 	}
+
+#if PLATFORM_MAC
+	// Cannot use asset tile if this is being shown in the Mac global menu bar, force a normal menu entry
+	if (ULevelEditorContextMenuContext* Context = Section.FindContext<ULevelEditorContextMenuContext>())
+	{
+		if (Context->ContextType == ELevelEditorMenuContext::MainMenu)
+		{
+			bUseAssetTile = false;
+		}
+	}
+#endif
 
 	if ( AssetMenuOptions.Num() == 1 )
 	{
@@ -341,97 +369,121 @@ static void BuildSingleAssetAddReplaceActorMenu(FToolMenuSection& Section, const
 			Action = FUIAction( FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::AddActor_Clicked, MenuItem.FactoryToUse,  MenuItem.AssetData) );
 		}
 
-		Section.AddEntry(FToolMenuEntry::InitMenuEntry(NAME_None, Action, SNew(SAssetMenuEntry, Asset, AssetMenuOptions).LabelOverride(LabelOverride)));
+		// For a single option that doesn't open a submenu, we have an option of the custom tile widget (used for recents, selection) and a regular menu entry.
+		if (bUseAssetTile)
+		{
+			FString EntryName = LabelOverride.BuildSourceString();
+			EntryName.RemoveSpacesInline();
+			FToolMenuEntry Entry = FToolMenuEntry::InitMenuEntry(*EntryName, Action, SNew(SAssetMenuEntry, Asset, AssetMenuOptions).LabelOverride(LabelOverride));
+			Section.AddEntry(Entry);
+		}
+		else
+		{
+			FText AssetDisplayName;
+			if (LabelOverride.IsEmpty())
+			{
+				FText UnusedActorTypeDisplayName;
+				GetMenuEntryText(Asset, AssetMenuOptions, AssetDisplayName, UnusedActorTypeDisplayName);
+			}
+			else
+			{
+				AssetDisplayName = LabelOverride;
+			}
+
+			FString EntryName = AssetDisplayName.BuildSourceString();
+			EntryName.RemoveSpacesInline();
+			FSlateIcon Icon = FSlateIconFinder::FindIconForClass(FClassIconFinder::GetIconClassForAssetData(Asset));
+			Section.AddMenuEntry(*EntryName, AssetDisplayName, TAttribute<FText>(), Icon, Action, EUserInterfaceActionType::Button);
+		}
 	}
 	else
 	{
-		FToolMenuEntry Entry = FToolMenuEntry::InitWidget(NAME_None, SNew( SAssetMenuEntry, Asset, AssetMenuOptions ).LabelOverride( LabelOverride ), FText());
-		Entry.Type = EMultiBlockType::MenuEntry;
-		Entry.SubMenuData.bIsSubMenu = true;
-		Entry.SubMenuData.ConstructMenu = FNewToolMenuDelegate::CreateStatic(&FillAssetAddReplaceActorMenu, Asset, AssetMenuOptions, CreateMode);
-		Section.AddEntry(Entry);
+		// If this opens a submenu for multiple options, always use a regular menu entry and never the custom tile widget.
+		FText AssetDisplayName;
+		if (LabelOverride.IsEmpty())
+		{
+			FText UnusedActorTypeDisplayName;
+			GetMenuEntryText(Asset, AssetMenuOptions, AssetDisplayName, UnusedActorTypeDisplayName);
+		}
+		else
+		{
+			AssetDisplayName = LabelOverride;
+		}
+
+		FString SubMenuName = AssetDisplayName.BuildSourceString();
+		SubMenuName.RemoveSpacesInline();
+		FSlateIcon Icon = FSlateIconFinder::FindIconForClass(FClassIconFinder::GetIconClassForAssetData(Asset));
+		Section.AddSubMenu(
+			*SubMenuName, AssetDisplayName, TAttribute<FText>(), FNewToolMenuDelegate::CreateStatic(&FillAssetAddReplaceActorMenu, Asset, AssetMenuOptions, CreateMode),
+			FToolUIActionChoice(), EUserInterfaceActionType::Button, /*bInOpenSubMenuOnClick*/ false, Icon);
 	}
 }
 
-void LevelEditorCreateActorMenu::FillAddReplaceContextMenuSections(UToolMenu* Menu, ULevelEditorContextMenuContext* LevelEditorMenuContext)
+void LevelEditorCreateActorMenu::FillAddReplaceContextMenuSections(FToolMenuSection& Section, ULevelEditorContextMenuContext* LevelEditorMenuContext)
 {
 	FAssetData TargetAssetData;
 	TArray< FActorFactoryAssetProxy::FMenuItem > AssetMenuOptions;
 	GetContentBrowserSelectionFactoryMenuEntries( /*OUT*/TargetAssetData, /*OUT*/AssetMenuOptions );
 
-	const bool bCanPlaceActor = LevelEditorMenuContext && (LevelEditorMenuContext->ContextType == ELevelEditorMenuContext::Viewport);
+	const bool bCanPlaceActor = true;
 	const bool bCanReplaceActors = CanReplaceActors();
 
-	if ( AssetMenuOptions.Num() == 0 )
+	if (bCanPlaceActor)
 	{
-		{
-			FToolMenuSection& Section = Menu->AddSection("ActorType");
-
-			if (bCanPlaceActor)
-			{
-				Section.AddSubMenu(
-					"AddActor",
-					NSLOCTEXT("LevelViewportContextMenu", "AddActorHeading", "Place Actor") , 
-					NSLOCTEXT("LevelViewportContextMenu", "AddActorMenu_ToolTip", "Templates for adding a new actor to the world"),
-					FNewToolMenuDelegate::CreateStatic(&LevelEditorCreateActorMenu::FillAddReplaceActorMenu, EActorCreateMode::Add));
-			}
-
-			if (bCanReplaceActors)
-			{
-				Section.AddSubMenu(
-					"ReplaceActor",
-					NSLOCTEXT("LevelViewportContextMenu", "ReplaceActorHeading", "Replace Selected Actors with") , 
-					NSLOCTEXT("LevelViewportContextMenu", "ReplaceActorMenu_ToolTip", "Templates for replacing selected with new actors in the world"),
-					FNewToolMenuDelegate::CreateStatic(&LevelEditorCreateActorMenu::FillAddReplaceActorMenu, EActorCreateMode::Replace));
-			}
-		}
+		Section.AddSubMenu(
+			"AddActor",
+			NSLOCTEXT("LevelViewportContextMenu", "AddActorHeading", "Place Actor") , 
+			NSLOCTEXT("LevelViewportContextMenu", "AddActorMenu_ToolTip", "Templates for adding a new actor to the world"),
+			FNewToolMenuDelegate::CreateStatic(&LevelEditorCreateActorMenu::FillAddReplaceActorMenu, EActorCreateMode::Add),
+			false, // default value
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.PlaceActors"));
 	}
-	else
+
+	if (bCanReplaceActors)
 	{
-		while ( AssetMenuOptions.Num() > 1 )
-		{
-			AssetMenuOptions.Pop();
-		}
-
-		if (bCanPlaceActor)
-		{
-			FToolMenuSection& Section = Menu->AddSection("AddActor", NSLOCTEXT("LevelViewportContextMenu", "AddActorHeading", "Place Actor"));
-			FUIAction Action( FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::AddActor_Clicked, AssetMenuOptions[0].FactoryToUse,  AssetMenuOptions[0].AssetData ) );
-			TSharedRef<SWidget> Widget = SNew(SAssetMenuEntry, TargetAssetData, AssetMenuOptions);
-			Section.AddEntry(FToolMenuEntry::InitSubMenu(
-				"AddActor",
-				Action,
-				Widget,
-				FNewToolMenuDelegate::CreateStatic(&LevelEditorCreateActorMenu::FillAddReplaceActorMenu, EActorCreateMode::Add)
-			));
-		}
-
-		if (bCanReplaceActors)
-		{
-			{
-				FToolMenuSection& Section = Menu->AddSection("ReplaceActor", NSLOCTEXT("LevelViewportContextMenu", "ReplaceActorHeading", "Replace Selected Actors with"));
-				FUIAction Action( FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ReplaceActors_Clicked, AssetMenuOptions[0].FactoryToUse,  AssetMenuOptions[0].AssetData ) );
-				TSharedRef<SWidget> Widget = SNew(SAssetMenuEntry, TargetAssetData, AssetMenuOptions);
-				Section.AddEntry(FToolMenuEntry::InitSubMenu(
-					"ReplaceActor",
-					Action,
-					Widget,
-					FNewToolMenuDelegate::CreateStatic(&LevelEditorCreateActorMenu::FillAddReplaceActorMenu, EActorCreateMode::Replace)
-				));
-			}
-		}
+		Section.AddSubMenu(
+			"ReplaceActor",
+			NSLOCTEXT("LevelViewportContextMenu", "ReplaceActorHeading", "Replace Selected Actors with") , 
+			NSLOCTEXT("LevelViewportContextMenu", "ReplaceActorMenu_ToolTip", "Templates for replacing selected with new actors in the world"),
+			FNewToolMenuDelegate::CreateStatic(&LevelEditorCreateActorMenu::FillAddReplaceActorMenu, EActorCreateMode::Replace),
+			false, // default value
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.ReplaceActor"));
 	}
 }
 
+bool GReplaceSelectedActorsWithSelectedClassCopyProperties = true;
 void LevelEditorCreateActorMenu::FillAddReplaceActorMenu(UToolMenu* Menu, EActorCreateMode::Type CreateMode)
 {
+	if ( CreateMode == EActorCreateMode::Replace )
+	{
+		FToolMenuSection& Section = Menu->AddSection("Options", NSLOCTEXT("LevelViewportContextMenu", "Options", "Options"));
+
+		GReplaceSelectedActorsWithSelectedClassCopyProperties = true;
+
+		FToolMenuEntry ToolMenuEntry = FToolMenuEntry::InitMenuEntry(
+			"CopyProperties",
+			NSLOCTEXT("LevelViewportContextMenu", "CopyProperties", "Copy Properties"),
+			FText(),
+			FSlateIcon(),
+			FUIAction(
+				FExecuteAction::CreateLambda([]() { GReplaceSelectedActorsWithSelectedClassCopyProperties = !GReplaceSelectedActorsWithSelectedClassCopyProperties; }),
+				FCanExecuteAction(),
+				FGetActionCheckState::CreateLambda([] { return GReplaceSelectedActorsWithSelectedClassCopyProperties ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; } )
+			),
+			EUserInterfaceActionType::ToggleButton
+		);
+		ToolMenuEntry.bShouldCloseWindowAfterMenuSelection = false;
+
+		Section.AddEntry(ToolMenuEntry);
+	}
+
 	{
 		FToolMenuSection& Section = Menu->AddSection("ContentBrowserActor", NSLOCTEXT("LevelViewportContextMenu", "AssetSelectionSection", "Selection"));
 		FAssetData TargetAssetData;
 		TArray< FActorFactoryAssetProxy::FMenuItem > AssetMenuOptions;
 		GetContentBrowserSelectionFactoryMenuEntries( /*OUT*/TargetAssetData, /*OUT*/AssetMenuOptions );
 
-		BuildSingleAssetAddReplaceActorMenu( Section, TargetAssetData, AssetMenuOptions, CreateMode );
+		BuildSingleAssetAddReplaceActorMenu( Section, TargetAssetData, AssetMenuOptions, CreateMode, FText::GetEmpty(), /*bUseAssetTile*/ true );
 	}
 
 	{
@@ -443,7 +495,7 @@ void LevelEditorCreateActorMenu::FillAddReplaceActorMenu(UToolMenu* Menu, EActor
 			const TArray< FActorPlacementInfo > RecentlyPlaced = IPlacementModeModule::Get().GetRecentlyPlaced();
 			for (int Index = 0; Index < RecentlyPlaced.Num() && Index < 3; Index++)
 			{
-				FAssetData Asset = AssetRegistryModule.Get().GetAssetByObjectPath( *RecentlyPlaced[Index].ObjectPath );
+				FAssetData Asset = AssetRegistryModule.Get().GetAssetByObjectPath( FSoftObjectPath(RecentlyPlaced[Index].ObjectPath) );
 
 				if ( Asset.IsValid() )
 				{
@@ -463,7 +515,7 @@ void LevelEditorCreateActorMenu::FillAddReplaceActorMenu(UToolMenu* Menu, EActor
 						}
 					}
 
-					BuildSingleAssetAddReplaceActorMenu(Section, Asset, AssetMenuOptions, CreateMode);
+					BuildSingleAssetAddReplaceActorMenu(Section, Asset, AssetMenuOptions, CreateMode, FText::GetEmpty(), /*bUseAssetTile*/ true );
 				}
 			}
 		}

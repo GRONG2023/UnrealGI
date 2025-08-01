@@ -7,8 +7,8 @@
 #include "SocketSubsystem.h"
 #include "AddressInfoTypes.h"
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 FControlClient::~FControlClient()
@@ -102,23 +102,19 @@ bool FControlClient::IsConnected() const
 ////////////////////////////////////////////////////////////////////////////////
 void FControlClient::SendSendTo(const TCHAR* Host)
 {
-    if (!IsConnected())
-    {
-        return;
-    }
-
     FormatAndSend(TEXT("SendTo %s"), Host);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 void FControlClient::SendWriteTo(const TCHAR* Path)
 {
-    if (!IsConnected())
-    {
-        return;
-    }
-
     FormatAndSend(TEXT("WriteTo %s"), Path);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void FControlClient::SendStop()
+{
+    FormatAndSend(TEXT("Stop"));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -173,3 +169,4 @@ void FControlClient::Send(const uint8* Data, int Length)
 }
 
 } // namespace Trace
+} // namespace UE

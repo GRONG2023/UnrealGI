@@ -4,14 +4,15 @@
 	FMallocFrameProfiler.cpp: Memoory tracking allocator
 =============================================================================*/
 #include "HAL/MallocFrameProfiler.h"
+
+#include "HAL/MemoryBase.h"
+#include "Logging/LogCategory.h"
 #include "Logging/LogMacros.h"
-#include "Misc/OutputDeviceRedirector.h"
 #include "Misc/Parse.h"
 #include "Misc/ScopeLock.h"
-#include "GenericPlatform/GenericPlatformProcess.h"
-#include "HAL/IConsoleManager.h"
-#include "HAL/PlatformMisc.h"
-#include "HAL/PlatformStackWalk.h"
+
+class FOutputDevice;
+class UWorld;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogMallocFrameProfiler, Log, All);
 DEFINE_LOG_CATEGORY(LogMallocFrameProfiler);
@@ -162,6 +163,7 @@ void FMallocFrameProfiler::UpdateStats()
 	CallStackStatsArray.Reset();
 }
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool FMallocFrameProfiler::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 {
 	if (FParse::Command(&Cmd, TEXT("MallocFrameProfiler")))
@@ -182,7 +184,7 @@ bool FMallocFrameProfiler::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice
 
 	return UsedMalloc->Exec(InWorld, Cmd, Ar);
 }
-
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 FMalloc* FMallocFrameProfiler::OverrideIfEnabled(FMalloc*InUsedAlloc)
 {

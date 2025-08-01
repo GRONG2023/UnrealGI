@@ -2,12 +2,13 @@
 
 #pragma once
 
+#include "PhysicsCore.h"
 #include "ProfilingDebugging/ScopedTimers.h"
 
-#if WITH_PHYSX
 #include "Chaos/PBDRigidsEvolutionGBF.h"
-#include "PhysicsCore/Public/PhysicsInterfaceUtilsCore.h"
+#include "PhysicsInterfaceUtilsCore.h"
 #include "PhysTestSerializer.h"
+#include "SQAccelerator.h"
 
 #ifndef SQ_REPLAY_TEST
 #define SQ_REPLAY_TEST(cond) bEnsureOnMismatch ? ensure(cond) : (cond)
@@ -28,20 +29,7 @@ void SQPerfComparisonHelper(const FString& TestName, FPhysTestSerializer& Serial
 	{
 	case FSQCapture::ESQType::Raycast:
 	{
-#if PHYSICS_INTERFACE_PHYSX
-		if (bHasPhysX)
-		{
-			for (double i = 0; i < NumIterations; ++i)
-			{
-				auto PxHitBuffer = MakeUnique<PhysXInterface::FDynamicHitBuffer<PxRaycastHit>>();
-				uint32 StartTime = FPlatformTime::Cycles();
-				Serializer.GetPhysXData()->raycast(U2PVector(CapturedSQ.StartPoint), U2PVector(CapturedSQ.Dir), CapturedSQ.DeltaMag, *PxHitBuffer, U2PHitFlags(CapturedSQ.OutputFlags.HitFlags), CapturedSQ.QueryFilterData, CapturedSQ.FilterCallback.Get());
-				PhysXSum += FPlatformTime::Cycles() - StartTime;
-			}
-		}
-#endif
-
-		ISpatialAccelerationCollection<FAccelerationStructureHandle, float, 3>* Accelerator = nullptr;
+		ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>* Accelerator = nullptr;
 		Serializer.GetChaosData()->UpdateExternalAccelerationStructure_External(Accelerator, Empty);
 		FChaosSQAccelerator SQAccelerator(*Accelerator);
 		for (double i = 0; i < NumIterations; ++i)
@@ -55,54 +43,28 @@ void SQPerfComparisonHelper(const FString& TestName, FPhysTestSerializer& Serial
 	}
 	case FSQCapture::ESQType::Sweep:
 	{
-#if PHYSICS_INTERFACE_PHYSX
-		if (bHasPhysX)
-		{
-			for (double i = 0; i < NumIterations; ++i)
-			{
-				auto PxHitBuffer = MakeUnique<PhysXInterface::FDynamicHitBuffer<PxSweepHit>>();
-				uint32 StartTime = FPlatformTime::Cycles();
-				Serializer.GetPhysXData()->sweep(CapturedSQ.PhysXGeometry.any(), U2PTransform(CapturedSQ.StartTM), U2PVector(CapturedSQ.Dir), CapturedSQ.DeltaMag, *PxHitBuffer, U2PHitFlags(CapturedSQ.OutputFlags.HitFlags), CapturedSQ.QueryFilterData, CapturedSQ.FilterCallback.Get());
-				PhysXSum += FPlatformTime::Cycles() - StartTime;
-			}
-		}
-#endif
-
-		ISpatialAccelerationCollection<FAccelerationStructureHandle, float, 3>* Accelerator = nullptr;
+		ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>* Accelerator = nullptr;
 		Serializer.GetChaosData()->UpdateExternalAccelerationStructure_External(Accelerator, Empty);
 		FChaosSQAccelerator SQAccelerator(*Accelerator);
 		for (double i = 0; i < NumIterations; ++i)
 		{
 			auto ChaosHitBuffer = MakeUnique<ChaosInterface::FSQHitBuffer<ChaosInterface::FSweepHit>>();
 			uint32 StartTime = FPlatformTime::Cycles();
-			SQAccelerator.Sweep(*CapturedSQ.ChaosGeometry, CapturedSQ.StartTM, CapturedSQ.Dir, CapturedSQ.DeltaMag, *ChaosHitBuffer, CapturedSQ.OutputFlags.HitFlags, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
+			SQAccelerator.Sweep(*CapturedSQ.ChaosImplicitGeometry, CapturedSQ.StartTM, CapturedSQ.Dir, CapturedSQ.DeltaMag, *ChaosHitBuffer, CapturedSQ.OutputFlags.HitFlags, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
 			ChaosSum += FPlatformTime::Cycles() - StartTime;
 		}
 		break;
 	}
 	case FSQCapture::ESQType::Overlap:
 	{
-#if PHYSICS_INTERFACE_PHYSX
-		if (bHasPhysX)
-		{
-			for (double i = 0; i < NumIterations; ++i)
-			{
-				auto PxHitBuffer = MakeUnique<PhysXInterface::FDynamicHitBuffer<PxOverlapHit>>();
-				uint32 StartTime = FPlatformTime::Cycles();
-				Serializer.GetPhysXData()->overlap(CapturedSQ.PhysXGeometry.any(), U2PTransform(CapturedSQ.StartTM), *PxHitBuffer, CapturedSQ.QueryFilterData, CapturedSQ.FilterCallback.Get());
-				PhysXSum += FPlatformTime::Cycles() - StartTime;
-			}
-		}
-#endif
-
-		ISpatialAccelerationCollection<FAccelerationStructureHandle, float, 3>* Accelerator = nullptr;
+		ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>* Accelerator = nullptr;
 		Serializer.GetChaosData()->UpdateExternalAccelerationStructure_External(Accelerator, Empty);
 		FChaosSQAccelerator SQAccelerator(*Accelerator);
 		for (double i = 0; i < NumIterations; ++i)
 		{
 			auto ChaosHitBuffer = MakeUnique<ChaosInterface::FSQHitBuffer<ChaosInterface::FOverlapHit>>();
 			uint32 StartTime = FPlatformTime::Cycles();
-			SQAccelerator.Overlap(*CapturedSQ.ChaosGeometry, CapturedSQ.StartTM, *ChaosHitBuffer, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
+			SQAccelerator.Overlap(*CapturedSQ.ChaosImplicitGeometry, CapturedSQ.StartTM, *ChaosHitBuffer, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
 			ChaosSum += FPlatformTime::Cycles() - StartTime;
 		}
 		break;
@@ -248,8 +210,6 @@ bool SQComparisonHelper(FPhysTestSerializer& Serializer, bool bEnsureOnMismatch 
 
 #endif
 
-#if INCLUDE_CHAOS
-
 bool SQValidityHelper(FPhysTestSerializer& Serializer)
 {
 	using namespace Chaos;
@@ -265,7 +225,7 @@ bool SQValidityHelper(FPhysTestSerializer& Serializer)
 		case FSQCapture::ESQType::Raycast:
 		{
 			ChaosInterface::FSQHitBuffer<ChaosInterface::FRaycastHit> ChaosHitBuffer;
-			ISpatialAccelerationCollection<FAccelerationStructureHandle, float, 3>* Accelerator = nullptr;
+			ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>* Accelerator = nullptr;
 			
 			Serializer.GetChaosData()->UpdateExternalAccelerationStructure_External(Accelerator, Empty);
 			FChaosSQAccelerator SQAccelerator(*Accelerator);
@@ -282,10 +242,10 @@ bool SQValidityHelper(FPhysTestSerializer& Serializer)
 		case FSQCapture::ESQType::Sweep:
 		{
 			ChaosInterface::FSQHitBuffer<ChaosInterface::FSweepHit> ChaosHitBuffer;
-			ISpatialAccelerationCollection<FAccelerationStructureHandle, float, 3>* Accelerator = nullptr;
+			ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>* Accelerator = nullptr;
 			Serializer.GetChaosData()->UpdateExternalAccelerationStructure_External(Accelerator, Empty);
 			FChaosSQAccelerator SQAccelerator(*Accelerator);
-			SQAccelerator.Sweep(*CapturedSQ.ChaosGeometry, CapturedSQ.StartTM, CapturedSQ.Dir, CapturedSQ.DeltaMag, ChaosHitBuffer, CapturedSQ.OutputFlags.HitFlags, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
+			SQAccelerator.Sweep(*CapturedSQ.ChaosImplicitGeometry, CapturedSQ.StartTM, CapturedSQ.Dir, CapturedSQ.DeltaMag, ChaosHitBuffer, CapturedSQ.OutputFlags.HitFlags, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
 			
 			const bool bHasBlockingHit = ChaosHitBuffer.HasBlockingHit();
 			const int32 NumHits = ChaosHitBuffer.GetNumHits();
@@ -305,10 +265,10 @@ bool SQValidityHelper(FPhysTestSerializer& Serializer)
 		case FSQCapture::ESQType::Overlap:
 		{
 			ChaosInterface::FSQHitBuffer<ChaosInterface::FOverlapHit> ChaosHitBuffer;
-			ISpatialAccelerationCollection<FAccelerationStructureHandle, float, 3>* Accelerator = nullptr;
+			ISpatialAccelerationCollection<FAccelerationStructureHandle, FReal, 3>* Accelerator = nullptr;
 			Serializer.GetChaosData()->UpdateExternalAccelerationStructure_External(Accelerator, Empty);
 			FChaosSQAccelerator SQAccelerator(*Accelerator);
-			SQAccelerator.Overlap(*CapturedSQ.ChaosGeometry, CapturedSQ.StartTM, ChaosHitBuffer, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
+			SQAccelerator.Overlap(*CapturedSQ.ChaosImplicitGeometry, CapturedSQ.StartTM, ChaosHitBuffer, CapturedSQ.QueryFilterData, *CapturedSQ.FilterCallback);
 			break;
 		}
 	}
@@ -316,5 +276,4 @@ bool SQValidityHelper(FPhysTestSerializer& Serializer)
 	return bTestPassed;
 }
 
-#endif
-#endif
+

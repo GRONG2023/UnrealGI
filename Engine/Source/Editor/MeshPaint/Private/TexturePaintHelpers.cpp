@@ -7,7 +7,10 @@
 #include "StaticMeshResources.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/Texture2D.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "TextureResource.h"
+#include "MaterialShared.h"
 
 #include "IMeshPaintGeometryAdapter.h"
 
@@ -15,6 +18,7 @@
 #include "CanvasTypes.h"
 #include "CanvasItem.h"
 #include "MeshPaintTypes.h"
+#include "PixelFormat.h"
 
 void TexturePaintHelpers::CopyTextureToRenderTargetTexture(UTexture* SourceTexture, UTextureRenderTarget2D* RenderTargetTexture, ERHIFeatureLevel::Type FeatureLevel)
 {
@@ -28,7 +32,7 @@ void TexturePaintHelpers::CopyTextureToRenderTargetTexture(UTexture* SourceTextu
 	check(RenderTargetResource != nullptr);
 	
 	// Create a canvas for the render target and clear it to black
-	FCanvas Canvas(RenderTargetResource, nullptr, 0, 0, 0, FeatureLevel);
+	FCanvas Canvas(RenderTargetResource, nullptr, FGameTime(), FeatureLevel);
 
 	const uint32 Width = RenderTargetTexture->GetSurfaceWidth();
 	const uint32 Height = RenderTargetTexture->GetSurfaceHeight();
@@ -46,7 +50,7 @@ void TexturePaintHelpers::CopyTextureToRenderTargetTexture(UTexture* SourceTextu
 	UTexture2D* Texture2D = Cast<UTexture2D>(SourceTexture);
 	if (Texture2D != nullptr)
 	{
-		TextureResource = Texture2D->Resource;
+		TextureResource = Texture2D->GetResource();
 	}
 	else
 	{
@@ -96,11 +100,7 @@ void TexturePaintHelpers::CopyTextureToRenderTargetTexture(UTexture* SourceTextu
 	ENQUEUE_RENDER_COMMAND(UpdateMeshPaintRTCommand)(
 		[RenderTargetResource](FRHICommandListImmediate& RHICmdList)
 		{
-			// Copy (resolve) the rendered image from the frame buffer to its render target texture
-			RHICmdList.CopyToResolveTarget(
-				RenderTargetResource->GetRenderTargetTexture(),		// Source texture
-				RenderTargetResource->TextureRHI,					// Dest texture
-				FResolveParams());									// Resolve parameters
+			TransitionAndCopyTexture(RHICmdList, RenderTargetResource->GetRenderTargetTexture(), RenderTargetResource->TextureRHI, {});
 		});		
 }
 
@@ -204,7 +204,7 @@ bool TexturePaintHelpers::GenerateSeamMask(UMeshComponent* MeshComponent, int32 
 
 	{
 		// Create a canvas for the render target and clear it to white
-		FCanvas Canvas(RenderTargetResource, nullptr, 0, 0, 0, GEditor->GetEditorWorldContext().World()->FeatureLevel);
+		FCanvas Canvas(RenderTargetResource, nullptr, FGameTime(), GEditor->GetEditorWorldContext().World()->GetFeatureLevel());
 		Canvas.Clear(FLinearColor::White);
 
 		TArray<FCanvasUVTri> TriList;
@@ -224,7 +224,7 @@ bool TexturePaintHelpers::GenerateSeamMask(UMeshComponent* MeshComponent, int32 
 			for (int32 TriVertexNum = 0; TriVertexNum < 3; ++TriVertexNum)
 			{
 				const int32 VertexIndex = Indices[TriIndex * 3 + TriVertexNum];
-				TriUVs[TriVertexNum] = LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVSet);
+				TriUVs[TriVertexNum] = FVector2D(LODModel.VertexBuffers.StaticMeshVertexBuffer.GetVertexUV(VertexIndex, UVSet));
 
 				// Update bounds
 				float U = TriUVs[TriVertexNum].X;
@@ -309,16 +309,21 @@ bool TexturePaintHelpers::GenerateSeamMask(UMeshComponent* MeshComponent, int32 
 		ENQUEUE_RENDER_COMMAND(UpdateMeshPaintRTCommand5)(
 			[RenderTargetResource](FRHICommandListImmediate& RHICmdList)
 			{
-				// Copy (resolve) the rendered image from the frame buffer to its render target texture
-				RHICmdList.CopyToResolveTarget(
-					RenderTargetResource->GetRenderTargetTexture(),		// Source texture
-					RenderTargetResource->TextureRHI,
-					FResolveParams());									// Resolve parameters
+				TransitionAndCopyTexture(RHICmdList, RenderTargetResource->GetRenderTargetTexture(), RenderTargetResource->TextureRHI, {});
 			});
-
 	}
 
 	return RetVal;
+}
+
+int32 TexturePaintHelpers::GetMaxSupportedBytesPerPixelForPainting()
+{
+	return GPixelFormats[GetTempUncompressedTexturePixelFormat()].BlockBytes;
+}
+
+EPixelFormat TexturePaintHelpers::GetTempUncompressedTexturePixelFormat()
+{
+	return EPixelFormat::PF_B8G8R8A8;
 }
 
 UTexture2D* TexturePaintHelpers::CreateTempUncompressedTexture(UTexture2D* SourceTexture)
@@ -340,7 +345,7 @@ UTexture2D* TexturePaintHelpers::CreateTempUncompressedTexture(UTexture2D* Sourc
 	UTexture2D* NewTexture2D = UTexture2D::CreateTransient(Width, Height, GetTempUncompressedTexturePixelFormat());
 
 	// Fill in the base mip for the texture we created
-	uint8* MipData = (uint8*)NewTexture2D->PlatformData->Mips[0].BulkData.Lock(LOCK_READ_WRITE);
+	uint8* MipData = (uint8*)NewTexture2D->GetPlatformData()->Mips[0].BulkData.Lock(LOCK_READ_WRITE);
 	for (int32 y = 0; y < Height; y++)
 	{
 		uint8* DestPtr = &MipData[(Height - 1 - y) * Width * sizeof(FColor)];
@@ -354,7 +359,7 @@ UTexture2D* TexturePaintHelpers::CreateTempUncompressedTexture(UTexture2D* Sourc
 			SrcPtr++;
 		}
 	}
-	NewTexture2D->PlatformData->Mips[0].BulkData.Unlock();
+	NewTexture2D->GetPlatformData()->Mips[0].BulkData.Unlock();
 
 	// Set options
 	NewTexture2D->SRGB = bUseSRGB;
@@ -383,7 +388,7 @@ void TexturePaintHelpers::SetupInitialRenderTargetData(UTexture2D* InTextureSour
 			check(TempSourceArtTexture != nullptr);
 
 			// Copy the texture to the render target using the GPU
-			CopyTextureToRenderTargetTexture(TempSourceArtTexture, InRenderTarget, GEditor->GetEditorWorldContext().World()->FeatureLevel);
+			CopyTextureToRenderTargetTexture(TempSourceArtTexture, InRenderTarget, GEditor->GetEditorWorldContext().World()->GetFeatureLevel());
 
 			// NOTE: TempSourceArtTexture is no longer needed (will be GC'd)
 		}
@@ -393,7 +398,7 @@ void TexturePaintHelpers::SetupInitialRenderTargetData(UTexture2D* InTextureSour
 		// Just copy (render) the texture in GPU memory to our render target.  Hopefully it's not
 		// compressed already!
 		check(InTextureSource->IsFullyStreamedIn());
-		CopyTextureToRenderTargetTexture(InTextureSource, InRenderTarget, GEditor->GetEditorWorldContext().World()->FeatureLevel);
+		CopyTextureToRenderTargetTexture(InTextureSource, InRenderTarget, GEditor->GetEditorWorldContext().World()->GetFeatureLevel());
 	}
 }
 
@@ -459,7 +464,7 @@ void TexturePaintHelpers::RetrieveMeshSectionsForMaterialIndices(const UMeshComp
 	}
 	else if (const USkeletalMeshComponent* SkeletalMeshComponent = Cast<const USkeletalMeshComponent>(MeshComponent))
 	{
-		const USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->SkeletalMesh;
+		const USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
 		if (SkeletalMesh)
 		{
 			const FSkeletalMeshRenderData* Resource = SkeletalMesh->GetResourceForRendering();

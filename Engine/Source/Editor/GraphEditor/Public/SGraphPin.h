@@ -2,24 +2,48 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Set.h"
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Misc/Guid.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Styling/SlateColor.h"
+#include "GenericPlatform/ICursor.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
 #include "Input/DragAndDrop.h"
 #include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/Layout/SBorder.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
 #include "SGraphNode.h"
+#include "Styling/SlateColor.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SWrapBox.h"
+#include "Widgets/SWidget.h"
 
+class FDragDropEvent;
+class FDragDropOperation;
+class FPinValueInspectorTooltip;
+class IToolTip;
+class SGraphNode;
 class SGraphPanel;
 class SGraphPin;
 class SHorizontalBox;
 class SImage;
+class SLevelOfDetailBranchNode;
+class SWidget;
 class SWrapBox;
+struct FGeometry;
+struct FPointerEvent;
+struct FSlateBrush;
 
 #define NAME_DefaultPinLabelStyle TEXT("Graph.Node.PinName")
 
@@ -34,6 +58,12 @@ struct GRAPHEDITOR_API FGraphPinHandle
 
 	/** The GUID of the pin we are referencing */
 	FGuid PinId;
+
+	/**
+	 * Default constructor
+	 * Will contain a invalid node and pin GUID and IsValid() will return false.
+	 */
+	FGraphPinHandle() = default;
 
 	/** Constructor */
 	FGraphPinHandle(UEdGraphPin* InPin);
@@ -92,6 +122,7 @@ public:
 
 public:
 	SGraphPin();
+	virtual ~SGraphPin();
 
 	/** Set attribute for determining if pin is editable */
 	void SetIsEditable(TAttribute<bool> InIsEditable);
@@ -118,13 +149,20 @@ public:
 	virtual FReply OnDragOver(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override;
 	virtual FReply OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent) override;
 	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
+	virtual TSharedPtr<IToolTip> GetToolTip() override;
 	// End of SWidget interface
+
+	/** Refresh the level of detail applied to the pin name */
+	void RefreshLOD();
 
 public:
 	UEdGraphPin* GetPinObj() const;
 
 	/** @param OwnerNode  The SGraphNode that this pin belongs to */
 	void SetOwner( const TSharedRef<SGraphNode> OwnerNode );
+
+	/** @param PinObj The UEdGraphPin object this pin widget represents */
+	void SetPinObj(UEdGraphPin* PinObj);
 
 	/** @return whether this pin is incoming or outgoing */
 	EEdGraphPinDirection GetDirection() const;
@@ -147,6 +185,9 @@ public:
 	/** @return whether this pin is connected to another pin */
 	bool IsConnected() const;
 
+	/** @return whether to fade out the pin's connections */
+	bool AreConnectionsFaded() const;
+
 	/** Tries to handle making a connection to another pin, depending on the schema and the pins it may do:  
 		 - Nothing
 		 - Break existing links on either side while making the new one
@@ -165,6 +206,23 @@ public:
 	void SetPinColorModifier(FLinearColor InColor)
 	{
 		PinColorModifier = InColor;
+	}
+
+	void SetDiffHighlighted(bool bHighlighted)
+	{
+		bIsDiffHighlighted = bHighlighted;
+	}
+
+	/** Allows Diff to highlight pins */
+	void SetPinDiffColor(TOptional<FLinearColor> InColor)
+	{
+		PinDiffColor = InColor;
+	}
+
+	/** Makes Pin Connection Wires transparent */
+	void SetFadeConnections(bool bInFadeConnections)
+	{
+		bFadeConnections = bInFadeConnections;
 	}
 
 	/** Set this pin to only be used to display default value */
@@ -206,6 +264,12 @@ public:
 	/** Override the visual look of the pin by providing two custom brushes */
 	void SetCustomPinIcon(const FSlateBrush* InConnectedBrush, const FSlateBrush* InDisconnectedBrush);
 
+	/** @returns true if we have a valid PinValueInspector tooltip */
+	bool HasInteractiveTooltip() const;
+
+	/** Enables or disables drag and drop on the pin */
+	void EnableDragAndDrop(bool bEnable) { bDragAndDropEnabled = bEnable; }
+
 protected:
 
 	/** If true the graph pin subclass is responsible for setting the IsEnabled delegates for the aspects it cares about. If false, the default value widget enabling is done by the base class */
@@ -242,6 +306,11 @@ protected:
 	/** @return The color that we should use to draw this pin */
 	virtual FSlateColor GetPinColor() const;
 
+	/** @return The color that we should use to draw the highlight for this pin */
+	virtual FSlateColor GetHighlightColor() const;
+
+	virtual FSlateColor GetPinDiffColor() const;
+
 	/** @return The secondary color that we should use to draw this pin (e.g. value color for Map pins) */
 	FSlateColor GetSecondaryPinColor() const;
 
@@ -250,6 +319,9 @@ protected:
 
 	/** @return The tooltip to display for this pin */
 	FText GetTooltipText() const;
+
+	/** Gets the window location (in screen coords) for an interactive tooltip (e.g. pin value inspector) */
+	void GetInteractiveTooltipLocation(FVector2D& InOutDesiredLocation) const;
 
 	TOptional<EMouseCursor::Type> GetPinCursor() const;
 
@@ -261,6 +333,14 @@ protected:
 
 	/** Determines the pin's visibility based on the LOD factor, when it is low LOD, no hit test will occur */
 	EVisibility GetPinVisiblity() const;
+
+public:
+
+	/** Returns the current pin image widget that is being used */
+	TSharedPtr<SWidget> GetPinImageWidget() const;
+
+	/** Sets the pin widget for this pin */
+	void SetPinImageWidget(TSharedRef<SWidget> NewWidget);
 
 protected:
 	/** The GraphNode that owns this pin */
@@ -278,6 +358,9 @@ protected:
 	/** Value widget for the pin, created with GetDefaultValueWidget() */
 	TSharedPtr<SWidget> ValueWidget;
 
+	/** Value inspector tooltip while debugging */
+	TWeakPtr<FPinValueInspectorTooltip> ValueInspectorTooltip;
+
 	/** The GraphPin that this widget represents. */
 	class UEdGraphPin* GraphPinObj;
 
@@ -292,6 +375,9 @@ protected:
 
 	/** Set of pins that are currently being hovered */
 	TSet< FEdGraphPinReference > HoverPinSet;
+
+	/** If set, this will change the color of the pin's background highlight */
+	TOptional<FLinearColor> PinDiffColor;
 
 	//@TODO: Want to cache these once for all SGraphPins, but still handle slate style updates
 	const FSlateBrush* CachedImg_ArrayPin_Connected;
@@ -310,6 +396,8 @@ protected:
 
 	const FSlateBrush* CachedImg_Pin_Background;
 	const FSlateBrush* CachedImg_Pin_BackgroundHovered;
+	
+	const FSlateBrush* CachedImg_Pin_DiffOutline;
 
 	const FSlateBrush* Custom_Brush_Connected;
 	const FSlateBrush* Custom_Brush_Disconnected;
@@ -328,4 +416,16 @@ protected:
 
 	/** TRUE if the pin should use the Pin's color for the text */
 	bool bUsePinColorForText;
+
+	/** TRUE if the pin should allow any drag and drop */
+	bool bDragAndDropEnabled;
+
+	/** True if this pin is being diffed and it's currently selected in the diff view. Highlights this pin */
+	bool bIsDiffHighlighted;
+
+	/** TRUE if the connections from this pin should be drawn at a lower opacity */
+	bool bFadeConnections;
+
+private:
+	TSharedPtr<SLevelOfDetailBranchNode> PinNameLODBranchNode;
 };

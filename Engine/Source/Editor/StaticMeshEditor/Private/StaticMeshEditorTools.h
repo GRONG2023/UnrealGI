@@ -14,6 +14,7 @@
 #include "Engine/MeshMerging.h"
 #include "Engine/StaticMesh.h"
 #include "IDetailCustomization.h"
+#include "StaticMeshResources.h"
 #include "Widgets/Input/SSpinBox.h"
 #include "IDetailCustomNodeBuilder.h"
 
@@ -21,6 +22,7 @@ struct FAssetData;
 class FAssetThumbnailPool;
 class FDetailWidgetRow;
 class FLevelOfDetailSettingsLayout;
+class FNaniteSettingsLayout;
 class FStaticMeshEditor;
 class IDetailCategoryBuilder;
 class IDetailChildrenBuilder;
@@ -42,8 +44,6 @@ enum ELimitModeChoice
 	Charts
 };
 
-class FLevelOfDetailSettingsLayout;
-
 class FStaticMeshDetails : public IDetailCustomization
 {
 public:
@@ -56,11 +56,16 @@ public:
 	/** @return true if settings have been changed and need to be applied to the static mesh */
 	bool IsApplyNeeded() const;
 
-	/** Applies level of detail changes to the static mesh */
+	/** Applies changes to the static mesh */
 	void ApplyChanges();
+
 private:
 	/** Level of detail settings for the details panel */
 	TSharedPtr<FLevelOfDetailSettingsLayout> LevelOfDetailSettings;
+
+	/** Nanite settings for the details panel. */
+	TSharedPtr<FNaniteSettingsLayout> NaniteSettings;
+
 	/** Static mesh editor */
 	class FStaticMeshEditor& StaticMeshEditor;
 
@@ -188,12 +193,13 @@ private:
 	ECheckBoxState ShouldUseMikkTSpace() const;
 	ECheckBoxState ShouldComputeWeightedNormals() const;
 	ECheckBoxState ShouldRemoveDegenerates() const;
-	ECheckBoxState ShouldBuildAdjacencyBuffer() const;
 	ECheckBoxState ShouldBuildReversedIndexBuffer() const;
 	ECheckBoxState ShouldUseHighPrecisionTangentBasis() const;
 	ECheckBoxState ShouldUseFullPrecisionUVs() const;
+	ECheckBoxState ShouldUseBackwardsCompatibleF16TruncUVs() const;
 	ECheckBoxState ShouldGenerateLightmapUVs() const;
 	ECheckBoxState ShouldGenerateDistanceFieldAsIfTwoSided() const;
+	bool IsRemoveDegeneratesDisabled() const;
 	int32 GetMinLightmapResolution() const;
 	int32 GetSrcLightmapIndex() const;
 	int32 GetDstLightmapIndex() const;
@@ -201,16 +207,17 @@ private:
 	TOptional<float> GetBuildScaleY() const;
 	TOptional<float> GetBuildScaleZ() const;
 	float GetDistanceFieldResolutionScale() const;
+	int32 GetMaxLumenMeshCards() const;
 
 	void OnRecomputeNormalsChanged(ECheckBoxState NewState);
 	void OnRecomputeTangentsChanged(ECheckBoxState NewState);
 	void OnUseMikkTSpaceChanged(ECheckBoxState NewState);
 	void OnComputeWeightedNormalsChanged(ECheckBoxState NewState);
 	void OnRemoveDegeneratesChanged(ECheckBoxState NewState);
-	void OnBuildAdjacencyBufferChanged(ECheckBoxState NewState);
 	void OnBuildReversedIndexBufferChanged(ECheckBoxState NewState);
 	void OnUseHighPrecisionTangentBasisChanged(ECheckBoxState NewState);
 	void OnUseFullPrecisionUVsChanged(ECheckBoxState NewState);
+	void OnUseBackwardsCompatibleF16TruncUVsChanged(ECheckBoxState NewState);
 	void OnGenerateLightmapUVsChanged(ECheckBoxState NewState);
 	void OnGenerateDistanceFieldAsIfTwoSidedChanged(ECheckBoxState NewState);
 	void OnMinLightmapResolutionChanged( int32 NewValue );
@@ -219,11 +226,12 @@ private:
 	void OnBuildScaleXChanged( float NewScaleX, ETextCommit::Type TextCommitType );
 	void OnBuildScaleYChanged( float NewScaleY, ETextCommit::Type TextCommitType );
 	void OnBuildScaleZChanged( float NewScaleZ, ETextCommit::Type TextCommitType );
-
 	void OnDistanceFieldResolutionScaleChanged(float NewValue);
 	void OnDistanceFieldResolutionScaleCommitted(float NewValue, ETextCommit::Type TextCommitType);
 	FString GetCurrentDistanceFieldReplacementMeshPath() const;
 	void OnDistanceFieldReplacementMeshSelected(const FAssetData& AssetData);
+	void OnMaxLumenMeshCardsChanged(int32 NewValue);
+	void OnMaxLumenMeshCardsCommitted(int32 NewValue, ETextCommit::Type TextCommitType);
 
 private:
 	TWeakPtr<FLevelOfDetailSettingsLayout> ParentLODSettings;
@@ -253,9 +261,11 @@ private:
 
 	// used by native tool and simplygon
 	float GetPercentTriangles() const;
+	uint32 GetMaxNumOfPercentTriangles() const;
 
 	// used by native quadric simplifier
 	float GetPercentVertices() const;
+	uint32 GetMaxNumOfPercentVertices() const;
 
 	// used by simplygon only
 	float GetMaxDeviation() const;
@@ -267,17 +277,21 @@ private:
 	// used by native tool and simplygon
 	void OnPercentTrianglesChanged(float NewValue);
 	void OnPercentTrianglesCommitted(float NewValue, ETextCommit::Type TextCommitType);
+	void OnMaxNumOfPercentTrianglesChanged(uint32 NewValue);
+	void OnMaxNumOfPercentTrianglesCommitted(uint32 NewValue, ETextCommit::Type TextCommitType);
 
 	// Used by native code only
 	void OnPercentVerticesChanged(float NewValue);
 	void OnPercentVerticesCommitted(float NewValue, ETextCommit::Type TextCommitType);
+	void OnMaxNumOfPercentVerticesChanged(uint32 NewValue);
+	void OnMaxNumOfPercentVerticesCommitted(uint32 NewValue, ETextCommit::Type TextCommitType);
+	
 
 	//used by simplygon only
 	void OnMaxDeviationChanged(float NewValue);
 	void OnMaxDeviationCommitted(float NewValue, ETextCommit::Type TextCommitType);
 	void OnPixelErrorChanged(float NewValue);
 	void OnPixelErrorCommitted(float NewValue, ETextCommit::Type TextCommitType);
-	void OnReductionAmountChanged(float NewValue);
 	void OnRecalculateNormalsChanged(ECheckBoxState NewValue);
 
 	// used by native tool and simplygon
@@ -386,6 +400,9 @@ private:
 
 	ECheckBoxState IsSectionVisibleInRayTracing(int32 SectionIndex) const;
 	void OnSectionVisibleInRayTracingChanged(ECheckBoxState NewState, int32 SectionIndex);
+
+	ECheckBoxState DoesSectionAffectDistanceFieldLighting(int32 SectionIndex) const;
+	void OnSectionAffectDistanceFieldLightingChanged(ECheckBoxState NewState, int32 SectionIndex);
 
 	ECheckBoxState IsSectionOpaque(int32 SectionIndex) const;
 	void OnSectionForceOpaqueFlagChanged(ECheckBoxState NewState, int32 SectionIndex);
@@ -524,7 +541,8 @@ public:
 	/** Apply current LOD settings to the mesh. */
 	void ApplyChanges();
 
-	bool PreviewLODRequiresAdjacencyInformation(int32 LODIndex);
+	/** Returns true if the LOD's static mesh has Nanite enabled */
+	bool IsNaniteEnabled() const;
 
 private:
 
@@ -542,10 +560,28 @@ private:
 	void OnMinLODChanged(int32 NewValue, FName Platform);
 	void OnMinLODCommitted(int32 InValue, ETextCommit::Type CommitInfo, FName Platform);
 	int32 GetMinLOD(FName Platform) const;
+	FPerPlatformInt GetMinLOD() const;
 	TSharedRef<SWidget> GetMinLODWidget(FName PlatformGroupName) const;
 	bool AddMinLODPlatformOverride(FName PlatformGroupName);
 	bool RemoveMinLODPlatformOverride(FName PlatformGroupName);
 	TArray<FName> GetMinLODPlatformOverrideNames() const;
+
+	void OnMinQualityLevelLODChanged(int32 NewValue, FName QualityLevel);
+	void OnMinQualityLevelLODCommitted(int32 InValue, ETextCommit::Type CommitInfo, FName QualityLevel);
+	int32 GetMinQualityLevelLOD(FName QualityLevel) const;
+	TSharedRef<SWidget> GetMinQualityLevelLODWidget(FName QualityLevelName) const;
+	bool AddMinLODQualityLevelOverride(FName QualityLevelName);
+	bool RemoveMinLODQualityLevelOverride(FName QualityLevelName);
+	TArray<FName> GetMinQualityLevelLODOverrideNames() const;
+	FReply ResetToDefault();
+
+	void OnNoRefStreamingLODBiasChanged(int32 NewValue, FName QualityLevel);
+	void OnNoRefStreamingLODBiasCommitted(int32 InValue, ETextCommit::Type CommitInfo, FName QualityLevel);
+	int32 GetNoRefStreamingLODBias(FName QualityLevel) const;
+	TSharedRef<SWidget> GetNoRefStreamingLODBiasWidget(FName QualityLevelName) const;
+	bool AddNoRefStreamingLODBiasOverride(FName QualityLevelName);
+	bool RemoveNoRefStreamingLODBiasOverride(FName QualityLevelName);
+	TArray<FName> GetNoRefStreamingLODBiasOverrideNames() const;
 
 	void OnNumStreamedLODsChanged(int32 NewValue, FName Platform);
 	void OnNumStreamedLODsCommitted(int32 InValue, ETextCommit::Type CommitInfo, FName Platform);
@@ -583,6 +619,7 @@ private:
 	void UpdateLODNames();
 	FText GetLODCountTooltip() const;
 	FText GetMinLODTooltip() const;
+	FText GetNoRefStreamingLODBiasTooltip() const;
 	FText GetNumStreamedLODsTooltip() const;
 
 	FText GetLODCustomModeNameContent(int32 LODIndex) const;
@@ -601,9 +638,6 @@ private:
 
 	/** The Static Mesh Editor this tool is associated with. */
 	FStaticMeshEditor& StaticMeshEditor;
-
-	/** Pool for material thumbnails. */
-	TSharedPtr<FAssetThumbnailPool> ThumbnailPool;
 
 	/** LOD group options. */
 	TArray<FName> LODGroupNames;
@@ -638,4 +672,122 @@ private:
 	IDetailCategoryBuilder* LodCustomCategory;
 
 	bool DetailDisplayLODs[MAX_STATIC_MESH_LODS];
+
+	FDelegateHandle OnAssetPostLODImportDelegateHandle;
+};
+
+/**
+ * Window for Nanite settings.
+ */
+class FNaniteSettingsLayout : public TSharedFromThis<FNaniteSettingsLayout>
+{
+public:
+	FNaniteSettingsLayout(FStaticMeshEditor& StaticMeshEditor);
+	virtual ~FNaniteSettingsLayout();
+
+	const FMeshNaniteSettings& GetSettings() const;
+	void UpdateSettings(const FMeshNaniteSettings& InSettings);
+
+	void AddToDetailsPanel(IDetailLayoutBuilder& DetailBuilder);
+
+	/** Returns true if settings have been changed and an Apply is needed to update the asset. */
+	bool IsApplyNeeded() const;
+
+	/** Apply current Nanite settings to the mesh. */
+	void ApplyChanges();
+
+	/** Position Precision range selectable in the UI. */
+	static const int32 DisplayPositionPrecisionAuto = MIN_int32;
+	static const int32 DisplayPositionPrecisionMin = -6;
+	static const int32 DisplayPositionPrecisionMax = 13;
+
+	static int32 PositionPrecisionIndexToValue(int32 Index);
+	static int32 PositionPrecisionValueToIndex(int32 Value);
+
+	/** Display string to show in menus. */
+	static FString PositionPrecisionValueToDisplayString(int32 Value);
+
+
+	/** Normal Precision range selectable in the UI. */
+	static const int32 DisplayNormalPrecisionAuto = -1;
+	static const int32 DisplayNormalPrecisionMin = 5;
+	static const int32 DisplayNormalPrecisionMax = 15;
+
+	static int32 NormalPrecisionIndexToValue(int32 Index);
+	static int32 NormalPrecisionValueToIndex(int32 Value);
+
+	/** Display string to show in menus. */
+	static FString NormalPrecisionValueToDisplayString(int32 Value);
+
+	/** Tangent Precision range selectable in the UI. */
+	static const int32 DisplayTangentPrecisionAuto = -1;
+	static const int32 DisplayTangentPrecisionMin = 4;
+	static const int32 DisplayTangentPrecisionMax = 12;
+
+	static int32 TangentPrecisionIndexToValue(int32 Index);
+	static int32 TangentPrecisionValueToIndex(int32 Value);
+
+	/** Display string to show in menus. */
+	static FString TangentPrecisionValueToDisplayString(int32 Value);
+
+	/** Residency range selectable in the UI. */
+	static const int32 DisplayMinimumResidencyMinimalIndex = 0;
+	static const int32 DisplayMinimumResidencyExpRangeMin = 5;
+	static const int32 DisplayMinimumResidencyExpRangeMax = 15;
+	static const int32 DisplayMinimumResidencyFullIndex = DisplayMinimumResidencyExpRangeMax - DisplayMinimumResidencyExpRangeMin + 2;
+
+	static uint32 MinimumResidencyIndexToValue(int32 Index);
+	static int32 MinimumResidencyValueToIndex(uint32 Value);
+
+	/** Display string to show in menus. */
+	static FString MinimumResidencyValueToDisplayString(uint32 Value);
+private:
+	FReply OnApply();
+
+	ECheckBoxState IsEnabledChecked() const;
+	void OnEnabledChanged(ECheckBoxState NewState);
+
+	void OnPositionPrecisionChanged(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
+	void OnNormalPrecisionChanged(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
+	void OnTangentPrecisionChanged(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
+	void OnResidencyChanged(TSharedPtr<FString> NewValue, ESelectInfo::Type SelectInfo);
+
+	float GetKeepPercentTriangles() const;
+	void OnKeepPercentTrianglesChanged(float NewValue);
+	void OnKeepPercentTrianglesCommitted(float NewValue, ETextCommit::Type TextCommitType);
+
+	float GetTrimRelativeError() const;
+	void OnTrimRelativeErrorChanged(float NewValue);
+
+	float GetFallbackPercentTriangles() const;
+	void OnFallbackPercentTrianglesChanged(float NewValue);
+	void OnFallbackPercentTrianglesCommitted(float NewValue, ETextCommit::Type TextCommitType);
+
+	float GetFallbackRelativeError() const;
+	void OnFallbackRelativeErrorChanged(float NewValue);
+
+	int32 GetDisplacementUVChannel() const;
+	void OnDisplacementUVChannelChanged(int32 NewValue);
+
+	FString GetHiResSourceFilename() const;
+	void SetHiResSourceFilename(const FString& NewSourceFile);
+
+	bool DoesHiResDataExists() const;
+	bool IsHiResDataEmpty() const;
+	
+	FReply OnImportHiRes();
+	FReply OnRemoveHiRes();
+	FReply OnReimportHiRes();
+	FReply OnReimportHiResWithNewFile();
+
+private:
+	/** The Static Mesh Editor this tool is associated with. */
+	FStaticMeshEditor& StaticMeshEditor;
+
+	FMeshNaniteSettings NaniteSettings;
+
+	TArray<TSharedPtr<FString> > PositionPrecisionOptions;
+	TArray<TSharedPtr<FString> > NormalPrecisionOptions;
+	TArray<TSharedPtr<FString> > TangentPrecisionOptions;
+	TArray<TSharedPtr<FString> > ResidencyOptions;
 };

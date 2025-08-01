@@ -4,19 +4,20 @@
 
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "SlateOptMacros.h"
+#include "Styling/AppStyle.h"
 #include "TraceServices/Model/Diagnostics.h"
 #include "TraceServices/ModuleService.h"
 #include "Misc/Paths.h"
-#include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
 
 #if WITH_EDITOR
 	#include "EngineAnalytics.h"
-	#include "Runtime/Analytics/Analytics/Public/AnalyticsEventAttribute.h"
-	#include "Runtime/Analytics/Analytics/Public/Interfaces/IAnalyticsProvider.h"
+	#include "AnalyticsEventAttribute.h"
+	#include "Interfaces/IAnalyticsProvider.h"
 #endif // WITH_EDITOR
 
 // Insights
@@ -38,7 +39,8 @@ const FName FSessionInfoTabs::SessionInfoID(TEXT("SessionInfo"));
 
 SSessionInfoWindow::SSessionInfoWindow()
 	: DurationActive(0.0f)
-	, TabManager()
+	, AnalysisSession(nullptr)
+	, bIsSessionInfoSet(false)
 {
 }
 
@@ -49,7 +51,7 @@ SSessionInfoWindow::~SSessionInfoWindow()
 #if WITH_EDITOR
 	if (DurationActive > 0.0f && FEngineAnalytics::IsAvailable())
 	{
-		FEngineAnalytics::GetProvider().RecordEvent(TEXT("Editor.Usage.Insights.SessionInfo"), FAnalyticsEventAttribute(TEXT("Duration"), DurationActive));
+		FEngineAnalytics::GetProvider().RecordEvent(TEXT("Insights.Usage.SessionInfo"), FAnalyticsEventAttribute(TEXT("Duration"), DurationActive));
 	}
 #endif // WITH_EDITOR
 }
@@ -67,7 +69,7 @@ void SSessionInfoWindow::Construct(const FArguments& InArgs, const TSharedRef<SD
 
 	TabManager->RegisterTabSpawner(FSessionInfoTabs::SessionInfoID, FOnSpawnTab::CreateRaw(this, &SSessionInfoWindow::SpawnTab_SessionInfo))
 		.SetDisplayName(LOCTEXT("SessionInfo", "Session Info"))
-		.SetIcon(FSlateIcon(FInsightsStyle::GetStyleSetName(), "Toolbar.Icon.Small"))
+		.SetIcon(FSlateIcon(FInsightsStyle::GetStyleSetName(), "Icons.SessionInfo"))
 		.SetGroup(AppMenuGroup);
 
 	TSharedRef<FTabManager::FLayout> Layout = []() -> TSharedRef<FTabManager::FLayout>
@@ -89,7 +91,6 @@ void SSessionInfoWindow::Construct(const FArguments& InArgs, const TSharedRef<SD
 
 	// Create & initialize main menu.
 	FMenuBarBuilder MenuBarBuilder = FMenuBarBuilder(TSharedPtr<FUICommandList>());
-
 	MenuBarBuilder.AddPullDownMenu(
 		LOCTEXT("MenuLabel", "Menu"),
 		FText::GetEmpty(),
@@ -97,93 +98,179 @@ void SSessionInfoWindow::Construct(const FArguments& InArgs, const TSharedRef<SD
 		FName(TEXT("Menu"))
 	);
 
+#if !WITH_EDITOR
+	TSharedRef<SWidget> MenuWidget = MenuBarBuilder.MakeWidget();
+	MenuWidget->SetClipping(EWidgetClipping::ClipToBoundsWithoutIntersecting);
+#endif
+
 	ChildSlot
 	[
 		SNew(SOverlay)
+
+#if !WITH_EDITOR
+		// Menu
+		+ SOverlay::Slot()
+		.HAlign(HAlign_Left)
+		.VAlign(VAlign_Top)
+		.Padding(34.0f, -60.0f, 0.0f, 0.0f)
+		[
+			MenuWidget
+		]
+#endif
 
 		// Version
 		+ SOverlay::Slot()
 		.HAlign(HAlign_Right)
 		.VAlign(VAlign_Top)
-		.Padding(0.0f, -16.0f, 0.0f, 0.0f)
+		.Padding(0.0f, -16.0f, 4.0f, 0.0f)
 		[
 			SNew(STextBlock)
 			.Clipping(EWidgetClipping::ClipToBoundsWithoutIntersecting)
 			.Text(LOCTEXT("UnrealInsightsVersion", UNREAL_INSIGHTS_VERSION_STRING_EX))
 			.ColorAndOpacity(FLinearColor(0.15f, 0.15f, 0.15f, 1.0f))
 		]
+
 		// Overlay slot for the main window area
 		+ SOverlay::Slot()
 		.HAlign(HAlign_Fill)
 		.VAlign(VAlign_Fill)
 		[
-			SNew(SVerticalBox)
-
-			+ SVerticalBox::Slot()
-			.AutoHeight()
-			[
-				MenuBarBuilder.MakeWidget()
-			]
-
-			+ SVerticalBox::Slot()
-			.FillHeight(1.0f)
-			[
-				TabManager->RestoreFrom(Layout, ConstructUnderWindow).ToSharedRef()
-			]
+			TabManager->RestoreFrom(Layout, ConstructUnderWindow).ToSharedRef()
 		]
 	];
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void SSessionInfoWindow::AddInfoLine(TSharedPtr<SVerticalBox> InVerticalBox, const FText& InHeader, const TAttribute<FText>& InValue) const
+void SSessionInfoWindow::BeginSection(TSharedPtr<SVerticalBox> InVerticalBox, const FText& InSectionName) const
 {
 	InVerticalBox->AddSlot()
 		.AutoHeight()
-		.Padding(8.0f, 4.0f, 8.0f, 0.0f)
+		.Padding(0.0f, 0.0f, 0.0f, 4.0f)
 		[
-			SNew(STextBlock)
-			.Text(InHeader)
-			.Font(FCoreStyle::GetDefaultFontStyle("Bold", 11))
-		];
-
-	InVerticalBox->AddSlot()
-		.AutoHeight()
-		.Padding(8.0f, 0.0f, 8.0f, 4.0f)
-		[
-			SNew(SEditableTextBox)
-			.Text(InValue)
-			.HintText(LOCTEXT("HintText", "N/A"))
-			//.BackgroundColor(FLinearColor(0.243f, 0.243f, 0.243f, 1.0f))
-			.BackgroundColor(FLinearColor(0.1f, 0.1f, 0.1f, 1.0f))
-			.IsReadOnly(true)
+			SNew(SBorder)
+			.BorderBackgroundColor(FLinearColor(0.03f, 0.03f, 0.03f, 1.0f))
+			.BorderImage(FAppStyle::Get().GetBrush("WhiteBrush"))
+			.Padding(FMargin(0.0f, 4.0f, 0.0f, 4.0f))
+			[
+				SNew(SBox)
+				.Padding(FMargin(16.0f, 0.0f, 16.0f, 0.0f))
+				[
+					SNew(STextBlock)
+					.Text(InSectionName)
+					.ColorAndOpacity(FLinearColor(0.7f, 0.7f, 0.7f, 1.0f))
+				]
+			]
 		];
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SSessionInfoWindow::EndSection(TSharedPtr<SVerticalBox> InVerticalBox) const
+{
+	InVerticalBox->AddSlot()
+		.AutoHeight()
+		.Padding(0.0f, 0.0f, 0.0f, 0.0f)
+		[
+			SNew(SBox)
+			.Padding(FMargin(0.0f))
+			.HeightOverride(4.0f)
+		];
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+TSharedRef<SWidget> SSessionInfoWindow::CreateTextBox(const TAttribute<FText>& InText, bool bMultiLine) const
+{
+	TSharedPtr<SWidget> TextBox;
+	if (bMultiLine)
+	{
+		TextBox = SNew(SMultiLineEditableTextBox)
+			.Text(InText)
+			.AutoWrapText(true)
+			.BackgroundColor(FLinearColor(0.1f, 0.1f, 0.1f, 1.0f))
+			.IsReadOnly(true);
+	}
+	else
+	{
+		TextBox = SNew(SEditableTextBox)
+			.Text(InText)
+			.BackgroundColor(FLinearColor(0.1f, 0.1f, 0.1f, 1.0f))
+			.IsReadOnly(true);
+	}
+	return TextBox.ToSharedRef();
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SSessionInfoWindow::AddInfoLine(TSharedPtr<SVerticalBox> InVerticalBox,
+									 const FText& InHeader,
+									 FText(SSessionInfoWindow::* InGetTextMethodPtr)() const,
+									 EVisibility(SSessionInfoWindow::* InVisibilityMethodPtr)() const,
+									 bool bMultiLine) const
+{
+	InVerticalBox->AddSlot()
+		.AutoHeight()
+		.Padding(16.0f, 0.0f, 16.0f, 0.0f)
+		[
+			SNew(SHorizontalBox)
+			.Visibility(this, InVisibilityMethodPtr)
+
+			+ SHorizontalBox::Slot()
+			.HAlign(HAlign_Right)
+			.VAlign(VAlign_Top)
+			.AutoWidth()
+			.Padding(0.0f)
+			[
+				SNew(SBox)
+				.Padding(FMargin(0.0f, 8.0f, 16.0f, 4.0f))
+				.HAlign(HAlign_Right)
+				.MinDesiredWidth(160.0f)
+				[
+					SNew(STextBlock)
+					.Text(InHeader)
+				]
+			]
+
+			+ SHorizontalBox::Slot()
+			.HAlign(HAlign_Fill)
+			.VAlign(VAlign_Top)
+			.FillWidth(1.0f)
+			.Padding(FMargin(0.0f, 4.0f, 0.0f, 4.0f))
+			[
+				CreateTextBox(TAttribute<FText>(this, InGetTextMethodPtr), bMultiLine)
+			]
+		];
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void SSessionInfoWindow::AddSimpleInfoLine(TSharedPtr<SVerticalBox> InVerticalBox, const TAttribute<FText>& InValue, bool bMultiLine) const
+{
+	InVerticalBox->AddSlot()
+		.AutoHeight()
+		.Padding(16.0f, 4.0f, 16.0f, 4.0f)
+		[
+			CreateTextBox(InValue, bMultiLine)
+		];
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 TSharedRef<SDockTab> SSessionInfoWindow::SpawnTab_SessionInfo(const FSpawnTabArgs& Args)
 {
-	TSharedPtr<SVerticalBox> VerticalBox;
-	TSharedPtr<SImage> Image;
-
 	TSharedPtr<SScrollBar> VScrollbar;
 	SAssignNew(VScrollbar, SScrollBar)
 	.Orientation(Orient_Vertical);
+
+	TSharedPtr<SVerticalBox> VerticalBox;
 
 	const TSharedRef<SDockTab> DockTab = SNew(SDockTab)
 		.TabRole(ETabRole::PanelTab)
 		[
 			SNew(SOverlay)
 
-			//Overlay slot for the Background image
-			+ SOverlay::Slot()
-			.HAlign(HAlign_Fill)
-			.VAlign(VAlign_Fill)
-			[
-				SAssignNew(Image, SImage)
-			]
-
-			//Overlay slot for the ScrollBox containing the data
+			// Overlay slot for the ScrollBox containing the data
 			+ SOverlay::Slot()
 			.HAlign(HAlign_Fill)
 			.VAlign(VAlign_Top)
@@ -211,32 +298,43 @@ TSharedRef<SDockTab> SSessionInfoWindow::SpawnTab_SessionInfo(const FSpawnTabArg
 			]
 		];
 
-	Image->SetImage(new FSlateColorBrush(FLinearColor(0.015f, 0.015f, 0.015f, 1.0f)));
+	BeginSection(VerticalBox, LOCTEXT("SessionInfo_SectionText", "Session Info"));
 
-	AddInfoLine(VerticalBox, LOCTEXT("SessionName_HeaderText",	"Session Name:"),		TAttribute<FText>(this, &SSessionInfoWindow::GetSessionNameText));
-	AddInfoLine(VerticalBox, LOCTEXT("Uri_HeaderText",			"URI:"),				TAttribute<FText>(this, &SSessionInfoWindow::GetUriText));
-	AddInfoLine(VerticalBox, LOCTEXT("Platform_HeaderText",		"Platform:"),			TAttribute<FText>(this, &SSessionInfoWindow::GetPlatformText));
-	AddInfoLine(VerticalBox, LOCTEXT("AppName_HeaderText",		"Application Name:"),	TAttribute<FText>(this, &SSessionInfoWindow::GetAppNameText));
-	AddInfoLine(VerticalBox, LOCTEXT("BuildConfig_HeaderText",	"Build Config:"),		TAttribute<FText>(this, &SSessionInfoWindow::GetBuildConfigText));
-	AddInfoLine(VerticalBox, LOCTEXT("BuildTarget_HeaderText",	"Build Target:"),		TAttribute<FText>(this, &SSessionInfoWindow::GetBuildTargetText));
-	AddInfoLine(VerticalBox, LOCTEXT("CommandLine_HeaderText",	"Command Line:"),		TAttribute<FText>(this, &SSessionInfoWindow::GetCommandLineText));
-	//AddInfoLine(VerticalBox, LOCTEXT("FileSize_HeaderText",		"File Size:"),			TAttribute<FText>(this, &SSessionInfoWindow::GetFileSizeText));
-	AddInfoLine(VerticalBox, LOCTEXT("Status_HeaderText",		"Status:"),				TAttribute<FText>(this, &SSessionInfoWindow::GetStatusText));
-	AddInfoLine(VerticalBox, LOCTEXT("Modules_HeaderText",		"Modules:"),			TAttribute<FText>(this, &SSessionInfoWindow::GetModulesText));
+	AddInfoLine(VerticalBox, LOCTEXT("SessionName_HeaderText",		"Session Name"),		&SSessionInfoWindow::GetSessionNameText,	&SSessionInfoWindow::IsAlwaysVisible);
+	AddInfoLine(VerticalBox, LOCTEXT("Uri_HeaderText",				"URI"),					&SSessionInfoWindow::GetUriText,			&SSessionInfoWindow::IsAlwaysVisible);
+	AddInfoLine(VerticalBox, LOCTEXT("Platform_HeaderText",			"Platform"),			&SSessionInfoWindow::GetPlatformText,		&SSessionInfoWindow::IsVisiblePlatformText);
+	AddInfoLine(VerticalBox, LOCTEXT("AppName_HeaderText",			"Application Name"),	&SSessionInfoWindow::GetAppNameText,		&SSessionInfoWindow::IsVisibleAppNameText);
+	AddInfoLine(VerticalBox, LOCTEXT("ProjectName_HeaderText",		"Project Name"),		&SSessionInfoWindow::GetProjectNameText,	&SSessionInfoWindow::IsVisibleProjectNameText);
+	AddInfoLine(VerticalBox, LOCTEXT("Branch_HeaderText",			"Branch"),				&SSessionInfoWindow::GetBranchText,			&SSessionInfoWindow::IsVisibleBranchText);
+	AddInfoLine(VerticalBox, LOCTEXT("BuildVersion_HeaderText",		"Build Version"),		&SSessionInfoWindow::GetBuildVersionText,	&SSessionInfoWindow::IsVisibleBuildVersionText);
+	AddInfoLine(VerticalBox, LOCTEXT("Changelist_HeaderText",		"Changelist"),			&SSessionInfoWindow::GetChangelistText,		&SSessionInfoWindow::IsVisibleChangelistText);
+	AddInfoLine(VerticalBox, LOCTEXT("BuildConfig_HeaderText",		"Build Config"),		&SSessionInfoWindow::GetBuildConfigText,	&SSessionInfoWindow::IsVisibleBuildConfigText);
+	AddInfoLine(VerticalBox, LOCTEXT("BuildTarget_HeaderText",		"Build Target"),		&SSessionInfoWindow::GetBuildTargetText,	&SSessionInfoWindow::IsVisibleBuildTargetText);
+	AddInfoLine(VerticalBox, LOCTEXT("CommandLine_HeaderText",		"Command Line"),		&SSessionInfoWindow::GetCommandLineText,	&SSessionInfoWindow::IsVisibleCommandLineText, true);
+	AddInfoLine(VerticalBox, LOCTEXT("OtherMetadata_HeaderText",	"Other Metadata"),		&SSessionInfoWindow::GetOtherMetadataText,	&SSessionInfoWindow::IsVisibleOtherMetadataText, true);
+
+	EndSection(VerticalBox);
+
+	BeginSection(VerticalBox, LOCTEXT("AnalysisStatus_SectionText", "Analysis Status"));
+	AddSimpleInfoLine(VerticalBox, TAttribute<FText>(this, &SSessionInfoWindow::GetStatusText), true);
+	EndSection(VerticalBox);
+
+	BeginSection(VerticalBox, LOCTEXT("AnalysisModules_SectionText", "Analysis Modules"));
+	AddSimpleInfoLine(VerticalBox, TAttribute<FText>(this, &SSessionInfoWindow::GetModulesText), true);
+	EndSection(VerticalBox);
 
 	DockTab->SetOnTabClosed(SDockTab::FOnTabClosedCallback::CreateRaw(this, &SSessionInfoWindow::OnSessionInfoTabClosed));
 
 	return DockTab;
 }
 
+END_SLATE_FUNCTION_BUILD_OPTIMIZATION
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void SSessionInfoWindow::OnSessionInfoTabClosed(TSharedRef<SDockTab> TabBeingClosed)
 {
-
 }
-
-END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -256,27 +354,127 @@ void SSessionInfoWindow::FillMenu(FMenuBuilder& MenuBuilder, const TSharedPtr<FT
 
 void SSessionInfoWindow::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
-	// If we already have the session info data we no longer poll for it.
-	if (bIsSessionInfoSet)
+	TSharedPtr<const TraceServices::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
+
+	if (Session != AnalysisSession)
 	{
-		return;
+		// The session has changed. We need new info.
+		AnalysisSession = Session;
+		bIsSessionInfoSet = false;
+
+		// We can quickly get the session name and uri.
+		{
+			TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
+
+			SessionNameText = FText::FromString(FPaths::GetBaseFilename(Session->GetName()));
+
+			FString Uri(Session->GetName());
+			FPaths::NormalizeFilename(Uri);
+			UriText = FText::FromString(Uri);
+		}
+
+		PlatformText = FText::GetEmpty();
+		AppNameText = FText::GetEmpty();
+		ProjectNameText = FText::GetEmpty();
+		BranchText = FText::GetEmpty();
+		BuildVersionText = FText::GetEmpty();
+		ChangelistText = FText::GetEmpty();
+		BuildConfigurationTypeText = FText::GetEmpty();
+		BuildTargetTypeText = FText::GetEmpty();
+		CommandLineText = FText::GetEmpty();
+		OtherMetadataText = FText::GetEmpty();
 	}
 
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
-
-	if (Session.IsValid())
+	// If we already have the session info data, we no longer poll for it.
+	if (!bIsSessionInfoSet && Session.IsValid())
 	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		const Trace::IDiagnosticsProvider& DiagnosticsProvider = Trace::ReadDiagnosticsProvider(*Session.Get());
+		TraceServices::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
 
-		if (DiagnosticsProvider.IsSessionInfoAvailable())
+		const TraceServices::IDiagnosticsProvider* DiagnosticsProvider = TraceServices::ReadDiagnosticsProvider(*Session.Get());
+
+		if (DiagnosticsProvider && DiagnosticsProvider->IsSessionInfoAvailable())
 		{
-			Trace::FSessionInfo SessionInfo = DiagnosticsProvider.GetSessionInfo();
+			TraceServices::FSessionInfo SessionInfo = DiagnosticsProvider->GetSessionInfo();
 			PlatformText = FText::FromString(SessionInfo.Platform);
 			AppNameText = FText::FromString(SessionInfo.AppName);
-			CommandLineText = FText::FromString(SessionInfo.CommandLine);
+			ProjectNameText = FText::FromString(SessionInfo.ProjectName);
+			BranchText = FText::FromString(SessionInfo.Branch);
+			BuildVersionText = FText::FromString(SessionInfo.BuildVersion);
+			ChangelistText = FText::AsNumber(SessionInfo.Changelist, &FNumberFormattingOptions::DefaultNoGrouping());
 			BuildConfigurationTypeText = FText::FromString(LexToString(SessionInfo.ConfigurationType));
 			BuildTargetTypeText = FText::FromString(LexToString(SessionInfo.TargetType));
+			CommandLineText = FText::FromString(SessionInfo.CommandLine);
+
+			TStringBuilder<1024> OtherMetadata;
+
+			if (Session->GetTraceId() != 0)
+			{
+				OtherMetadata.Appendf(TEXT("TraceId=0x%X"), Session->GetTraceId());
+			}
+
+			Session->EnumerateMetadata([&OtherMetadata](const TraceServices::FTraceSessionMetadata& Metadata)
+				{
+					static FName ExcludedMetadata[]
+					{
+						FName("Platform"),
+						FName("AppName"),
+						FName("ProjectName"),
+						FName("Branch"),
+						FName("BuildVersion"),
+						FName("Changelist"),
+						FName("ConfigurationType"),
+						FName("TargetType"),
+						FName("CommandLine"),
+					};
+
+					for (int32 Index = 0; Index < UE_ARRAY_COUNT(ExcludedMetadata); ++Index)
+					{
+						if (Metadata.Name == ExcludedMetadata[Index])
+						{
+							return;
+						}
+					}
+
+					switch (Metadata.Type)
+					{
+						case TraceServices::FTraceSessionMetadata::EType::Int64:
+						{
+							if (OtherMetadata.Len() > 0)
+							{
+								OtherMetadata.Append(TEXT("\n"));
+							}
+							OtherMetadata.Append(Metadata.Name.GetPlainNameString());
+							OtherMetadata.Append(TEXT("="));
+							OtherMetadata.Appendf(TEXT("%lld"), Metadata.Int64Value);
+							break;
+						}
+						case TraceServices::FTraceSessionMetadata::EType::Double:
+						{
+							if (OtherMetadata.Len() > 0)
+							{
+								OtherMetadata.Append(TEXT("\n"));
+							}
+							OtherMetadata.Append(Metadata.Name.GetPlainNameString());
+							OtherMetadata.Append(TEXT("="));
+							OtherMetadata.Appendf(TEXT("%f"), Metadata.DoubleValue);
+							break;
+						}
+						case TraceServices::FTraceSessionMetadata::EType::String:
+						{
+							if (OtherMetadata.Len() > 0)
+							{
+								OtherMetadata.Append(TEXT("\n"));
+							}
+							OtherMetadata.Append(Metadata.Name.GetPlainNameString());
+							OtherMetadata.Append(TEXT("="));
+							OtherMetadata.Append(Metadata.StringValue);
+							break;
+						}
+					}
+				});
+
+			OtherMetadataText = FText::FromString(FString(OtherMetadata.ToView()));
+
 			bIsSessionInfoSet = true;
 		}
 	}
@@ -328,6 +526,11 @@ FReply SSessionInfoWindow::OnKeyDown(const FGeometry& MyGeometry, const FKeyEven
 
 FReply SSessionInfoWindow::OnDragOver(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
 {
+	if (FInsightsManager::Get()->OnDragOver(DragDropEvent))
+	{
+		return FReply::Handled();
+	}
+
 	return SCompoundWidget::OnDragOver(MyGeometry, DragDropEvent);
 }
 
@@ -335,71 +538,12 @@ FReply SSessionInfoWindow::OnDragOver(const FGeometry& MyGeometry, const FDragDr
 
 FReply SSessionInfoWindow::OnDrop(const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent)
 {
+	if (FInsightsManager::Get()->OnDrop(DragDropEvent))
+	{
+		return FReply::Handled();
+	}
+
 	return SCompoundWidget::OnDrop(MyGeometry, DragDropEvent);
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetSessionNameText() const
-{
-	FText SessionName;
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
-	if (Session.IsValid())
-	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		SessionName = FText::FromString(FPaths::GetBaseFilename(Session->GetName()));
-	}
-	return SessionName;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetUriText() const
-{
-	//TODO: update code to use a SessionInfo provider instead
-	FText LocalUri;
-	TSharedPtr<const Trace::IAnalysisSession> Session = FInsightsManager::Get()->GetSession();
-	if (Session.IsValid())
-	{
-		Trace::FAnalysisSessionReadScope SessionReadScope(*Session.Get());
-		LocalUri = FText::FromString(FString(Session->GetName()));
-	}
-	return LocalUri;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetPlatformText() const
-{
-	return PlatformText;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetAppNameText() const
-{
-	return AppNameText;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetBuildConfigText() const
-{
-	return BuildConfigurationTypeText;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetBuildTargetText() const
-{
-	return BuildTargetTypeText;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-FText SSessionInfoWindow::GetCommandLineText() const
-{
-	return CommandLineText;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -414,16 +558,18 @@ FText SSessionInfoWindow::GetFileSizeText() const
 
 FText SSessionInfoWindow::GetStatusText() const
 {
-	//TODO: add also info from a SessionInfo provider
-
 	TSharedPtr<FInsightsManager> InsightsManager = FInsightsManager::Get();
 	InsightsManager->UpdateSessionDuration();
 
+	FNumberFormattingOptions FormattingOptions;
+	FormattingOptions.MaximumFractionalDigits = 1;
+
+	const int32 NumDigits = InsightsManager->IsAnalysisComplete() ? 2 : 0;
 	FText Status = FText::Format(LOCTEXT("StatusFmt", "{0}\nSession Duration: {1}\nAnalyzed in {2} at {3}X speed."),
 		InsightsManager->IsAnalysisComplete() ? FText::FromString(FString(TEXT("ANALYSIS COMPLETED."))) : FText::FromString(FString(TEXT("ANALYZING..."))),
-		FText::FromString(TimeUtils::FormatTimeAuto(InsightsManager->GetSessionDuration(), 2)),
-		FText::FromString(TimeUtils::FormatTimeAuto(InsightsManager->GetAnalysisDuration(), 2)),
-		FMath::RoundToInt(static_cast<float>(InsightsManager->GetAnalysisSpeedFactor())));
+		FText::FromString(TimeUtils::FormatTimeAuto(InsightsManager->GetSessionDuration(), NumDigits)),
+		FText::FromString(TimeUtils::FormatTimeAuto(InsightsManager->GetAnalysisDuration(), NumDigits)),
+		FText::AsNumber(InsightsManager->GetAnalysisSpeedFactor(), &FormattingOptions));
 
 	return Status;
 }
@@ -433,18 +579,30 @@ FText SSessionInfoWindow::GetStatusText() const
 FText SSessionInfoWindow::GetModulesText() const
 {
 	FString ModulesStr;
-	TArray<Trace::FModuleInfo> Modules;
+	TArray<TraceServices::FModuleInfoEx> Modules;
 
-	TSharedPtr<Trace::IModuleService> ModuleService = FInsightsManager::Get()->GetModuleService();
+	TSharedPtr<TraceServices::IModuleService> ModuleService = FInsightsManager::Get()->GetModuleService();
 	if (ModuleService)
 	{
-		ModuleService->GetAvailableModules(Modules);
+		ModuleService->GetAvailableModulesEx(Modules);
 	}
 
-	for (const Trace::FModuleInfo& Module : Modules)
+	bool bIsFirst = true;
+	for (const TraceServices::FModuleInfoEx& Module : Modules)
 	{
-		ModulesStr += Module.DisplayName;
-		ModulesStr += TEXT(", ");
+		if (bIsFirst)
+		{
+			bIsFirst = false;
+		}
+		else
+		{
+			ModulesStr += TEXT(", ");
+		}
+		if (!Module.bIsEnabled)
+		{
+			ModulesStr += TEXT("!");
+		}
+		ModulesStr += Module.Info.DisplayName;
 	}
 
 	return FText::FromString(ModulesStr);

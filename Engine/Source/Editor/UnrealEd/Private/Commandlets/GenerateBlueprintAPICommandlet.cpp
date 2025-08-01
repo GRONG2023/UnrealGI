@@ -285,7 +285,7 @@ GenerateBlueprintAPIUtils::CommandletOptions::CommandletOptions(TArray<FString> 
 		{
 			FString ClassSwitch, ClassName;
 			Switch.Split(TEXT("="), &ClassSwitch, &ClassName);
-			BlueprintClass = FindObject<UClass>(ANY_PACKAGE, *ClassName);
+			BlueprintClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing GenerateBlueprintAPIUtils class"));
 
 			if (BlueprintClass == nullptr)
 			{
@@ -297,7 +297,7 @@ GenerateBlueprintAPIUtils::CommandletOptions::CommandletOptions(TArray<FString> 
 		{
 			FString ClassSwitch, ClassName;
 			Switch.Split(TEXT("="), &ClassSwitch, &ClassName);
-			PaletteFilter = FindObject<UClass>(ANY_PACKAGE, *ClassName);
+			PaletteFilter = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("parsing GenerateBlueprintAPIUtils palfilter"));
 
 			NewDumpFlags |= BPDUMP_FilteredPalette;
 			if (PaletteFilter == nullptr)
@@ -678,7 +678,7 @@ static double GenerateBlueprintAPIUtils::GetPaletteMenuActions(FCategorizedGraph
 	FBlueprintActionContext FilterContext;
 	FilterContext.Blueprints.Add(const_cast<UBlueprint*>(Blueprint));
 
-	FBlueprintActionMenuBuilder MenuBuilder(nullptr);
+	FBlueprintActionMenuBuilder MenuBuilder;
 	{
 		// prime the database so it's not recorded in our timing capture
 		FBlueprintActionDatabase::Get();

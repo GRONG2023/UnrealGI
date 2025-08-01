@@ -1,15 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commandlets/FixConflictingLocalizationKeys.h"
-#include "Commandlets/GatherTextCommandletBase.h"
-#include "UObject/Object.h"
+
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/InternationalizationManifest.h"
+#include "Internationalization/LocKeyFuncs.h"
+#include "Internationalization/Text.h"
+#include "Internationalization/TextNamespaceUtil.h"
+#include "LocTextHelper.h"
+#include "LocalizationSourceControlUtil.h"
+#include "LocalizedAssetUtil.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/Char.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
+#include "Trace/Detail/Channel.h"
 #include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/Object.h"
 #include "UObject/Package.h"
 #include "UObject/TextProperty.h"
-#include "Internationalization/LocKeyFuncs.h"
-#include "Misc/Paths.h"
-#include "Misc/PackageName.h"
-#include "Internationalization/TextNamespaceUtil.h"
+#include "UObject/UnrealType.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFixConflictingLocalizationKeys, Log, All);
 
@@ -175,26 +194,11 @@ bool ReKeyTextProperty(UStruct* InOuterType, void* InAddrToUpdate, const TArray<
 
 						FScriptMapHelper ScriptMapHelper(MapProp, AddrToUpdate);
 
-						// ContainerIndex is the element index, but we need the sparse index
-						int32 SparseIndex = 0;
+						// ContainerIndex is the element index, but we need the sparse index which is computed by the iterator.
+						const int32 InternalIndex = ScriptMapHelper.FindInternalIndex(ContainerIndex);
+						if (InternalIndex != INDEX_NONE)
 						{
-							const int32 ElementCount = ScriptMapHelper.Num();
-							for (int32 ElementIndex = 0; ElementIndex < ElementCount; ++SparseIndex)
-							{
-								if (ScriptMapHelper.IsValidIndex(SparseIndex))
-								{
-									if (ElementIndex == ContainerIndex)
-									{
-										break;
-									}
-									++ElementIndex;
-								}
-							}
-						}
-
-						if (ScriptMapHelper.IsValidIndex(SparseIndex))
-						{
-							AddrToUpdate = ScriptMapHelper.GetPairPtr(SparseIndex) + MapProp->MapLayout.ValueOffset;
+							AddrToUpdate = ScriptMapHelper.GetPairPtr(InternalIndex) + MapProp->MapLayout.ValueOffset;
 
 							// Is this a complex property? If so, we need to recurse into it
 							if (FStructProperty* StructProp = CastField<FStructProperty>(MapProp->ValueProp))
@@ -212,26 +216,11 @@ bool ReKeyTextProperty(UStruct* InOuterType, void* InAddrToUpdate, const TArray<
 
 						FScriptSetHelper ScriptSetHelper(SetProp, AddrToUpdate);
 
-						// ContainerIndex is the element index, but we need the sparse index
-						int32 SparseIndex = 0;
+						// ContainerIndex is the element index, but we need the sparse index which is computed by the iterator.
+						const int32 InternalIndex = ScriptSetHelper.FindInternalIndex(ContainerIndex);
+						if (InternalIndex != INDEX_NONE)
 						{
-							const int32 ElementCount = ScriptSetHelper.Num();
-							for (int32 ElementIndex = 0; ElementIndex < ElementCount; ++SparseIndex)
-							{
-								if (ScriptSetHelper.IsValidIndex(SparseIndex))
-								{
-									if (ElementIndex == ContainerIndex)
-									{
-										break;
-									}
-									++ElementIndex;
-								}
-							}
-						}
-
-						if (ScriptSetHelper.IsValidIndex(SparseIndex))
-						{
-							AddrToUpdate = ScriptSetHelper.GetElementPtr(SparseIndex);
+							AddrToUpdate = ScriptSetHelper.GetElementPtr(InternalIndex);
 
 							// Is this a complex property? If so, we need to recurse into it
 							if (FStructProperty* StructProp = CastField<FStructProperty>(SetProp->ElementProp))
@@ -251,9 +240,12 @@ bool ReKeyTextProperty(UStruct* InOuterType, void* InAddrToUpdate, const TArray<
 						AddrToUpdate = MangledPropToUpdate->ContainerPtrToValuePtr<void>(AddrToUpdate);
 
 						FScriptMapHelper ScriptMapHelper(MapProp, AddrToUpdate);
-						if (ScriptMapHelper.IsValidIndex(ContainerIndex))
+
+						// ContainerIndex is the element index, but we need the sparse index to get the element.
+						const int32 InternalIndex = ScriptMapHelper.FindInternalIndex(ContainerIndex);
+						if (InternalIndex != INDEX_NONE)
 						{
-							AddrToUpdate = ScriptMapHelper.GetPairPtr(ContainerIndex);
+							AddrToUpdate = ScriptMapHelper.GetPairPtr(InternalIndex);
 
 							// Is this a complex property? If so, we need to recurse into it
 							if (FStructProperty* StructProp = CastField<FStructProperty>(MapProp->KeyProp))
@@ -305,7 +297,7 @@ int32 UFixConflictingLocalizationKeysCommandlet::Main(const FString& Params)
 		FText SCCErrorStr;
 		if (!SourceControlInfo->IsReady(SCCErrorStr))
 		{
-			UE_LOG(LogFixConflictingLocalizationKeys, Error, TEXT("Source Control error: %s"), *SCCErrorStr.ToString());
+			UE_LOG(LogFixConflictingLocalizationKeys, Error, TEXT("Revision Control error: %s"), *SCCErrorStr.ToString());
 			return -1;
 		}
 	}
@@ -374,7 +366,7 @@ int32 UFixConflictingLocalizationKeysCommandlet::Main(const FString& Params)
 		// Did we get a valid package name?
 		if (!FPackageName::IsValidLongPackageName(ConflictingSourceParts[0]))
 		{
-			UE_LOG(LogFixConflictingLocalizationKeys, Warning, TEXT("Skipping '%s' as '%s' isn't a valid package name"), *ConflictingSourceParts[0]);
+			UE_LOG(LogFixConflictingLocalizationKeys, Warning, TEXT("Skipping '%s' as it isn't a valid package name"), *ConflictingSourceParts[0]);
 			continue;
 		}
 

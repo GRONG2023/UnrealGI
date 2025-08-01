@@ -4,9 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "Interfaces/TargetDeviceId.h"
+#include "Interfaces/ITargetDeviceSocket.h"
 
 class ITargetDevice;
 class ITargetDeviceOutput;
+class ITargetPlatform;
 
 /**
  * Enumerates features that may be supported by target devices.
@@ -57,13 +59,36 @@ enum class ETargetDeviceTypes
 	HMD
 };
 
+/**
+ * Enumerates how the target device is connected
+ */
+enum class ETargetDeviceConnectionTypes
+{
+	/** It's unknown how the device is connected. */
+	Unknown,
+
+	/** The device is connected through USB. */
+	USB,
+
+	/** The device is connected via Wifi. */
+	Wifi,
+	
+	/** The device is connected via Ethernet. */
+	Ethernet,
+
+	/** The device is running as a simulator on the current Editor. */
+	Simulator,
+
+	/** The device is connected via a proprietary connection. */
+	Proprietary
+};
 
 namespace TargetDeviceTypes
 {
 	/**
 	 * Returns the string representation of the specified ETargetDeviceTypes value.
 	 *
-	 * @param Configuration The value to get the string for.
+	 * @param DeviceType The value to get the string for.
 	 * @return A string value.
 	 */
 	inline FString ToString(ETargetDeviceTypes DeviceType)
@@ -91,6 +116,38 @@ namespace TargetDeviceTypes
 	}
 }
 
+namespace TargetDeviceConnectionTypes
+{
+	/**
+	 * Returns the string representation of the specified ETargetDeviceConnectionTypes value.
+	 *
+	 * @param DeviceConnectionType The value to get the string for.
+	 * @return A string value.
+	 */
+	inline FString ToString(ETargetDeviceConnectionTypes DeviceConnectionType)
+	{
+		switch (DeviceConnectionType)
+		{
+		case ETargetDeviceConnectionTypes::USB:
+			return FString("USB");
+
+		case ETargetDeviceConnectionTypes::Wifi:
+			return FString("Wifi");
+
+		case ETargetDeviceConnectionTypes::Ethernet:
+			return FString("Ethernet");
+
+		case ETargetDeviceConnectionTypes::Simulator:
+			return FString("Simulator");
+
+		case ETargetDeviceConnectionTypes::Proprietary:
+			return FString("Proprietary");
+
+		default:
+			return FString("Unknown");
+		}
+	}
+}
 
 /**
  * Enumerates states of threads running on a target device.
@@ -216,15 +273,6 @@ public:
 	virtual bool Connect() = 0;
 
 	/**
-	 * Deploys an application in the specified folder to the device.
-	 *
-	 * @param SourceFolder The path to the files and directories to be deployed.
-	 * @param OutAppId Will hold the identifier of the deployed application (used for launching).
-	 * @return true on success, false otherwise.
-	 */
-	virtual bool Deploy( const FString& SourceFolder, FString& OutAppId ) = 0;
-
-	/**
 	 * Disconnect from the physical device.
 	 */
 	virtual void Disconnect() = 0;
@@ -235,6 +283,27 @@ public:
 	 * @return Device type.
 	 */
 	virtual ETargetDeviceTypes GetDeviceType() const = 0;
+
+	/**
+	 * Gets the device model identifier.
+	 *
+	 * @return ModelId.
+	 */
+	virtual FString GetModelId() const {return FString();};
+
+	/**
+	 * Gets the device OS Version.
+	 *
+	 * @return OSVersion.
+	 */
+	virtual FString GetOSVersion() const {return FString();};
+
+	/**
+	 * Gets the device connection type.
+	 * 
+	 * @return Device connection type.
+	 */
+	virtual ETargetDeviceConnectionTypes GetDeviceConnectionType() const {return ETargetDeviceConnectionTypes::Unknown; };
 
 	/**
 	 * Gets the unique device identifier.
@@ -290,7 +359,19 @@ public:
 	/**
 	 * Gets the TargetPlatform that this device belongs to.
 	 */
-	virtual const class ITargetPlatform& GetTargetPlatform() const = 0;
+protected:
+	// Temporary until we get rid of this.
+	virtual const class ITargetPlatform& GetTargetPlatform() const
+	{
+		unimplemented();
+		static ITargetPlatform* DummyReference = nullptr;
+		// Code should never reach this point, this is just temporary until we port all platforms to new system
+		return *DummyReference; //-V522
+	};
+public:
+
+	TARGETPLATFORM_API virtual const class ITargetPlatformSettings& GetPlatformSettings() const;
+	TARGETPLATFORM_API virtual const class ITargetPlatformControls& GetPlatformControls() const;
 
 	/**
 	 * Checks whether this device is connected.
@@ -318,18 +399,6 @@ public:
 	virtual bool IsAuthorized() const { return true;  }
 
 	/**
-	 * Launches a previously deployed build.
-	 *
-	 * @param AppId The identifier of the application to launch (as returned by the Deploy() method).
-	 * @param BuildConfiguration The build configuration to launch.
-	 * @param TargetType The target type to launch
-	 * @param Params The command line parameters to launch with.
-	 * @param OutProcessId Will hold the identifier of the created process (can be NULL).
-	 * @return true on success, false otherwise.
-	 */
-	virtual bool Launch( const FString& AppId, EBuildConfiguration BuildConfiguration, EBuildTargetType TargetType, const FString& Params, uint32* OutProcessId ) = 0;
-
-	/**
 	 * Powers off the device.
 	 *
 	 * @param Force Whether to force powering off.
@@ -353,30 +422,12 @@ public:
 	virtual bool Reboot( bool bReconnect = false ) = 0;
 
 	/**
-	 * Runs an executable on the device.
-	 *
-	 * @param ExecutablePath The path to the executable to run.
-	 * @param Params The command line parameters.
-	 * @param OutProcessId Will hold the identifier of the created process (can be NULL).
-	 * @return true if the executable was started, false otherwise.
-	 */
-	virtual bool Run( const FString& ExecutablePath, const FString& Params, uint32* OutProcessId ) = 0;
-
-	/**
 	 * Checks whether the target device supports the specified feature.
 	 *
 	 * @param Feature The feature to check.
 	 * @return true if the feature is supported, false otherwise.
 	 */
 	virtual bool SupportsFeature( ETargetDeviceFeatures Feature ) const = 0;
-
-	/**
-	 * Checks whether this device supports the specified SDK version.
-	 *
-	 * @param VersionString The SDK version string.
-	 * @return true if the SDK version is supported, false otherwise.
-	 */
-	virtual bool SupportsSdkVersion( const FString& VersionString ) const = 0;
 
 	/**
 	 * Terminates a process that was launched on the device using the Launch() or Run() methods.
@@ -426,6 +477,52 @@ public:
 	 * @param ProcessIdentifier The bundle id
 	 */
 	virtual bool TerminateLaunchedProcess(const FString & ProcessIdentifier) { return false;  };
+	
+	/**
+	 * Execute console command on the device to reload the global shader map
+	 * 
+	 * @param GlobalShaderMapDirectory path to directory that contains global shader map
+	 */
+	virtual void ReloadGlobalShadersMap(const FString& GlobalShaderMapDirectory) const
+	{
+		return ExecuteConsoleCommand(TEXT("ReloadGlobalShaders"));
+	}
+
+	/**
+	 * Opens a direct connection with the device allowing data exchange with a process running on the target.
+	 * 
+	 * ProtocolIndex is a number that identifies the connection and has to be know both to the target
+	 * process and the PC. There can be only one connection using a given protocol index at a time.
+	 * 
+	 * You may check EHostProtocol enumeration for known protocols used by the engine.
+	 * 
+	 * This function just opens a communication channel but doesn't check if there is a peer
+	 * on the other end of the connection. To know this, you should either check IsProtocolAvailable
+	 * or ITargetDeviceSocket::Connected.
+	 * 
+	 * @param ProtocolIndex Unique index of the communication channel (from 0 to a platform-dependent maximum).
+	 * @return Socket object on success, nullptr otherwise.
+	 * @see CloseSocket, EHostProtocol, IsProtocolAvailable, ITargetDeviceSocket::Connected
+	 */
+	virtual ITargetDeviceSocketPtr OpenConnection(uint32 ProtocolIndex)	{ return nullptr; }
+
+	/**
+	 * Closes a previously opened connection with a process on the target.
+	 * 
+	 * @param Socket Socket object returned by OpenSocket.
+	 * @see OpenSocket
+	 */
+	virtual void CloseConnection(ITargetDeviceSocketPtr Socket)			{ }
+
+	/**
+	 * Checks if connections using the given ProtocolIndex are available for this device at the moment.
+	 * If this function returns true, it means that OpenConnection should succeed and communication
+	 * with a game running on the target should be possible.
+	 * 
+	 * @param ProtocolIndex Unique index of the communication channel (from 0 to a platform-dependent maximum).
+	 * @return True if the protocol is available and we can connect to the device, false otherwise.
+	 */
+	virtual bool IsProtocolAvailable(uint32 ProtocolIndex) const		{ return false; }
 
 public:
 

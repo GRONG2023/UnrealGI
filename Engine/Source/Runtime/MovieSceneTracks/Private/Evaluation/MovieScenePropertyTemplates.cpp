@@ -8,12 +8,13 @@
 #include "Sections/MovieSceneIntegerSection.h"
 #include "Sections/MovieSceneVectorSection.h"
 #include "Sections/MovieScene3DTransformSection.h"
-#include "Sections/MovieSceneStringSection.h"
 #include "Tracks/MovieScenePropertyTrack.h"
 #include "MovieScene.h"
 #include "Evaluation/MovieSceneEvaluation.h"
 #include "MovieSceneTemplateCommon.h"
 #include "Evaluation/Blending/MovieSceneMultiChannelBlending.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScenePropertyTemplates)
 
 namespace
 {
@@ -41,22 +42,6 @@ void FMovieSceneBoolPropertySectionTemplate::Evaluate(const FMovieSceneEvaluatio
 	if (BoolCurve.Evaluate(Context.GetTime(), Result))
 	{
 		ExecutionTokens.Add(TPropertyTrackExecutionToken<bool>(Result));
-	}
-}
-
-//	----------------------------------------------------------------------------
-//	String Property Template
-FMovieSceneStringPropertySectionTemplate::FMovieSceneStringPropertySectionTemplate(const UMovieSceneStringSection& Section, const UMovieScenePropertyTrack& Track)
-	: FMovieScenePropertySectionTemplate(Track.GetPropertyName(), Track.GetPropertyPath().ToString())
-	, StringCurve(Section.GetChannel())
-{}
-
-void FMovieSceneStringPropertySectionTemplate::Evaluate(const FMovieSceneEvaluationOperand& Operand, const FMovieSceneContext& Context, const FPersistentEvaluationData& PersistentData, FMovieSceneExecutionTokens& ExecutionTokens) const
-{
-	const FString* Result = StringCurve.Evaluate(Context.GetTime());
-	if (Result)
-	{
-		ExecutionTokens.Add(TPropertyTrackExecutionToken<FString>(*Result));
 	}
 }
 

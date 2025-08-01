@@ -18,7 +18,7 @@
 
 class IAsyncReadFileHandle;
 
-class CORE_API FCachedFileHandle : public IFileHandle
+class FCachedFileHandle : public IFileHandle
 {
 public:
 	FCachedFileHandle(IFileHandle* InFileHandle, bool bInReadable, bool bInWritable)
@@ -195,9 +195,9 @@ public:
 
 private:
 
-	static const uint32 BufferCacheSize = 64 * 1024; // Seems to be the magic number for best perf
-	static const uint64 BufferSizeMask  = ~((uint64)BufferCacheSize-1);
-	static const uint32	CacheCount		= 2;
+	static constexpr uint32 BufferCacheSize = 64 * 1024; // Seems to be the magic number for best perf
+	static constexpr uint64 BufferSizeMask  = ~((uint64)BufferCacheSize-1);
+	static constexpr uint32	CacheCount		= 2;
 
 	bool InnerSeek(uint64 Pos)
 	{
@@ -252,7 +252,7 @@ private:
 	int32					CurrentCache;
 };
 
-class CORE_API FCachedReadPlatformFile : public IPlatformFile
+class FCachedReadPlatformFile : public IPlatformFile
 {
 	IPlatformFile*		LowerLevel;
 public:
@@ -281,12 +281,15 @@ public:
 	}
 	virtual bool ShouldBeUsed(IPlatformFile* Inner, const TCHAR* CmdLine) const override
 	{
+#ifndef PLATFORM_PROVIDES_FILE_CACHE
+#define PLATFORM_PROVIDES_FILE_CACHE 0
+#endif
 		// Default to false on platforms that already do platform file level caching
-		bool bResult = !PLATFORM_PS4 && !PLATFORM_WINDOWS && FPlatformProperties::RequiresCookedData();
+		bool bResult = !PLATFORM_PROVIDES_FILE_CACHE && !PLATFORM_WINDOWS && FPlatformProperties::RequiresCookedData();
 
 		// Allow a choice between shorter load times or less memory on desktop platforms.
 		// Note: this cannot be in config since they aren't read at that point.
-#if (PLATFORM_DESKTOP || PLATFORM_PS4)
+#if (PLATFORM_DESKTOP || PLATFORM_PROVIDES_FILE_CACHE)
 		{
 			if (FParse::Param(CmdLine, TEXT("NoCachedReadFile")))
 			{
@@ -297,7 +300,7 @@ public:
 				bResult = true;
 			}
 
-			UE_LOG(LogPlatformFile, Log, TEXT("%s cached read wrapper"), bResult ? TEXT("Using") : TEXT("Not using"));
+			UE_LOG(LogPlatformFile, Verbose, TEXT("%s cached read wrapper"), bResult ? TEXT("Using") : TEXT("Not using"));
 		}
 #endif
 		return bResult;

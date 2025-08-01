@@ -2,11 +2,11 @@
 
 #include "TrackEditors/LevelVisibilityTrackEditor.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Sections/MovieSceneLevelVisibilitySection.h"
 #include "Sections/LevelVisibilitySection.h"
 #include "Tracks/MovieSceneLevelVisibilityTrack.h"
-#include "SequencerUtilities.h"
+#include "MVVM/Views/ViewUtilities.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/World.h"
 #include "Misc/PackageName.h"
@@ -37,7 +37,7 @@ bool FLevelVisibilityTrackEditor::SupportsType( TSubclassOf<UMovieSceneTrack> Ty
 
 const FSlateBrush* FLevelVisibilityTrackEditor::GetIconBrush() const
 {
-	return FEditorStyle::GetBrush("Sequencer.Tracks.LevelVisibility");
+	return FAppStyle::GetBrush("Sequencer.Tracks.LevelVisibility");
 }
 
 TSharedRef<ISequencerSection> FLevelVisibilityTrackEditor::MakeSectionInterface( UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding )
@@ -53,18 +53,17 @@ void FLevelVisibilityTrackEditor::BuildAddTrackMenu( FMenuBuilder& MenuBuilder )
 	MenuBuilder.AddMenuEntry(
 		LOCTEXT("AddTrack", "Level Visibility Track" ),
 		LOCTEXT("AddAdTrackToolTip", "Adds a new track which can control level visibility." ),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.Tracks.LevelVisibility"),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.Tracks.LevelVisibility"),
 		FUIAction( FExecuteAction::CreateRaw( this, &FLevelVisibilityTrackEditor::OnAddTrack ) ) );
 }
 
 
 TSharedPtr<SWidget> FLevelVisibilityTrackEditor::BuildOutlinerEditWidget( const FGuid& ObjectBinding, UMovieSceneTrack* Track, const FBuildEditWidgetParams& Params )
 {
-	// Create a container edit box
-	return FSequencerUtilities::MakeAddButton( 
+	return UE::Sequencer::MakeAddButton(
 		LOCTEXT( "AddVisibilityTrigger", "Visibility Trigger" ),
 		FOnGetContent::CreateSP( this, &FLevelVisibilityTrackEditor::BuildAddVisibilityTriggerMenu, Track ),
-		Params.NodeIsHovered, GetSequencer() );
+		Params.ViewModel);
 }
 
 void FLevelVisibilityTrackEditor::BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track )
@@ -138,7 +137,7 @@ void FLevelVisibilityTrackEditor::OnAddTrack()
 	const FScopedTransaction Transaction( LOCTEXT( "AddLevelVisibilityTrack_Transaction", "Add Level Visibility Track" ) );
 	FocusedMovieScene->Modify();
 
-	UMovieSceneLevelVisibilityTrack* NewTrack = FocusedMovieScene->AddMasterTrack<UMovieSceneLevelVisibilityTrack>();
+	UMovieSceneLevelVisibilityTrack* NewTrack = FocusedMovieScene->AddTrack<UMovieSceneLevelVisibilityTrack>();
 	checkf( NewTrack != nullptr, TEXT("Failed to create new level visibility track.") );
 
 	UMovieSceneLevelVisibilitySection* NewSection = AddNewSection( FocusedMovieScene, NewTrack, ELevelVisibility::Visible );
@@ -190,7 +189,7 @@ void FLevelVisibilityTrackEditor::OnAddNewSection( UMovieSceneTrack* LevelVisibi
 
 void FLevelVisibilityTrackEditor::GetCurrentLevelVisibility(TArray<FName>& OutVisibleLevelNames, TArray<FName>& OutHiddenLevelNames)
 {
-	UWorld* World = Cast<UWorld>(GetSequencer()->GetPlaybackContext());
+	UWorld* World = GetSequencer()->GetPlaybackContext()->GetWorld();
 	if (!World)
 	{
 		return;

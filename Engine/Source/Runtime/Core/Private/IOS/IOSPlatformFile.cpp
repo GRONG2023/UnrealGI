@@ -434,12 +434,13 @@ public:
 	
 };
 
+static SIZE_T FileMappingAlignment = FPlatformMemory::GetConstants().PageSize;
+
 class FIOSMappedFileHandle final : public IMappedFileHandle
 {
 	const uint8* MappedPtr;
 	FString Filename;
 	int32 NumOutstandingRegions;
-	int32 Alignment;
 	int FileHandle;
 	
 public:
@@ -453,7 +454,6 @@ public:
 		, NumOutstandingRegions(0)
 		, FileHandle(InFileHandle)
 	{
-		Alignment = sysconf(_SC_PAGE_SIZE);
 	}
 
 	~FIOSMappedFileHandle()
@@ -474,15 +474,9 @@ public:
 		// const uint8* MapPtr = (const uint8 *)mmap(NULL, BytesToMap, PROT_READ, MAP_PRIVATE, FileHandle, Offset);
 		//		const uint8* MapPtr = (const uint8 *)mmap(NULL, BytesToMap, PROT_READ, MAP_SHARED, FileHandle, Offset);
 		
-		int64 AlignedOffset = AlignDown(Offset, Alignment);
-		int64 AlignedSize = Align(BytesToMap + Offset - AlignedOffset, Alignment);
-		
-		// if we are about to go off the end, let's not
-		if (AlignedOffset + AlignedSize > GetFileSize())
-		{
-			UE_LOG(LogIOS, Warning, TEXT("Mapping fell off the end, did we need to actually abort? [%lld + %lld > %lld]"), AlignedOffset, AlignedSize, GetFileSize());
-			return nullptr;
-		}
+		const int64 AlignedOffset = AlignDown(Offset, FileMappingAlignment);
+		//File mapping can extend beyond file size. It's OK, kernel will just fill any leftover page data with zeros
+		const int64 AlignedSize = Align(BytesToMap + Offset - AlignedOffset, FileMappingAlignment);
 		
 		const uint8* AlignedMapPtr = (const uint8 *)mmap(NULL, AlignedSize, PROT_READ, MAP_PRIVATE, FileHandle, AlignedOffset);
 		if (AlignedMapPtr == (const uint8*)-1 || AlignedMapPtr == nullptr)
@@ -490,7 +484,7 @@ public:
 			UE_LOG(LogIOS, Warning, TEXT("Failed to map memory %s, error is %d"), *Filename, errno);
 			return nullptr;
 		}
-		LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, AlignedMapPtr, AlignedSize));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, AlignedMapPtr, AlignedSize));
 
 		// create a mapping for this range
 		const uint8* MapPtr = AlignedMapPtr + Offset - AlignedOffset;
@@ -505,7 +499,7 @@ public:
 		check(NumOutstandingRegions > 0);
 		NumOutstandingRegions--;
 		
-		LLM(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, (void*)Region->AlignedPtr));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, (void*)Region->AlignedPtr));
 		int Res = munmap((void*)Region->AlignedPtr, Region->AlignedSize);
 		checkf(Res == 0, TEXT("Failed to unmap, error is %d, errno is %d [params: %x, %d]"), Res, errno, MappedPtr, GetFileSize());
 	}
@@ -654,7 +648,7 @@ bool FIOSPlatformFile::IsReadOnly(const TCHAR* Filename)
 
 	if (access(TCHAR_TO_UTF8(*Filepath), W_OK) == -1)
 	{
-		return errno == EACCES;
+		return errno == EPERM || errno == EACCES;
 	}
 	return false;
 }
@@ -741,7 +735,7 @@ void FIOSPlatformFile::SetTimeStamp(const TCHAR* Filename, const FDateTime DateT
 	// change the modification time only
 	struct utimbuf Times;
 	Times.actime = FileInfo.st_atime;
-	Times.modtime = (DateTime - IOSEpoch).GetTotalSeconds();
+	Times.modtime = (time_t)(DateTime - IOSEpoch).GetTotalSeconds();
 	utime(TCHAR_TO_UTF8(*IOSFilename), &Times);
 }
 
@@ -946,7 +940,7 @@ bool FIOSPlatformFile::IterateDirectory(const TCHAR* Directory, FDirectoryVisito
 		const FString NormalizedFilename = UTF8_TO_TCHAR(([[[NSString stringWithUTF8String:InEntry->d_name] precomposedStringWithCanonicalMapping] cStringUsingEncoding:NSUTF8StringEncoding]));
 		const FString FullPath = DirectoryStr / NormalizedFilename;
 
-		return Visitor.Visit(*FullPath, InEntry->d_type == DT_DIR);
+		return Visitor.CallShouldVisitAndVisit(*FullPath, InEntry->d_type == DT_DIR);
 	});
 }
 
@@ -978,7 +972,7 @@ bool FIOSPlatformFile::IterateDirectoryStat(const TCHAR* Directory, FDirectorySt
 			}
 		}
 
-		return Visitor.Visit(*FullPath, IOSStatToUEFileData(FileInfo));
+		return Visitor.CallShouldVisitAndVisit(*FullPath, IOSStatToUEFileData(FileInfo));
 	});
 }
 
@@ -1035,7 +1029,7 @@ bool FIOSPlatformFile::IterateDirectoryCommon(const TCHAR* Directory, const TFun
 	{
 		Result = true;
 		struct dirent *Entry;
-		while ((Entry = readdir(Handle)) != NULL)
+		while (Result && (Entry = readdir(Handle)) != NULL)
 		{
 			if (FCStringAnsi::Strcmp(Entry->d_name, ".") && FCStringAnsi::Strcmp(Entry->d_name, ".."))
 			{
@@ -1078,10 +1072,17 @@ FString FIOSPlatformFile::ConvertToIOSPath(const FString& Filename, bool bForWri
 
 	if(bForWrite)
 	{
+#if PLATFORM_TVOS
+		// tvOS cannot write to the Documents directory. All files must be written to Library/Caches
+		static FString PublicWritePathBase = FString([NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) objectAtIndex:0]) + TEXT("/");
+
+		return PublicWritePathBase + Result;
+#else
 		static FString PublicWritePathBase = FString([NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0]) + TEXT("/");
 		static FString PrivateWritePathBase = FString([NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES) objectAtIndex:0]) + TEXT("/");
 		
 		return (bIsPublicWrite ? PublicWritePathBase : PrivateWritePathBase) + Result;
+#endif
 	}
 	else
 	{

@@ -1,8 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "RendererUtils.h"
+#include "RendererPrivateUtils.h"
 #include "RenderTargetPool.h"
+#include "RHIDefinitions.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "VisualizeTexture.h"
+#include "ScenePrivate.h"
+#include "SystemTextures.h"
+#include "UnifiedBuffer.h"
 
 class FRTWriteMaskDecodeCS : public FGlobalShader
 {
@@ -18,7 +24,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_RDG_TEXTURE(Texture2D, ReferenceInput)
-		SHADER_PARAMETER_RDG_TEXTURE_SRV_ARRAY(Buffer<uint>, RTWriteMaskInputs, [MaxRenderTargetCount])
+		SHADER_PARAMETER_RDG_TEXTURE_SRV_ARRAY(TextureMetadata, RTWriteMaskInputs, [MaxRenderTargetCount])
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<uint>, OutCombinedRTWriteMask)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -56,9 +62,9 @@ public:
 	}
 
 	// Shader parameter structs don't have a way to push variable sized data yet. So the we use the old shader parameter API.
-	void SetPlatformData(FRHIComputeCommandList& RHICmdList, const void* PlatformDataPtr, uint32 PlatformDataSize)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const void* PlatformDataPtr, uint32 PlatformDataSize)
 	{
-		RHICmdList.SetShaderParameter(RHICmdList.GetBoundComputeShader(), PlatformDataParam.GetBufferIndex(), PlatformDataParam.GetBaseIndex(), PlatformDataSize, PlatformDataPtr);
+		BatchedParameters.SetShaderParameter(PlatformDataParam.GetBufferIndex(), PlatformDataParam.GetBaseIndex(), PlatformDataSize, PlatformDataPtr);
 	}
 
 private:
@@ -153,13 +159,116 @@ void FRenderTargetWriteMask::Decode(
 			Texture0RHI->GetWriteMaskProperties(PlatformDataPtr, PlatformDataSize);
 		}
 
-		RHICmdList.SetComputeShader(DecodeCS.GetComputeShader());
-		SetShaderParameters(RHICmdList, DecodeCS, DecodeCS.GetComputeShader(), *PassParameters);
-		DecodeCS->SetPlatformData(RHICmdList, PlatformDataPtr, PlatformDataSize);
+		SetComputePipelineState(RHICmdList, DecodeCS.GetComputeShader());
+
+		SetShaderParametersMixedCS(RHICmdList, DecodeCS, *PassParameters, PlatformDataPtr, PlatformDataSize);
 
 		RHICmdList.DispatchComputeShader(
 			FMath::DivideAndRoundUp((uint32)RTWriteMaskDims.X, FRTWriteMaskDecodeCS::ThreadGroupSizeX),
 			FMath::DivideAndRoundUp((uint32)RTWriteMaskDims.Y, FRTWriteMaskDecodeCS::ThreadGroupSizeY),
 			1);
 	});
+}
+
+FDepthBounds::FDepthBoundsValues FDepthBounds::CalculateNearFarDepthExcludingSky()
+{
+	FDepthBounds::FDepthBoundsValues Values;
+
+	if (bool(ERHIZBuffer::IsInverted))
+	{
+		//const float SmallestFloatAbove0 = 1.1754943508e-38;		// 32bit float depth
+		const float SmallestFloatAbove0 = 1.0f / 16777215.0f;		// 24bit norm depth
+
+		Values.MinDepth = SmallestFloatAbove0;
+		Values.MaxDepth = float(ERHIZBuffer::NearPlane);
+	}
+	else
+	{
+		//const float SmallestFloatBelow1 = 0.9999999404;			// 32bit float depth
+		const float SmallestFloatBelow1 = 16777214.0f / 16777215.0f;// 24bit norm depth
+
+		Values.MinDepth = float(ERHIZBuffer::NearPlane);
+		Values.MaxDepth = SmallestFloatBelow1;
+	}
+
+	return Values;
+}
+
+IMPLEMENT_GLOBAL_SHADER_PARAMETER_STRUCT(FSubstratePublicGlobalUniformParameters, "SubstratePublic");
+
+namespace Substrate
+{
+	void PreInitViews(FScene& Scene)
+	{
+		FSubstrateSceneData& SubstrateScene = Scene.SubstrateSceneData;
+		SubstrateScene.SubstratePublicGlobalUniformParameters = nullptr;
+	}
+
+	void PostRender(FScene& Scene)
+	{
+		FSubstrateSceneData& SubstrateScene = Scene.SubstrateSceneData;
+		SubstrateScene.SubstratePublicGlobalUniformParameters = nullptr;
+	}
+
+	TRDGUniformBufferRef<FSubstratePublicGlobalUniformParameters> GetPublicGlobalUniformBuffer(FRDGBuilder& GraphBuilder, FScene& Scene)
+	{		
+		if(::Substrate::IsSubstrateEnabled())
+		{
+			FSubstrateSceneData& SubstrateScene = Scene.SubstrateSceneData;
+
+			if(SubstrateScene.SubstratePublicGlobalUniformParameters == nullptr)
+			{
+				return CreatePublicGlobalUniformBuffer(GraphBuilder, nullptr);//We are creating a dummy here so pass in null for the scene data.
+			}
+			return SubstrateScene.SubstratePublicGlobalUniformParameters;
+		}
+
+		return nullptr;
+	}
+}
+
+void FBufferScatterUploader::UploadTo(FRDGBuilder& GraphBuilder, FRDGBuffer *DestBuffer, FRDGBuffer *ScatterOffsets, FRDGBuffer *Values, uint32 NumScatters, uint32 NumBytesPerElement, int32 NumValuesPerScatter)
+{
+	FScatterCopyParams ScatterCopyParams { NumScatters, NumBytesPerElement, NumValuesPerScatter };
+	ScatterCopyResource(GraphBuilder, DestBuffer, GraphBuilder.CreateSRV(ScatterOffsets), GraphBuilder.CreateSRV(Values), ScatterCopyParams);
+}
+
+namespace UE::RendererPrivateUtils::Implementation
+{
+
+FPersistentBuffer::FPersistentBuffer(int32 InMinimumNumElementsReserved, const TCHAR *InName, bool bInRoundUpToPOT)
+	: MinimumNumElementsReserved(InMinimumNumElementsReserved)
+	, Name(InName)
+	, bRoundUpToPOT(bInRoundUpToPOT)
+{
+}
+
+FRDGBuffer* FPersistentBuffer::Register(FRDGBuilder& GraphBuilder) const
+{ 
+	return GraphBuilder.RegisterExternalBuffer(PooledBuffer); 
+}
+
+void FPersistentBuffer::Empty()
+{
+	PooledBuffer.SafeRelease();
+}
+
+FRDGBuffer* FPersistentBuffer::ResizeBufferIfNeeded(FRDGBuilder& GraphBuilder, const FRDGBufferDesc& BufferDesc)
+{
+	return ::ResizeBufferIfNeeded(GraphBuilder, PooledBuffer, BufferDesc, Name);
+}
+
+}
+
+TGlobalResource<FTileTexCoordVertexBuffer> GOneTileQuadVertexBuffer(1);
+TGlobalResource<FTileIndexBuffer> GOneTileQuadIndexBuffer(1);
+
+RENDERER_API FBufferRHIRef& GetOneTileQuadVertexBuffer()
+{
+	return GOneTileQuadVertexBuffer.VertexBufferRHI;
+}
+
+RENDERER_API FBufferRHIRef& GetOneTileQuadIndexBuffer()
+{
+	return GOneTileQuadIndexBuffer.IndexBufferRHI;
 }

@@ -47,12 +47,11 @@ public:
 
 private:
 
+	EVisibility OnGetRowVisibility() const;
+
 	EVisibility OnGetFavoritesVisibility() const;
 	const FSlateBrush* OnGetFavoriteImage() const;
 	FReply OnToggleFavoriteClicked();
-
-	void OnEditConditionCheckChanged( ECheckBoxState CheckState );
-	ECheckBoxState OnGetEditConditionCheckState() const;
 
 	FReply OnNameDoubleClicked();
 
@@ -81,4 +80,7 @@ private:
 
 	/** Called to construct any the cell contents for columns created by external code*/
 	FConstructExternalColumnCell ConstructExternalColumnCell;
+
+	FOptionalSize MinWidth;
+	FOptionalSize MaxWidth;
 };

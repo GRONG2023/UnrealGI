@@ -7,16 +7,18 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "GameFramework/Actor.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerPublicTypes.h"
-#include "Editor/SceneOutliner/Public/SceneOutlinerModule.h"
-#include "AssetRegistryModule.h"
+#include "SceneOutlinerPublicTypes.h"
+#include "SceneOutlinerModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "UserInterface/PropertyEditor/PropertyEditorAssetConstants.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "SceneOutlinerPublicTypes.h"
+#include "ActorTreeItem.h"
+#include "PropertyNode.h"
 
 #define LOCTEXT_NAMESPACE "PropertyEditor"
 
@@ -24,6 +26,7 @@ void SPropertyMenuActorPicker::Construct( const FArguments& InArgs )
 {
 	CurrentActor = InArgs._InitialActor;
 	bAllowClear = InArgs._AllowClear;
+	bAllowPickingLevelInstanceContent = InArgs._AllowPickingLevelInstanceContent;
 	ActorFilter = InArgs._ActorFilter;
 	OnSet = InArgs._OnSet;
 	OnClose = InArgs._OnClose;
@@ -82,20 +85,19 @@ void SPropertyMenuActorPicker::Construct( const FArguments& InArgs )
 
 		FSceneOutlinerModule& SceneOutlinerModule = FModuleManager::Get().LoadModuleChecked<FSceneOutlinerModule>(TEXT("SceneOutliner"));
 
-		SceneOutliner::FInitializationOptions InitOptions;
-		InitOptions.Mode = ESceneOutlinerMode::ActorPicker;
-		InitOptions.Filters->AddFilterPredicate(ActorFilter);
+		FSceneOutlinerInitializationOptions InitOptions;
+		InitOptions.Filters->AddFilterPredicate<FActorTreeItem>(ActorFilter);
 		InitOptions.bFocusSearchBoxWhenOpened = true;
 
-		InitOptions.ColumnMap.Add(SceneOutliner::FBuiltInColumnTypes::Label(), SceneOutliner::FColumnInfo(SceneOutliner::EColumnVisibility::Visible, 0) );
-		InitOptions.ColumnMap.Add(SceneOutliner::FBuiltInColumnTypes::ActorInfo(), SceneOutliner::FColumnInfo(SceneOutliner::EColumnVisibility::Visible, 10) );
+		InitOptions.ColumnMap.Add(FSceneOutlinerBuiltInColumnTypes::Label(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 0));
+		InitOptions.ColumnMap.Add(FSceneOutlinerBuiltInColumnTypes::ActorInfo(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 10));
 		
 		MenuContent =
 			SNew(SBox)
-			.WidthOverride(PropertyEditorAssetConstants::SceneOutlinerWindowSize.X)
-			.HeightOverride(PropertyEditorAssetConstants::SceneOutlinerWindowSize.Y)
+			.WidthOverride(static_cast<float>(PropertyEditorAssetConstants::SceneOutlinerWindowSize.X))
+			.HeightOverride(static_cast<float>(PropertyEditorAssetConstants::SceneOutlinerWindowSize.Y))
 			[
-				SceneOutlinerModule.CreateSceneOutliner(InitOptions, FOnActorPicked::CreateSP(this, &SPropertyMenuActorPicker::OnActorSelected))
+				SceneOutlinerModule.CreateActorPicker(InitOptions, FOnActorPicked::CreateSP(this, &SPropertyMenuActorPicker::OnActorSelected), nullptr, !bAllowPickingLevelInstanceContent)
 			];
 
 		MenuBuilder.AddWidget(MenuContent.ToSharedRef(), FText::GetEmpty(), true);
@@ -163,7 +165,7 @@ bool SPropertyMenuActorPicker::CanPaste()
 	if( ClipboardText.Split( TEXT("'"), &Class, &PossibleObjectPath, ESearchCase::CaseSensitive) )
 	{
 		// Remove the last item
-		PossibleObjectPath.LeftChopInline( 1, false );
+		PossibleObjectPath.LeftChopInline( 1, EAllowShrinking::No );
 	}
 
 	bool bCanPaste = false;
@@ -175,7 +177,7 @@ bool SPropertyMenuActorPicker::CanPaste()
 	else
 	{
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::Get().LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-		bCanPaste = PossibleObjectPath.Len() < NAME_SIZE && AssetRegistryModule.Get().GetAssetByObjectPath( *PossibleObjectPath ).IsValid();
+		bCanPaste = PossibleObjectPath.Len() < NAME_SIZE && AssetRegistryModule.Get().GetAssetByObjectPath( FSoftObjectPath(PossibleObjectPath) ).IsValid();
 	}
 
 	return bCanPaste;
@@ -189,6 +191,25 @@ void SPropertyMenuActorPicker::OnClear()
 
 void SPropertyMenuActorPicker::OnActorSelected( AActor* InActor )
 {
+	FText OutErrorMsg;
+
+	if (IsValid(InActor) && !FName::IsValidXName(InActor->GetName(), INVALID_NAME_CHARACTERS,  &OutErrorMsg))
+	{
+		FFormatNamedArguments Args;
+		Args.Add("ActorName", FText::FromString(FName::SanitizeWhitespace(InActor->GetName())));
+		Args.Add("ActorLabel", FText::FromString(FName::SanitizeWhitespace(InActor->GetActorLabel())));
+
+		FText Error = OutErrorMsg.IsEmpty() ?
+		     LOCTEXT("InvalidCharactersDefaultErrorMessage", "Names do not support the following characters: \"\' ,\\n\\r\\t") : OutErrorMsg;
+		
+		Args.Add("ErrorMessage", Error);
+		const FText LogMessage = FText::Format(LOCTEXT("InvalidActorName", "The chosen actor, {ActorLabel}, has an invalid name of {ActorName}.\n{ErrorMessage}"), Args);
+		
+		UE_LOG(LogPropertyNode, Warning, TEXT("%s"), *LogMessage.ToString());
+	}
+
+
+	
 	SetValue(InActor);
 	OnClose.ExecuteIfBound();
 }

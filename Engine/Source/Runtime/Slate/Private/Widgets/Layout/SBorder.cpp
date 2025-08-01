@@ -5,10 +5,21 @@
 
 static FName SBorderTypeName("SBorder");
 
+SLATE_IMPLEMENT_WIDGET(SBorder)
+void SBorder::PrivateRegisterAttributes(FSlateAttributeInitializer& AttributeInitializer)
+{
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "BorderImage", BorderImageAttribute, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "BorderBackgroundColor", BorderBackgroundColorAttribute, EInvalidateWidgetReason::Paint);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "DesiredSizeScale", DesiredSizeScaleAttribute, EInvalidateWidgetReason::Layout);
+	SLATE_ADD_MEMBER_ATTRIBUTE_DEFINITION_WITH_NAME(AttributeInitializer, "ShowDisabledEffect", ShowDisabledEffectAttribute, EInvalidateWidgetReason::Paint);
+}
+
 SBorder::SBorder()
-	: BorderImage( FCoreStyle::Get().GetBrush( "Border" ) )
-	, BorderBackgroundColor( FLinearColor::White )
-	, DesiredSizeScale(FVector2D(1,1))
+	: BorderImageAttribute(*this, FCoreStyle::Get().GetBrush( "Border" ))
+	, BorderBackgroundColorAttribute(*this, FLinearColor::White)
+	, DesiredSizeScaleAttribute(*this, FVector2D(1,1))
+	, ShowDisabledEffectAttribute(*this, true)
+	, bFlipForRightToLeftFlowDirection(false)
 {
 }
 
@@ -21,17 +32,16 @@ void SBorder::Construct( const SBorder::FArguments& InArgs )
 		bCanSupportFocus = false;
 	}
 
-	ContentScale = InArgs._ContentScale;
-	ColorAndOpacity = InArgs._ColorAndOpacity;
-	DesiredSizeScale = InArgs._DesiredSizeScale;
-
-	ShowDisabledEffect = InArgs._ShowEffectWhenDisabled;
+	SetContentScale(InArgs._ContentScale);
+	SetColorAndOpacity(InArgs._ColorAndOpacity);
+	SetDesiredSizeScale(InArgs._DesiredSizeScale);
+	SetShowEffectWhenDisabled(InArgs._ShowEffectWhenDisabled);
 
 	bFlipForRightToLeftFlowDirection = InArgs._FlipForRightToLeftFlowDirection;
 
-	BorderImage = InArgs._BorderImage;
-	BorderBackgroundColor = InArgs._BorderBackgroundColor;
-	ForegroundColor = InArgs._ForegroundColor;
+	SetBorderImage(InArgs._BorderImage);
+	SetBorderBackgroundColor(InArgs._BorderBackgroundColor);
+	SetForegroundColor(InArgs._ForegroundColor);
 
 	if (InArgs._OnMouseButtonDown.IsBound())
 	{
@@ -82,13 +92,13 @@ void SBorder::ClearContent()
 
 int32 SBorder::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const
 {
-	const FSlateBrush* BrushResource = BorderImage.Get();
+	const FSlateBrush* BrushResource = BorderImageAttribute.Get();
 		
 	const bool bEnabled = ShouldBeEnabled(bParentEnabled);
 
 	if ( BrushResource && BrushResource->DrawAs != ESlateBrushDrawType::NoDrawType )
 	{
-		const bool bShowDisabledEffect = ShowDisabledEffect.Get();
+		const bool bShowDisabledEffect = GetShowDisabledEffect();
 		const ESlateDrawEffect DrawEffects = (bShowDisabledEffect && !bEnabled) ? ESlateDrawEffect::DisabledEffect : ESlateDrawEffect::None;
 
 		if (bFlipForRightToLeftFlowDirection && GSlateFlowDirection == EFlowDirection::RightToLeft)
@@ -100,7 +110,7 @@ int32 SBorder::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometr
 				FlippedGeometry.ToPaintGeometry(),
 				BrushResource,
 				DrawEffects,
-				BrushResource->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint() * BorderBackgroundColor.Get().GetColor(InWidgetStyle)
+				BrushResource->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint() * BorderBackgroundColorAttribute.Get().GetColor(InWidgetStyle)
 			);
 		}
 		else
@@ -111,7 +121,7 @@ int32 SBorder::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometr
 				AllottedGeometry.ToPaintGeometry(),
 				BrushResource,
 				DrawEffects,
-				BrushResource->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint() * BorderBackgroundColor.Get().GetColor(InWidgetStyle)
+				BrushResource->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint() * BorderBackgroundColorAttribute.Get().GetColor(InWidgetStyle)
 			);
 		}
 	}
@@ -119,55 +129,42 @@ int32 SBorder::OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometr
 	return SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bEnabled );
 }
 
-bool SBorder::ComputeVolatility() const
-{
-	return BorderImage.IsBound() || BorderBackgroundColor.IsBound() || DesiredSizeScale.IsBound() || ShowDisabledEffect.IsBound();
-}
-
 FVector2D SBorder::ComputeDesiredSize(float LayoutScaleMultiplier) const
 {
-	return DesiredSizeScale.Get() * SCompoundWidget::ComputeDesiredSize(LayoutScaleMultiplier);
+	return DesiredSizeScaleAttribute.Get() * Super::ComputeDesiredSize(LayoutScaleMultiplier);
 }
 
-void SBorder::SetBorderBackgroundColor(const TAttribute<FSlateColor>& InColorAndOpacity)
+void SBorder::SetBorderBackgroundColor(TAttribute<FSlateColor> InColorAndOpacity)
 {
-	SetAttribute(BorderBackgroundColor, InColorAndOpacity, EInvalidateWidgetReason::Paint);
+	BorderBackgroundColorAttribute.Assign(*this, InColorAndOpacity);
 }
 
-void SBorder::SetDesiredSizeScale(const TAttribute<FVector2D>& InDesiredSizeScale)
+void SBorder::SetDesiredSizeScale(TAttribute<FVector2D> InDesiredSizeScale)
 {
-	SetAttribute(DesiredSizeScale, InDesiredSizeScale, EInvalidateWidgetReason::Layout);
+	DesiredSizeScaleAttribute.Assign(*this, InDesiredSizeScale);
 }
 
 void SBorder::SetHAlign(EHorizontalAlignment HAlign)
 {
-	if (ChildSlot.HAlignment != HAlign)
-	{
-		ChildSlot.HAlignment = HAlign;
-		Invalidate(EInvalidateWidget::Layout);
-	}
+	ChildSlot.SetHorizontalAlignment(HAlign);
 }
 
 void SBorder::SetVAlign(EVerticalAlignment VAlign)
 {
-	if (ChildSlot.VAlignment != VAlign)
-	{
-		ChildSlot.VAlignment = VAlign;
-		Invalidate(EInvalidateWidget::Layout);
-	}
+	ChildSlot.SetVerticalAlignment(VAlign);
 }
 
-void SBorder::SetPadding(const TAttribute<FMargin>& InPadding)
+void SBorder::SetPadding(TAttribute<FMargin> InPadding)
 {
-	SetAttribute(ChildSlot.SlotPadding, InPadding, EInvalidateWidgetReason::Layout);
+	ChildSlot.SetPadding(MoveTemp(InPadding));
 }
 
-void SBorder::SetShowEffectWhenDisabled(const TAttribute<bool>& InShowEffectWhenDisabled)
+void SBorder::SetShowEffectWhenDisabled(TAttribute<bool> InShowEffectWhenDisabled)
 {
-	SetAttribute(ShowDisabledEffect, InShowEffectWhenDisabled, EInvalidateWidgetReason::Paint);
+	ShowDisabledEffectAttribute.Assign(*this, InShowEffectWhenDisabled);
 }
 
-void SBorder::SetBorderImage(const TAttribute<const FSlateBrush*>& InBorderImage)
+void SBorder::SetBorderImage(TAttribute<const FSlateBrush*> InBorderImage)
 {
-	BorderImage.SetImage(*this, InBorderImage);
+	BorderImageAttribute.Assign(*this, InBorderImage);
 }

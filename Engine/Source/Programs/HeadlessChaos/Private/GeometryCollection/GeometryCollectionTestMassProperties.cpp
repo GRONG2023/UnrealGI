@@ -23,19 +23,19 @@ namespace GeometryCollectionTest
 
 		Chaos::FParticles Vertices;
 		Vertices.AddParticles(8);
-		Vertices.X(0) = FVec3(-1, 1, -1);
-		Vertices.X(1) = FVec3(1, 1, -1);
-		Vertices.X(2) = FVec3(1, -1, -1);
-		Vertices.X(3) = FVec3(-1, -1, -1);
-		Vertices.X(4) = FVec3(-1, 1, 1);
-		Vertices.X(5) = FVec3(1, 1, 1);
-		Vertices.X(6) = FVec3(1, -1, 1);
-		Vertices.X(7) = FVec3(-1, -1, 1);
+		Vertices.SetX(0, FVec3(-1, 1, -1));
+		Vertices.SetX(1, FVec3(1, 1, -1));
+		Vertices.SetX(2, FVec3(1, -1, -1));
+		Vertices.SetX(3, FVec3(-1, -1, -1));
+		Vertices.SetX(4, FVec3(-1, 1, 1));
+		Vertices.SetX(5, FVec3(1, 1, 1));
+		Vertices.SetX(6, FVec3(1, -1, 1));
+		Vertices.SetX(7, FVec3(-1, -1, 1));
 
 		// @todo(chaos):  breaking : this trips an ensure in the test, why?
 		for (int i = 0; i < 8; i++) {
-			Vertices.X(i) *= FVector(1, 2, 3);
-			Vertices.X(i) += FVector(1, 2, 3);
+			Vertices.SetX(i, Vertices.GetX(i) * FVector(1, 2, 3));
+			Vertices.SetX(i, Vertices.GetX(i) + FVector(1, 2, 3));
 		}
 
 		TArray<Chaos::TVec3<int32>> Faces;
@@ -63,7 +63,7 @@ namespace GeometryCollectionTest
 
 			for (int32 Idx = 0; Idx < 8; ++Idx)
 			{
-				Vertices.X(Idx) -= MassProperties.CenterOfMass;
+				Vertices.SetX(Idx, Vertices.GetX(Idx) - MassProperties.CenterOfMass);
 			}
 
 			check(MassProperties.Mass > 0);
@@ -78,9 +78,9 @@ namespace GeometryCollectionTest
 		// This is just measured data to let us know when it changes. Ideally this would be derived. 
 		FVector EulerAngle = MassProperties.RotationOfMass.Euler();
 		EXPECT_TRUE(MassProperties.RotationOfMass.Euler().Equals(FVector(115.8153, -12.4347, 1.9705)));
-		EXPECT_TRUE(FMath::IsNearlyEqual(MassProperties.InertiaTensor.M[0][0], static_cast<FReal>(14.9866095), KINDA_SMALL_NUMBER));
-		EXPECT_TRUE(FMath::IsNearlyEqual(MassProperties.InertiaTensor.M[1][1], static_cast<FReal>(1.40656376), KINDA_SMALL_NUMBER));
-		EXPECT_TRUE(FMath::IsNearlyEqual(MassProperties.InertiaTensor.M[2][2], static_cast<FReal>(13.7401619), KINDA_SMALL_NUMBER));
+		EXPECT_TRUE(FMath::IsNearlyEqual((FReal)MassProperties.InertiaTensor.M[0][0], static_cast<FReal>(14.9866095), (FReal)KINDA_SMALL_NUMBER));
+		EXPECT_TRUE(FMath::IsNearlyEqual((FReal)MassProperties.InertiaTensor.M[1][1], static_cast<FReal>(1.40656376), (FReal)KINDA_SMALL_NUMBER));
+		EXPECT_TRUE(FMath::IsNearlyEqual((FReal)MassProperties.InertiaTensor.M[2][2], static_cast<FReal>(13.7401619), (FReal)KINDA_SMALL_NUMBER));
 	}
 
 	GTEST_TEST(AllTraits, GeometryCollection_MassProperties_Cube)
@@ -98,7 +98,7 @@ namespace GeometryCollectionTest
 		const TManagedArray<bool>& Visible = Collection->RestCollection->Visible;
 
 		// VerticesGroup
-		const TManagedArray<FVector>& Vertex = Collection->RestCollection->Vertex;
+		const TManagedArray<FVector3f>& Vertex = Collection->RestCollection->Vertex;
 
 		// GeometryGroup
 		const int32 NumGeometries = Collection->RestCollection->NumElements(FGeometryCollection::GeometryGroup);
@@ -134,7 +134,7 @@ namespace GeometryCollectionTest
 		MassSpaceParticles.AddParticles(Vertex.Num());
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) = Transform[BoneMap[Idx]].TransformPosition(Vertex[Idx]);
+			MassSpaceParticles.SetX(Idx, Transform[BoneMap[Idx]].TransformPosition(FVector(Vertex[Idx])));
 		}
 
 		CalculateVolumeAndCenterOfMass(MassSpaceParticles, TriMesh->GetElements(), MassProperties.Volume, MassProperties.CenterOfMass);
@@ -146,7 +146,7 @@ namespace GeometryCollectionTest
 
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) -= MassProperties.CenterOfMass;
+			MassSpaceParticles.SetX(Idx, MassSpaceParticles.GetX(Idx) - MassProperties.CenterOfMass);
 		}
 
 		FReal Density = 1.0;
@@ -158,9 +158,9 @@ namespace GeometryCollectionTest
 
 		// This is just measured data to let us know when it changes. Ideally this would be derived. 
 		EXPECT_TRUE((MassProperties.RotationOfMass.Euler() - FVector(115.8153, -12.4347, 1.9705)).Size() > KINDA_SMALL_NUMBER);
-		EXPECT_TRUE(FMath::IsNearlyEqual(MassProperties.InertiaTensor.M[0][0], static_cast<FReal>(4.99521351), KINDA_SMALL_NUMBER));
-		EXPECT_TRUE(FMath::IsNearlyEqual(MassProperties.InertiaTensor.M[1][1], static_cast<FReal>(4.07145357), KINDA_SMALL_NUMBER));
-		EXPECT_TRUE(FMath::IsNearlyEqual(MassProperties.InertiaTensor.M[2][2], static_cast<FReal>(4.26666689), KINDA_SMALL_NUMBER));
+		EXPECT_TRUE(FMath::IsNearlyEqual((FReal)MassProperties.InertiaTensor.M[0][0], static_cast<FReal>(4.99521351), (FReal)KINDA_SMALL_NUMBER));
+		EXPECT_TRUE(FMath::IsNearlyEqual((FReal)MassProperties.InertiaTensor.M[1][1], static_cast<FReal>(4.07145357), (FReal)KINDA_SMALL_NUMBER));
+		EXPECT_TRUE(FMath::IsNearlyEqual((FReal)MassProperties.InertiaTensor.M[2][2], static_cast<FReal>(4.26666689), (FReal)KINDA_SMALL_NUMBER));
 	}
 
 	GTEST_TEST(AllTraits, GeometryCollection_MassProperties_Sphere)
@@ -178,7 +178,7 @@ namespace GeometryCollectionTest
 		const TManagedArray<bool>& Visible = Collection->RestCollection->Visible;
 
 		// VerticesGroup
-		const TManagedArray<FVector>& Vertex = Collection->RestCollection->Vertex;
+		const TManagedArray<FVector3f>& Vertex = Collection->RestCollection->Vertex;
 
 		// GeometryGroup
 		const int32 NumGeometries = Collection->RestCollection->NumElements(FGeometryCollection::GeometryGroup);
@@ -207,7 +207,7 @@ namespace GeometryCollectionTest
 		MassSpaceParticles.AddParticles(Vertex.Num());
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) = Transform[BoneMap[Idx]].TransformPosition(Vertex[Idx]);
+			MassSpaceParticles.SetX(Idx, Transform[BoneMap[Idx]].TransformPosition(FVector(Vertex[Idx])));
 		}
 
 		CalculateVolumeAndCenterOfMass(MassSpaceParticles, TriMesh->GetElements(), MassProperties.Volume, MassProperties.CenterOfMass);
@@ -226,7 +226,7 @@ namespace GeometryCollectionTest
 
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) -= MassProperties.CenterOfMass;
+			MassSpaceParticles.SetX(Idx, MassSpaceParticles.GetX(Idx) - MassProperties.CenterOfMass);
 		}
 
 		FReal Density = 0.01;
@@ -258,7 +258,7 @@ namespace GeometryCollectionTest
 		const TManagedArray<bool>& Visible = Collection->RestCollection->Visible;
 
 		// VerticesGroup
-		const TManagedArray<FVector>& Vertex = Collection->RestCollection->Vertex;
+		const TManagedArray<FVector3f>& Vertex = Collection->RestCollection->Vertex;
 
 		// GeometryGroup
 		const int32 NumGeometries = Collection->RestCollection->NumElements(FGeometryCollection::GeometryGroup);
@@ -289,7 +289,7 @@ namespace GeometryCollectionTest
 		MassSpaceParticles.AddParticles(Vertex.Num());
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) = Transform[BoneMap[Idx]].TransformPosition(Vertex[Idx]);
+			MassSpaceParticles.SetX(Idx, Transform[BoneMap[Idx]].TransformPosition(FVector(Vertex[Idx])));
 		}
 
 		CalculateVolumeAndCenterOfMass(MassSpaceParticles, TriMesh->GetElements(), MassProperties.Volume, MassProperties.CenterOfMass);
@@ -301,7 +301,7 @@ namespace GeometryCollectionTest
 
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) -= MassProperties.CenterOfMass;
+			MassSpaceParticles.SetX(Idx, MassSpaceParticles.GetX(Idx) - MassProperties.CenterOfMass);
 		}
 
 		FReal Density = 0.01;
@@ -339,7 +339,7 @@ namespace GeometryCollectionTest
 		const TManagedArray<bool>& Visible = Collection->RestCollection->Visible;
 
 		// VerticesGroup
-		TManagedArray<FVector>& Vertex = Collection->RestCollection->Vertex;
+		TManagedArray<FVector3f>& Vertex = Collection->RestCollection->Vertex;
 
 		// GeometryGroup
 		const int32 NumGeometries = Collection->RestCollection->NumElements(FGeometryCollection::GeometryGroup);
@@ -370,9 +370,9 @@ namespace GeometryCollectionTest
 		MassSpaceParticles.AddParticles(Vertex.Num());
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			FVector VertexPoint = Vertex[Idx];
-			MassSpaceParticles.X(Idx) = Transform[BoneMap[Idx]].TransformPosition(Vertex[Idx]);
-			FVector MassSpacePoint = FVector(MassSpaceParticles.X(Idx)[0], MassSpaceParticles.X(Idx)[1], MassSpaceParticles.X(Idx)[2]);
+			FVector VertexPoint = FVector(Vertex[Idx]);
+			MassSpaceParticles.SetX(Idx, Transform[BoneMap[Idx]].TransformPosition(FVector(Vertex[Idx])));
+			FVector MassSpacePoint = FVector(MassSpaceParticles.GetX(Idx)[0], MassSpaceParticles.GetX(Idx)[1], MassSpaceParticles.GetX(Idx)[2]);
 			SomeVec.Add(MassSpacePoint);
 		}
 
@@ -385,17 +385,23 @@ namespace GeometryCollectionTest
 
 		for (int32 Idx = 0; Idx < Vertex.Num(); ++Idx)
 		{
-			MassSpaceParticles.X(Idx) -= MassProperties.CenterOfMass;
+			MassSpaceParticles.SetX(Idx, MassSpaceParticles.GetX(Idx) - MassProperties.CenterOfMass);
 		}
 
 		FReal Density = 0.01;
 		FVec3 ZeroVec(0);
 		CalculateInertiaAndRotationOfMass(MassSpaceParticles, TriMesh->GetSurfaceElements(), Density, ZeroVec, MassProperties.InertiaTensor, MassProperties.RotationOfMass);
 
+		FVector RotationEulerClamped = MassProperties.RotationOfMass.Euler();
+		if (RotationEulerClamped[0] < 0.)
+		{
+			RotationEulerClamped[0] += 180.f;
+		}
+		
 		// rotational alignment.
-		EXPECT_NEAR(MassProperties.RotationOfMass.Euler()[0], 135.f, KINDA_SMALL_NUMBER);
-		EXPECT_NEAR(MassProperties.RotationOfMass.Euler()[1], 0, KINDA_SMALL_NUMBER);
-		EXPECT_NEAR(MassProperties.RotationOfMass.Euler()[2], 0, KINDA_SMALL_NUMBER);
+		EXPECT_NEAR(RotationEulerClamped[0], 135., KINDA_SMALL_NUMBER);
+		EXPECT_NEAR(RotationEulerClamped[1], 0., KINDA_SMALL_NUMBER);
+		EXPECT_NEAR(RotationEulerClamped[2], 0., KINDA_SMALL_NUMBER);
 		// X dominate inertia tensor
 		EXPECT_GT(MassProperties.InertiaTensor.M[0][0], MassProperties.InertiaTensor.M[2][2]);
 		EXPECT_GT(MassProperties.InertiaTensor.M[0][0], MassProperties.InertiaTensor.M[1][1]);

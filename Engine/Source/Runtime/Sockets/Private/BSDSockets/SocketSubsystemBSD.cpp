@@ -182,7 +182,8 @@ TSharedPtr<FInternetAddr> FSocketSubsystemBSD::GetAddressFromString(const FStrin
 		UniversalNetBufferPtr = &(((sockaddr_in*)&NetworkBuffer)->sin_addr);
 	}
 
-	NetworkBuffer.ss_family = AddrFamily;
+	// The type of ss_family varies by platform.
+	NetworkBuffer.ss_family = IntCastChecked<decltype(NetworkBuffer.ss_family)>(AddrFamily);
 
 	if (inet_pton(AddrFamily, TCHAR_TO_ANSI(*InAddress), UniversalNetBufferPtr))
 	{
@@ -500,6 +501,83 @@ int32 FSocketSubsystemBSD::GetAddressInfoHintFlag(EAddressInfoFlags InFlags) con
 #endif
 
 	return ReturnFlagsCode;
+}
+
+TSharedRef<FInternetAddr> FSocketSubsystemBSD::GetLocalHostAddr(FOutputDevice& Out, bool& bCanBindAll)
+{
+	TSharedRef<FInternetAddr> HostAddr = CreateInternetAddr();
+	bCanBindAll = false;
+
+	if (!GetMultihomeAddress(HostAddr))
+	{
+		// First try to get the host address via connect
+		if (!GetLocalHostAddrViaConnect(HostAddr))
+		{
+			bCanBindAll = true;
+
+			TArray<TSharedPtr<FInternetAddr>> AdapterAddresses;
+			if (!GetLocalAdapterAddresses(AdapterAddresses) || (AdapterAddresses.Num() == 0))
+			{
+				Out.Logf(TEXT("Could not fetch the local adapter addresses"));
+				HostAddr->SetAnyAddress();
+			}
+			else
+			{
+				if (AdapterAddresses.Num() > 0)
+				{
+					HostAddr = AdapterAddresses[0]->Clone();
+				}
+			}
+		}
+	}
+
+	UE_LOG(LogSockets, VeryVerbose, TEXT("GetLocalHostAddr: %s"), *HostAddr->ToString(true));
+
+	return HostAddr;
+}
+
+bool FSocketSubsystemBSD::GetLocalHostAddrViaConnect(TSharedRef<FInternetAddr>& HostAddr)
+{
+	bool bReturnValue = false;
+
+	const bool bDisableIPv6 = CVarDisableIPv6.GetValueOnAnyThread() == 1;
+
+	TSharedRef<FInternetAddr> ConnectAddr = bDisableIPv6 ? CreateInternetAddr(FNetworkProtocolTypes::IPv4) : CreateInternetAddr();
+
+	bool bIsValid = false;
+	// any IP will do, doesn't even need to be reachable
+	if (ConnectAddr->GetProtocolType() == FNetworkProtocolTypes::IPv6)
+	{
+		ConnectAddr->SetIp(TEXT("::ffff:172.31.255.255"), bIsValid);		
+	}
+	else if (ConnectAddr->GetProtocolType() == FNetworkProtocolTypes::IPv4)
+	{
+		ConnectAddr->SetIp(TEXT("172.31.255.255"), bIsValid);
+	}
+
+	if (bIsValid)
+	{
+		ConnectAddr->SetPort(256);
+
+		FUniqueSocket TestSocket = CreateUniqueSocket(NAME_DGram, TEXT("GetLocalHostAddrViaConnect"), ConnectAddr->GetProtocolType());
+
+		if (TestSocket.IsValid())
+		{
+			if (TestSocket->Connect(*ConnectAddr))
+			{
+				TestSocket->GetAddress(*HostAddr);
+
+				HostAddr->SetPort(0);
+				bReturnValue = true;
+
+				UE_LOG(LogSockets, VeryVerbose, TEXT("GetLocalHostAddrViaConnect: %s"), *HostAddr->ToString(true));
+			}
+
+			TestSocket->Close();
+		}
+	}
+
+	return bReturnValue;
 }
 
 #endif	//PLATFORM_HAS_BSD_SOCKETS

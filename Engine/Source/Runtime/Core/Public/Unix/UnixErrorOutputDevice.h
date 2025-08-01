@@ -3,14 +3,16 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "Logging/LogVerbosity.h"
 #include "Misc/OutputDeviceError.h"
+#include "UObject/NameTypes.h"
 
-class CORE_API FUnixErrorOutputDevice : public FOutputDeviceError
+class FUnixErrorOutputDevice : public FOutputDeviceError
 {
 public:
 
 	/** Constructor, initializing member variables */
-	FUnixErrorOutputDevice();
+	CORE_API FUnixErrorOutputDevice();
 
 	/**
 	 * Serializes the passed in data unless the current event is suppressed.
@@ -18,13 +20,13 @@ public:
 	 * @param	Data	Text to log
 	 * @param	Event	Event name used for suppression purposes
 	 */
-	virtual void Serialize(const TCHAR* Msg, ELogVerbosity::Type Verbosity, const class FName& Category) override;
+	CORE_API virtual void Serialize(const TCHAR* Msg, ELogVerbosity::Type Verbosity, const class FName& Category) override;
 
 	/**
 	 * Error handling function that is being called from within the system wide global
 	 * error handler, e.g. using structured exception handling on the PC.
 	 */
-	void HandleError() override;
+	CORE_API void HandleError() override;
 
 private:
 
@@ -34,5 +36,5 @@ protected:
 	/**
 	 * Callback to allow FUnixApplicationErrorOutputDevice to restore the UI.
 	 */
-	virtual void HandleErrorRestoreUI();
+	CORE_API virtual void HandleErrorRestoreUI();
 };

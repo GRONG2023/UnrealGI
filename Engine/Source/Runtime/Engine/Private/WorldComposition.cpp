@@ -4,21 +4,23 @@
 	WorldComposition.cpp: UWorldComposition implementation
 =============================================================================*/
 #include "Engine/WorldComposition.h"
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "GenericPlatform/GenericPlatformFile.h"
-#include "HAL/PlatformFilemanager.h"
+#include "Engine/LevelStreaming.h"
+#include "HAL/PlatformFileManager.h"
+#include "Engine/World.h"
 #include "Misc/Paths.h"
-#include "UObject/Package.h"
 #include "Misc/PackageName.h"
-#include "EngineDefines.h"
-#include "EngineGlobals.h"
-#include "Engine/EngineTypes.h"
-#include "UObject/PropertyPortFlags.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/LevelStreamingDynamic.h"
 #include "Engine/AssetManager.h"
+#include "Engine/Level.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WorldComposition)
 
 DEFINE_LOG_CATEGORY_STATIC(LogWorldComposition, Log, All);
 
@@ -36,7 +38,7 @@ UWorldComposition::UWorldComposition(const FObjectInitializer& ObjectInitializer
 	, TilesStreamingTimeThreshold(1.0)
 	, bLoadAllTilesDuringCinematic(false)
 	, bRebaseOriginIn3DSpace(false)
-	, RebaseOriginDistance(HALF_WORLD_MAX1*0.5f)
+	, RebaseOriginDistance(UE_OLD_HALF_WORLD_MAX1*0.5f)
 {
 }
 
@@ -44,9 +46,9 @@ void UWorldComposition::PostInitProperties()
 {
 	Super::PostInitProperties();
 
-	if (!IsTemplate() && !GetOutermost()->HasAnyPackageFlags(PKG_PlayInEditor))
+	if (!IsTemplate() && !GetOutermost()->HasAnyPackageFlags(PKG_PlayInEditor) && !FPlatformProperties::RequiresCookedData())
 	{
-		// Tiles information is not serialized to disk, and should be regenerated on world composition object construction
+		// Tiles information is not serialized to disk in the editor, and should be regenerated on world composition object construction
 		Rescan();
 	}
 }
@@ -55,9 +57,11 @@ void UWorldComposition::Serialize( FArchive& Ar )
 {
 	Super::Serialize(Ar);
 	
-	// We serialize this data only for PIE
-	// In normal game this data is regenerated on object construction
-	if (Ar.GetPortFlags() & PPF_DuplicateForPIE)
+	// We serialize this data only for PIE and cooked data
+	// In normal editor game this data is regenerated on object construction
+	const bool bIsPIE = Ar.GetPortFlags() & PPF_DuplicateForPIE;
+	const bool bIsCooked = Ar.IsCooking() || (Ar.IsLoading() && FPlatformProperties::RequiresCookedData());
+	if (bIsPIE || bIsCooked)
 	{
 		Ar << WorldRoot;
 		Ar << Tiles;
@@ -71,13 +75,21 @@ void UWorldComposition::PostDuplicate(bool bDuplicateForPIE)
 
 	if (bDuplicateForPIE)
 	{
-		FixupForPIE(GetOutermost()->PIEInstanceID);	
+		FixupForPIE(GetOutermost()->GetPIEInstanceID());	
 	}
 }
 
 void UWorldComposition::PostLoad()
 {
 	Super::PostLoad();
+
+	if (FPlatformProperties::RequiresCookedData())
+	{
+		// Create streaming levels for each Tile
+		PopulateStreamingLevels();
+		// Calculate absolute positions since they are not serialized to disk
+		CaclulateTilesAbsolutePositions();
+	}
 
 	UWorld* World = GetWorld();
 
@@ -147,7 +159,12 @@ struct FWorldTilesGatherer
 		{
 			FString FullPath = FilenameOrDirectory;
 
-			if (FPaths::GetExtension(FullPath, true) == FPackageName::GetMapPackageExtension())
+			if (FPaths::GetExtension(FullPath, true) == FPackageName::GetMapPackageExtension() 
+#if WITH_EDITOR
+				// Make sure we don't gather partitioned levels in World Composition
+				&& !ULevel::GetIsLevelPartitionedFromPackage(FName(FPackageName::FilenameToLongPackageName(FullPath)))
+#endif
+				)
 			{
 				MapFilesToConsider.Emplace(MoveTemp(FullPath));
 			}
@@ -166,7 +183,7 @@ struct FWorldTilesGatherer
 		for (const FString& FullPath : MapFilesToConsider)
 		{
 			FString TilePackageName = FPackageName::FilenameToLongPackageName(FullPath);
-			const FName TilePackagePath = *(TilePackageName + TEXT(".") + FPackageName::GetLongPackageAssetName(TilePackageName));
+			const FSoftObjectPath TilePackagePath(FName(*TilePackageName), FName(*FPackageName::GetLongPackageAssetName(TilePackageName)), FString{});
 
 			const FAssetData MapAssetData = AssetRegistry.GetAssetByObjectPath(TilePackagePath);
 
@@ -225,6 +242,8 @@ struct FWorldTilesGatherer
 
 void UWorldComposition::Rescan()
 {
+	checkfSlow(!FPlatformProperties::RequiresCookedData(), TEXT("Rescan should not be called in a cooked game with serialized tile info."));
+
 	// Save tiles state, so we can restore it for dirty tiles after rescan is done
 	FTilesList SavedTileList = Tiles;
 		
@@ -312,7 +331,7 @@ void UWorldComposition::Rescan()
 void UWorldComposition::ReinitializeForPIE()
 {
 	Rescan();
-	FixupForPIE(GetOutermost()->PIEInstanceID);
+	FixupForPIE(GetOutermost()->GetPIEInstanceID());
 	GetWorld()->SetStreamingLevels(TilesStreaming);
 }
 
@@ -464,14 +483,14 @@ void UWorldComposition::OnTileInfoUpdated(const FName& InPackageName, const FWor
 	UPackage* LevelPackage = Cast<UPackage>(StaticFindObjectFast(UPackage::StaticClass(), NULL, Tile->PackageName));
 	if (LevelPackage)
 	{
-		if (LevelPackage->WorldTileInfo == nullptr)
+		if (!LevelPackage->GetWorldTileInfo())
 		{
-			LevelPackage->WorldTileInfo = MakeUnique<FWorldTileInfo>(Tile->Info);
+			LevelPackage->SetWorldTileInfo(MakeUnique<FWorldTileInfo>(Tile->Info));
 			PackageDirty = true;
 		}
 		else
 		{
-			*(LevelPackage->WorldTileInfo) = Tile->Info;
+			*(LevelPackage->GetWorldTileInfo()) = Tile->Info;
 		}
 
 		if (PackageDirty)
@@ -747,6 +766,19 @@ void UWorldComposition::UpdateStreamingState()
 }
 
 #if WITH_EDITOR
+TArray<FWorldTileLayer> UWorldComposition::GetDistanceDependentLayers() const
+{
+	TArray<FWorldTileLayer> Layers;
+	for (const FWorldCompositionTile& Tile : Tiles)
+	{
+		if (IsDistanceDependentLevel(Tile.PackageName))
+		{
+			Layers.AddUnique(Tile.Info.Layer);
+		}
+	}
+	return Layers;
+}
+
 bool UWorldComposition::UpdateEditorStreamingState(const FVector& InLocation)
 {
 	UWorld* OwningWorld = GetWorld();
@@ -895,7 +927,7 @@ void UWorldComposition::OnLevelRemovedFromWorld(ULevel* InLevel)
 	}
 #endif
 	
-	// Move level to his local origin
+	// Move level to its local origin
 	FIntVector LevelOffset = GetLevelOffset(InLevel);
 	InLevel->ApplyWorldOffset(-FVector(LevelOffset), false);
 }
@@ -917,19 +949,22 @@ void UWorldComposition::OnLevelPostLoad(ULevel* InLevel)
 				Info = Tile->Info;
 			}
 		}
-		else
+		else if (!World->IsPartitionedWorld())
 		{
 #if WITH_EDITOR
-			// Preserve FWorldTileInfo in case sub-level was loaded in the editor outside of world composition
-			FString PackageFilename = FPackageName::LongPackageNameToFilename(LevelPackage->GetName(), FPackageName::GetMapPackageExtension());
-			FWorldTileInfo::Read(PackageFilename, Info);
+			// Try to preserve FWorldTileInfo in case sub-level was loaded in the editor outside of world composition
+			FString PackageFilename;
+			if (FPackageName::TryConvertLongPackageNameToFilename(LevelPackage->GetName(), PackageFilename, FPackageName::GetMapPackageExtension()))
+			{
+				FWorldTileInfo::Read(PackageFilename, Info);
+			}
 #endif //WITH_EDITOR
 		}
 		
 		const bool bIsDefault = (Info == FWorldTileInfo());
 		if (!bIsDefault)
 		{
-			LevelPackage->WorldTileInfo = MakeUnique<FWorldTileInfo>(Info);
+			LevelPackage->SetWorldTileInfo(MakeUnique<FWorldTileInfo>(Info));
 		}
 	}
 }
@@ -956,9 +991,9 @@ FIntVector UWorldComposition::GetLevelOffset(ULevel* InLevel) const
 	UPackage* LevelPackage = InLevel->GetOutermost();
 	
 	FIntVector LevelPosition = FIntVector::ZeroValue;
-	if (LevelPackage->WorldTileInfo)
+	if (LevelPackage->GetWorldTileInfo())
 	{
-		LevelPosition = LevelPackage->WorldTileInfo->AbsolutePosition;
+		LevelPosition = LevelPackage->GetWorldTileInfo()->AbsolutePosition;
 	}
 	
 	return LevelPosition - OwningWorld->OriginLocation;
@@ -970,10 +1005,11 @@ FBox UWorldComposition::GetLevelBounds(ULevel* InLevel) const
 	UPackage* LevelPackage = InLevel->GetOutermost();
 	
 	FBox LevelBBox(ForceInit);
-	if (LevelPackage->WorldTileInfo)
+	if (LevelPackage->GetWorldTileInfo())
 	{
-		LevelBBox = LevelPackage->WorldTileInfo->Bounds.ShiftBy(FVector(GetLevelOffset(InLevel)));
+		LevelBBox = LevelPackage->GetWorldTileInfo()->Bounds.ShiftBy(FVector(GetLevelOffset(InLevel)));
 	}
 	
 	return LevelBBox;
 }
+

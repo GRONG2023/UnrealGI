@@ -53,6 +53,19 @@ struct FClassPickerDefaults
 {
 	GENERATED_USTRUCT_BODY()
 
+	FClassPickerDefaults()
+	{}
+
+	FClassPickerDefaults(const FString& InClassName, const FString& InAssetClass)
+		: ClassName(InClassName)
+		, AssetClass(InAssetClass)
+	{}
+
+	FClassPickerDefaults(FString&& InClassName, FString&& InAssetClass)
+		: ClassName(MoveTemp(InClassName))
+		, AssetClass(MoveTemp(InAssetClass))
+	{}
+
 	/** The name of the class to select */
 	UPROPERTY()
 	FString ClassName;
@@ -68,10 +81,11 @@ struct FClassPickerDefaults
 	FText GetDescription() const;
 };
 
-UCLASS(Config=Editor)
-class UNREALED_API UUnrealEdOptions : public UObject
+UCLASS(Config=Editor, MinimalAPI)
+class UUnrealEdOptions : public UObject
 {
-	GENERATED_UCLASS_BODY()
+	GENERATED_BODY()
+public:
 
 	/** Categories of commands. */
 	UPROPERTY(config)
@@ -83,7 +97,7 @@ class UNREALED_API UUnrealEdOptions : public UObject
 
 	/** Pointer to the key bindings object that actually stores key bindings for the editor. */
 	UPROPERTY()
-	class UUnrealEdKeyBindings* EditorKeyBindings;
+	TObjectPtr<class UUnrealEdKeyBindings> EditorKeyBindings;
 
 	/** If true, the list of classes in the class picker dialog will be expanded */
 	UPROPERTY(config)
@@ -93,19 +107,34 @@ class UNREALED_API UUnrealEdOptions : public UObject
 	UPROPERTY(config)
 	TArray<FClassPickerDefaults> NewAssetDefaultClasses;
 
+	/* Delegate to override NewAssetDefaultClasses */
+	DECLARE_DELEGATE_RetVal(const TArray<FClassPickerDefaults>&, FGetNewAssetDefaultClasses);
+	FGetNewAssetDefaultClasses& OnGetNewAssetDefaultClasses() { return GetNewAssetDefaultClassesDelegate; }
 
-public:
+	/** Get default objects in the blueprint class dialog */
+	const TArray<FClassPickerDefaults>& GetNewAssetDefaultClasses() const
+	{
+		return GetNewAssetDefaultClassesDelegate.IsBound() ? GetNewAssetDefaultClassesDelegate.Execute() : NewAssetDefaultClasses;
+	}
+
+	/* Delegate to disallow C++ creation/editing from the editor */
+	DECLARE_DELEGATE_RetVal(bool, FIsCPPAllowed);
+	FIsCPPAllowed& OnIsCPPAllowed() { return IsCPPAllowedDelegate; }
+
+	/** Returns whether C++ creation/editing from the editor is allowed */
+	bool IsCPPAllowed() { return IsCPPAllowedDelegate.IsBound() ? IsCPPAllowedDelegate.Execute() : true; }
+
 	/** Mapping of command name's to array index. */
 	TMap<FName, int32>	CommandMap;
 
 	//~ Begin UObject Interface
-	virtual void PostInitProperties() override;
+	UNREALED_API virtual void PostInitProperties() override;
 	//~ End UObject Interface
 
 	/**
 	 * Generates a mapping from commnands to their parent sets for quick lookup.
 	 */
-	void GenerateCommandMap();
+	UNREALED_API void GenerateCommandMap();
 
 	/**
 	 * Attempts to locate a exec command bound to a hotkey.
@@ -116,8 +145,13 @@ public:
 	 * @param bShiftDown	Whether or not SHIFT is pressed.
 	 * @param EditorSet		Set of bindings to search in.
 	 */
-	FString GetExecCommand(FKey Key, bool bAltDown, bool bCtrlDown, bool bShiftDown, FName EditorSet);
+	UNREALED_API FString GetExecCommand(FKey Key, bool bAltDown, bool bCtrlDown, bool bShiftDown, FName EditorSet);
+
+private:
+
+	/* Delegate to override NewAssetDefaultClasses */
+	FGetNewAssetDefaultClasses GetNewAssetDefaultClassesDelegate;
+
+	/** Delegate to disallow C++ creation/editing from the editor */
+	FIsCPPAllowed IsCPPAllowedDelegate;
 };
-
-
-

@@ -1,18 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "BoneControllers/AnimNode_SpringBone.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/WorldSettings.h"
 #include "Animation/AnimInstanceProxy.h"
+#include "Animation/AnimStats.h"
 #include "Animation/AnimTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_SpringBone)
 
 /////////////////////////////////////////////////////
 // FAnimNode_SpringBone
 
 FAnimNode_SpringBone::FAnimNode_SpringBone()
-	: MaxDisplacement(0.0f)
-	, SpringStiffness(50.0f)
-	, SpringDamping(4.0f)
-	, ErrorResetThresh(256.0f)
+	: MaxDisplacement(0.0)
+	, SpringStiffness(50.0)
+	, SpringDamping(4.0)
+	, ErrorResetThresh(256.0)
 	, BoneLocation(FVector::ZeroVector)
 	, BoneVelocity(FVector::ZeroVector)
 	, OwnerVelocity(FVector::ZeroVector)
@@ -88,6 +92,8 @@ FORCEINLINE void CopyToVectorByFlags(FVector& DestVec, const FVector& SrcVec, bo
 void FAnimNode_SpringBone::EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(EvaluateSkeletalControl_AnyThread)
+	ANIM_MT_SCOPE_CYCLE_COUNTER_VERBOSE(SpringBone, !IsInGameThread());
+
 	check(OutBoneTransforms.Num() == 0);
 
 	const bool bNoOffset = !bTranslateX && !bTranslateY && !bTranslateZ;
@@ -137,10 +143,10 @@ void FAnimNode_SpringBone::EvaluateSkeletalControl_AnyThread(FComponentSpacePose
 
 			// Integrate velocity
 			// Make sure damping with variable frame rate actually dampens velocity. Otherwise Spring will go nuts.
-			float const CutOffDampingValue = 1.f / FixedTimeStep;
+			double const CutOffDampingValue = 1.0 / FixedTimeStep;
 			if (SpringDamping > CutOffDampingValue)
 			{
-				float const SafetyScale = CutOffDampingValue / SpringDamping;
+				double const SafetyScale = CutOffDampingValue / SpringDamping;
 				BoneVelocity += SafetyScale * (Acceleration * FixedTimeStep);
 			}
 			else
@@ -149,7 +155,7 @@ void FAnimNode_SpringBone::EvaluateSkeletalControl_AnyThread(FComponentSpacePose
 			}
 
 			// Clamp velocity to something sane (|dX/dt| <= ErrorResetThresh)
-			float const BoneVelocityMagnitude = BoneVelocity.Size();
+			double const BoneVelocityMagnitude = BoneVelocity.Size();
 			if (BoneVelocityMagnitude * FixedTimeStep > ErrorResetThresh)
 			{
 				BoneVelocity *= (ErrorResetThresh / (BoneVelocityMagnitude * FixedTimeStep));
@@ -252,3 +258,4 @@ void FAnimNode_SpringBone::PreUpdate(const UAnimInstance* InAnimInstance)
 		}
 	}
 }
+

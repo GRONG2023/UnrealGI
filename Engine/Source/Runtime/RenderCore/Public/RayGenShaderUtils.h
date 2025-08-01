@@ -10,9 +10,8 @@
 #include "RenderGraphUtils.h"
 #include "PipelineStateCache.h"
 
-
 /** All utils for ray generation shaders. */
-struct RENDERCORE_API FRayGenShaderUtils
+struct FRayGenShaderUtils
 {
 	/** Dispatch a ray generation shader to render graph builder with its parameters. */
 	template<typename TShaderClass>
@@ -29,7 +28,7 @@ struct RENDERCORE_API FRayGenShaderUtils
 			Forward<FRDGEventName>(PassName),
 			Parameters,
 			ERDGPassFlags::Compute,
-			[RayGenerationShader, Parameters, Resolution](FRHICommandList& RHICmdList)
+			[RayGenerationShader, Parameters, Resolution](FRHIRayTracingCommandList& RHICmdList)
 		{
 			FRayTracingShaderBindingsWriter GlobalResources;
 			SetShaderParameters(GlobalResources, RayGenerationShader, *Parameters);

@@ -13,34 +13,31 @@ class FRHIResource;
 class FScopedRHIThreadStaller;
 struct FRHICommandBase;
 
-FORCEINLINE_DEBUGGABLE void FRHICommandListBase::Flush()
+FORCEINLINE_DEBUGGABLE bool FRHICommandListBase::IsImmediate() const
 {
-	if (HasCommands())
-	{
-		check(!IsImmediate());
-		GRHICommandList.ExecuteList(*this);
-	}
+	return PersistentState.bImmediate;
 }
 
-FORCEINLINE_DEBUGGABLE bool FRHICommandListBase::IsImmediate()
+FORCEINLINE_DEBUGGABLE FRHICommandListImmediate& FRHICommandListBase::GetAsImmediate()
 {
-	return this == &FRHICommandListExecutor::GetImmediateCommandList();
-}
-
-FORCEINLINE_DEBUGGABLE bool FRHICommandListBase::IsImmediateAsyncCompute()
-{
-	return this == &FRHICommandListExecutor::GetImmediateAsyncComputeCommandList();
+	checkf(IsImmediate(), TEXT("This operation expects the immediate command list."));
+	return static_cast<FRHICommandListImmediate&>(*this);
 }
 
 FORCEINLINE_DEBUGGABLE bool FRHICommandListBase::Bypass() const
 {
-	return GRHICommandList.Bypass();
+#if CAN_TOGGLE_COMMAND_LIST_BYPASS
+	check(!IsImmediate() || IsInRenderingThread() || IsInRHIThread());
+	return GRHICommandList.Bypass() && IsImmediate();
+#else
+	return false;
+#endif
 }
 
-FORCEINLINE_DEBUGGABLE FScopedRHIThreadStaller::FScopedRHIThreadStaller(class FRHICommandListImmediate& InImmed)
+FORCEINLINE_DEBUGGABLE FScopedRHIThreadStaller::FScopedRHIThreadStaller(class FRHICommandListImmediate& InImmed, bool bDoStall)
 	: Immed(nullptr)
 {
-	if (IsRunningRHIInSeparateThread())
+	if (bDoStall && IsRunningRHIInSeparateThread())
 	{
 		check(IsInRenderingThread());
 		if (InImmed.StallRHIThread())
@@ -64,67 +61,56 @@ namespace PipelineStateCache
 	extern RHI_API void FlushResources();
 }
 
-FORCEINLINE_DEBUGGABLE void FRHICommandListImmediate::ImmediateFlush(EImmediateFlushType::Type FlushType)
+inline void FRHIComputeCommandList::SubmitCommandsHint()
 {
-	switch (FlushType)
+	if (IsImmediate())
 	{
-	case EImmediateFlushType::WaitForOutstandingTasksOnly:
-		{
-			WaitForTasks();
-		}
-		break;
-	case EImmediateFlushType::DispatchToRHIThread:
-		{
-			if (HasCommands())
-			{
-				GRHICommandList.ExecuteList(*this);
-			}
-		}
-		break;
-	case EImmediateFlushType::WaitForDispatchToRHIThread:
-		{
-			if (HasCommands())
-			{
-				GRHICommandList.ExecuteList(*this);
-			}
-			WaitForDispatch();
-		}
-		break;
-	case EImmediateFlushType::FlushRHIThread:
-		{
-			CSV_SCOPED_TIMING_STAT(RHITFlushes, FlushRHIThreadTotal);
-			if (HasCommands())
-			{
-				GRHICommandList.ExecuteList(*this);
-			}
-			WaitForDispatch();
-			if (IsRunningRHIInSeparateThread())
-			{
-				WaitForRHIThreadTasks();
-			}
-			WaitForTasks(true); // these are already done, but this resets the outstanding array
-		}
-		break;
-	case EImmediateFlushType::FlushRHIThreadFlushResources:
-	case EImmediateFlushType::FlushRHIThreadFlushResourcesFlushDeferredDeletes:
-		{
-			CSV_SCOPED_TIMING_STAT(RHITFlushes, FlushRHIThreadFlushResourcesTotal);
-			if (HasCommands())
-			{
-				GRHICommandList.ExecuteList(*this);
-			}
-			WaitForDispatch();
-			WaitForRHIThreadTasks();
-			WaitForTasks(true); // these are already done, but this resets the outstanding array
-			PipelineStateCache::FlushResources();
-			FRHIResource::FlushPendingDeletes(FlushType == EImmediateFlushType::FlushRHIThreadFlushResourcesFlushDeferredDeletes);
-		}
-		break;
-	default:
-		check(0);
+		static_cast<FRHICommandListImmediate&>(*this).SubmitCommandsHint();
 	}
 }
 
+FORCEINLINE_DEBUGGABLE void FRHICommandListImmediate::ImmediateFlush(EImmediateFlushType::Type FlushType)
+{
+	if (FlushType == EImmediateFlushType::WaitForOutstandingTasksOnly)
+	{
+		WaitForTasks();
+	}
+	else
+	{
+		if (FlushType >= EImmediateFlushType::DispatchToRHIThread)
+		{
+			// Execution and initialization are separate functions because initializing the immediate contexts
+			// may enqueue a lambda call to SwitchPipeline, which needs special handling in LatchBypass().
+			const bool bFlushingResources = FlushType >= EImmediateFlushType::FlushRHIThreadFlushResources;
+			ExecuteAndReset(bFlushingResources);
+			InitializeImmediateContexts();
+		}
+
+		if (FlushType >= EImmediateFlushType::FlushRHIThread)
+		{
+			CSV_SCOPED_TIMING_STAT(RHITFlushes, FlushRHIThreadTotal);
+			WaitForRHIThreadTasks();
+		}
+
+		if (FlushType >= EImmediateFlushType::FlushRHIThreadFlushResources)
+		{
+			CSV_SCOPED_TIMING_STAT(RHITFlushes, FlushRHIThreadFlushResourcesTotal);
+
+			// RHIPerFrameRHIFlushComplete was originally called from FlushPendingDeletes, which used to be here, so it was
+			// running as part of the next command list. FlushPendingDeletes now runs as part of the command list being finalized
+			// and submitted by this function, as it should be, but moving RHIPerFrameRHIFlushComplete there is risky, because
+			// the RHIs which use it do weird things in there (e.g. D3D11 does blocking query resolve calls in that function which
+			// happen to not stall because this runs when the next command list is executed, so they have time to be executed).
+			EnqueueLambda([](FRHICommandListImmediate& RHICmdList)
+			{
+				if (GDynamicRHI)
+				{
+					GDynamicRHI->RHIPerFrameRHIFlushComplete();
+				}
+			});
+		}
+	}
+}
 
 // Helper class for traversing a FRHICommandList
 class FRHICommandListIterator
@@ -133,12 +119,16 @@ public:
 	FRHICommandListIterator(FRHICommandListBase& CmdList)
 	{
 		CmdPtr = CmdList.Root;
+#if RHI_COUNT_COMMANDS
 		NumCommands = 0;
 		CmdListNumCommands = CmdList.NumCommands;
+#endif
 	}
 	~FRHICommandListIterator()
 	{
+#if RHI_COUNT_COMMANDS
 		checkf(CmdListNumCommands == NumCommands, TEXT("Missed %d Commands!"), CmdListNumCommands - NumCommands);
+#endif
 	}
 
 	FORCEINLINE_DEBUGGABLE bool HasCommandsLeft() const
@@ -150,13 +140,35 @@ public:
 	{
 		FRHICommandBase* RHICmd = CmdPtr;
 		CmdPtr = RHICmd->Next;
+#if RHI_COUNT_COMMANDS
 		NumCommands++;
+#endif
 		return RHICmd;
 	}
 
 private:
 	FRHICommandBase* CmdPtr;
+
+#if RHI_COUNT_COMMANDS
 	uint32 NumCommands;
 	uint32 CmdListNumCommands;
+#endif
 };
 
+inline FRHICommandListScopedPipelineGuard::FRHICommandListScopedPipelineGuard(FRHICommandListBase& RHICmdList)
+	: RHICmdList(RHICmdList)
+{
+	if (RHICmdList.GetPipeline() == ERHIPipeline::None)
+	{
+		RHICmdList.SwitchPipeline(ERHIPipeline::Graphics);
+		bPipelineSet = true;
+	}
+}
+
+inline FRHICommandListScopedPipelineGuard::~FRHICommandListScopedPipelineGuard()
+{
+	if (bPipelineSet)
+	{
+		RHICmdList.SwitchPipeline(ERHIPipeline::None);
+	}
+}

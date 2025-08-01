@@ -4,10 +4,14 @@
 #include "UObject/ConstructorHelpers.h"
 #include "UObject/VRObjectVersion.h"
 #include "Containers/StringConv.h"
+#include "EngineLogs.h"
 #include "Misc/CoreMisc.h"
 #include "ARSessionConfigCookSupport.h"
+#include "MaterialDomain.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ARSessionConfig)
 
 UARSessionConfig::UARSessionConfig()
 	: bTrackSceneObjects(true)
@@ -114,6 +118,28 @@ const TArray<UARCandidateImage*>& UARSessionConfig::GetCandidateImageList() cons
 void UARSessionConfig::AddCandidateImage(UARCandidateImage* NewCandidateImage)
 {
 	CandidateImages.Add(NewCandidateImage);
+}
+
+void UARSessionConfig::RemoveCandidateImage(UARCandidateImage* CandidateImage)
+{
+	int ImagesRemoved = CandidateImages.Remove(CandidateImage);
+}
+
+void UARSessionConfig::RemoveCandidateImageAtIndex(int Index)
+{
+	if (Index < 0 || Index >= CandidateImages.Num())
+	{
+		UE_LOG(LogBlueprint, Warning, TEXT("RemoveCandidateImageAtIndex failed because the index is invalid.  No image removed."));
+	}
+	else
+	{
+		CandidateImages.RemoveAt(Index);
+	}
+}
+
+void UARSessionConfig::ClearCandidateImages()
+{
+	CandidateImages.Empty();
 }
 
 int32 UARSessionConfig::GetMaxNumSimultaneousImagesTracked() const
@@ -284,3 +310,4 @@ bool UARSessionConfig::ShouldUseOptimalVideoFormat() const
 {
 	return bUseOptimalVideoFormat;
 }
+

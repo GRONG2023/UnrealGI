@@ -9,7 +9,7 @@
 #include "MaterialExpressionLandscapeLayerCoords.generated.h"
 
 UENUM()
-enum ETerrainCoordMappingType
+enum ETerrainCoordMappingType : int
 {
 	TCMT_Auto,
 	TCMT_XY,
@@ -19,7 +19,7 @@ enum ETerrainCoordMappingType
 };
 
 UENUM()
-enum ELandscapeCustomizedCoordType
+enum ELandscapeCustomizedCoordType : int
 {
 	/** Don't use customized UV, just use original UV. */
 	LCCT_None,
@@ -31,8 +31,8 @@ enum ELandscapeCustomizedCoordType
 	LCCT_MAX,
 };
 
-UCLASS(collapsecategories, hidecategories=Object)
-class LANDSCAPE_API UMaterialExpressionLandscapeLayerCoords : public UMaterialExpression
+UCLASS(collapsecategories, hidecategories=Object, MinimalAPI)
+class UMaterialExpressionLandscapeLayerCoords : public UMaterialExpression
 {
 	GENERATED_UCLASS_BODY()
 
@@ -62,8 +62,10 @@ class LANDSCAPE_API UMaterialExpressionLandscapeLayerCoords : public UMaterialEx
 
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
-	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
-	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	LANDSCAPE_API virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	LANDSCAPE_API virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 	//~ End UMaterialExpression Interface
 };

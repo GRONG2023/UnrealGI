@@ -8,7 +8,7 @@
 #include "VT/RuntimeVirtualTextureEnum.h"
 
 enum class ERuntimeVirtualTextureMaterialType : uint8;
-class FRHITexture2D;
+class FRHITexture;
 class FSceneInterface;
 
 /** IVirtualTextureFinalizer implementation that renders the virtual texture pages on demand. */
@@ -44,7 +44,7 @@ public:
 	void AddTile(FTileEntry& Tile);
 
 	//~ Begin IVirtualTextureFinalizer Interface.
-	virtual void Finalize(FRHICommandListImmediate& RHICmdList) override;
+	virtual void Finalize(FRDGBuilder& GraphBuilder) override;
 	//~ End IVirtualTextureFinalizer Interface.
 
 private:
@@ -81,10 +81,16 @@ public:
 		FTransform const& InUVToWorld,
 		FBox const& InWorldBounds);
 	
-	RENDERER_API virtual ~FRuntimeVirtualTextureProducer() {}
+	virtual ~FRuntimeVirtualTextureProducer() {}
 
 	//~ Begin IVirtualTexture Interface.
+	virtual bool IsPageStreamed(uint8 vLevel, uint32 vAddress) const override
+	{
+		return false;
+	}
+
 	virtual FVTRequestPageResult RequestPageData(
+		FRHICommandList& RHICmdList,
 		const FVirtualTextureProducerHandle& ProducerHandle,
 		uint8 LayerMask,
 		uint8 vLevel,
@@ -93,7 +99,7 @@ public:
 	) override;
 
 	virtual IVirtualTextureFinalizer* ProducePageData(
-		FRHICommandListImmediate& RHICmdList,
+		FRHICommandList& RHICmdList,
 		ERHIFeatureLevel::Type FeatureLevel,
 		EVTProducePageFlags Flags,
 		const FVirtualTextureProducerHandle& ProducerHandle,

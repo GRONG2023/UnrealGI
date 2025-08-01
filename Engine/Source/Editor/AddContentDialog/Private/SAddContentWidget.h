@@ -2,20 +2,32 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "SlateFwd.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
 #include "Input/Reply.h"
-#include "Widgets/SWidget.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateConstants.h"
+#include "Types/SlateEnums.h"
+#include "ViewModels/CategoryViewModel.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/STileView.h"
-#include "ViewModels/CategoryViewModel.h"
 
 class FAddContentWidgetViewModel;
 class FContentSourceViewModel;
+class FText;
 class IContentSource;
+class ITableRow;
+class SBox;
+class SWidget;
+struct FSlateBrush;
 
 /** A widget which allows the user to select multiple options from content which is available to be added to the project. */
 class SAddContentWidget : public SCompoundWidget
@@ -54,13 +66,6 @@ private:
 	/** Creates the widget the displays a screenshot in the screenshot carousel. */
 	TSharedRef<SWidget> CreateScreenshotWidget(TSharedPtr<FSlateBrush> ScreenshotBrush);
 
-
-	/** Handles the user clicking on one of the check boxes representing the category tabs. */
-	void CategoryCheckBoxCheckStateChanged(ECheckBoxState CheckState, FCategoryViewModel Category);
-
-	/** Gets the check state for one of the check boxes representing the category tabs. */
-	ECheckBoxState GetCategoryCheckBoxCheckState(FCategoryViewModel Category) const;
-
 	/** Handles the text in the search box changing. */
 	void SearchTextChanged(const FText& SearchText);
 
@@ -70,6 +75,14 @@ private:
 	/** Handles the add content to project button being clicked. */
 	FReply AddButtonClicked();
 
+	/** Handles the close button being clicked. */
+	FReply CancelButtonClicked();
+
+	/** Handles selected category changing in the UI */
+	void OnSelectedCategoryChanged(FCategoryViewModel SelectedCategory);
+
+	/** Gets the curerently selected category */
+	FCategoryViewModel GetSelectedCategory() const;
 
 	/** Handles the available categories changing on the view model. */
 	void CategoriesChanged();

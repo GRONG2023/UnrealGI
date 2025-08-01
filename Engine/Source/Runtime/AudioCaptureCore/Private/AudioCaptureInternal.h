@@ -4,6 +4,7 @@
 
 #include "AudioCaptureCore.h"
 #include "AudioCaptureCoreLog.h"
+#include "Engine/Engine.h"
 #include "Features/IModularFeatures.h"
 
 namespace Audio
@@ -16,7 +17,7 @@ namespace Audio
 
 		// Begin IAudioCaptureStream
 		virtual bool GetCaptureDeviceInfo(FCaptureDeviceInfo& OutInfo, int32 DeviceIndex) override { return false; }
-		virtual bool OpenCaptureStream(const FAudioCaptureDeviceParams& InParams, FOnCaptureFunction OnCapture, uint32 NumFramesDesired) override { return false; }
+		virtual bool OpenAudioCaptureStream(const FAudioCaptureDeviceParams& InParams, FOnAudioCaptureFunction OnCapture, uint32 NumFramesDesired) override { return false; }
 		virtual bool CloseStream() override { return false; }
 		virtual bool StartStream() override { return false; }
 		virtual bool StopStream() override { return false; }
@@ -32,10 +33,12 @@ namespace Audio
 
 	FORCEINLINE TUniquePtr<IAudioCaptureStream> FAudioCapture::CreateImpl()
 	{
+		IModularFeatures::Get().LockModularFeatureList();
 		TArray<IAudioCaptureFactory*> AudioCaptureStreamFactories = IModularFeatures::Get().GetModularFeatureImplementations<IAudioCaptureFactory>(IAudioCaptureFactory::GetModularFeatureName());
+		IModularFeatures::Get().UnlockModularFeatureList();
 
 		// For now, just return the first audio capture stream implemented. We can make this configurable at a later point.
-		if (AudioCaptureStreamFactories.Num() > 0 && AudioCaptureStreamFactories[0] != nullptr)
+		if (AudioCaptureStreamFactories.Num() > 0 && AudioCaptureStreamFactories[0] != nullptr && GEngine->UseSound())
 		{
 			return AudioCaptureStreamFactories[0]->CreateNewAudioCaptureStream();
 		}

@@ -4,11 +4,9 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -34,12 +32,12 @@ namespace UnrealBuildTool
 			/// <summary>
 			/// Name of the marker
 			/// </summary>
-			public string Name;
+			public readonly string Name;
 
 			/// <summary>
 			/// Time at which the event ocurred
 			/// </summary>
-			public TimeSpan StartTime;
+			public readonly TimeSpan StartTime;
 
 			/// <summary>
 			/// Time at which the event ended
@@ -49,7 +47,7 @@ namespace UnrealBuildTool
 			/// <summary>
 			/// The trace span for external tracing
 			/// </summary>
-			public ITraceSpan Span;
+			public readonly ITraceSpan Span;
 
 			/// <summary>
 			/// Constructor
@@ -62,7 +60,7 @@ namespace UnrealBuildTool
 				this.Name = Name;
 				this.StartTime = StartTime;
 				this.FinishTime = FinishTime;
-				this.Span = TraceSpan.Create(Name);
+				Span = TraceSpan.Create(Name);
 			}
 
 			/// <summary>
@@ -70,7 +68,7 @@ namespace UnrealBuildTool
 			/// </summary>
 			public void Finish()
 			{
-				if(!FinishTime.HasValue)
+				if (!FinishTime.HasValue)
 				{
 					FinishTime = Stopwatch.Elapsed;
 				}
@@ -99,10 +97,7 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Property for the total time elapsed
 		/// </summary>
-		public static TimeSpan Elapsed
-		{
-			get { return Stopwatch.Elapsed; }
-		}
+		public static TimeSpan Elapsed => Stopwatch.Elapsed;
 
 		/// <summary>
 		/// Start the stopwatch
@@ -119,7 +114,10 @@ namespace UnrealBuildTool
 		public static void AddEvent(string Name)
 		{
 			TimeSpan Time = Stopwatch.Elapsed;
-			Events.Add(new Event(Name, Time, Time));
+			lock (Events)
+			{
+				Events.Add(new Event(Name, Time, Time));
+			}
 		}
 
 		/// <summary>
@@ -130,71 +128,79 @@ namespace UnrealBuildTool
 		public static ITimelineEvent ScopeEvent(string Name)
 		{
 			Event Event = new Event(Name, Stopwatch.Elapsed, null);
-			Events.Add(Event);
+			lock (Events)
+			{
+				Events.Add(Event);
+			}
 			return Event;
 		}
 
 		/// <summary>
 		/// Prints this information to the log
 		/// </summary>
-		public static void Print(TimeSpan MaxUnknownTime, LogEventType Verbosity)
+		public static void Print(TimeSpan MaxUnknownTime, LogLevel Verbosity, ILogger Logger)
 		{
 			// Print the start time
-			Log.WriteLine(Verbosity, "Timeline:");
-			Log.WriteLine(Verbosity, "");
-			Log.WriteLine(Verbosity, "[{0,6}]", FormatTime(TimeSpan.Zero));
+			Logger.Log(Verbosity, "Timeline:");
+			Logger.Log(Verbosity, "");
+			Logger.Log(Verbosity, "[{Time,6}]", FormatTime(TimeSpan.Zero));
 
 			// Create the root event
 			TimeSpan FinishTime = Stopwatch.Elapsed;
 
-			List<Event> OuterEvents = new List<Event>();
-			OuterEvents.Add(new Event("<Root>", TimeSpan.Zero, FinishTime));
+			List<Event> OuterEvents = new List<Event>
+			{
+				new Event("<Root>", TimeSpan.Zero, FinishTime)
+			};
 
 			// Print out all the child events
 			TimeSpan LastTime = TimeSpan.Zero;
-			for(int EventIdx = 0; EventIdx < Events.Count; EventIdx++)
+			lock (Events)
 			{
-				Event Event = Events[EventIdx];
-
-				// Pop events off the stack
-				for (; OuterEvents.Count > 1; OuterEvents.RemoveAt(OuterEvents.Count - 1))
+				for (int EventIdx = 0; EventIdx < Events.Count; EventIdx++)
 				{
-					Event OuterEvent = OuterEvents.Last();
-					if (Event.StartTime < OuterEvent.FinishTime.Value)
+					Event Event = Events[EventIdx];
+
+					// Pop events off the stack
+					for (; OuterEvents.Count > 1; OuterEvents.RemoveAt(OuterEvents.Count - 1))
 					{
-						break;
+						Event OuterEvent = OuterEvents.Last();
+						if (Event.StartTime < OuterEvent.FinishTime!.Value)
+						{
+							break;
+						}
+						UpdateLastEventTime(ref LastTime, OuterEvent.FinishTime.Value, MaxUnknownTime, OuterEvents, Verbosity, Logger);
 					}
-					UpdateLastEventTime(ref LastTime, OuterEvent.FinishTime.Value, MaxUnknownTime, OuterEvents, Verbosity);
-				}
 
-				// If there's a gap since the last event, print an unknown marker
-				UpdateLastEventTime(ref LastTime, Event.StartTime, MaxUnknownTime, OuterEvents, Verbosity);
+					// If there's a gap since the last event, print an unknown marker
+					UpdateLastEventTime(ref LastTime, Event.StartTime, MaxUnknownTime, OuterEvents, Verbosity, Logger);
 
-				// Print this event
-				Print(Event.StartTime, Event.FinishTime, Event.Name, OuterEvents, Verbosity);
+					// Print this event
+					Print(Event.StartTime, Event.FinishTime, Event.Name, OuterEvents, Verbosity, Logger);
 
-				// Push it onto the stack
-				if(Event.FinishTime.HasValue)
-				{
-					if(EventIdx + 1 < Events.Count && Events[EventIdx + 1].StartTime < Event.FinishTime.Value)
+					// Push it onto the stack
+					if (Event.FinishTime.HasValue)
 					{
-						OuterEvents.Add(Event);
-					}
-					else
-					{
-						LastTime = Event.FinishTime.Value;
+						if (EventIdx + 1 < Events.Count && Events[EventIdx + 1].StartTime < Event.FinishTime.Value)
+						{
+							OuterEvents.Add(Event);
+						}
+						else
+						{
+							LastTime = Event.FinishTime.Value;
+						}
 					}
 				}
 			}
 
 			// Remove everything from the stack
-			for(; OuterEvents.Count > 0; OuterEvents.RemoveAt(OuterEvents.Count - 1))
+			for (; OuterEvents.Count > 0; OuterEvents.RemoveAt(OuterEvents.Count - 1))
 			{
-				UpdateLastEventTime(ref LastTime, OuterEvents.Last().FinishTime.Value, MaxUnknownTime, OuterEvents, Verbosity);
+				UpdateLastEventTime(ref LastTime, OuterEvents.Last().FinishTime!.Value, MaxUnknownTime, OuterEvents, Verbosity, Logger);
 			}
 
 			// Print the finish time
-			Log.WriteLine(Verbosity, "[{0,6}]", FormatTime(FinishTime));
+			Logger.Log(Verbosity, "[{Time,6}]", FormatTime(FinishTime));
 		}
 
 		/// <summary>
@@ -205,12 +211,13 @@ namespace UnrealBuildTool
 		/// <param name="MaxUnknownTime"></param>
 		/// <param name="OuterEvents"></param>
 		/// <param name="Verbosity"></param>
-		static void UpdateLastEventTime(ref TimeSpan LastTime, TimeSpan NewTime, TimeSpan MaxUnknownTime, List<Event> OuterEvents, LogEventType Verbosity)
+		/// <param name="Logger"></param>
+		static void UpdateLastEventTime(ref TimeSpan LastTime, TimeSpan NewTime, TimeSpan MaxUnknownTime, List<Event> OuterEvents, LogLevel Verbosity, ILogger Logger)
 		{
 			const string UnknownEvent = "<unknown>";
 			if (NewTime - LastTime > MaxUnknownTime)
 			{
-				Print(LastTime, NewTime, UnknownEvent, OuterEvents, Verbosity);
+				Print(LastTime, NewTime, UnknownEvent, OuterEvents, Verbosity, Logger);
 			}
 			LastTime = NewTime;
 		}
@@ -223,11 +230,12 @@ namespace UnrealBuildTool
 		/// <param name="Label">Event name</param>
 		/// <param name="OuterEvents">List of all the start times for parent events</param>
 		/// <param name="Verbosity">Verbosity for the output</param>
-		static void Print(TimeSpan StartTime, TimeSpan? FinishTime, string Label, List<Event> OuterEvents, LogEventType Verbosity)
+		/// <param name="Logger">Logger for output</param>
+		static void Print(TimeSpan StartTime, TimeSpan? FinishTime, string Label, List<Event> OuterEvents, LogLevel Verbosity, ILogger Logger)
 		{
 			StringBuilder Prefix = new StringBuilder();
 
-			for(int Idx = 0; Idx < OuterEvents.Count - 1; Idx++)
+			for (int Idx = 0; Idx < OuterEvents.Count - 1; Idx++)
 			{
 				Prefix.AppendFormat(" {0,6}          ", FormatTime(StartTime - OuterEvents[Idx].StartTime));
 			}
@@ -238,7 +246,7 @@ namespace UnrealBuildTool
 			{
 				Prefix.AppendFormat("({0,6})", "???");
 			}
-			else if(FinishTime.Value == StartTime)
+			else if (FinishTime.Value == StartTime)
 			{
 				Prefix.Append(" ------ ");
 			}
@@ -247,7 +255,7 @@ namespace UnrealBuildTool
 				Prefix.AppendFormat("({0,6})", "+" + FormatTime(FinishTime.Value - StartTime));
 			}
 
-			Log.WriteLine(Verbosity, "{0} {1}", Prefix.ToString(), Label);
+			Logger.Log(Verbosity, "{Prefix} {Label}", Prefix.ToString(), Label);
 		}
 
 		/// <summary>

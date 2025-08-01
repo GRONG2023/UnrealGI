@@ -1,9 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/PostProcessVolume.h"
+#include "Engine/BlendableInterface.h"
 #include "Engine/CollisionProfile.h"
 #include "Components/BrushComponent.h"
 #include "EngineUtils.h"
+#include "SceneInterface.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PostProcessVolume)
 
 APostProcessVolume::APostProcessVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -50,14 +54,15 @@ void APostProcessVolume::Serialize(FArchive& Ar)
 }
 
 #if WITH_EDITOR
-
 void APostProcessVolume::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	static const FName NAME_Blendables = FName(TEXT("Blendables"));
-	
-	if(PropertyChangedEvent.Property && PropertyChangedEvent.Property->GetFName() == NAME_Blendables)
+	static const FName NAME_Blendables = FName(TEXT("Blendables"));	
+
+	const FName ChangedPropertyName = (PropertyChangedEvent.Property != NULL) ? PropertyChangedEvent.Property->GetFName() : NAME_None;	
+
+	if(ChangedPropertyName == NAME_Blendables)
 	{
 		// remove unsupported types
 		uint32 Count = Settings.WeightedBlendables.Array.Num();
@@ -72,6 +77,13 @@ void APostProcessVolume::PostEditChangeProperty(FPropertyChangedEvent& PropertyC
 		}
 	}
 
+	if (ChangedPropertyName == GET_MEMBER_NAME_CHECKED(APostProcessVolume, bUnbound))
+	{
+		if (bUnbound)
+		{
+			bIsSpatiallyLoaded = false;
+		}
+	}	
 	
 	if (PropertyChangedEvent.Property)
 	{
@@ -165,7 +177,6 @@ bool APostProcessVolume::CanEditChange(const FProperty* InProperty) const
 
 			// Parameters that are only used for the Sum of Gaussian bloom / not the texture based fft bloom
 			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomThreshold) ||
-				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomIntensity) ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomSizeScale) ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, Bloom1Size) ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, Bloom2Size) ||
@@ -186,6 +197,7 @@ bool APostProcessVolume::CanEditChange(const FProperty* InProperty) const
 			// Parameters that are only of use with the bloom texture based fft
 			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomConvolutionTexture)      ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomConvolutionSize)         ||
+				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomConvolutionScatterDispersion) ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomConvolutionCenterUV)     ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomConvolutionPreFilterMin) ||
 				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, BloomConvolutionPreFilterMax) ||
@@ -194,7 +206,25 @@ bool APostProcessVolume::CanEditChange(const FProperty* InProperty) const
 			{
 				return (Settings.BloomMethod == EBloomMethod::BM_FFT);
 			}
+			
+			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, LumenRayLightingMode))
+			{
+				static IConsoleVariable* RayTracingCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.RayTracing"));
+				if (RayTracingCVar->GetInt() == 0)
+				{
+					return false;
+				}
+			}
 
+			if (PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, DynamicGlobalIlluminationMethod) ||
+				PropertyName == GET_MEMBER_NAME_STRING_CHECKED(FPostProcessSettings, ReflectionMethod))
+			{
+				static IConsoleVariable* ForwardShadingCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ForwardShading"));
+				if (ForwardShadingCVar->GetInt() != 0)
+				{
+					return false;
+				}
+			}
 		}
 		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
@@ -221,3 +251,4 @@ bool APostProcessVolume::CanEditChange(const FProperty* InProperty) const
 }
 
 #endif // WITH_EDITOR
+

@@ -1,7 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ISoundfieldFormat.h"
+
+#include "AudioExtentionsModule.h"
 #include "ISoundfieldEndpoint.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ISoundfieldFormat)
 
 FName ISoundfieldFactory::GetFormatNameForNoEncoding()
 {
@@ -40,7 +44,9 @@ ISoundfieldFactory* ISoundfieldFactory::Get(const FName& InName)
 		return nullptr;
 	}
 
+	IModularFeatures::Get().LockModularFeatureList();
 	TArray<ISoundfieldFactory*> Factories = IModularFeatures::Get().GetModularFeatureImplementations<ISoundfieldFactory>(GetModularFeatureName());
+	IModularFeatures::Get().UnlockModularFeatureList();
 
 	for (ISoundfieldFactory* Factory : Factories)
 	{
@@ -61,12 +67,18 @@ ISoundfieldFactory* ISoundfieldFactory::Get(const FName& InName)
 
 TArray<FName> ISoundfieldFactory::GetAvailableSoundfieldFormats()
 {
+	// Ensure the module is loaded. This will cause any platform extension modules to load and register. 
+	ensure(FAudioExtensionsModule::Get() != nullptr);
+	
 	TArray<FName> SoundfieldFormatNames;
 
 	SoundfieldFormatNames.Add(GetFormatNameForInheritedEncoding());
 	SoundfieldFormatNames.Add(GetFormatNameForNoEncoding());
 
+	IModularFeatures::Get().LockModularFeatureList();
 	TArray<ISoundfieldFactory*> Factories = IModularFeatures::Get().GetModularFeatureImplementations<ISoundfieldFactory>(GetModularFeatureName());
+	IModularFeatures::Get().UnlockModularFeatureList();
+
 	for (ISoundfieldFactory* Factory : Factories)
 	{
 		SoundfieldFormatNames.Add(Factory->GetSoundfieldFormatName());
@@ -74,3 +86,4 @@ TArray<FName> ISoundfieldFactory::GetAvailableSoundfieldFormats()
 
 	return SoundfieldFormatNames;
 }
+

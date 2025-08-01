@@ -2,34 +2,53 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Misc/AssertionMacros.h"
-#include "Containers/Array.h"
-#include "Math/UnrealMathUtility.h"
-#include "Containers/UnrealString.h"
-#include "Templates/Function.h"
-#include "Containers/Map.h"
-#include "Math/Color.h"
-#include "Templates/SharedPointer.h"
-#include "Delegates/Delegate.h"
-#include "Misc/Optional.h"
-#include "HAL/PlatformTime.h"
-#include "HAL/ThreadSafeBool.h" 
-#include "HAL/PlatformStackWalk.h"
-#include "GenericPlatform/GenericPlatformStackWalk.h" 
-#include "Containers/Queue.h"
-#include "Misc/CString.h"
-#include "Misc/FeedbackContext.h"
-#include "Async/Future.h"
 #include "Async/Async.h"
-#include "Misc/Guid.h"
-#include "Math/Vector.h"
-#include "Math/Color.h"
-#include "Math/Rotator.h"
+#include "Async/Future.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Queue.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Delegates/Delegate.h"
+#include "Delegates/DelegateBase.h"
+#include "Delegates/DelegateInstancesImpl.h"
+#include "Delegates/IDelegateInstance.h"
+#include "GenericPlatform/GenericPlatformStackWalk.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "HAL/PlatformProcess.h"
-#include "Misc/AutomationEvent.h"
+#include "HAL/PlatformStackWalk.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/PreprocessorHelpers.h"
+#include "HAL/ThreadSafeBool.h"
 #include "Internationalization/Regex.h"
+#include "Logging/LogVerbosity.h"
+#include "Math/Color.h"
+#include "Math/MathFwd.h"
+#include "Math/Rotator.h"
+#include "Math/UnrealMathUtility.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/AutomationEvent.h"
+#include "Misc/Build.h"
+#include "Misc/Char.h"
+#include "Misc/CString.h"
+#include "Misc/DateTime.h"
+#include "Misc/FeedbackContext.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "Misc/OutputDevice.h"
+#include "Misc/Timespan.h"
+#include "Templates/Function.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
 
+#include <atomic>
+
+CORE_API DECLARE_LOG_CATEGORY_EXTERN(LogLatentCommands, Log, All);
+class FAutomationTestBase;
 
 #ifndef WITH_AUTOMATION_TESTS
 	#define WITH_AUTOMATION_TESTS (WITH_DEV_AUTOMATION_TESTS || WITH_PERF_AUTOMATION_TESTS)
@@ -46,11 +65,21 @@
 		Info.LineNumber = 1;																				\
 	}
 
-/** Flags for specifying automation test requirements/behavior */
-namespace EAutomationTestFlags
+// This macro allows for early exit of the executing unit test function when the condition is false
+// It explicitly uses the condition to ensure static analysis is happy with nullptr checks
+#ifndef UE_RETURN_ON_ERROR
+#define UE_RETURN_ON_ERROR(Condition, Message) const bool PREPROCESSOR_JOIN(UE____bCondition_Line_, __LINE__) = (Condition); AddErrorIfFalse(PREPROCESSOR_JOIN(UE____bCondition_Line_, __LINE__), (Message)); if(!PREPROCESSOR_JOIN(UE____bCondition_Line_, __LINE__)) return false
+#endif
+
+/**
+* Flags for specifying automation test requirements/behavior
+* Update GetTestFlagsMap when updating this enum.
+*/
+struct EAutomationTestFlags
 {
 	enum Type
 	{
+		None = 0x00000000,
 		//~ Application context required for the test
 		// Test is suitable for running within the editor
 		EditorContext = 0x00000001,
@@ -103,20 +132,32 @@ namespace EAutomationTestFlags
 		NegativeFilter				= 0x20000000,
 		FilterMask = SmokeFilter | EngineFilter | ProductFilter | PerfFilter | StressFilter | NegativeFilter
 	};
+
+	static CORE_API const TMap<FString, Type>& GetTestFlagsMap();
+
+	static const Type FromString(FString Name)
+	{
+		static auto FlagMap = GetTestFlagsMap();
+		if (FlagMap.Contains(Name))
+		{
+			return FlagMap[Name];
+		}
+		return Type::None;
+	}
 };
 
-/** Flags for indicating the matching type to use for an expected error */
-namespace EAutomationExpectedErrorFlags
+/** Flags for indicating the matching type to use for an expected message */
+namespace EAutomationExpectedMessageFlags
 {
 	enum MatchType
 	{
-		// When matching expected errors, do so exactly.
+		// When matching expected messages, do so exactly.
 		Exact,
-		// When matching expected errors, just see if the error string is contained in the string to be evaluated.
+		// When matching expected messages, just see if the message string is contained in the string to be evaluated.
 		Contains,
 	};
 
-	inline const TCHAR* ToString(EAutomationExpectedErrorFlags::MatchType ThisType)
+	inline const TCHAR* ToString(EAutomationExpectedMessageFlags::MatchType ThisType)
 	{
 		switch (ThisType)
 		{
@@ -129,8 +170,25 @@ namespace EAutomationExpectedErrorFlags
 	}
 }
 
+/** Flags for indicating the matching type to use for an expected error message. Aliased for backwards compatibility. */
+namespace EAutomationExpectedErrorFlags = EAutomationExpectedMessageFlags;
+
+struct FAutomationTelemetryData
+{
+	FString DataPoint;
+	double Measurement;
+	FString Context;
+
+	FAutomationTelemetryData(const FString& InDataPoint, double InMeasurement, const FString& InContext)
+		:DataPoint(InDataPoint)
+		, Measurement(InMeasurement)
+		, Context(InContext)
+	{
+	}
+};
+
 /** Simple class to store the results of the execution of a automation test */
-class CORE_API FAutomationTestExecutionInfo
+class FAutomationTestExecutionInfo
 {
 public:
 	/** Constructor */
@@ -148,19 +206,19 @@ public:
 	}
 
 	/** Helper method to clear out the results from a previous execution */
-	void Clear();
+	CORE_API void Clear();
 
-	int32 RemoveAllEvents(EAutomationEventType EventType);
+	CORE_API int32 RemoveAllEvents(EAutomationEventType EventType);
 
-	int32 RemoveAllEvents(TFunctionRef<bool(FAutomationEvent&)> FilterPredicate);
+	CORE_API int32 RemoveAllEvents(TFunctionRef<bool(FAutomationEvent&)> FilterPredicate);
 
 	/** Any errors that occurred during execution */
 	const TArray<FAutomationExecutionEntry>& GetEntries() const { return Entries; }
 
-	void AddEvent(const FAutomationEvent& Event, int StackOffset = 0);
+	CORE_API void AddEvent(const FAutomationEvent& Event, int StackOffset = 0, bool bCaptureStack = true);
 
-	void AddWarning(const FString& WarningMessage);
-	void AddError(const FString& ErrorMessage);
+	CORE_API void AddWarning(const FString& WarningMessage);
+	CORE_API void AddError(const FString& ErrorMessage);
 
 	int32 GetWarningTotal() const { return Warnings; }
 	int32 GetErrorTotal() const { return Errors; }
@@ -192,6 +250,12 @@ public:
 	/** Any analytics items that occurred during execution */
 	TArray<FString> AnalyticsItems;
 
+	/** Telemetry items that occurred during execution */
+	TArray<FAutomationTelemetryData> TelemetryItems;
+
+	/** Telemetry storage name set by the test */
+	FString TelemetryStorage;
+
 	/** Time to complete the task */
 	double Duration;
 
@@ -206,7 +270,7 @@ private:
 };
 
 /** Simple class to store the automation test info */
-class CORE_API FAutomationTestInfo
+class FAutomationTestInfo
 {
 public:
 
@@ -246,7 +310,7 @@ public:
 	 *
 	 * @Param InTestFlags - the child test flag to add.
 	 */
-	void AddTestFlags( const uint8 InTestFlags)
+	void AddTestFlags( const uint32 InTestFlags)
 	{
 		TestFlags |= InTestFlags;
 	}
@@ -457,6 +521,7 @@ private:
 		{
 			StartTime = FPlatformTime::Seconds();
 		}
+
 		return Update();
 	}
 
@@ -465,6 +530,17 @@ protected:
 	IAutomationLatentCommand()
 		: StartTime(0.0f)
 	{
+	}
+
+	// Gets current run time for the command for reporting purposes.
+	double GetCurrentRunTime() const
+	{
+		if (StartTime == 0.0)
+		{
+			return 0.0;
+		}
+
+		return FPlatformTime::Seconds() - StartTime;
 	}
 
 	/** For timers, track the first time this ticks */
@@ -486,19 +562,19 @@ public:
 	{
 		if (!Future.IsValid())
 		{
-			Future = Async(EAsyncExecution::Thread, Function);
+			Future = Async(EAsyncExecution::Thread, MoveTemp(Function));
 		}
 
 		return Future.IsReady();
 	}
 
-	FThreadedAutomationLatentCommand(TFunction<void()> InFunction)
-		: Function(InFunction)
+	FThreadedAutomationLatentCommand(TUniqueFunction<void()> InFunction)
+		: Function(MoveTemp(InFunction))
 	{ }
 
 protected:
 
-	const TFunction<void()> Function;
+	TUniqueFunction<void()> Function;
 
 	TFuture<void> Future;
 
@@ -526,46 +602,103 @@ public:
 	virtual void Run() = 0;
 };
 
-struct FAutomationExpectedError
+struct FAutomationExpectedMessage
 {
-	// Original regular expression pattern string matching expected error message.
-	// NOTE: using the Exact comparison type wraps the pattern string with ^ and $ tokens,
-	// but the base pattern string is preserved to allow checks for duplicate entries.
-	FString ErrorPatternString;
-	// Regular expression pattern for ErrorPatternString
-	FRegexPattern ErrorPattern;
-	// Type of comparison to perform on error message using ErrorPattern.
-	EAutomationExpectedErrorFlags::MatchType CompareType;
+	// Original string pattern matching expected log message.
+	// If IsRegex is false, it is this string that is used to match.
+	// Otherwise MessagePatternRegex is set to a valid pointer of FRegexPattern.
+	// The base pattern string is preserved none the less to allow checks for duplicate entries.
+	FString MessagePatternString;
+	// Regular expression pattern from MessagePatternString if regex option was true(default), otherwise it is not set.
+	TOptional<FRegexPattern> MessagePatternRegex;
+	// Type of comparison to perform on error log using MessagePattern.
+	EAutomationExpectedMessageFlags::MatchType CompareType;
 	/** 
-	 * Number of occurrences expected for error. If set greater than 0, it will cause the test to fail if the
+	 * Number of occurrences expected for message. If set greater than 0, it will cause the test to fail if the
 	 * exact number of occurrences expected is not matched. If set to 0, it will suppress all matching messages. 
 	 */
 	int32 ExpectedNumberOfOccurrences;
 	int32 ActualNumberOfOccurrences;
+	// Log message Verbosity
+	ELogVerbosity::Type Verbosity;
 
 	/**
 	* Constructor
 	*/
-	
-	FAutomationExpectedError(FString& InErrorPattern, EAutomationExpectedErrorFlags::MatchType InCompareType, int32 InExpectedNumberOfOccurrences = 1)
-		: ErrorPatternString(InErrorPattern)
-		, ErrorPattern((InCompareType == EAutomationExpectedErrorFlags::Exact) ? FString::Printf(TEXT("^%s$"), *InErrorPattern) : InErrorPattern)
+	FAutomationExpectedMessage(FString& InMessagePattern, ELogVerbosity::Type InVerbosity, EAutomationExpectedMessageFlags::MatchType InCompareType, int32 InExpectedNumberOfOccurrences = 1, bool IsRegex = true)
+		: MessagePatternString(InMessagePattern)
 		, CompareType(InCompareType)
 		, ExpectedNumberOfOccurrences(InExpectedNumberOfOccurrences)
 		, ActualNumberOfOccurrences(0)
+		, Verbosity(InVerbosity)
+	{
+		if (IsRegex)
+		{
+			MessagePatternRegex = FRegexPattern((InCompareType == EAutomationExpectedMessageFlags::Exact) ? FString::Printf(TEXT("^%s$"), *InMessagePattern) : InMessagePattern, ERegexPatternFlags::CaseInsensitive);
+		}		
+	}
+
+	FAutomationExpectedMessage(FString& InMessagePattern, ELogVerbosity::Type InVerbosity, int32 InExpectedNumberOfOccurrences)
+		: MessagePatternString(InMessagePattern)
+		, MessagePatternRegex(FRegexPattern(InMessagePattern, ERegexPatternFlags::CaseInsensitive))
+		, CompareType(EAutomationExpectedMessageFlags::Contains)
+		, ExpectedNumberOfOccurrences(InExpectedNumberOfOccurrences)
+		, ActualNumberOfOccurrences(0)
+		, Verbosity(InVerbosity)
 	{}
 
-	FAutomationExpectedError(FString& InErrorPattern, int32 InExpectedNumberOfOccurrences)
-		: ErrorPatternString(InErrorPattern)
-		, ErrorPattern(InErrorPattern)
-		, CompareType(EAutomationExpectedErrorFlags::Contains)
-		, ExpectedNumberOfOccurrences(InExpectedNumberOfOccurrences)
-	{}
+	inline bool IsRegex() const
+	{
+		return MessagePatternRegex.IsSet();
+	}
+
+	inline bool IsExactCompareType() const
+	{
+		return CompareType == EAutomationExpectedMessageFlags::Exact;
+	}
+
+	/// <summary>
+	/// Look if Message matches the expected message and increment internal counter if true.
+	/// </summary>
+	/// <param name="Message"></param>
+	/// <returns></returns>
+	bool Matches(const FString& Message)
+	{
+		bool HasMatch = false;
+		if (IsRegex())
+		{
+			FRegexMatcher MessageMatcher(MessagePatternRegex.GetValue(), Message);
+			HasMatch = MessageMatcher.FindNext();
+		}
+		else
+		{
+			HasMatch = Message.Contains(MessagePatternString) && (!IsExactCompareType() || Message.Len() == MessagePatternString.Len());
+		}
+		ActualNumberOfOccurrences += HasMatch;
+		return HasMatch;
+	}
+
+	bool operator==(const FAutomationExpectedMessage& Other) const
+	{
+		return MessagePatternString == Other.MessagePatternString;
+	}
+
+	bool operator<(const FAutomationExpectedMessage& Other) const
+	{
+		return MessagePatternString < Other.MessagePatternString;
+	}
+
 };
+
+FORCEINLINE uint32 GetTypeHash(const FAutomationExpectedMessage& Object)
+{
+	return GetTypeHash(Object.MessagePatternString);
+}
 
 struct FAutomationScreenshotData
 {
 	FString ScreenShotName;
+	FString VariantName;
 	FString Context;
 	FString TestName;
 	FString Notes;
@@ -594,6 +727,8 @@ struct FAutomationScreenshotData
 	int32 ViewDistanceQuality;
 	int32 AntiAliasingQuality;
 	int32 ShadowQuality;
+	int32 GlobalIlluminationQuality;
+	int32 ReflectionQuality;
 	int32 PostProcessQuality;
 	int32 TextureQuality;
 	int32 EffectsQuality;
@@ -613,8 +748,8 @@ struct FAutomationScreenshotData
 	bool bIgnoreAntiAliasing;
 	bool bIgnoreColors;
 
-	// Name of the screenshot generated from AutomationCommon::GetScreenShotName()
-	FString ScreenshotName;
+	// Path of the screenshot generated from AutomationCommon::GetScreenShotPath()
+	FString ScreenshotPath;
 
 	FAutomationScreenshotData()
 		: Id()
@@ -626,6 +761,8 @@ struct FAutomationScreenshotData
 		, ViewDistanceQuality(0)
 		, AntiAliasingQuality(0)
 		, ShadowQuality(0)
+		, GlobalIlluminationQuality(0)
+		, ReflectionQuality(0)
 		, PostProcessQuality(0)
 		, TextureQuality(0)
 		, EffectsQuality(0)
@@ -646,7 +783,7 @@ struct FAutomationScreenshotData
 	}
 };
 
-struct CORE_API FAutomationScreenshotCompareResults
+struct FAutomationScreenshotCompareResults
 {
 	FGuid UniqueId;
 	FString ErrorMessage;
@@ -654,10 +791,103 @@ struct CORE_API FAutomationScreenshotCompareResults
 	double GlobalDifference = 0.0;
 	bool bWasNew = false;
 	bool bWasSimilar = false;
+	FString IncomingFilePath;
+	FString ReportComparisonFilePath;
+	FString ReportApprovedFilePath;
+	FString ReportIncomingFilePath;
+	FString ScreenshotPath;
 
-	FAutomationEvent ToAutomationEvent(const FString& ScreenhotName) const;
+	FAutomationScreenshotCompareResults()
+		: UniqueId()
+		, MaxLocalDifference(0.0)
+		, GlobalDifference(0.0)
+		, bWasNew(false)
+		, bWasSimilar(false)
+	{ }
+
+	FAutomationScreenshotCompareResults(
+		FGuid InUniqueId,
+		FString InErrorMessage,
+		double InMaxLocalDifference,
+		double InGlobalDifference,
+		bool InWasNew,
+		bool InWasSimilar,
+		FString InIncomingFilePath,
+		FString InReportComparisonFilePath,
+		FString InReportApprovedFilePath,
+		FString InReportIncomingFilePath,
+		FString InScreenshotPath
+	)
+		: UniqueId(InUniqueId)
+		, ErrorMessage(InErrorMessage)
+		, MaxLocalDifference(InMaxLocalDifference)
+		, GlobalDifference(InGlobalDifference)
+		, bWasNew(InWasNew)
+		, bWasSimilar(InWasSimilar)
+		, IncomingFilePath(InIncomingFilePath)
+		, ReportComparisonFilePath(InReportComparisonFilePath)
+		, ReportApprovedFilePath(InReportApprovedFilePath)
+		, ReportIncomingFilePath(InReportIncomingFilePath)
+		, ScreenshotPath(InScreenshotPath)
+	{ }
+
+	CORE_API FAutomationEvent ToAutomationEvent() const;
 };
 
+enum class EAutomationComparisonToleranceLevel : uint8
+{
+	Zero,
+	Low,
+	Medium,
+	High
+};
+
+struct FAutomationComparisonToleranceAmount
+{
+public:
+
+	FAutomationComparisonToleranceAmount()
+		: Red(0)
+		, Green(0)
+		, Blue(0)
+		, Alpha(0)
+		, MinBrightness(0)
+		, MaxBrightness(255)
+	{
+	}
+
+	FAutomationComparisonToleranceAmount(uint8 R, uint8 G, uint8 B, uint8 A, uint8 InMinBrightness, uint8 InMaxBrightness)
+		: Red(R)
+		, Green(G)
+		, Blue(B)
+		, Alpha(A)
+		, MinBrightness(InMinBrightness)
+		, MaxBrightness(InMaxBrightness)
+	{
+	}
+
+	static FAutomationComparisonToleranceAmount FromToleranceLevel(EAutomationComparisonToleranceLevel InTolerance)
+	{
+		switch (InTolerance)
+		{
+		case EAutomationComparisonToleranceLevel::Low:
+			return FAutomationComparisonToleranceAmount(16, 16, 16, 16, 16, 240);
+		case EAutomationComparisonToleranceLevel::Medium:
+			return FAutomationComparisonToleranceAmount(24, 24, 24, 24, 24, 220);
+		case EAutomationComparisonToleranceLevel::High:
+			return FAutomationComparisonToleranceAmount(32, 32, 32, 32, 64, 96);
+		}
+		// Zero
+		return FAutomationComparisonToleranceAmount(0, 0, 0, 0, 0, 255);
+	}
+
+	uint8 Red;
+	uint8 Green;
+	uint8 Blue;
+	uint8 Alpha;
+	uint8 MinBrightness;
+	uint8 MaxBrightness;
+};
 
 /**
  * Delegate type for when a test screenshot has been captured
@@ -671,22 +901,37 @@ DECLARE_DELEGATE_ThreeParams(FOnTestScreenshotAndTraceCaptured, const TArray<FCo
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnTestScreenshotComparisonComplete, const FAutomationScreenshotCompareResults& /*CompareResults*/);
 
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnTestScreenshotComparisonReport, const FAutomationScreenshotCompareResults& /*CompareResults*/);
+
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnTestDataRetrieved, bool /*bWasNew*/, const FString& /*JsonData*/);
 
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPerformanceDataRetrieved, bool /*bSuccess*/, const FString& /*ErrorMessage*/);
 
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnTestEvent, FAutomationTestBase*);
+
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnTestSectionEvent, const FString& /*Section*/);
+
 /** Class representing the main framework for running automation tests */
-class CORE_API FAutomationTestFramework
+class FAutomationTestFramework
 {
 public:
-	/** Called right before unit testing is about to begin */
+	/** Called right before automated test is about to begin */
 	FSimpleMulticastDelegate PreTestingEvent;
-	
-	/** Called after all unit tests have completed */
+
+	/** Called after all automated tests have completed */
 	FSimpleMulticastDelegate PostTestingEvent;
+
+	/** Called when each automated test is starting */
+	FOnTestEvent OnTestStartEvent;
+
+	/** Called when each automated test is ending */
+	FOnTestEvent OnTestEndEvent;
 
 	/** Called when a screenshot comparison completes. */
 	FOnTestScreenshotComparisonComplete OnScreenshotCompared;
+
+	/** Called when a screenshot comparison result is reported */
+	FOnTestScreenshotComparisonReport OnScreenshotComparisonReport;
 
 	/** Called when the test data is retrieved. */
 	FOnTestDataRetrieved OnTestDataRetrieved;
@@ -697,12 +942,28 @@ public:
 	/** The final call related to screenshots, after they've been taken, and after they've been compared (or not if automation isn't running). */
 	FSimpleMulticastDelegate OnScreenshotTakenAndCompared;
 
+	/** Called before all chosen tests run. */
+	FSimpleMulticastDelegate OnBeforeAllTestsEvent;
+
+	/** Called after all chosen tests run have finished. */
+	FSimpleMulticastDelegate OnAfterAllTestsEvent;
+
+	/** Called entering test section. */
+	CORE_API FOnTestSectionEvent& GetOnEnteringTestSection(const FString& Section);
+	CORE_API void TriggerOnEnteringTestSection(const FString& Section) const;
+	CORE_API bool IsAnyOnEnteringTestSectionBound() const;
+
+	/** Called leaving test section. */
+	CORE_API FOnTestSectionEvent& GetOnLeavingTestSection(const FString& Section);
+	CORE_API void TriggerOnLeavingTestSection(const FString& Section) const;
+	CORE_API bool IsAnyOnLeavingTestSectionBound() const;
+
 	/**
 	 * Return the singleton instance of the framework.
 	 *
 	 * @return The singleton instance of the framework.
 	 */
-	static FAutomationTestFramework& Get();
+	static CORE_API FAutomationTestFramework& Get();
 	static FAutomationTestFramework& GetInstance() { return Get(); }
 
 	/**
@@ -710,7 +971,7 @@ public:
 	 * to do something like generate project files, or create new projects it should use this directory, rather
 	 * than pollute other areas of the machine.
 	 */
-	FString GetUserAutomationDirectory() const;
+	CORE_API FString GetUserAutomationDirectory() const;
 
 	/**
 	 * Register a automation test into the framework. The automation test may or may not be necessarily valid
@@ -723,28 +984,28 @@ public:
 	 * @return	true if the test was successfully registered; false if a test was already registered under the same
 	 *			name as before
 	 */
-	bool RegisterAutomationTest( const FString& InTestNameToRegister, class FAutomationTestBase* InTestToRegister );
+	CORE_API bool RegisterAutomationTest( const FString& InTestNameToRegister, FAutomationTestBase* InTestToRegister );
 
 	/**
 	 * Unregister a automation test with the provided name from the framework.
 	 *
 	 * @return true if the test was successfully unregistered; false if a test with that name was not found in the framework.
 	 */
-	bool UnregisterAutomationTest( const FString& InTestNameToUnregister );
+	CORE_API bool UnregisterAutomationTest( const FString& InTestNameToUnregister );
 
 	/**
 	 * Enqueues a latent command for execution on a subsequent frame
 	 *
 	 * @param NewCommand - The new command to enqueue for deferred execution
 	 */
-	void EnqueueLatentCommand(TSharedPtr<IAutomationLatentCommand> NewCommand);
+	CORE_API void EnqueueLatentCommand(TSharedPtr<IAutomationLatentCommand> NewCommand);
 
 	/**
 	 * Enqueues a network command for execution in accordance with this workers role
 	 *
 	 * @param NewCommand - The new command to enqueue for network execution
 	 */
-	void EnqueueNetworkCommand(TSharedPtr<IAutomationNetworkCommand> NewCommand);
+	CORE_API void EnqueueNetworkCommand(TSharedPtr<IAutomationNetworkCommand> NewCommand);
 
 	/**
 	 * Checks if a provided test is contained within the framework.
@@ -753,63 +1014,67 @@ public:
 	 *
 	 * @return	true if the provided test is within the framework; false otherwise
 	 */
-	bool ContainsTest( const FString& InTestName ) const;
+	CORE_API bool ContainsTest( const FString& InTestName ) const;
 		
 	/**
 	 * Attempt to run all fast smoke tests that are valid for the current application configuration.
 	 *
 	 * @return	true if all smoke tests run were successful, false if any failed
 	 */
-	bool RunSmokeTests();
+	CORE_API bool RunSmokeTests();
 
 	/**
 	 * Reset status of worker (delete local files, etc)
 	 */
-	void ResetTests();
+	CORE_API void ResetTests();
 
 	/**
 	 * Attempt to start the specified test.
 	 *
 	 * @param	InTestToRun			Name of the test that should be run
 	 * @param	InRoleIndex			Identifier for which worker in this group that should execute a command
+	 * @param	InFullTestPath		Full test path
 	 */
-	void StartTestByName( const FString& InTestToRun, const int32 InRoleIndex );
+	CORE_API void StartTestByName( const FString& InTestToRun, const int32 InRoleIndex, const FString& InFullTestPath = FString() );
 
 	/**
 	 * Stop the current test and return the results of execution
 	 *
 	 * @return	true if the test ran successfully, false if it did not (or the test could not be found/was invalid)
 	 */
-	bool StopTest( FAutomationTestExecutionInfo& OutExecutionInfo );
+	CORE_API bool StopTest( FAutomationTestExecutionInfo& OutExecutionInfo );
 
 	/**
 	 * Execute all latent functions that complete during update
 	 *
 	 * @return - true if the latent command queue is now empty and the test is complete
 	 */
-	bool ExecuteLatentCommands();
+	CORE_API bool ExecuteLatentCommands();
 
 	/**
 	 * Execute the next network command if you match the role, otherwise just dequeue
 	 *
 	 * @return - true if any network commands were in the queue to give subsequent latent commands a chance to execute next frame
 	 */
-	bool ExecuteNetworkCommands();
+	CORE_API bool ExecuteNetworkCommands();
 
 	/**
 	 * Dequeue all latent and network commands
 	 */
-	void DequeueAllCommands();
+	CORE_API void DequeueAllCommands();
+
+	/**
+	 * Whether there is no latent command in queue
+	 */
+	bool IsLatentCommandQueueEmpty() const
+	{
+		return LatentCommands.IsEmpty();
+	}
 
 	/**
 	 * Load any modules that are not loaded by default and have test classes in them
 	 */
-	void LoadTestModules();
-
-	/**
-	 * Load the test Blacklist from the config.
-	 */
-	void BuildTestBlacklistFromConfig();
+	CORE_API void LoadTestModules();
 
 	/**
 	 * Populates the provided array with the names of all tests in the framework that are valid to run for the current
@@ -817,35 +1082,35 @@ public:
 	 *
 	 * @param	TestInfo	Array to populate with the test information
 	 */
-	void GetValidTestNames( TArray<FAutomationTestInfo>& TestInfo ) const;
+	CORE_API void GetValidTestNames( TArray<FAutomationTestInfo>& TestInfo ) const;
 
 	/**
 	 * Whether the testing framework should allow content to be tested or not.  Intended to block developer directories.
 	 * @param Path - Full path to the content in question
 	 * @return - Whether this content should have tests performed on it
 	 */
-	bool ShouldTestContent(const FString& Path) const;
+	CORE_API bool ShouldTestContent(const FString& Path) const;
 
 	/**
 	 * Sets whether we want to include content in developer directories in automation testing
 	 */
-	void SetDeveloperDirectoryIncluded(const bool bInDeveloperDirectoryIncluded);
+	CORE_API void SetDeveloperDirectoryIncluded(const bool bInDeveloperDirectoryIncluded);
 
 	/**
 	* Sets which set of tests to pull from.
 	*/
-	void SetRequestedTestFilter(const uint32 InRequestedTestFlags);
+	CORE_API void SetRequestedTestFilter(const uint32 InRequestedTestFlags);
 	
 
 	/**
 	 * Accessor for delegate called when a png screenshot is captured 
 	 */
-	FOnTestScreenshotCaptured& OnScreenshotCaptured();
+	CORE_API FOnTestScreenshotCaptured& OnScreenshotCaptured();
 
 	/**
 	 * Accessor for delegate called when a png screenshot is captured and a frame trace
 	 */
-	FOnTestScreenshotAndTraceCaptured& OnScreenshotAndTraceCaptured();
+	CORE_API FOnTestScreenshotAndTraceCaptured& OnScreenshotAndTraceCaptured();
 
 	/**
 	 * Sets forcing smoke tests.
@@ -857,9 +1122,13 @@ public:
 
 	bool GetCaptureStack() const
 	{
-		return bCaptureStack;
+		return bCaptureStack && !NeedSkipStackWalk();
 	}
 
+	/**
+	 * Used to disabled stack capture when an error or warning event is triggered.
+	 * Setting bCapture=true does not guarantees GetCaptureStack()=true because that method also depend on NeedSkipStackWalk(). 
+	 */
 	void SetCaptureStack(bool bCapture)
 	{
 		bCaptureStack = bCapture;
@@ -870,7 +1139,7 @@ public:
 	 *
 	 * @param	AnalyticsItem	Log item to add to the current test
 	 */
-	void AddAnalyticsItemToCurrentTest( const FString& AnalyticsItem );
+	CORE_API void AddAnalyticsItemToCurrentTest( const FString& AnalyticsItem );
 
 	/**
 	 * Returns the actively executing test or null if there isn't one
@@ -880,11 +1149,59 @@ public:
 		return CurrentTest;
 	}
 
-	void NotifyScreenshotComparisonComplete(const FAutomationScreenshotCompareResults& CompareResults);
-	void NotifyTestDataRetrieved(bool bWasNew, const FString& JsonData);
-	void NotifyPerformanceDataRetrieved(bool bSuccess, const FString& ErrorMessage);
+	/**
+	 * Returns the actively executing test full path
+	 */
+	FString GetCurrentTestFullPath() const
+	{
+		return CurrentTestFullPath;
+	}
 
-	void NotifyScreenshotTakenAndCompared();
+	/**
+	 * Whether to skip stack walk while iterating for listing the tests
+	 */
+	static CORE_API bool NeedSkipStackWalk();
+
+	/**
+	 * Whether to output blueprint functional test metadata to the log when test is running
+	 */
+	static CORE_API bool NeedLogBPTestMetadata();
+
+	/**
+	 * Whether to also run stereo test variants for screenshot functional tests
+	 */
+	static CORE_API bool NeedPerformStereoTestVariants();
+
+	/**
+	 * Whether to skip variants when the baseline test fails, and skip saving screenshots for successful variants
+	 */
+	static CORE_API bool NeedUseLightweightStereoTestVariants();
+
+	/**
+	 * Notify that the screenshot comparison has completed
+	 */
+	CORE_API void NotifyScreenshotComparisonComplete(const FAutomationScreenshotCompareResults& CompareResults);
+
+	/**
+	 * Notify the screenshot comparison report to the framework
+	 */
+	CORE_API void NotifyScreenshotComparisonReport(const FAutomationScreenshotCompareResults& CompareResults);
+
+	CORE_API void NotifyTestDataRetrieved(bool bWasNew, const FString& JsonData);
+	CORE_API void NotifyPerformanceDataRetrieved(bool bSuccess, const FString& ErrorMessage);
+
+	CORE_API void NotifyScreenshotTakenAndCompared();
+
+	/**
+	 * Internal helper method designed to check if the given test is able to run in the current environment.
+	 *
+	 * @param	InTestToRun test name
+	 * @param	OutReason the related reason of the skipping
+	 * @param	OutWarn the related warning of the skipping
+	 *
+	 * @return	true if the test is able to run; false if it is unable to run.
+	 */
+	CORE_API bool CanRunTestInEnvironment(const FString& InTestToRun, FString* OutReason, bool* OutWarn) const;
 
 private:
 
@@ -893,11 +1210,11 @@ private:
 	{
 	public:
 		FAutomationTestOutputDevice() 
-			: CurTest( NULL ) {}
+			: CurTest( nullptr ) {}
 
 		~FAutomationTestOutputDevice()
 		{
-			CurTest = NULL;
+			CurTest = nullptr;
 		}
 
 		/**
@@ -909,19 +1226,29 @@ private:
 		virtual void Serialize( const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category ) override;
 
 		/**
+		 * FOutputDevice interface
+		 *
+		 * Make it unbuffered by returning true
+		 */
+		virtual bool CanBeUsedOnMultipleThreads() const override
+		{
+			return true;
+		}
+
+		/**
 		 * Set the automation test associated with the output device. The automation test is where all warnings, errors, etc.
 		 * will be routed to.
 		 *
 		 * @param	InAutomationTest	Automation test to associate with the output device.
 		 */
-		void SetCurrentAutomationTest( class FAutomationTestBase* InAutomationTest )
+		void SetCurrentAutomationTest( FAutomationTestBase* InAutomationTest )
 		{
 			CurTest = InAutomationTest;
 		}
 
 	private:
 		/** Associated automation test; all warnings, errors, etc. are routed to the automation test to track */
-		class FAutomationTestBase* CurTest;
+		std::atomic<FAutomationTestBase*>CurTest;
 	};
 
 	 /** Special feedback context used during automated testing to filter messages that happen during tests */
@@ -929,10 +1256,12 @@ private:
 	 {
 	 public:
 		 FAutomationTestMessageFilter()
-			 : CurTest(nullptr) {}
+			: CurTest(nullptr)
+			, DestinationContext(nullptr) {}
 
 		 ~FAutomationTestMessageFilter()
 		 {
+			 DestinationContext = nullptr;
 			 CurTest = nullptr;
 		 }
 
@@ -942,7 +1271,20 @@ private:
 		  * @param	V		String to serialize within the context
 		  * @param	Event	Event associated with the string
 		  */
-		 virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const class FName& Category) override;
+		 virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override;
+		 virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category, double Time) override;
+
+		 virtual void SerializeRecord(const UE::FLogRecord& Record) override;
+
+		 /**
+		  * FOutputDevice interface
+		  *
+		  * Make it unbuffered by returning true
+		  */
+		 virtual bool CanBeUsedOnMultipleThreads() const override
+		 {
+			 return true;
+		 }
 
 		 /**
 		  * Set the automation test associated with the feedback context. The automation test is what will be used
@@ -951,7 +1293,7 @@ private:
 		  *
 		  * @param	InAutomationTest	Automation test to associate with the feedback context.
 		  */
-		 void SetCurrentAutomationTest(class FAutomationTestBase* InAutomationTest)
+		 void SetCurrentAutomationTest(FAutomationTestBase* InAutomationTest)
 		 {
 			 CurTest = InAutomationTest;
 		 }
@@ -968,29 +1310,17 @@ private:
 		 }
 
 	 private:
-		 class FAutomationTestBase* CurTest;
-		 FFeedbackContext* DestinationContext = nullptr;
+		 std::atomic<FAutomationTestBase*> CurTest;
+		 std::atomic<FFeedbackContext*> DestinationContext;
+		 FCriticalSection ActionCS;
 	 };
-
-	//** Store information about blacklisted test */
-	struct FBlacklistEntry
-	{
-		FBlacklistEntry() :
-			bWarn(false) {}
-
-		FString Map;
-		FString Test;
-		FString Reason;
-		TArray<FString> RHIs;
-		bool bWarn;
-	};
 
 	friend class FAutomationTestOutputDevice;
 	/** Helper method called to prepare settings for automation testing to follow */
-	void PrepForAutomationTests();
+	CORE_API void PrepForAutomationTests();
 
 	/** Helper method called after automation testing is complete to restore settings to how they should be */
-	void ConcludeAutomationTests();
+	CORE_API void ConcludeAutomationTests();
 
 	/**
 	 * Helper method to dump the contents of the provided test name to execution info map to the provided feedback context
@@ -998,15 +1328,15 @@ private:
 	 * @param	InContext		Context to dump the execution info to
 	 * @param	InInfoToDump	Execution info that should be dumped to the provided feedback context
 	 */
-	void DumpAutomationTestExecutionInfo( const TMap<FString, FAutomationTestExecutionInfo>& InInfoToDump );
+	CORE_API void DumpAutomationTestExecutionInfo( const TMap<FString, FAutomationTestExecutionInfo>& InInfoToDump );
 
 	/**
 	 * Internal helper method designed to simply start the provided test name.
 	 *
 	 * @param	InTestToRun			Name of the test that should be run
-	 * @param	OutExecutionInfo	Results of executing the test
+	 * @param	InFullTestPath		Full test path
 	 */
-	void InternalStartTest( const FString& InTestToRun );
+	CORE_API void InternalStartTest( const FString& InTestToRun, const FString& InFullTestPath );
 
 	/**
 	 * Internal helper method designed to stop current executing test and return the results of execution.
@@ -1014,28 +1344,17 @@ private:
 	 * @return	true if the test was successfully run; false if it was not, could not be found, or is invalid for
 	 *			the current application settings
 	 */
-	bool InternalStopTest(FAutomationTestExecutionInfo& OutExecutionInfo);
-
-
-	/**
-	 * Internal helper method that verify if a test is black listed.
-	 *
-	 * @param	TestName		Beautified test name to be checked
-	 * @param	OutReason		Output the reason for the test being blacklisted
-	 * @param	OutWarn			Output true if the config ask for a warning message
-	 * @return	true if the TestName is part of the blacklist.
-	 */
-	bool IsBlacklisted(const FString& TestName, FString* OutReason = nullptr, bool* OutWarn = nullptr) const;
+	CORE_API bool InternalStopTest(FAutomationTestExecutionInfo& OutExecutionInfo);
 
 	/** Constructor */
-	FAutomationTestFramework();
+	CORE_API FAutomationTestFramework();
 
 	/** Destructor */
-	~FAutomationTestFramework();
+	CORE_API ~FAutomationTestFramework();
 
 	// Copy constructor and assignment operator intentionally left unimplemented
-	FAutomationTestFramework( const FAutomationTestFramework& );
-	FAutomationTestFramework& operator=( const FAutomationTestFramework& );
+	CORE_API FAutomationTestFramework( const FAutomationTestFramework& );
+	CORE_API FAutomationTestFramework& operator=( const FAutomationTestFramework& );
 
 	/** Specialized output device used for automation testing */
 	FAutomationTestOutputDevice AutomationTestOutputDevice;
@@ -1046,7 +1365,7 @@ private:
 	FFeedbackContext* OriginalGWarn = nullptr;
 
 	/** Mapping of automation test names to their respective object instances */
-	TMap<FString, class FAutomationTestBase*> AutomationTestClassNameToInstanceMap;
+	TMap<FString, FAutomationTestBase*> AutomationTestClassNameToInstanceMap;
 
 	/** Queue of deferred commands */
 	TQueue< TSharedPtr<IAutomationLatentCommand> > LatentCommands;
@@ -1069,6 +1388,9 @@ private:
 	/** Copy of the parameters for the active test */
 	FString Parameters;
 
+	/** Full test path as given by the automation controller of the active test */
+	FString CurrentTestFullPath;
+
 	/** Whether we want to run automation tests on content within the Developer Directories */
 	bool bDeveloperDirectoryIncluded;
 
@@ -1086,12 +1408,12 @@ private:
 
 	bool bCaptureStack;
 
-	TMap<FString, FBlacklistEntry> TestBlacklist;
+	TMap<FString, FOnTestSectionEvent> OnEnteringTestSectionEvent;
+	TMap<FString, FOnTestSectionEvent> OnLeavingTestSectionEvent;
 };
 
-
 /** Simple abstract base class for all automation tests */
-class CORE_API FAutomationTestBase
+class FAutomationTestBase
 {
 public:
 	/**
@@ -1101,8 +1423,9 @@ public:
 	 */
 	FAutomationTestBase( const FString& InName, const bool bInComplexTask )
 		: bComplexTask( bInComplexTask )
-		, TestName( InName )
 	{
+		LLM_SCOPE_BYNAME(TEXT("AutomationTest/Framework"));
+		TestName = InName;
 		// Register the newly created automation test into the automation testing framework
 		FAutomationTestFramework::Get().RegisterAutomationTest( InName, this );
 	}
@@ -1113,6 +1436,12 @@ public:
 		// Unregister the automation test from the automation testing framework
 		FAutomationTestFramework::Get().UnregisterAutomationTest( TestName );
 	}
+
+	/** Log flags */
+	static CORE_API bool bSuppressLogWarnings;
+	static CORE_API bool bSuppressLogErrors;
+	static CORE_API bool bElevateLogWarningsToErrors;
+	static CORE_API TArray<FString> SuppressedLogCategories;
 
 	/**
 	 * Pure virtual method; returns the flags associated with the given automation test
@@ -1128,6 +1457,23 @@ public:
 	FString GetTestContext() const { return TestParameterContext; }
 
 	/**
+	* Returns the beautified test name
+	*/
+	virtual FString GetBeautifiedTestName() const = 0;
+
+	/**
+	 * Returns the beautified test name with test context. Should return what is displayed in the Test Automation UI. See GenerateTestNames()
+	 */
+	virtual FString GetTestFullName() const {
+		if (FAutomationTestFramework::Get().GetCurrentTest() == this)
+		{
+			return FAutomationTestFramework::Get().GetCurrentTestFullPath();
+		}
+		if (GetTestContext().IsEmpty()) { return GetBeautifiedTestName(); }
+		return FString::Printf(TEXT("%s.%s"), *GetBeautifiedTestName(), *GetTestContext());
+	}
+
+	/**
 	 * Pure virtual method; returns the number of participants for this test
 	 *
 	 * @return	Number of required participants
@@ -1135,22 +1481,23 @@ public:
 	virtual uint32 GetRequiredDeviceNum() const = 0;
 
 	/** Clear any execution info/results from a prior running of this test */
-	void ClearExecutionInfo();
+	CORE_API void ClearExecutionInfo();
 
 	/**
 	 * Adds an error message to this test
 	 *
 	 * @param	InError	Error message to add to this test
 	 */
-	virtual void AddError( const FString& InError, int32 StackOffset = 0 );
+	CORE_API virtual void AddError( const FString& InError, int32 StackOffset = 0 );
 
 	/**
 	 * Adds an error message to this test if the condition is false
 	 *
 	 * @param   bCondition The condition to validate.
 	 * @param   InError	   Error message to add to this test
+	 * @return	False if there was an error
 	 */
-	virtual void AddErrorIfFalse( bool bCondition, const FString& InError, int32 StackOffset = 0 );
+	CORE_API virtual bool AddErrorIfFalse( bool bCondition, const FString& InError, int32 StackOffset = 0 );
 
 	/**
 	 * Adds an error message to this test
@@ -1159,7 +1506,8 @@ public:
 	 * @param	InFilename	The filename the error originated in
 	 * @param	InLineNumber	The line number in the file this error originated in
 	 */
-	virtual void AddErrorS(const FString& InError, const FString& InFilename, int32 InLineNumber);
+	UE_DEPRECATED(5.4, "Please use AddError instead.")
+	CORE_API virtual void AddErrorS(const FString& InError, const FString& InFilename, int32 InLineNumber);
 
 	/**
 	 * Adds an warning message to this test
@@ -1168,62 +1516,98 @@ public:
 	 * @param	InFilename	The filename the error originated in
 	 * @param	InLineNumber	The line number in the file this error originated in
 	 */
-	virtual void AddWarningS(const FString& InWarning, const FString& InFilename, int32 InLineNumber);
+	UE_DEPRECATED(5.4, "Please use AddWarning instead.")
+	CORE_API virtual void AddWarningS(const FString& InWarning, const FString& InFilename, int32 InLineNumber);
 
 	/**
 	 * Adds a warning to this test
 	 *
 	 * @param	InWarning	Warning message to add to this test
 	 */
-	virtual void AddWarning( const FString& InWarning, int32 StackOffset = 0);
-
-	UE_DEPRECATED(4.16, "Use AddInfo")
-	FORCEINLINE void AddLogItem(const FString& InLogItem)
-	{
-		AddInfo(InLogItem, 0);
-	}
+	CORE_API virtual void AddWarning( const FString& InWarning, int32 StackOffset = 0);
 
 	/**
 	 * Adds a log item to this test
 	 *
 	 * @param	InLogItem	Log item to add to this test
 	 */
-	virtual void AddInfo( const FString& InLogItem, int32 StackOffset = 0);
+	CORE_API virtual void AddInfo( const FString& InLogItem, int32 StackOffset = 0, bool bCaptureStack = false);
 
 	/**
 	 * Adds an automation event directly into the execution log.
 	 *
 	 * @param	InLogItem	Log item to add to this test
 	 */
-	virtual void AddEvent(const FAutomationEvent& InEvent, int32 StackOffset = 0);
+	CORE_API virtual void AddEvent(const FAutomationEvent& InEvent, int32 StackOffset = 0, bool bCaptureStack = false);
 
 	/**
 	 * Adds a analytics string to parse later
 	 *
 	 * @param	InLogItem	Log item to add to this test
 	 */
-	virtual void AddAnalyticsItem(const FString& InAnalyticsItem);
+	CORE_API virtual void AddAnalyticsItem(const FString& InAnalyticsItem);
+
+	/**
+	 * Adds a telemetry data point measurement
+	 *
+	 * @param	DataPoint	Name of the Data point
+	 * @param	Measurement	Value to associate to the data point
+	 * @param	Context		optional context associated with the data point
+	 */
+	CORE_API virtual void AddTelemetryData(const FString& DataPoint, double Measurement, const FString& Context = TEXT(""));
+
+	/**
+	 * Adds several telemetry data point measurements
+	 *
+	 * @param	ValuePairs	value pair of Name and Measurement of several Data points
+	 * @param	Context		optional context associated with the data point
+	 */
+	CORE_API virtual void AddTelemetryData(const TMap<FString, double>& ValuePairs, const FString& Context = TEXT(""));
+
+	/**
+	 * Set telemetry storage name
+	 *
+	 * @param	StorageName	Name of the data storage
+	 */
+	CORE_API virtual void SetTelemetryStorage(const FString& StorageName);
 
 	/**
 	 * Returns whether this test has any errors associated with it or not
 	 *
 	 * @return true if this test has at least one error associated with it; false if not
 	 */
-	bool HasAnyErrors() const;
+	CORE_API bool HasAnyErrors() const;
+
+	/**
+	* Returns whether this test has encountered all expected log messages defined for it
+	* @param VerbosityType Optionally specify to check by log level. Defaults to all.
+	* @return true if this test has encountered all expected messages; false if not
+	*/
+	CORE_API bool HasMetExpectedMessages(ELogVerbosity::Type VerbosityType = ELogVerbosity::All);
 
 	/**
 	* Returns whether this test has encountered all expected errors defined for it
 	*
 	* @return true if this test has encountered all expected errors; false if not
 	*/
-	bool HasMetExpectedErrors();
+	CORE_API bool HasMetExpectedErrors();
 
 	/**
-	 * Forcibly sets whether the test has succeeded or not
-	 *
-	 * @param	bSuccessful	true to mark the test successful, false to mark the test as failed
+	 * Return the last success state for this test
 	 */
-	void SetSuccessState( bool bSuccessful );
+	CORE_API bool GetLastExecutionSuccessState();
+
+	/**
+	 * [Deprecated] Use AddError(msg) instead to change the state of the test to a failure
+	 */
+	UE_DEPRECATED(5.1, "Use AddError(msg) instead to change the state of the test to a failure.")
+	void SetSuccessState(bool bSuccessful) { }
+
+	/**
+	 * [Deprecated] Return the last success state for this test
+	 */
+	UE_DEPRECATED(5.1, "Use GetLastExecutionSuccessState instead.")
+	bool GetSuccessState() { return GetLastExecutionSuccessState(); }
 
 	/**
 	 * Populate the provided execution info object with the execution info contained within the test. Not particularly efficient,
@@ -1231,12 +1615,80 @@ public:
 	 *
 	 * @param	OutInfo	Execution info to be populated with the same data contained within this test's execution info
 	 */
-	void GetExecutionInfo( FAutomationTestExecutionInfo& OutInfo ) const;
+	CORE_API void GetExecutionInfo( FAutomationTestExecutionInfo& OutInfo ) const;
 
 	/** 
 	 * Helper function that will generate a list of sub-tests via GetTests
 	 */
-	void GenerateTestNames( TArray<FAutomationTestInfo>& TestInfo ) const;
+	CORE_API void GenerateTestNames( TArray<FAutomationTestInfo>& TestInfo ) const;
+
+	/**
+	 * Helper function that determines if the given log category matches the expected category, inclusively (so an Error counts as a Warning)
+	*/
+	static CORE_API bool LogCategoryMatchesSeverityInclusive(ELogVerbosity::Type Actual, ELogVerbosity::Type MaximumVerbosity);
+
+	/**
+	 * Enables log settings from config
+	*/
+	static CORE_API void LoadDefaultLogSettings();
+	/**
+	
+	* Adds a regex pattern to an internal list that this test will expect to encounter in logs (of the specified verbosity) during its execution. If an expected pattern
+	* is not encountered, it will cause this test to fail.
+	*
+	* @param ExpectedPatternString - The expected message string. Supports basic regex patterns if IsRegex is set to true (the default).
+	* @param ExpectedVerbosity - The expected message verbosity. This is treated as a minimum requirement, so for example the Warning level will intercept Warnings, Errors and Fatal.
+	* @param CompareType - How to match this string with an encountered message, should it match exactly or simply just contain the string.
+	* @param Occurrences - How many times to expect this message string to be seen. If > 0, the message must be seen the exact number of times
+	* specified or the test will fail. If == 0, the message must be seen one or more times (with no upper limit) or the test will fail.
+	* @param IsRegex - If the pattern is to be used as regex or plain string. Default is true.
+	*/
+	CORE_API void AddExpectedMessage(FString ExpectedPatternString, ELogVerbosity::Type ExpectedVerbosity, EAutomationExpectedMessageFlags::MatchType CompareType = EAutomationExpectedMessageFlags::Contains, int32 Occurrences = 1, bool IsRegex = true);
+
+	/**
+
+	* Adds a plain string to an internal list that this test will expect to encounter in logs (of the specified verbosity) during its execution. If an expected pattern
+	* is not encountered, it will cause this test to fail.
+	*
+	* @param ExpectedString - The expected message string.
+	* @param ExpectedVerbosity - The expected message verbosity. This is treated as a minimum requirement, so for example the Warning level will intercept Warnings, Errors and Fatal.
+	* @param CompareType - How to match this string with an encountered message, should it match exactly or simply just contain the string.
+	* @param Occurrences - How many times to expect this message string to be seen. If > 0, the message must be seen the exact number of times
+	* specified or the test will fail. If == 0, the message must be seen one or more times (with no upper limit) or the test will fail.
+	*/
+	CORE_API void AddExpectedMessagePlain(FString ExpectedString, ELogVerbosity::Type ExpectedVerbosity, EAutomationExpectedMessageFlags::MatchType CompareType = EAutomationExpectedMessageFlags::Contains, int32 Occurrences = 1);
+
+	/**
+	* Adds a regex pattern to an internal list that this test will expect to encounter in logs (of all severities) during its execution. If an expected pattern
+	* is not encountered, it will cause this test to fail.
+	*
+	* @param ExpectedPatternString - The expected message string. Supports basic regex patterns.
+	* @param CompareType - How to match this string with an encountered message, should it match exactly or simply just contain the string.
+	* @param Occurrences - How many times to expect this message string to be seen. If > 0, the message must be seen the exact number of times
+	* specified or the test will fail. If == 0, the message must be seen one or more times (with no upper limit) or the test will fail.
+	* @param IsRegex - If the pattern is to be used as regex or plain string. Default is true.
+	*/
+	CORE_API void AddExpectedMessage(FString ExpectedPatternString, EAutomationExpectedMessageFlags::MatchType CompareType = EAutomationExpectedMessageFlags::Contains, int32 Occurrences = 1, bool IsRegex = true);
+
+	/**
+	* Adds a plain string to an internal list that this test will expect to encounter in logs (of all severities) during its execution. If an expected pattern
+	* is not encountered, it will cause this test to fail.
+	*
+	* @param ExpectedString - The expected message string.
+	* @param CompareType - How to match this string with an encountered message, should it match exactly or simply just contain the string.
+	* @param Occurrences - How many times to expect this message string to be seen. If > 0, the message must be seen the exact number of times
+	* specified or the test will fail. If == 0, the message must be seen one or more times (with no upper limit) or the test will fail.
+	*/
+	CORE_API void AddExpectedMessagePlain(FString ExpectedString, EAutomationExpectedMessageFlags::MatchType CompareType = EAutomationExpectedMessageFlags::Contains, int32 Occurrences = 1);
+
+
+	/**
+	* Populate the provided expected log messages object with the expected messages contained within the test. Not particularly efficient,
+	* but providing direct access to the test's private execution messages list could result in errors.
+	* @param Verbosity - Optionally filter the returned messages by verbosity. This is inclusive, so Warning will return Warnings, Errors, etc.
+	* @param OutInfo - Array of Expected Messages to be populated with the same data contained within this test's expected messages list
+	*/
+	CORE_API void GetExpectedMessages(TArray<FAutomationExpectedMessage>& OutInfo, ELogVerbosity::Type Verbosity = ELogVerbosity::All) const;
 
 	/**
 	* Adds a regex pattern to an internal list that this test will expect to encounter in error or warning logs during its execution. If an expected pattern
@@ -1246,16 +1698,20 @@ public:
 	* @param CompareType - How to match this string with an encountered error, should it match exactly or simply just contain the string.
 	* @param Occurrences - How many times to expect this error string to be seen. If > 0, the error must be seen the exact number of times
 	* specified or the test will fail. If == 0, the error must be seen one or more times (with no upper limit) or the test will fail.
+	* @param IsRegex - If the pattern is to be used as regex or plain string. Default is true.
 	*/
-	void AddExpectedError(FString ExpectedPatternString, EAutomationExpectedErrorFlags::MatchType CompareType = EAutomationExpectedErrorFlags::Contains, int32 Occurrences = 1);
+	CORE_API void AddExpectedError(FString ExpectedPatternString, EAutomationExpectedErrorFlags::MatchType CompareType = EAutomationExpectedErrorFlags::Contains, int32 Occurrences = 1, bool IsRegex = true);
 
 	/**
-	* Populate the provided expected errors object with the expected errors contained within the test. Not particularly efficient,
-	* but providing direct access to the test's private execution errors list could result in errors.
+	* Adds a plain string to an internal list that this test will expect to encounter in error or warning logs during its execution. If an expected pattern
+	* is not encountered, it will cause this test to fail.
 	*
-	* @param OutInfo - Array of Expected Errors to be populated with the same data contained within this test's expected errors list
+	* @param ExpectedString - The expected message string.
+	* @param CompareType - How to match this string with an encountered error, should it match exactly or simply just contain the string.
+	* @param Occurrences - How many times to expect this error string to be seen. If > 0, the error must be seen the exact number of times
+	* specified or the test will fail. If == 0, the error must be seen one or more times (with no upper limit) or the test will fail.
 	*/
-	void GetExpectedErrors(TArray<FAutomationExpectedError>& OutInfo) const;
+	CORE_API void AddExpectedErrorPlain(FString ExpectedString, EAutomationExpectedErrorFlags::MatchType CompareType = EAutomationExpectedErrorFlags::Contains, int32 Occurrences = 1);
 
 	/**
 	 * Is this a complex tast - if so it will be a stress test.
@@ -1279,29 +1735,44 @@ public:
 	 */
 	virtual bool SuppressLogs()
 	{
-		return false;
+		return bSuppressLogs;
 	}
+
+	/**
+	 * Should the log category be captured and surfaced as part of the test.
+	 * If true will then go through the SuppressLogWarnings and SuppressLogErrors checks for if this should be suppressed further or not
+	 * Recommend overriding with a virtual function that contains a static TSet to check for the categories you want.
+	 * 
+	 * @return true to allow a log category through.
+	 */
+	virtual bool ShouldCaptureLogCategory(const class FName& Category) const { return true; }
 
 	/**
 	 * If returns true then logging with a level of Error will not be recorded in test results
 	 *
 	 * @return false to make errors errors
 	 */
-	virtual bool SuppressLogErrors() { return false; }
+	virtual bool SuppressLogErrors() { return bSuppressLogErrors; }
 
 	/**
 	 * If returns true then logging with a level of Warning will not be recorded in test results
 	 *
 	 * @return true to make warnings errors
 	 */
-	virtual bool SuppressLogWarnings() { return false; }
+	virtual bool SuppressLogWarnings() { return bSuppressLogWarnings; }
 
 	/**
 	 * If returns true then logging with a level of Warning will be treated as an error
 	 *
 	 * @return true to make warnings errors
 	 */
-	virtual bool ElevateLogWarningsToErrors() { return false; }
+	virtual bool ElevateLogWarningsToErrors() { return bElevateLogWarningsToErrors; }
+
+	/**
+	 * Return suppressed log categories
+	 */
+	virtual TArray<FString> GetSuppressedLogCategories() { return SuppressedLogCategories; }
+
 
 	/**
 	 * Enqueues a new latent command.
@@ -1349,47 +1820,63 @@ public:
 		ExecutionInfo.PopContext();
 	}
 
+	/** Checks if the test is able to run in the current environment. */
+	virtual bool CanRunInEnvironment(const FString& TestParams, FString* OutReason, bool* OutWarn) const
+	{
+		// By default the test is able to run in the current environment
+		// It is responsibility of a child class to decide if the flow should skip the corresponding test.
+		return true;
+	}
+
 public:
 
-	bool TestEqual(const TCHAR* What, int32 Actual, int32 Expected);
-	bool TestEqual(const TCHAR* What, int64 Actual, int64 Expected);
+	CORE_API bool TestEqual(const TCHAR* What, const int32 Actual, const int32 Expected);
+	CORE_API bool TestEqual(const TCHAR* What, const int64 Actual, const int64 Expected);
 #if PLATFORM_64BITS
-	bool TestEqual(const TCHAR* What, SIZE_T Actual, SIZE_T Expected);
+	CORE_API bool TestEqual(const TCHAR* What, const SIZE_T Actual, const SIZE_T Expected);
 #endif
-	bool TestEqual(const TCHAR* What, float Actual, float Expected, float Tolerance = KINDA_SMALL_NUMBER);
-	bool TestEqual(const TCHAR* What, double Actual, double Expected, double Tolerance = KINDA_SMALL_NUMBER);
-	bool TestEqual(const TCHAR* What, FVector Actual, FVector Expected, float Tolerance = KINDA_SMALL_NUMBER);
-	bool TestEqual(const TCHAR* What, FRotator Actual, FRotator Expected, float Tolerance = KINDA_SMALL_NUMBER);
-	bool TestEqual(const TCHAR* What, FColor Actual, FColor Expected);
-	bool TestEqual(const TCHAR* What, const TCHAR* Actual, const TCHAR* Expected);
-	bool TestEqualInsensitive(const TCHAR* What, const TCHAR* Actual, const TCHAR* Expected);
+	CORE_API bool TestEqual(const TCHAR* What, const float Actual, const float Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestEqual(const TCHAR* What, const double Actual, const double Expected, double Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestEqual(const TCHAR* What, const FVector Actual, const FVector Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestEqual(const TCHAR* What, const FTransform Actual, const FTransform Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestEqual(const TCHAR* What, const FRotator Actual, const FRotator Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestEqual(const TCHAR* What, const FColor Actual, const FColor Expected);
+	CORE_API bool TestEqual(const TCHAR* What, const FLinearColor Actual, const FLinearColor Expected);
+	CORE_API bool TestEqual(const TCHAR* What, const TCHAR* Actual, const TCHAR* Expected);
+	CORE_API bool TestEqualInsensitive(const TCHAR* What, const TCHAR* Actual, const TCHAR* Expected);
+	CORE_API bool TestNotEqualInsensitive(const TCHAR* What, const TCHAR* Actual, const TCHAR* Expected);
 
-	bool TestEqual(const FString& What, int32 Actual, int32 Expected)
+	bool TestEqual(const FString& What, const int32 Actual, const int32 Expected)
 	{
 		return TestEqual(*What, Actual, Expected);
 	}
 
-	bool TestEqual(const FString& What, float Actual, float Expected, float Tolerance = KINDA_SMALL_NUMBER)
+	bool TestEqual(const FString& What, const float Actual, const float Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
 	{
 		return TestEqual(*What, Actual, Expected, Tolerance);
 	}
 
-	bool TestEqual(const FString& What, double Actual, double Expected, double Tolerance = KINDA_SMALL_NUMBER)
+	bool TestEqual(const FString& What, const double Actual, const double Expected, double Tolerance = UE_KINDA_SMALL_NUMBER)
 	{
 		return TestEqual(*What, Actual, Expected, Tolerance);
 	}
 
-	bool TestEqual(const FString& What, FVector Actual, FVector Expected, float Tolerance = KINDA_SMALL_NUMBER)
+	bool TestEqual(const FString& What, const FVector Actual, const FVector Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
 	{
 		return TestEqual(*What, Actual, Expected, Tolerance);
 	}
 
-	bool TestEqual(const FString& What, FRotator Actual, FRotator Expected, float Tolerance = KINDA_SMALL_NUMBER)
+	bool TestEqual(const FString& What, const FTransform Actual, const FTransform Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
 	{
 		return TestEqual(*What, Actual, Expected, Tolerance);
 	}
 
-	bool TestEqual(const FString& What, FColor Actual, FColor Expected)
+	bool TestEqual(const FString& What, const FRotator Actual, const FRotator Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
+	{
+		return TestEqual(*What, Actual, Expected, Tolerance);
+	}
+
+	bool TestEqual(const FString& What, const FColor Actual, const FColor Expected)
 	{
 		return TestEqual(*What, Actual, Expected);
 	}
@@ -1439,11 +1926,11 @@ public:
 	 * @see TestNotEqual
 	 */
 	template<typename ValueType> 
-	bool TestEqual(const TCHAR* What, const ValueType& Actual, const ValueType& Expected)
+	FORCEINLINE bool TestEqual(const TCHAR* What, const ValueType& Actual, const ValueType& Expected)
 	{
 		if (Actual != Expected)
 		{
-			AddError(FString::Printf(TEXT("%s: The two values are not equal."), What), 1);
+			AddError(FString::Printf(TEXT("%s: The two values are not equal."), What));
 			return false;
 		}
 		return true;
@@ -1455,6 +1942,37 @@ public:
 		return TestEqual(*What, Actual, Expected);
 	}
 
+	CORE_API bool TestNearlyEqual(const TCHAR* What, const float Actual, const float Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestNearlyEqual(const TCHAR* What, const double Actual, const double Expected, double Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestNearlyEqual(const TCHAR* What, const FVector Actual, const FVector Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestNearlyEqual(const TCHAR* What, const FTransform Actual, const FTransform Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+	CORE_API bool TestNearlyEqual(const TCHAR* What, const FRotator Actual, const FRotator Expected, float Tolerance = UE_KINDA_SMALL_NUMBER);
+
+	bool TestNearlyEqual(const FString& What, const float Actual, const float Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
+	{
+		return TestNearlyEqual(*What, Actual, Expected, Tolerance);
+	}
+
+	bool TestNearlyEqual(const FString& What, const double Actual, const double Expected, double Tolerance = UE_KINDA_SMALL_NUMBER)
+	{
+		return TestNearlyEqual(*What, Actual, Expected, Tolerance);
+	}
+
+	bool TestNearlyEqual(const FString& What, const FVector Actual, const FVector Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
+	{
+		return TestNearlyEqual(*What, Actual, Expected, Tolerance);
+	}
+
+	bool TestNearlyEqual(const FString& What, const FTransform Actual, const FTransform Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
+	{
+		return TestNearlyEqual(*What, Actual, Expected, Tolerance);
+	}
+
+	bool TestNearlyEqual(const FString& What, const FRotator Actual, const FRotator Expected, float Tolerance = UE_KINDA_SMALL_NUMBER)
+	{
+		return TestNearlyEqual(*What, Actual, Expected, Tolerance);
+	}
+
 
 	/**
 	 * Logs an error if the specified Boolean value is not false.
@@ -1464,7 +1982,7 @@ public:
 	 *
 	 * @see TestFalse
 	 */
-	bool TestFalse(const TCHAR* What, bool Value);
+	CORE_API bool TestFalse(const TCHAR* What, bool Value);
 
 	bool TestFalse(const FString& What, bool Value)
 	{
@@ -1472,26 +1990,28 @@ public:
 	}
 
 	/**
-	 * Logs an error if the given shared pointer is valid.
+	 * Logs an error if the given object tests true when calling its IsValid member.
 	 *
 	 * @param Description - Description text for the test.
-	 * @param SharedPointer - The shared pointer to test.
+	 * @param Value - The value to test.
 	 *
 	 * @see TestValid
 	 */
-	template<typename ValueType> bool TestInvalid(const TCHAR* Description, const TSharedPtr<ValueType>& SharedPointer)
+	template<typename ValueType>
+	FORCEINLINE bool TestInvalid(const TCHAR* Description, const ValueType& Value)
 	{
-		if (SharedPointer.IsValid())
+		if (Value.IsValid())
 		{
-			AddError(FString::Printf(TEXT("%s: The shared pointer is valid."), Description), 1);
+			AddError(FString::Printf(TEXT("%s: The value is valid (.IsValid() returned true)."), Description));
 			return false;
 		}
 		return true;
 	}
 
-	template<typename ValueType> bool TestInvalid(const FString& Description, const TSharedPtr<ValueType>& SharedPointer)
+	template<typename ValueType>
+	bool TestInvalid(const FString& Description, const ValueType& Value)
 	{
-		return TestInvalid(*Description, SharedPointer);
+		return TestInvalid(*Description, Value);
 	}
 
 	/**
@@ -1503,11 +2023,12 @@ public:
 	 *
 	 * @see TestEqual
 	 */
-	template<typename ValueType> bool TestNotEqual(const TCHAR* Description, const ValueType& Actual, const ValueType& Expected)
+	template<typename ValueType>
+	FORCEINLINE bool TestNotEqual(const TCHAR* Description, const ValueType& Actual, const ValueType& Expected)
 	{
 		if (Actual == Expected)
 		{
-			AddError(FString::Printf(TEXT("%s: The two values are equal."), Description), 1);
+			AddError(FString::Printf(TEXT("%s: The two values are equal."), Description));
 			return false;
 		}
 		return true;
@@ -1526,17 +2047,18 @@ public:
 	 *
 	 * @see TestNull
 	 */
-	template<typename ValueType> bool TestNotNull(const TCHAR* What, ValueType* Pointer)
+	template<typename ValueType>
+	FORCEINLINE bool TestNotNull(const TCHAR* What, const ValueType* Pointer)
 	{
 		if (Pointer == nullptr)
 		{
-			AddError(FString::Printf(TEXT("Expected '%s' to be not null."), What), 1);
+			AddError(FString::Printf(TEXT("Expected '%s' to be not null."), What));
 			return false;
 		}
 		return true;
 	}
 
-	template<typename ValueType> bool TestNotNull(const FString& What, ValueType* Pointer)
+	template<typename ValueType> bool TestNotNull(const FString& What, const ValueType* Pointer)
 	{
 		return TestNotNull(*What, Pointer);
 	}
@@ -1550,11 +2072,12 @@ public:
 	 *
 	 * @see TestSame
 	 */
-	template<typename ValueType> bool TestNotSame(const TCHAR* Description, const ValueType& Actual, const ValueType& Expected)
+	template<typename ValueType>
+	FORCEINLINE bool TestNotSame(const TCHAR* Description, const ValueType& Actual, const ValueType& Expected)
 	{
 		if (&Actual == &Expected)
 		{
-			AddError(FString::Printf(TEXT("%s: The two values are the same."), Description), 1);
+			AddError(FString::Printf(TEXT("%s: The two values are the same."), Description));
 			return false;
 		}
 		return true;
@@ -1573,7 +2096,7 @@ public:
 	 *
 	 * @see TestNotNull
 	 */
-	bool TestNull(const TCHAR* What, const void* Pointer);
+	CORE_API bool TestNull(const TCHAR* What, const void* Pointer);
 
 	bool TestNull(const FString& What, const void* Pointer)
 	{
@@ -1589,11 +2112,12 @@ public:
 	 *
 	 * @see TestNotSame
 	 */
-	template<typename ValueType> bool TestSame(const TCHAR* Description, const ValueType& Actual, const ValueType& Expected)
+	template<typename ValueType>
+	FORCEINLINE bool TestSame(const TCHAR* Description, const ValueType& Actual, const ValueType& Expected)
 	{
 		if (&Actual != &Expected)
 		{
-			AddError(FString::Printf(TEXT("%s: The two values are not the same."), Description), 1);
+			AddError(FString::Printf(TEXT("%s: The two values are not the same."), Description));
 			return false;
 		}
 		return true;
@@ -1612,7 +2136,7 @@ public:
 	 *
 	 * @see TestFalse
 	 */
-	bool TestTrue(const TCHAR* What, bool Value);
+	CORE_API bool TestTrue(const TCHAR* What, bool Value);
 
 	bool TestTrue(const FString& What, bool Value)
 	{
@@ -1623,26 +2147,28 @@ public:
 	#define TestTrueExpr(Expression) TestTrue(TEXT(#Expression), Expression)
 
 	/**
-	 * Logs an error if the given shared pointer is not valid.
+	 * Logs an error if the given object returns false when calling its IsValid member.
 	 *
 	 * @param Description - Description text for the test.
-	 * @param SharedPointer - The shared pointer to test.
+	 * @param Value - The value to test.
 	 *
 	 * @see TestInvalid
 	 */
-	template<typename ValueType> bool TestValid(const TCHAR* Description, const TSharedPtr<ValueType>& SharedPointer)
+	template<typename ValueType>
+	FORCEINLINE bool TestValid(const TCHAR* Description, const ValueType& Value)
 	{
-		if (!SharedPointer.IsValid())
+		if (!Value.IsValid())
 		{
-			AddError(FString::Printf(TEXT("%s: The shared pointer is not valid."), Description), 1);
+			AddError(FString::Printf(TEXT("%s: The value is not valid (.IsValid() returned false)."), Description));
 			return false;
 		}
 		return true;
 	}
 
-	template<typename ValueType> bool TestValid(const FString& Description, const TSharedPtr<ValueType>& SharedPointer)
+	template<typename ValueType>
+	bool TestValid(const FString& Description, const ValueType& Value)
 	{
-		return TestValid(*Description, SharedPointer);
+		return TestValid(*Description, Value);
 	}
 
 protected:
@@ -1662,13 +2188,11 @@ protected:
 	 */
 	virtual bool RunTest(const FString& Parameters)=0;
 
-	/**
-	 * Returns the beautified test name
-	 */
-	virtual FString GetBeautifiedTestName() const = 0;
-
 	/** Sets the parameter context of the test. */
 	virtual void SetTestContext(FString Context) { TestParameterContext = Context; }
+
+	/** Extracts a combined EAutomationTestFlags value from a string representation using tag notation "[Filter_1]...[Filter_n][Tag_1]...[Tag_m]" */
+	CORE_API uint32 ExtractAutomationTestFlags(FString InTagNotation);
 
 protected:
 
@@ -1679,7 +2203,7 @@ protected:
 	bool bRunOnSeparateThread;
 
 	/** Flag to suppress logs */
-	bool bSuppressLogs;
+	bool bSuppressLogs = false;
 
 	/** Name of the test */
 	FString TestName;
@@ -1695,19 +2219,28 @@ protected:
 
 private:
 	/**
-	* Returns whether this test has defined any expected errors matching the given message.
-	* If a match is found, the expected error definition increments it actual occurrence count.
+	* Returns whether this test has defined any expected log messages matching the given message.
+	* If a match is found, the expected message definition increments it actual occurrence count.
 	*
-	* @return true if this message matches any of the expected errors
+	* @return true if this message matches any of the expected messages
 	*/
-	bool IsExpectedError(const FString& Error);
+	CORE_API bool IsExpectedMessage(const FString& Message, const ELogVerbosity::Type& Verbosity = ELogVerbosity::All);
 
-	/* Errors to be expected while processing this test.*/
-	TArray< FAutomationExpectedError> ExpectedErrors;
+	/**
+	 * Sets whether the test has succeeded or not
+	 *
+	 * @param	bSuccessful	true to mark the test successful, false to mark the test as failed
+	 */
+	CORE_API void InternalSetSuccessState(bool bSuccessful);
 
+	/* Log messages to be expected while processing this test.*/
+	TSet<FAutomationExpectedMessage> ExpectedMessages;
+
+	/** Critical section lock */
+	FRWLock ActionCS;
 };
 
-class CORE_API FBDDAutomationTestBase : public FAutomationTestBase
+class FBDDAutomationTestBase : public FAutomationTestBase
 { 
 public:
 	FBDDAutomationTestBase(const FString& InName, const bool bInComplexTask)
@@ -1891,7 +2424,7 @@ private:
 
 DECLARE_DELEGATE(FDoneDelegate);
 
-class CORE_API FAutomationSpecBase 
+class FAutomationSpecBase 
 	: public FAutomationTestBase
 	, public TSharedFromThis<FAutomationSpecBase>
 {
@@ -1952,6 +2485,7 @@ private:
 					return true;
 				}
 
+				bDone = false;
 				Predicate(FDoneDelegate::CreateSP(this, &FUntilDoneLatentCommand::Done));
 				bIsRunning = true;
 				StartedRunning = FDateTime::UtcNow();
@@ -1976,7 +2510,10 @@ private:
 
 		void Done()
 		{
-			bDone = true;
+			if (bIsRunning)
+			{
+				bDone = true;
+			}
 		}
 
 		void Reset()
@@ -2023,6 +2560,7 @@ private:
 					return true;
 				}
 
+				bDone = false;
 				Future = Async(Execution, [this]() {
 					Predicate(FDoneDelegate::CreateRaw(this, &FAsyncUntilDoneLatentCommand::Done));
 				});
@@ -2049,14 +2587,17 @@ private:
 
 		void Done()
 		{
-			bDone = true;
+			if (Future.IsValid())
+			{
+				bDone = true;
+			}
 		}
 
 		void Reset()
 		{
 			// Reset the done for the next potential run of this command
 			bDone = false;
-			Future = TFuture<void>();
+			Future.Reset();
 		}
 
 	private:
@@ -2097,9 +2638,10 @@ private:
 					return true;
 				}
 
+				bDone = false;
 				Future = Async(Execution, [this]() {
 					Predicate();
-					bDone = true;
+					Done();
 				});
 
 				StartedRunning = FDateTime::UtcNow();
@@ -2124,14 +2666,17 @@ private:
 
 		void Done()
 		{
-			bDone = true;
+			if (Future.IsValid())
+			{
+				bDone = true;
+			}
 		}
 
 		void Reset()
 		{
 			// Reset the done for the next potential run of this command
 			bDone = false;
-			Future = TFuture<void>();
+			Future.Reset();
 		}
 
 	private:
@@ -2298,6 +2843,7 @@ public:
 
 	void Describe(const FString& InDescription, TFunction<void()> DoWork)
 	{
+		LLM_SCOPE_BYNAME(TEXT("AutomationTest/Framework"));
 		const TSharedRef<FSpecDefinitionScope> ParentScope = DefinitionScopeStack.Last();
 		const TSharedRef<FSpecDefinitionScope> NewScope = MakeShareable(new FSpecDefinitionScope());
 		NewScope->Description = InDescription;
@@ -2353,70 +2899,70 @@ public:
 	void It(const FString& InDescription, TFunction<void()> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FSingleExecuteLatentCommand(this, DoWork, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FSingleExecuteLatentCommand(this, DoWork, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
 	void It(const FString& InDescription, EAsyncExecution Execution, TFunction<void()> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FAsyncLatentCommand(this, Execution, DoWork, DefaultTimeout, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FAsyncLatentCommand(this, Execution, DoWork, DefaultTimeout, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
 	void It(const FString& InDescription, EAsyncExecution Execution, const FTimespan& Timeout, TFunction<void()> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FAsyncLatentCommand(this, Execution, DoWork, Timeout, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FAsyncLatentCommand(this, Execution, DoWork, Timeout, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
 	void LatentIt(const FString& InDescription, TFunction<void(const FDoneDelegate&)> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FUntilDoneLatentCommand(this, DoWork, DefaultTimeout, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FUntilDoneLatentCommand(this, DoWork, DefaultTimeout, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
 	void LatentIt(const FString& InDescription, const FTimespan& Timeout, TFunction<void(const FDoneDelegate&)> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FUntilDoneLatentCommand(this, DoWork, Timeout, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FUntilDoneLatentCommand(this, DoWork, Timeout, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
 	void LatentIt(const FString& InDescription, EAsyncExecution Execution, TFunction<void(const FDoneDelegate&)> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FAsyncUntilDoneLatentCommand(this, Execution, DoWork, DefaultTimeout, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FAsyncUntilDoneLatentCommand(this, Execution, DoWork, DefaultTimeout, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
 	void LatentIt(const FString& InDescription, EAsyncExecution Execution, const FTimespan& Timeout, TFunction<void(const FDoneDelegate&)> DoWork)
 	{
 		const TSharedRef<FSpecDefinitionScope> CurrentScope = DefinitionScopeStack.Last();
-		SAFE_GETSTACK(Stack, 1, 1);
+		const auto Stack = GetStack();
 
 		PushDescription(InDescription);
-		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack[0].Filename, Stack[0].LineNumber, MakeShareable(new FAsyncUntilDoneLatentCommand(this, Execution, DoWork, Timeout, bEnableSkipIfError)))));
+		CurrentScope->It.Push(MakeShareable(new FSpecIt(GetDescription(), GetId(), Stack.Get()[0].Filename, Stack.Get()[0].LineNumber, MakeShareable(new FAsyncUntilDoneLatentCommand(this, Execution, DoWork, Timeout, bEnableSkipIfError)))));
 		PopDescription(InDescription);
 	}
 
@@ -2672,6 +3218,7 @@ private:
 
 	void PushDescription(const FString& InDescription)
 	{
+		LLM_SCOPE_BYNAME(TEXT("AutomationTest/Framework"));
 		Description.Add(InDescription);
 	}
 
@@ -2747,6 +3294,43 @@ private:
 		return CompleteId;
 	}
 
+	static TArray<FProgramCounterSymbolInfo> StackWalk(int32 IgnoreCount, int32 MaxDepth)
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_FAutomationSpecBase_StackWalk);
+
+		LLM_SCOPE_BYNAME(TEXT("AutomationTest/Framework"));
+		SAFE_GETSTACK(Stack, IgnoreCount, MaxDepth);
+		return Stack;
+	}
+
+	static TArray<FProgramCounterSymbolInfo> SkipStackWalk()
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_FAutomationSpecBase_SkipStackWalk);
+
+		LLM_SCOPE_BYNAME(TEXT("AutomationTest/Framework"));
+		TArray<FProgramCounterSymbolInfo> Stack;
+		FProgramCounterSymbolInfo First;
+		TCString<ANSICHAR>::Strcpy(First.Filename, FProgramCounterSymbolInfo::MAX_NAME_LENGTH, "Unknown");
+		First.LineNumber = 0;
+		Stack.Add(First);
+
+		return Stack;
+	}
+
+	static TSharedRef<TArray<FProgramCounterSymbolInfo>> GetStack()
+	{
+		QUICK_SCOPE_CYCLE_COUNTER(STAT_FAutomationSpecBase_GetStack);
+
+		const bool NeedSkipStackWalk(FAutomationTestFramework::NeedSkipStackWalk());
+		constexpr int32 IgnoreCount(3);
+		constexpr int32 MaxDepth(1);
+		
+		TSharedRef<TArray<FProgramCounterSymbolInfo>> Stack = MakeShared<TArray<FProgramCounterSymbolInfo>>(
+			NeedSkipStackWalk ? SkipStackWalk() : StackWalk(IgnoreCount, MaxDepth));
+
+		return Stack;
+	}
+
 private:
 
 	TArray<FString> Description;
@@ -2757,7 +3341,7 @@ private:
 };
 
 
-//////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////
 // Latent command definition macros
 
 #define DEFINE_LATENT_AUTOMATION_COMMAND(CommandName)	\
@@ -2882,11 +3466,112 @@ class EXPORT_API CommandName : public IAutomationLatentCommand \
 	ParamType ParamName; \
 }
 
+#define DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_TWO_PARAMETER(EXPORT_API, CommandName,ParamType0,ParamName0,ParamType1,ParamName1)	\
+class EXPORT_API CommandName : public IAutomationLatentCommand \
+	{ \
+	public: \
+	CommandName(ParamType0 InputParam0, ParamType1 InputParam1) \
+	: ParamName0(InputParam0) \
+	, ParamName1(InputParam1) \
+		{} \
+		virtual ~CommandName() \
+		{} \
+		virtual bool Update() override; \
+	private: \
+	ParamType0 ParamName0; \
+	ParamType1 ParamName1; \
+}
+
 #define DEFINE_ENGINE_LATENT_AUTOMATION_COMMAND(CommandName)	\
 	DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND(ENGINE_API, CommandName)
 
 #define DEFINE_ENGINE_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(CommandName,ParamType,ParamName)	\
 	DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(ENGINE_API, CommandName, ParamType, ParamName)
+
+#define DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_WITH_RETRIES(EXPORT_API,CommandName,RetryCount,WaitTimeBetweenRuns)	\
+class EXPORT_API CommandName : public IAutomationLatentCommandWithRetriesAndDelays \
+	{ \
+	public: \
+	CommandName(int32 InRetryCount, double InWaitTimeBetweenRuns) \
+	: IAutomationLatentCommandWithRetriesAndDelays(#CommandName, InRetryCount, InWaitTimeBetweenRuns) \
+		{} \
+		virtual ~CommandName() \
+		{} \
+		virtual bool Execute() override; \
+	private: \
+}
+
+#define DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_WITH_RETRIES_ONE_PARAMETER(EXPORT_API,CommandName,RetryCount,WaitTimeBetweenRuns,ParamType,ParamName)	\
+class EXPORT_API CommandName : public IAutomationLatentCommandWithRetriesAndDelays \
+	{ \
+	public: \
+	CommandName(int32 InRetryCount, double InWaitTimeBetweenRuns, ParamType ParamName) \
+	: IAutomationLatentCommandWithRetriesAndDelays(#CommandName, InRetryCount, InWaitTimeBetweenRuns) \
+	, ParamName(ParamName) \
+		{} \
+		virtual ~CommandName() \
+		{} \
+		virtual bool Execute() override; \
+	private: \
+	ParamType ParamName; \
+}
+
+#define DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_WITH_RETRIES_TWO_PARAMETERS(EXPORT_API,CommandName,RetryCount,WaitTimeBetweenRuns,ParamType0,ParamName0,ParamType1,ParamName1)	\
+class EXPORT_API CommandName : public IAutomationLatentCommandWithRetriesAndDelays \
+	{ \
+	public: \
+	CommandName(int32 InRetryCount, double InWaitTimeBetweenRuns, ParamType0 ParamName0, ParamType1 ParamName1) \
+	: IAutomationLatentCommandWithRetriesAndDelays(#CommandName, InRetryCount, InWaitTimeBetweenRuns) \
+	, ParamName0(ParamName0) \
+	, ParamName1(ParamName1) \
+		{} \
+		virtual ~CommandName() \
+		{} \
+		virtual bool Execute() override; \
+	private: \
+	ParamType0 ParamName0; \
+	ParamType1 ParamName1; \
+}
+
+#define DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_WITH_RETRIES_THREE_PARAMETERS(EXPORT_API,CommandName,RetryCount,WaitTimeBetweenRuns,ParamType0,ParamName0,ParamType1,ParamName1,ParamType2,ParamName2)	\
+class EXPORT_API CommandName : public IAutomationLatentCommandWithRetriesAndDelays \
+	{ \
+	public: \
+	CommandName(int32 InRetryCount, double InWaitTimeBetweenRuns, ParamType0 ParamName0, ParamType1 ParamName1, ParamType2 ParamName2) \
+	: IAutomationLatentCommandWithRetriesAndDelays(#CommandName, InRetryCount, InWaitTimeBetweenRuns) \
+	, ParamName0(ParamName0) \
+	, ParamName1(ParamName1) \
+	, ParamName2(ParamName2) \
+		{} \
+		virtual ~CommandName() \
+		{} \
+		virtual bool Execute() override; \
+	private: \
+	ParamType0 ParamName0; \
+	ParamType1 ParamName1; \
+	ParamType2 ParamName2; \
+}
+
+#define DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_WITH_RETRIES_FOUR_PARAMETERS(EXPORT_API,CommandName,RetryCount,WaitTimeBetweenRuns,ParamType0,ParamName0,ParamType1,ParamName1,ParamType2,ParamName2,ParamType3,ParamName3)	\
+class EXPORT_API CommandName : public IAutomationLatentCommandWithRetriesAndDelays \
+	{ \
+	public: \
+	CommandName(int32 InRetryCount, double InWaitTimeBetweenRuns, ParamType0 ParamName0, ParamType1 ParamName1, ParamType2 ParamName2, ParamType3 ParamName3) \
+	: IAutomationLatentCommandWithRetriesAndDelays(#CommandName, InRetryCount, InWaitTimeBetweenRuns) \
+	, ParamName0(ParamName0) \
+	, ParamName1(ParamName1) \
+	, ParamName2(ParamName2) \
+	, ParamName3(ParamName3) \
+		{} \
+		virtual ~CommandName() \
+		{} \
+		virtual bool Execute() override; \
+	private: \
+	ParamType0 ParamName0; \
+	ParamType1 ParamName1; \
+	ParamType2 ParamName2; \
+	ParamType3 ParamName3; \
+}
 
 //macro to simply the syntax for enqueueing a latent command
 #define ADD_LATENT_AUTOMATION_COMMAND(ClassDeclaration) FAutomationTestFramework::Get().EnqueueLatentCommand(MakeShareable(new ClassDeclaration));
@@ -2950,6 +3635,8 @@ public: \
 		virtual bool RunTest(const FString& Parameters) override; \
 		virtual FString GetBeautifiedTestName() const override { return PrettyName; } \
 	};
+
+
 
 #define IMPLEMENT_COMPLEX_AUTOMATION_TEST_PRIVATE( TClass, TBaseClass, PrettyName, TFlags, FileName, LineNumber ) \
 	class TClass : public TBaseClass \
@@ -3210,8 +3897,26 @@ public: \
 		return false;\
 	}
 
+#define UTEST_EQUAL_EXPR(Actual, Expected)\
+	if (!TestEqual(TEXT(#Actual), Actual, Expected))\
+	{\
+		return false;\
+	}
+
 #define UTEST_EQUAL_TOLERANCE(What, Actual, Expected, Tolerance)\
 	if (!TestEqual(What, Actual, Expected, Tolerance))\
+	{\
+		return false;\
+	}
+
+#define UTEST_EQUAL_TOLERANCE_EXPR(Actual, Expected, Tolerance)\
+	if (!TestEqual(TEXT(#Actual), Actual, Expected, Tolerance))\
+	{\
+		return false;\
+	}
+
+#define UTEST_NEARLY_EQUAL_EXPR(Actual, Expected, Tolerance)\
+	if (!TestNearlyEqual(TEXT(#Actual), Actual, Expected, Tolerance))\
 	{\
 		return false;\
 	}
@@ -3222,8 +3927,32 @@ public: \
 		return false;\
 	}
 
+#define UTEST_EQUAL_INSENSITIVE_EXPR(Actual, Expected)\
+	if (!TestEqualInsensitive(TEXT(#Actual), Actual, Expected))\
+	{\
+		return false;\
+	}
+
+#define UTEST_NOT_EQUAL_INSENSITIVE(What, Actual, Expected)\
+	if (!TestNotEqualInsensitive(What, Actual, Expected))\
+	{\
+		return false;\
+	}
+
+#define UTEST_NOT_EQUAL_INSENSITIVE_EXPR(Actual, Expected)\
+	if (!TestNotEqualInsensitive(TEXT(#Actual), Actual, Expected))\
+	{\
+		return false;\
+	}
+
 #define UTEST_NOT_EQUAL(What, Actual, Expected)\
 	if (!TestNotEqual(What, Actual, Expected))\
+	{\
+		return false;\
+	}
+
+#define UTEST_NOT_EQUAL_EXPR(Actual, Expected)\
+	if (!TestNotEqual(FString::Printf(TEXT("%s != %s"), TEXT(#Actual), TEXT(#Expected)), Actual, Expected))\
 	{\
 		return false;\
 	}
@@ -3234,8 +3963,20 @@ public: \
 		return false;\
 	}
 
+#define UTEST_SAME_EXPR(Actual, Expected)\
+	if (!TestSame(FString::Printf(TEXT("%s == %s"), TEXT(#Actual), TEXT(#Expected)), Actual, Expected))\
+	{\
+		return false;\
+	}
+
 #define UTEST_NOT_SAME(What, Actual, Expected)\
 	if (!TestNotSame(What, Actual, Expected))\
+	{\
+		return false;\
+	}
+
+#define UTEST_NOT_SAME_EXPR(Actual, Expected)\
+	if (!TestNotSame(FString::Printf(TEXT("%s != %s"), TEXT(#Actual), TEXT(#Expected)), Actual, Expected))\
 	{\
 		return false;\
 	}
@@ -3246,20 +3987,44 @@ public: \
 		return false;\
 	}
 
+#define UTEST_TRUE_EXPR(Expression)\
+	if (!TestTrue(TEXT(#Expression), Expression))\
+	{\
+		return false;\
+	}
+
 #define UTEST_FALSE(What, Value)\
 	if (!TestFalse(What, Value))\
 	{\
 		return false;\
 	}
 
-#define UTEST_VALID(What, SharedPointer)\
-	if (!TestValid(What, SharedPointer))\
+#define UTEST_FALSE_EXPR(Expression)\
+	if (!TestFalse(TEXT(#Expression), Expression))\
 	{\
 		return false;\
 	}
 
-#define UTEST_INVALID(What, SharedPointer)\
-	if (!TestInvalid(What, SharedPointer))\
+#define UTEST_VALID(What, Value)\
+	if (!TestValid(What, Value))\
+	{\
+		return false;\
+	}
+
+#define UTEST_VALID_EXPR(Value)\
+	if (!TestValid(TEXT(#Value), Value))\
+	{\
+		return false;\
+	}
+
+#define UTEST_INVALID(What, Value)\
+	if (!TestInvalid(What, Value))\
+	{\
+		return false;\
+	}
+
+#define UTEST_INVALID_EXPR(Value)\
+	if (!TestInvalid(TEXT(#Value), Value))\
 	{\
 		return false;\
 	}
@@ -3270,18 +4035,31 @@ public: \
 		return false;\
 	}
 
-#define UTEST_NOT_NULL(What, Pointer)\
-	if (!TestNotNull(What, Pointer))\
+#define UTEST_NULL_EXPR(Pointer)\
+	if (!TestNull(TEXT(#Pointer), Pointer))\
 	{\
 		return false;\
 	}
 
-//////////////////////////////////////////////////////////////////////////
+#define UTEST_NOT_NULL(What, Pointer)\
+	if (!TestNotNull(What, Pointer))\
+	{\
+		return false;\
+	}\
+	CA_ASSUME(Pointer);
+
+#define UTEST_NOT_NULL_EXPR(Pointer)\
+	if (!TestNotNull(TEXT(#Pointer), Pointer))\
+	{\
+		return false;\
+	}
+
+//////////////////////////////////////////////////
 // Basic Latent Commands
 
 /**
- * Run some code latently with a predicate lambda.  If the predicate returns true, the latent action will be called 
- * again next frame.  If it returns false, the command will stop running.
+ * Run some code latently with a predicate lambda.  If the predicate returns false, the latent action will be called 
+ * again next frame.  If it returns true, the command will stop running.
  */
 class FFunctionLatentCommand : public IAutomationLatentCommand
 {
@@ -3347,8 +4125,91 @@ public:
 			if ( NewTime - StartTime >= Timeout )
 			{
 				TimeoutCallback();
-				return false;
+				return true;
 			}
+
+			return false;
+		}
+
+		return true;
+	}
+
+private:
+	TFunction<bool()> Callback;
+	TFunction<bool()> TimeoutCallback;
+	float Timeout;
+};
+
+// Extension of IAutomationLatentCommand with delays between attempts
+// if initial command does not succeed. Has a max retry count that can be 
+// overridden. Default is 10 retries with a 1 second delay in between.
+// To protect against misuse of unlimited retries, has a Max execution 
+// time of 5 minutes. This can be overridden, but not recommended. Only 
+// do this if you're absolutely certain it will not cause an infinite loop
+class IAutomationLatentCommandWithRetriesAndDelays : public IAutomationLatentCommand
+{
+public:
+	virtual ~IAutomationLatentCommandWithRetriesAndDelays() {}
+
+	virtual void CommandFailedDueToError(const FString& ErrorMessage)
+	{
+		// Stop further commands and log error so the test fails.
+		FAutomationTestFramework::Get().DequeueAllCommands();
+		// Must log here so that Gauntlet can also pick up the error for its report. Otherwise, it will only show up in the Automation log.
+		UE_LOG(LogLatentCommands, Error, TEXT("%s"), *ErrorMessage);
+		GetCurrentTest()->AddError(ErrorMessage);
+	}
+
+	// Base Update override with delay logic built in. Can be further overridden in child
+	// classes
+	virtual bool Update() override
+	{
+		if (bHasUnlimitedRetries)
+		{
+			// command has unlimited retries, so need to check if max run time has been exceeded
+			if (HasExceededMaxTotalRunTime())
+			{
+				// Command run time has exceeded max total run time.
+				FString ErrorMessageText = FString::Printf(TEXT("%s has failed due to exceeding the max allowed run time of %f seconds. \
+This may be due to an error, or having a single command attempt to do too many things. If this is not due to an error, consider breaking \
+up this command into multiple, smaller commands."), *GetTestAndCommandName(), MaxTotalRunTimeInSeconds);
+				CommandFailedDueToError(ErrorMessageText);
+				return true;
+			}
+		}
+
+		if (IsDelayTimerRunning())
+		{
+			return false;
+		}
+
+		// pre-increment iteration so that its 1 based instead of 0 based for readability
+		CurrentIteration++;
+
+		if (!CanRetry())
+		{
+			// Must log here so that Gauntlet can also pick up the error for its report. Otherwise, it will only show up in the Automation log.
+			FString ErrorMessageText = FString::Printf(TEXT("%s Latent command with retries and delays has failed after %d retries"), *GetTestAndCommandName(), MaxRetries);
+			CommandFailedDueToError(ErrorMessageText);
+			return true;
+		}
+
+		ResetDelayTimer();
+
+		// auto-logging for limited retries and unlimited retries
+		if (bHasUnlimitedRetries)
+		{
+			UE_LOG(LogLatentCommands, Log, TEXT("%s Executing Attempt %d."), *GetTestAndCommandName(), CurrentIteration);
+		}
+		else
+		{
+			UE_LOG(LogLatentCommands, Log, TEXT("%s Executing Attempt %d of %d."), *GetTestAndCommandName(), CurrentIteration, MaxRetries);
+		}
+
+		if (Execute())
+		{
+			// completion log message, logs total time taken.
+			UE_LOG(LogLatentCommands, Log, TEXT("%s Completed Successfully, total run time: %f seconds."), *GetTestAndCommandName(), GetCurrentRunTime());
 
 			return true;
 		}
@@ -3356,8 +4217,103 @@ public:
 		return false;
 	}
 
+	// Pure virtual method that must be overridden.
+	// This is the actual command logic.
+	virtual bool Execute() = 0;
+
 private:
-	TFunction<bool()> Callback;
-	TFunction<bool()> TimeoutCallback;
-	float Timeout;
+	// To keep track of which iteration we are on. 1 based
+	// To allow for more readable logs. Attempt 1 of N instead
+	// of 0 of N.
+	int32 CurrentIteration = 0;
+
+protected:
+	// default constructor
+	IAutomationLatentCommandWithRetriesAndDelays() {}
+
+	// parameterized constructor
+	IAutomationLatentCommandWithRetriesAndDelays(const FString InCommandClassName, const int32 InMaxRetries, const double InWaitTimeBetweenRuns)
+		:CommandClassName(InCommandClassName)
+		, MaxRetries(InMaxRetries < 0 ? 0 : InMaxRetries)
+		, bHasUnlimitedRetries(InMaxRetries == 0)
+		, DelayTimeInSeconds(InWaitTimeBetweenRuns)
+	{
+		// set first run start time so that we don't start off in a delay. Its fine if its negative.
+		DelayStartTime = FPlatformTime::Seconds() - InWaitTimeBetweenRuns;
+
+		// warn if command has unlimited retries MaxTotalRunTime
+		if (bHasUnlimitedRetries)
+		{
+			// Must log here so that Gauntlet can also pick up the error for its report. Otherwise, it will only show up in the Automation log.
+			UE_LOG(LogLatentCommands, Warning, TEXT("%s has been set to Unlimited retries. Will be using MaxTotalRunTime to prevent \
+running forever. Default time is set at 300 seconds. If this is not enough time, make sure to override this in your Execute() loop."), *GetTestAndCommandName());
+		}
+	}
+
+	// Resets the Delay Timer by setting start time to now (In game time).
+	void ResetDelayTimer()
+	{
+		DelayStartTime = FPlatformTime::Seconds();
+	}
+
+	// Determines if timer is running, pausing execution in a non-blocking way.
+	bool IsDelayTimerRunning() const
+	{
+		// time elapsed < Delay time
+		return (FPlatformTime::Seconds() - DelayStartTime) < DelayTimeInSeconds;
+	}
+
+	// Returns if we have exceeded max allowed total run time for this latent command
+	bool HasExceededMaxTotalRunTime()
+	{
+		return MaxTotalRunTimeInSeconds - GetCurrentRunTime() < 0;
+	}
+
+	// Determines if we should execute the command. If MaxRetries is set to 0, 
+	// indicates unlimited retries.
+	bool CanRetry() const
+	{
+		return (CurrentIteration <= MaxRetries) || MaxRetries == 0;
+	}
+
+	// Returns the command name 
+	FString GetTestAndCommandName() const
+	{
+		// Otherwise use the provided string
+		return FString::Printf(TEXT("Test: %s - Command: %s - "), *GetCurrentTest()->GetTestFullName(), *CommandClassName);
+	}
+
+	FAutomationTestBase* GetCurrentTest() const
+	{
+		return FAutomationTestFramework::Get().GetCurrentTest();
+	}
+
+	void OverrideMaxTotalRunTimeInSeconds(double OverrideValue)
+	{
+		MaxTotalRunTimeInSeconds = OverrideValue;
+	}
+
+	// Command Name stored for easy logging
+	const FString CommandClassName = "UnknownCommand";
+
+	// Times to retry command before reporting command failure.
+	// Defaults to 10, but can be overridden.
+	const int32 MaxRetries = 10;
+
+	// Indicates that this latent command has unlimited retries
+	// Used to implement the MaxTotalRunTimeInSeconds logic
+	const bool bHasUnlimitedRetries = false;
+
+	// Time in between UpdateDelayed calls. 
+	// Default is 1 second but can be overridden.
+	const double DelayTimeInSeconds = 1.0;
+
+	// Time that the Delay Timer started.
+	double DelayStartTime = 0.0;	
+
+private:
+	// Max total run time for command 
+	// Default is 5 minutes, but can be overridden
+	double MaxTotalRunTimeInSeconds = 300.0;
+	
 };

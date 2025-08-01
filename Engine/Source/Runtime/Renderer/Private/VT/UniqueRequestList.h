@@ -12,8 +12,8 @@
 union FMappingRequest
 {
 	inline FMappingRequest() {}
-	inline FMappingRequest(uint16 InLoadIndex, uint8 InPhysicalGroupIndex, uint8 InSpaceID, uint8 InPageTableLayerIndex, uint32 InAddress, uint8 InLevel, uint8 InLocalLevel)
-		: vAddress(InAddress), vLevel(InLevel), SpaceID(InSpaceID), LoadRequestIndex(InLoadIndex), Local_vLevel(InLocalLevel), ProducerPhysicalGroupIndex(InPhysicalGroupIndex), PageTableLayerIndex(InPageTableLayerIndex), Pad(0)
+	inline FMappingRequest(uint16 InLoadIndex, uint8 InPhysicalGroupIndex, uint8 InSpaceID, uint8 InPageTableLayerIndex, uint32 InMaxLevel, uint32 InAddress, uint8 InLevel, uint8 InLocalLevel)
+		: vAddress(InAddress), vLevel(InLevel), SpaceID(InSpaceID), LoadRequestIndex(InLoadIndex), Local_vLevel(InLocalLevel), ProducerPhysicalGroupIndex(InPhysicalGroupIndex), PageTableLayerIndex(InPageTableLayerIndex), MaxLevel(InMaxLevel)
 	{}
 
 	uint64 PackedValue;
@@ -26,7 +26,7 @@ union FMappingRequest
 		uint32 Local_vLevel : 4;
 		uint32 ProducerPhysicalGroupIndex : 4;
 		uint32 PageTableLayerIndex : 4;
-		uint32 Pad : 4;
+		uint32 MaxLevel : 4;
 	};
 };
 static_assert(sizeof(FMappingRequest) == sizeof(uint64), "Bad packing");
@@ -36,44 +36,48 @@ inline bool operator!=(const FMappingRequest& Lhs, const FMappingRequest& Rhs) {
 union FDirectMappingRequest
 {
 	inline FDirectMappingRequest() {}
-	inline FDirectMappingRequest(uint8 InSpaceID, uint16 InPhysicalSpaceID, uint8 InPageTableLayerIndex, uint8 InLogSize, uint32 InAddress, uint8 InLevel, uint16 InPhysicalAddress)
-		: vAddress(InAddress), vLevel(InLevel), SpaceID(InSpaceID), pAddress(InPhysicalAddress), PhysicalSpaceID(InPhysicalSpaceID), Local_vLevel(InLogSize), PageTableLayerIndex(InPageTableLayerIndex)
+	inline FDirectMappingRequest(uint8 InSpaceID, uint16 InPhysicalSpaceID, uint8 InPageTableLayerIndex, uint32 InMaxLevel, uint32 InAddress, uint8 InLevel, uint8 InLocalLevel, uint16 InPhysicalAddress)
+		: vAddress(InAddress), vLevel(InLevel), SpaceID(InSpaceID), pAddress(InPhysicalAddress), PhysicalSpaceID(InPhysicalSpaceID), Local_vLevel(InLocalLevel), MaxLevel(InMaxLevel), PageTableLayerIndex(InPageTableLayerIndex), Pad(0u)
 	{}
 
-	uint64 PackedValue;
+	uint32 PackedValue[3];
 	struct
 	{
 		uint32 vAddress : 24;
 		uint32 vLevel : 4;
 		uint32 SpaceID : 4;
+
 		uint32 pAddress : 16;
 		uint32 PhysicalSpaceID : 8;
 		uint32 Local_vLevel : 4;
+		uint32 MaxLevel : 4;
+
 		uint32 PageTableLayerIndex : 4;
+		uint32 Pad : 28;
 	};
 };
-static_assert(sizeof(FDirectMappingRequest) == sizeof(uint64), "Bad packing");
-inline bool operator==(const FDirectMappingRequest& Lhs, const FDirectMappingRequest& Rhs) { return Lhs.PackedValue == Rhs.PackedValue; }
-inline bool operator!=(const FDirectMappingRequest& Lhs, const FDirectMappingRequest& Rhs) { return Lhs.PackedValue != Rhs.PackedValue; }
+static_assert(sizeof(FDirectMappingRequest) == sizeof(uint32) * 3, "Bad packing");
+inline bool operator==(const FDirectMappingRequest& Lhs, const FDirectMappingRequest& Rhs) { return Lhs.PackedValue[0] == Rhs.PackedValue[0] && Lhs.PackedValue[1] == Rhs.PackedValue[1] && Lhs.PackedValue[2] == Rhs.PackedValue[2]; }
+inline bool operator!=(const FDirectMappingRequest& Lhs, const FDirectMappingRequest& Rhs) { return !operator==(Lhs, Rhs); }
 
 class FUniqueRequestList
 {
 public:
-	// Make separate allocations to avoid any single MemStack allocation larger than FPageAllocator::PageSize (65536)
-	// MemStack also allocates extra bytes to ensure proper alignment, so actual size we can allocate is typically 8 bytes less than this
-	explicit FUniqueRequestList(FMemStack& MemStack)
+	explicit FUniqueRequestList(FConcurrentLinearBulkObjectAllocator& Allocator)
 		: LoadRequestHash(NoInit)
 		, MappingRequestHash(NoInit)
 		, DirectMappingRequestHash(NoInit)
-		, LoadRequests(new(MemStack) FVirtualTextureLocalTile[LoadRequestCapacity])
-		, MappingRequests(new(MemStack) FMappingRequest[MappingRequestCapacity])
-		, DirectMappingRequests(new(MemStack) FDirectMappingRequest[DirectMappingRequestCapacity])
-		, ContinuousUpdateRequests(new(MemStack) FVirtualTextureLocalTile[LoadRequestCapacity])
-		, AdaptiveAllocationsRequests(new(MemStack) uint32[LoadRequestCapacity])
-		, LoadRequestCount(new(MemStack) uint16[LoadRequestCapacity])
-		, LoadRequestGroupMask(new(MemStack) uint8[LoadRequestCapacity])
+		, LoadRequests(Allocator.CreateArray<FVirtualTextureLocalTile>(LoadRequestCapacity))
+		, MappingRequests(Allocator.CreateArray<FMappingRequest>(MappingRequestCapacity))
+		, DirectMappingRequests(Allocator.CreateArray<FDirectMappingRequest>(DirectMappingRequestCapacity))
+		, ContinuousUpdateRequests(Allocator.CreateArray<FVirtualTextureLocalTile>(LoadRequestCapacity))
+		, AdaptiveAllocationsRequests(Allocator.MallocArray<uint32>(LoadRequestCapacity))
+		, LoadRequestCount(Allocator.MallocArray<uint16>(LoadRequestCapacity))
+		, LoadRequestGroupMask(Allocator.MallocArray<uint8>(LoadRequestCapacity))
+		, LoadRequestFlags(Allocator.MallocArray<FLoadRequestFlags>(LoadRequestCapacity))
 		, NumLoadRequests(0u)
 		, NumLockRequests(0u)
+		, NumNonStreamingLoadRequests(0u)
 		, NumMappingRequests(0u)
 		, NumDirectMappingRequests(0u)
 		, NumContinuousUpdateRequests(0u)
@@ -89,7 +93,27 @@ public:
 		ContinuousUpdateRequestHash.Clear();
 	}
 
+	inline void Reset(bool bResetContinousUpdates)
+	{
+		LoadRequestHash.Clear();
+		MappingRequestHash.Clear();
+		DirectMappingRequestHash.Clear();
+		NumLoadRequests = 0;
+		NumLockRequests = 0;
+		NumNonStreamingLoadRequests = 0;
+		NumMappingRequests = 0;
+		NumDirectMappingRequests = 0;
+		NumAdaptiveAllocationRequests = 0;
+
+		if (bResetContinousUpdates)
+		{
+			NumContinuousUpdateRequests = 0;
+			ContinuousUpdateRequestHash.Clear();
+		}
+	}
+
 	inline uint32 GetNumLoadRequests() const { return NumLoadRequests; }
+	inline uint32 GetNumNonStreamingLoadRequests() const { return NumNonStreamingLoadRequests; }
 	inline uint32 GetNumMappingRequests() const { return NumMappingRequests; }
 	inline uint32 GetNumDirectMappingRequests() const { return NumDirectMappingRequests; }
 	inline uint32 GetNumContinuousUpdateRequests() const { return NumContinuousUpdateRequests; }
@@ -104,21 +128,21 @@ public:
 	inline uint8 GetGroupMask(uint32 i) const { checkSlow(i < NumLoadRequests); return LoadRequestGroupMask[i]; }
 	inline bool IsLocked(uint32 i) const { checkSlow(i < NumLoadRequests); return i < NumLockRequests; }
 
-	uint16 AddLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask, uint16 Count);
-	uint16 LockLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask);
+	uint16 AddLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask, uint16 Count, bool bStreamingRequest);
+	uint16 LockLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask, bool bStreamingRequest);
 
-	void AddMappingRequest(uint16 LoadRequestIndex, uint8 ProducerPhysicalGroupIndex, uint8 SpaceID, uint8 PageTableLayerIndex, uint32 vAddress, uint8 vLevel, uint8 Local_vLevel);
+	void AddMappingRequest(uint16 LoadRequestIndex, uint8 ProducerPhysicalGroupIndex, uint8 SpaceID, uint8 PageTableLayerIndex, uint32 MaxLevel, uint32 vAddress, uint8 vLevel, uint8 Local_vLevel);
 
-	void AddDirectMappingRequest(uint8 InSpaceID, uint16 InPhysicalSpaceID, uint8 InPageTableLayerIndex, uint8 InLogSize, uint32 InAddress, uint8 InLevel, uint16 InPhysicalAddress);
+	void AddDirectMappingRequest(uint8 InSpaceID, uint16 InPhysicalSpaceID, uint8 InPageTableLayerIndex, uint32 MaxLevel, uint32 InAddress, uint8 InLevel, uint8 InLocalLevel, uint16 InPhysicalAddress);
 	void AddDirectMappingRequest(const FDirectMappingRequest& Request);
 
 	void AddContinuousUpdateRequest(const FVirtualTextureLocalTile& Request);
 
 	void AddAdaptiveAllocationRequest(uint32 Request);
 
-	void MergeRequests(const FUniqueRequestList* RESTRICT Other, FMemStack& MemStack);
+	void MergeRequests(const FUniqueRequestList* RESTRICT Other, FConcurrentLinearBulkObjectAllocator& Allocator);
 
-	void SortRequests(FVirtualTextureProducerCollection& Producers, FMemStack& MemStack, uint32 MaxNumRequests);
+	void SortRequests(FVirtualTextureProducerCollection& Producers, FConcurrentLinearBulkObjectAllocator& Allocator, uint32 MaxNonStreamingLoadRequests, uint32 MaxStreamingLoadRequests, bool bUseCombinedLimit);
 
 private:
 	static const uint32 LoadRequestCapacity = 4u * 1024;
@@ -141,8 +165,22 @@ private:
 	uint16* LoadRequestCount;
 	uint8* LoadRequestGroupMask;
 
+	struct FLoadRequestFlags
+	{
+		uint8 bLocked : 1;
+		uint8 bStreaming : 1;
+		uint8 Padding : 6;
+
+		FLoadRequestFlags(bool bInLocked, bool bInStreaming)
+			: bLocked(bInLocked)
+			, bStreaming(bInStreaming)
+		{}
+	};
+	FLoadRequestFlags* LoadRequestFlags;
+
 	uint32 NumLoadRequests;
 	uint32 NumLockRequests;
+	uint32 NumNonStreamingLoadRequests;
 	uint32 NumMappingRequests;
 	uint32 NumDirectMappingRequests;
 	uint32 NumContinuousUpdateRequests;
@@ -150,7 +188,7 @@ private:
 };
 
 
-inline uint16 FUniqueRequestList::AddLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask, uint16 Count)
+inline uint16 FUniqueRequestList::AddLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask, uint16 Count, bool bStreamingRequest)
 {
 	const uint16 Hash = MurmurFinalize64(Tile.PackedValue);
 	check(GroupMask != 0u);
@@ -159,12 +197,9 @@ inline uint16 FUniqueRequestList::AddLoadRequest(const FVirtualTextureLocalTile&
 	{
 		if (Tile == LoadRequests[Index])
 		{
-			const uint32 PrevCount = LoadRequestCount[Index];
-			if (PrevCount != 0xffff)
-			{
-				// Don't adjust count if already locked, don't allow request to transition to lock
-				LoadRequestCount[Index] = FMath::Min<uint32>(PrevCount + Count, 0xfffe);
-			}
+			check(LoadRequestFlags[Index].bStreaming == bStreamingRequest);
+
+			LoadRequestCount[Index] = FMath::Min<uint32>((uint32)LoadRequestCount[Index] + Count, MAX_uint16);
 			LoadRequestGroupMask[Index] |= GroupMask;
 			return Index;
 		}
@@ -175,14 +210,15 @@ inline uint16 FUniqueRequestList::AddLoadRequest(const FVirtualTextureLocalTile&
 		const uint32 Index = NumLoadRequests++;
 		LoadRequestHash.Add(Hash, Index);
 		LoadRequests[Index] = Tile;
-		LoadRequestCount[Index] = FMath::Min<uint32>(Count, 0xfffe);
+		LoadRequestCount[Index] = Count;
 		LoadRequestGroupMask[Index] = GroupMask;
+		LoadRequestFlags[Index] = FLoadRequestFlags(false, bStreamingRequest);
 		return Index;
 	}
 	return 0xffff;
 }
 
-inline uint16 FUniqueRequestList::LockLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask)
+inline uint16 FUniqueRequestList::LockLoadRequest(const FVirtualTextureLocalTile& Tile, uint8 GroupMask, bool bStreamingRequest)
 {
 	const uint16 Hash = MurmurFinalize64(Tile.PackedValue);
 	check(GroupMask != 0u);
@@ -191,9 +227,13 @@ inline uint16 FUniqueRequestList::LockLoadRequest(const FVirtualTextureLocalTile
 	{
 		if (Tile == LoadRequests[Index])
 		{
-			if (LoadRequestCount[Index] != 0xffff)
+			FLoadRequestFlags& Flags = LoadRequestFlags[Index];
+			check(bStreamingRequest == Flags.bStreaming);
+
+			if (!Flags.bLocked)
 			{
-				LoadRequestCount[Index] = 0xffff;
+				Flags.bLocked = true;
+				LoadRequestCount[Index] = MAX_uint16;
 				++NumLockRequests;
 			}
 			LoadRequestGroupMask[Index] |= GroupMask;
@@ -206,8 +246,9 @@ inline uint16 FUniqueRequestList::LockLoadRequest(const FVirtualTextureLocalTile
 		const uint32 Index = NumLoadRequests++;
 		LoadRequestHash.Add(Hash, Index);
 		LoadRequests[Index] = Tile;
-		LoadRequestCount[Index] = 0xffff;
+		LoadRequestCount[Index] = MAX_uint16;
 		LoadRequestGroupMask[Index] = GroupMask;
+		LoadRequestFlags[Index] = FLoadRequestFlags(true, bStreamingRequest);
 		++NumLockRequests;
 		return Index;
 	}
@@ -215,10 +256,10 @@ inline uint16 FUniqueRequestList::LockLoadRequest(const FVirtualTextureLocalTile
 	return 0xffff;
 }
 
-inline void FUniqueRequestList::AddMappingRequest(uint16 LoadRequestIndex, uint8 ProducerPhysicalGroupIndex, uint8 SpaceID, uint8 PageTableLayerIndex, uint32 vAddress, uint8 vLevel, uint8 Local_vLevel)
+inline void FUniqueRequestList::AddMappingRequest(uint16 LoadRequestIndex, uint8 ProducerPhysicalGroupIndex, uint8 SpaceID, uint8 PageTableLayerIndex, uint32 MaxLevel, uint32 vAddress, uint8 vLevel, uint8 Local_vLevel)
 {
 	check(LoadRequestIndex < NumLoadRequests);
-	const FMappingRequest Request(LoadRequestIndex, ProducerPhysicalGroupIndex, SpaceID, PageTableLayerIndex, vAddress, vLevel, Local_vLevel);
+	const FMappingRequest Request(LoadRequestIndex, ProducerPhysicalGroupIndex, SpaceID, PageTableLayerIndex, MaxLevel, vAddress, vLevel, Local_vLevel);
 	const uint16 Hash = MurmurFinalize64(Request.PackedValue);
 
 	for (uint16 Index = MappingRequestHash.First(Hash); MappingRequestHash.IsValid(Index); Index = MappingRequestHash.Next(Index))
@@ -229,7 +270,7 @@ inline void FUniqueRequestList::AddMappingRequest(uint16 LoadRequestIndex, uint8
 		}
 	}
 
-	if (ensure(NumMappingRequests < MappingRequestCapacity))
+	if (NumMappingRequests < MappingRequestCapacity)
 	{
 		const uint32 Index = NumMappingRequests++;
 		MappingRequestHash.Add(Hash, Index);
@@ -237,15 +278,15 @@ inline void FUniqueRequestList::AddMappingRequest(uint16 LoadRequestIndex, uint8
 	}
 }
 
-inline void FUniqueRequestList::AddDirectMappingRequest(uint8 InSpaceID, uint16 InPhysicalSpaceID, uint8 InPageTableLayerIndex, uint8 InLogSize, uint32 InAddress, uint8 InLevel, uint16 InPhysicalAddress)
+inline void FUniqueRequestList::AddDirectMappingRequest(uint8 InSpaceID, uint16 InPhysicalSpaceID, uint8 InPageTableLayerIndex, uint32 InMaxLevel, uint32 InAddress, uint8 InLevel, uint8 InLocalLevel, uint16 InPhysicalAddress)
 {
-	const FDirectMappingRequest Request(InSpaceID, InPhysicalSpaceID, InPageTableLayerIndex, InLogSize, InAddress, InLevel, InPhysicalAddress);
+	const FDirectMappingRequest Request(InSpaceID, InPhysicalSpaceID, InPageTableLayerIndex, InMaxLevel, InAddress, InLevel, InLocalLevel, InPhysicalAddress);
 	AddDirectMappingRequest(Request);
 }
 
 inline void FUniqueRequestList::AddDirectMappingRequest(const FDirectMappingRequest& Request)
 {
-	const uint16 Hash = MurmurFinalize64(Request.PackedValue);
+	const uint16 Hash = Murmur32({ Request.PackedValue[0], Request.PackedValue[1], Request.PackedValue[2] });
 	for (uint16 Index = DirectMappingRequestHash.First(Hash); DirectMappingRequestHash.IsValid(Index); Index = DirectMappingRequestHash.Next(Index))
 	{
 		if (Request == DirectMappingRequests[Index])
@@ -254,7 +295,7 @@ inline void FUniqueRequestList::AddDirectMappingRequest(const FDirectMappingRequ
 		}
 	}
 
-	if (ensure(NumDirectMappingRequests < DirectMappingRequestCapacity))
+	if (NumDirectMappingRequests < DirectMappingRequestCapacity)
 	{
 		const uint32 Index = NumDirectMappingRequests++;
 		DirectMappingRequestHash.Add(Hash, Index);
@@ -273,7 +314,7 @@ inline void FUniqueRequestList::AddContinuousUpdateRequest(const FVirtualTexture
 		}
 	}
 
-	if (ensure(NumContinuousUpdateRequests < ContinuousUpdateRequestCapacity))
+	if (NumContinuousUpdateRequests < ContinuousUpdateRequestCapacity)
 	{
 		const uint32 Index = NumContinuousUpdateRequests++;
 		ContinuousUpdateRequestHash.Add(Hash, Index);
@@ -283,26 +324,25 @@ inline void FUniqueRequestList::AddContinuousUpdateRequest(const FVirtualTexture
 
 void FUniqueRequestList::AddAdaptiveAllocationRequest(uint32 Request)
 {
-	if (ensure(NumAdaptiveAllocationRequests < AdaptiveAllocationRequestCapacity))
+	if (NumAdaptiveAllocationRequests < AdaptiveAllocationRequestCapacity)
 	{
 		AdaptiveAllocationsRequests[NumAdaptiveAllocationRequests++] = Request;
 	}
 }
 
-inline void FUniqueRequestList::MergeRequests(const FUniqueRequestList* RESTRICT Other, FMemStack& MemStack)
+inline void FUniqueRequestList::MergeRequests(const FUniqueRequestList* RESTRICT Other, FConcurrentLinearBulkObjectAllocator& Allocator)
 {
-	FMemMark Mark(MemStack);
+	uint16* LoadRequestIndexRemap = Allocator.MallocArray<uint16>(Other->NumLoadRequests);
 
-	uint16* LoadRequestIndexRemap = new(MemStack) uint16[Other->NumLoadRequests];
 	for (uint32 Index = 0u; Index < Other->NumLoadRequests; ++Index)
 	{
 		if (Other->IsLocked(Index))
 		{
-			LoadRequestIndexRemap[Index] = LockLoadRequest(Other->GetLoadRequest(Index), Other->LoadRequestGroupMask[Index]);
+			LoadRequestIndexRemap[Index] = LockLoadRequest(Other->GetLoadRequest(Index), Other->LoadRequestGroupMask[Index], Other->LoadRequestFlags[Index].bStreaming);
 		}
 		else
 		{
-			LoadRequestIndexRemap[Index] = AddLoadRequest(Other->GetLoadRequest(Index), Other->LoadRequestGroupMask[Index], Other->LoadRequestCount[Index]);
+			LoadRequestIndexRemap[Index] = AddLoadRequest(Other->GetLoadRequest(Index), Other->LoadRequestGroupMask[Index], Other->LoadRequestCount[Index], Other->LoadRequestFlags[Index].bStreaming);
 		}
 	}
 
@@ -313,7 +353,7 @@ inline void FUniqueRequestList::MergeRequests(const FUniqueRequestList* RESTRICT
 		const uint16 LoadRequestIndex = LoadRequestIndexRemap[Request.LoadRequestIndex];
 		if (LoadRequestIndex != 0xffff)
 		{
-			AddMappingRequest(LoadRequestIndex, Request.ProducerPhysicalGroupIndex, Request.SpaceID, Request.PageTableLayerIndex, Request.vAddress, Request.vLevel, Request.Local_vLevel);
+			AddMappingRequest(LoadRequestIndex, Request.ProducerPhysicalGroupIndex, Request.SpaceID, Request.PageTableLayerIndex, Request.MaxLevel, Request.vAddress, Request.vLevel, Request.Local_vLevel);
 		}
 	}
 
@@ -333,7 +373,7 @@ inline void FUniqueRequestList::MergeRequests(const FUniqueRequestList* RESTRICT
 	}
 }
 
-inline void FUniqueRequestList::SortRequests(FVirtualTextureProducerCollection& Producers, FMemStack& MemStack, uint32 MaxNumRequests)
+inline void FUniqueRequestList::SortRequests(FVirtualTextureProducerCollection& Producers, FConcurrentLinearBulkObjectAllocator& Allocator, uint32 MaxNonStreamingLoadRequests, uint32 MaxStreamingLoadRequests, bool bUseCombinedLimit)
 {
 	struct FPriorityAndIndex
 	{
@@ -341,55 +381,103 @@ inline void FUniqueRequestList::SortRequests(FVirtualTextureProducerCollection& 
 		uint16 Index;
 
 		// sort from largest to smallest
-		inline bool operator<(const FPriorityAndIndex& Rhs) const{ return Priroity > Rhs.Priroity; }
+		inline bool operator<(const FPriorityAndIndex& Rhs) const { return Priroity > Rhs.Priroity; }
 	};
 
-	FMemMark Mark(MemStack);
+	if (bUseCombinedLimit)
+	{
+		MaxNonStreamingLoadRequests += MaxStreamingLoadRequests;
+		MaxStreamingLoadRequests = 0;
+	}
 
 	// Compute priority of each load request
 	uint32 CheckNumLockRequests = 0u;
-	FPriorityAndIndex* SortedKeys = new(MemStack) FPriorityAndIndex[NumLoadRequests];
+	uint32 NumNonStreamingLockRequests = 0u;
+	uint32 NumStreamingNonLockRequests = 0u;
+	FPriorityAndIndex* SortedKeys = Allocator.CreateArray<FPriorityAndIndex>(NumLoadRequests);
+
 	for (uint32 i = 0u; i < NumLoadRequests; ++i)
 	{
 		const uint32 Count = LoadRequestCount[i];
+		const FLoadRequestFlags Flags = LoadRequestFlags[i];
+
+		// Try to load higher mips first
+		const FVirtualTextureLocalTile& TileToLoad = GetLoadRequest(i);
+		const uint32 Priority = (Count * (1u + TileToLoad.Local_vLevel)) & 0x0fffffff;
+
 		SortedKeys[i].Index = i;
-		if (Count == 0xffff)
+		if (Flags.bLocked)
 		{
 			// Lock request, use max priority
-			SortedKeys[i].Priroity = 0xffffffff;
+			SortedKeys[i].Priroity = MAX_uint32;
+			NumNonStreamingLockRequests += (bUseCombinedLimit || !Flags.bStreaming ? 1 : 0);
 			++CheckNumLockRequests;
+		}
+		else if (bUseCombinedLimit || !Flags.bStreaming)
+		{
+			SortedKeys[i].Priroity = 0xd | Priority;
 		}
 		else
 		{
-			// Try to load higher mips first
-			const FVirtualTextureLocalTile& TileToLoad = GetLoadRequest(i);
-			const uint32 Priority = Count * (1u + TileToLoad.Local_vLevel);
-			SortedKeys[i].Priroity = Priority;
+			SortedKeys[i].Priroity = 0xe | Priority;
+			++NumStreamingNonLockRequests;
 		}
 	}
 	checkSlow(CheckNumLockRequests == NumLockRequests);
 
 	// Sort so highest priority requests are at the front of the list
-	::Sort(SortedKeys, NumLoadRequests);
+	// [ Lock requests | streaming non-lock requests | non-streaming non-lock requests ]
+	Algo::Sort(MakeArrayView(SortedKeys, NumLoadRequests));
 
 	// Clamp number of load requests to maximum, but also ensure all lock requests are considered
-	const uint32 NewNumLoadRequests = FMath::Min(NumLoadRequests, FMath::Max(NumLockRequests, MaxNumRequests));
+	const uint32 NumStreamingLockRequests = NumLockRequests - NumNonStreamingLockRequests;
+	const uint32 NumStreamingRequests = NumStreamingNonLockRequests + NumStreamingLockRequests;
+	const uint32 NumNonStreamingRequests = NumLoadRequests - NumStreamingRequests;
+
+	const uint32 NewNumNonStreamingRequests = FMath::Min(NumNonStreamingRequests, FMath::Max(NumNonStreamingLockRequests, MaxNonStreamingLoadRequests));
+	const uint32 NewNumStreamingRequests = FMath::Min(NumStreamingRequests, FMath::Max(NumStreamingLockRequests, MaxStreamingLoadRequests));
+	const uint32 NewNumLoadRequests = NewNumNonStreamingRequests + NewNumStreamingRequests;
 
 	// Re-index load request list, using sorted indices
-	FVirtualTextureLocalTile* SortedLoadRequests = new(MemStack) FVirtualTextureLocalTile[NewNumLoadRequests];
-	uint8* SortedGroupMask = new(MemStack) uint8[NewNumLoadRequests];
-	uint16* LoadIndexToSortedLoadIndex = new(MemStack) uint16[NumLoadRequests];
+	FVirtualTextureLocalTile* SortedLoadRequests = Allocator.CreateArray<FVirtualTextureLocalTile>(NewNumLoadRequests);
+	uint8* SortedGroupMask = Allocator.MallocArray<uint8>(NewNumLoadRequests);
+	FLoadRequestFlags* SortedFlags = Allocator.MallocArray<FLoadRequestFlags>(NewNumLoadRequests);
+	uint16* LoadIndexToSortedLoadIndex = Allocator.MallocArray<uint16>(NumLoadRequests);
 	FMemory::Memset(LoadIndexToSortedLoadIndex, 0xff, NumLoadRequests * sizeof(uint16));
-	for (uint32 i = 0u; i < NewNumLoadRequests; ++i)
+
+	uint32 WriteIndex = 0;
+	auto CopyRequestToSorted = [this, &WriteIndex, SortedKeys, SortedLoadRequests, SortedGroupMask, SortedFlags, LoadIndexToSortedLoadIndex](uint32 SortedIndex)
 	{
-		const uint32 SortedIndex = SortedKeys[i].Index;
-		SortedLoadRequests[i] = LoadRequests[SortedIndex];
-		SortedGroupMask[i] = LoadRequestGroupMask[SortedIndex];
-		checkSlow(SortedIndex < NumLoadRequests);
-		LoadIndexToSortedLoadIndex[SortedIndex] = i;
+		const uint32 OldIndex = SortedKeys[SortedIndex].Index;
+		checkSlow(OldIndex < NumLoadRequests);
+
+		SortedLoadRequests[WriteIndex] = LoadRequests[OldIndex];
+		SortedGroupMask[WriteIndex] = LoadRequestGroupMask[OldIndex];
+		SortedFlags[WriteIndex] = LoadRequestFlags[OldIndex];
+		LoadIndexToSortedLoadIndex[OldIndex] = WriteIndex;
+
+		++WriteIndex;
+	};
+
+	for (uint32 i = 0u; i < NumLockRequests; ++i)
+	{
+		CopyRequestToSorted(i);
 	}
-	FMemory::Memcpy(LoadRequests, SortedLoadRequests, sizeof(FVirtualTextureLocalTile) * NewNumLoadRequests);
-	FMemory::Memcpy(LoadRequestGroupMask, SortedGroupMask, sizeof(uint8) * NewNumLoadRequests);
+
+	for (uint32 i = 0u; i < NewNumStreamingRequests - NumStreamingLockRequests; ++i)
+	{
+		CopyRequestToSorted(NumLockRequests + i);
+	}
+
+	for (uint32 i = 0u; i < NewNumNonStreamingRequests - NumNonStreamingLockRequests; ++i)
+	{
+		CopyRequestToSorted(NumLockRequests + NumStreamingNonLockRequests + i);
+	}
+	
+	check(NewNumLoadRequests == WriteIndex);
+	LoadRequests = SortedLoadRequests;
+	LoadRequestGroupMask = SortedGroupMask;
+	LoadRequestFlags = SortedFlags;
 
 	// Remap LoadRequest indices for all the mapping requests
 	// Can discard any mapping request that refers to a LoadRequest that's no longer being performed this frame
@@ -408,5 +496,7 @@ inline void FUniqueRequestList::SortRequests(FVirtualTextureProducerCollection& 
 	}
 
 	NumLoadRequests = NewNumLoadRequests;
+	NumNonStreamingLoadRequests = NewNumNonStreamingRequests;
+	check(!bUseCombinedLimit || NumLoadRequests == NumNonStreamingLoadRequests);
 	NumMappingRequests = NewNumMappingRequests;
 }

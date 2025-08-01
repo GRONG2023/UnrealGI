@@ -10,12 +10,9 @@ public class PListEditor : ModuleRules
 			new string[] { 
 				"Core",
 				"CoreUObject",
-				"Engine",
-                "InputCore",
+				"InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
-				"UnrealEd",
 				"DesktopPlatform",
 				"XmlParser",
 			}
@@ -23,7 +20,7 @@ public class PListEditor : ModuleRules
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"MainFrame",
+				"WorkspaceMenuStructure",
 			}
 		);
 

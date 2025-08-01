@@ -1,11 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -20,6 +17,11 @@ namespace UnrealBuildTool
 		public static bool bWriteMarkup = false;
 
 		/// <summary>
+		/// Logger for output
+		/// </summary>
+		ILogger Logger;
+
+		/// <summary>
 		/// The name to include with the status message
 		/// </summary>
 		string Message;
@@ -27,22 +29,24 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The inner scope object
 		/// </summary>
-		LogStatusScope Status;
+		LogStatusScope? Status;
 
 		/// <summary>
 		/// The current progress message
 		/// </summary>
-		string CurrentProgressString;
+		string? CurrentProgressString;
 
 		/// <summary>
 		/// Constructor
 		/// </summary>
 		/// <param name="InMessage">The message to display before the progress percentage</param>
 		/// <param name="bInUpdateStatus">Whether to write messages to the console</param>
-		public ProgressWriter(string InMessage, bool bInUpdateStatus)
+		/// <param name="InLogger">Logger for output</param>
+		public ProgressWriter(string InMessage, bool bInUpdateStatus, ILogger InLogger)
 		{
 			Message = InMessage;
-			if(bInUpdateStatus)
+			Logger = InLogger;
+			if (bInUpdateStatus)
 			{
 				Status = new LogStatusScope(InMessage);
 			}
@@ -54,7 +58,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		public void Dispose()
 		{
-			if(Status != null)
+			if (Status != null)
 			{
 				Status.Dispose();
 				Status = null;
@@ -75,9 +79,9 @@ namespace UnrealBuildTool
 				CurrentProgressString = ProgressString;
 				if (bWriteMarkup)
 				{
-					Log.WriteLine(LogEventType.Console, "@progress '{0}' {1}", Message, ProgressString);
+					Logger.LogInformation("@progress '{Message}' {ProgressString}", Message, ProgressString);
 				}
-				if(Status != null)
+				if (Status != null)
 				{
 					Status.SetProgress(ProgressString);
 				}

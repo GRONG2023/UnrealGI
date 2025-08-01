@@ -1,9 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FoliageTypeFactory.h"
-#include "AssetTypeCategories.h"
-#include "FoliageType_InstancedStaticMesh.h"
+
 #include "FoliageType_Actor.h"
+#include "FoliageType_InstancedStaticMesh.h"
+#include "Internationalization/Internationalization.h"
+#include "Templates/SubclassOf.h"
+
+class FFeedbackContext;
+class UClass;
+class UObject;
 
 #define LOCTEXT_NAMESPACE "FoliageTypeFactory"
 
@@ -18,6 +24,11 @@ UFoliageType_InstancedStaticMeshFactory::UFoliageType_InstancedStaticMeshFactory
 UObject* UFoliageType_InstancedStaticMeshFactory::FactoryCreateNew(UClass* Class, UObject* InParent, FName Name, EObjectFlags Flags, UObject* Context, FFeedbackContext* Warn)
 {
 	return NewObject<UFoliageType_InstancedStaticMesh>(InParent, Class, Name, Flags | RF_Transactional);
+}
+
+FString UFoliageType_InstancedStaticMeshFactory::GetDefaultNewAssetName() const
+{
+	return UFoliageType_InstancedStaticMesh::StaticClass()->GetDefaultObject<UFoliageType_InstancedStaticMesh>()->GetDefaultNewAssetName();
 }
 
 FText UFoliageType_InstancedStaticMeshFactory::GetToolTip() const
@@ -36,6 +47,11 @@ UFoliageType_ActorFactory::UFoliageType_ActorFactory(const FObjectInitializer& O
 UObject* UFoliageType_ActorFactory::FactoryCreateNew(UClass* Class, UObject* InParent, FName Name, EObjectFlags Flags, UObject* Context, FFeedbackContext* Warn)
 {
 	return NewObject<UFoliageType_Actor>(InParent, Class, Name, Flags | RF_Transactional);
+}
+
+FString UFoliageType_ActorFactory::GetDefaultNewAssetName() const
+{
+	return UFoliageType_Actor::StaticClass()->GetDefaultObject<UFoliageType_Actor>()->GetDefaultNewAssetName();
 }
 
 FText UFoliageType_ActorFactory::GetToolTip() const

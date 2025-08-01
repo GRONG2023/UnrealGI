@@ -3,6 +3,8 @@
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Vector.h"
 #include "AITypes.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardKeyType_Vector)
+
 const UBlackboardKeyType_Vector::FDataType UBlackboardKeyType_Vector::InvalidValue = FAISystem::InvalidLocation;
 
 UBlackboardKeyType_Vector::UBlackboardKeyType_Vector(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -55,7 +57,14 @@ bool UBlackboardKeyType_Vector::GetLocation(const UBlackboardComponent& OwnerCom
 
 void UBlackboardKeyType_Vector::InitializeMemory(UBlackboardComponent& OwnerComp, uint8* RawData)
 {
-	SetValue(this, RawData, FAISystem::InvalidLocation);
+	if (bUseDefaultValue)
+	{
+		SetValue(this, RawData, DefaultValue);
+	}
+	else
+	{
+		SetValue(this, RawData, InvalidValue);
+	}
 }
 
 bool UBlackboardKeyType_Vector::TestBasicOperation(const UBlackboardComponent& OwnerComp, const uint8* MemoryBlock, EBasicKeyOperation::Type Op) const
@@ -63,3 +72,4 @@ bool UBlackboardKeyType_Vector::TestBasicOperation(const UBlackboardComponent& O
 	const FVector Location = GetValue(this, MemoryBlock);
 	return (Op == EBasicKeyOperation::Set) ? FAISystem::IsValidLocation(Location) : !FAISystem::IsValidLocation(Location);
 }
+

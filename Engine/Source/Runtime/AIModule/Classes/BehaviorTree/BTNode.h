@@ -13,6 +13,7 @@
 #include "BTNode.generated.h"
 
 class AActor;
+class ISlateStyle;
 class UBehaviorTree;
 class UBlackboardData;
 class UBTCompositeNode;
@@ -33,53 +34,59 @@ struct FBTInstancedNodeMemory
 	int32 NodeIdx;
 };
 
-UCLASS(Abstract,config=Game)
-class AIMODULE_API UBTNode : public UObject, public IGameplayTaskOwnerInterface
+UCLASS(Abstract,config=Game, MinimalAPI)
+class UBTNode : public UObject, public IGameplayTaskOwnerInterface
 {
 	GENERATED_UCLASS_BODY()
 
-	virtual UWorld* GetWorld() const override;
+	AIMODULE_API virtual UWorld* GetWorld() const override;
 
 	/** fill in data about tree structure */
-	void InitializeNode(UBTCompositeNode* InParentNode, uint16 InExecutionIndex, uint16 InMemoryOffset, uint8 InTreeDepth);
+	AIMODULE_API void InitializeNode(UBTCompositeNode* InParentNode, uint16 InExecutionIndex, uint16 InMemoryOffset, uint8 InTreeDepth);
 
 	/** initialize any asset related data */
-	virtual void InitializeFromAsset(UBehaviorTree& Asset);
+	AIMODULE_API virtual void InitializeFromAsset(UBehaviorTree& Asset);
 	
-	/** initialize memory block */
-	virtual void InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const;
+	/** initialize memory block. InitializeNodeMemory template function is provided to help initialize the memory. */
+	AIMODULE_API virtual void InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const;
 
-	/** cleanup memory block */
-	virtual void CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const;
+	/** cleanup memory block. CleanupNodeMemory template function is provided to help cleanup the memory. */
+	AIMODULE_API virtual void CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const;
 
 	/** gathers description of all runtime parameters */
-	virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const;
+	AIMODULE_API virtual void DescribeRuntimeValues(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity, TArray<FString>& Values) const;
 
 	/** size of instance memory */
-	virtual uint16 GetInstanceMemorySize() const;
+	AIMODULE_API virtual uint16 GetInstanceMemorySize() const;
 
 	/** called when node instance is added to tree */
-	virtual void OnInstanceCreated(UBehaviorTreeComponent& OwnerComp);
+	AIMODULE_API virtual void OnInstanceCreated(UBehaviorTreeComponent& OwnerComp);
 
 	/** called when node instance is removed from tree */
-	virtual void OnInstanceDestroyed(UBehaviorTreeComponent& OwnerComp);
+	AIMODULE_API virtual void OnInstanceDestroyed(UBehaviorTreeComponent& OwnerComp);
 
 	/** called on creating subtree to set up memory and instancing */
-	void InitializeInSubtree(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, int32& NextInstancedIndex, EBTMemoryInit::Type InitType) const;
+	AIMODULE_API void InitializeInSubtree(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, int32& NextInstancedIndex, EBTMemoryInit::Type InitType) const;
 
 	/** called on removing subtree to cleanup memory */
-	void CleanupInSubtree(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const;
+	AIMODULE_API void CleanupInSubtree(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const;
 
 	/** size of special, hidden memory block for internal mechanics */
-	virtual uint16 GetSpecialMemorySize() const;
+	AIMODULE_API virtual uint16 GetSpecialMemorySize() const;
 
 #if USE_BEHAVIORTREE_DEBUGGER
 	/** fill in data about execution order */
-	void InitializeExecutionOrder(UBTNode* NextNode);
+	AIMODULE_API void InitializeExecutionOrder(UBTNode* NextNode);
 
 	/** @return next node in execution order */
-	UBTNode* GetNextNode() const;
+	AIMODULE_API UBTNode* GetNextNode() const;
 #endif
+
+	template<typename T>
+	T* InitializeNodeMemory(uint8* NodeMemory, EBTMemoryInit::Type InitType) const;
+
+	template <typename T>
+	void CleanupNodeMemory(uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const;
 
 	template<typename T>
 	T* GetNodeMemory(FBehaviorTreeSearchData& SearchData) const;
@@ -101,57 +108,63 @@ class AIMODULE_API UBTNode : public UObject, public IGameplayTaskOwnerInterface
 	T* GetSpecialNodeMemory(uint8* NodeMemory) const;
 
 	/** @return parent node */
-	UBTCompositeNode* GetParentNode() const;
+	AIMODULE_API UBTCompositeNode* GetParentNode() const;
 
 	/** @return name of node */
-	FString GetNodeName() const;
+	AIMODULE_API FString GetNodeName() const;
 
 	/** @return execution index */
-	uint16 GetExecutionIndex() const;
+	AIMODULE_API uint16 GetExecutionIndex() const;
 
 	/** @return memory offset */
-	uint16 GetMemoryOffset() const;
+	AIMODULE_API uint16 GetMemoryOffset() const;
 
 	/** @return depth in tree */
-	uint8 GetTreeDepth() const;
+	AIMODULE_API uint8 GetTreeDepth() const;
 
 	/** sets bIsInjected flag, do NOT call this function unless you really know what you are doing! */
-	void MarkInjectedNode();
+	AIMODULE_API void MarkInjectedNode();
 
 	/** @return true if node was injected by subtree */
-	bool IsInjected() const;
+	AIMODULE_API bool IsInjected() const;
 
 	/** sets bCreateNodeInstance flag, do NOT call this function on already pushed tree instance! */
-	void ForceInstancing(bool bEnable);
+	AIMODULE_API void ForceInstancing(bool bEnable);
 
 	/** @return true if node wants to be instanced */
-	bool HasInstance() const;
+	AIMODULE_API bool HasInstance() const;
 
 	/** @return true if this object is instanced node */
-	bool IsInstanced() const;
+	AIMODULE_API bool IsInstanced() const;
 
 	/** @return tree asset */
-	UBehaviorTree* GetTreeAsset() const;
+	AIMODULE_API UBehaviorTree* GetTreeAsset() const;
 
 	/** @return blackboard asset */
-	UBlackboardData* GetBlackboardAsset() const;
+	AIMODULE_API UBlackboardData* GetBlackboardAsset() const;
 
 	/** @return node instance if bCreateNodeInstance was set */
-	UBTNode* GetNodeInstance(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) const;
-	UBTNode* GetNodeInstance(FBehaviorTreeSearchData& SearchData) const;
+	AIMODULE_API UBTNode* GetNodeInstance(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) const;
+	AIMODULE_API UBTNode* GetNodeInstance(FBehaviorTreeSearchData& SearchData) const;
 
 	/** @return string containing description of this node instance with all relevant runtime values */
-	FString GetRuntimeDescription(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity) const;
+	AIMODULE_API FString GetRuntimeDescription(const UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTDescriptionVerbosity::Type Verbosity) const;
 
 	/** @return string containing description of this node with all setup values */
-	virtual FString GetStaticDescription() const;
+	AIMODULE_API virtual FString GetStaticDescription() const;
 
 #if WITH_EDITOR
+	/** Get the style set from which GetNodeIconName is queried */
+	AIMODULE_API virtual const ISlateStyle& GetNodeIconStyleSet() const;
+
 	/** Get the name of the icon used to display this node in the editor */
-	virtual FName GetNodeIconName() const;
+	AIMODULE_API virtual FName GetNodeIconName() const;
 
 	/** Get whether this node is using a blueprint for its logic */
-	virtual bool UsesBlueprint() const;
+	AIMODULE_API virtual bool UsesBlueprint() const;
+
+	/** Validates this node and returns the resulting error message. Empty means no error. */
+	AIMODULE_API virtual FString GetErrorMessage() const;
 
 	/** Called after creating new node in behavior tree editor, use for versioning */
 	virtual void OnNodeCreated() {}
@@ -161,14 +174,14 @@ class AIMODULE_API UBTNode : public UObject, public IGameplayTaskOwnerInterface
 	virtual void SetOwner(AActor* ActorOwner) {}
 
 	// BEGIN IGameplayTaskOwnerInterface
-	virtual UGameplayTasksComponent* GetGameplayTasksComponent(const UGameplayTask& Task) const override;
-	virtual AActor* GetGameplayTaskOwner(const UGameplayTask* Task) const override;
-	virtual AActor* GetGameplayTaskAvatar(const UGameplayTask* Task) const override;
-	virtual uint8 GetGameplayTaskDefaultPriority() const override;
-	virtual void OnGameplayTaskInitialized(UGameplayTask& Task) override;
+	AIMODULE_API virtual UGameplayTasksComponent* GetGameplayTasksComponent(const UGameplayTask& Task) const override;
+	AIMODULE_API virtual AActor* GetGameplayTaskOwner(const UGameplayTask* Task) const override;
+	AIMODULE_API virtual AActor* GetGameplayTaskAvatar(const UGameplayTask* Task) const override;
+	AIMODULE_API virtual uint8 GetGameplayTaskDefaultPriority() const override;
+	AIMODULE_API virtual void OnGameplayTaskInitialized(UGameplayTask& Task) override;
 	// END IGameplayTaskOwnerInterface
 
-	UBehaviorTreeComponent* GetBTComponentForTask(UGameplayTask& Task) const;
+	AIMODULE_API UBehaviorTreeComponent* GetBTComponentForTask(UGameplayTask& Task) const;
 	
 	template <class T>
 	T* NewBTAITask(UBehaviorTreeComponent& BTComponent)
@@ -176,6 +189,14 @@ class AIMODULE_API UBTNode : public UObject, public IGameplayTaskOwnerInterface
 		check(BTComponent.GetAIOwner());
 		bOwnsGameplayTasks = true;
 		return UAITask::NewAITask<T>(*BTComponent.GetAIOwner(), *this, TEXT("Behavior"));
+	}
+	
+	template <class T>
+	T* NewBTAITask(const UClass& Class, UBehaviorTreeComponent& BTComponent)
+	{
+		check(BTComponent.GetAIOwner());
+		bOwnsGameplayTasks = true;
+		return UAITask::NewAITask<T>(Class, *BTComponent.GetAIOwner(), *this, TEXT("Behavior"));
 	}
 
 	/** node name */
@@ -186,11 +207,11 @@ private:
 
 	/** source asset */
 	UPROPERTY()
-	UBehaviorTree* TreeAsset;
+	TObjectPtr<UBehaviorTree> TreeAsset;
 
 	/** parent node */
 	UPROPERTY()
-	UBTCompositeNode* ParentNode;
+	TObjectPtr<UBTCompositeNode> ParentNode;
 
 #if USE_BEHAVIORTREE_DEBUGGER
 	/** next node in execution order */
@@ -283,6 +304,28 @@ FORCEINLINE bool UBTNode::HasInstance() const
 FORCEINLINE bool UBTNode::IsInstanced() const
 {
 	return bIsInstanced;
+}
+
+template<typename T>
+T* UBTNode::InitializeNodeMemory(uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	if (InitType == EBTMemoryInit::Initialize)
+	{
+		new(NodeMemory) T();
+	}
+	return CastInstanceNodeMemory<T>(NodeMemory);
+}
+
+template <typename T>
+void UBTNode::CleanupNodeMemory(uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	if constexpr (!TIsTriviallyDestructible<T>::Value)
+	{
+		if (CleanupType == EBTMemoryClear::Destroy)
+		{
+			CastInstanceNodeMemory<T>(NodeMemory)->~T();
+		}
+	}
 }
 
 template<typename T>

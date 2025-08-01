@@ -6,18 +6,11 @@ public class WorldBrowser : ModuleRules
 {
     public WorldBrowser(ReadOnlyTargetRules Target) : base(Target)
     {
-        PublicIncludePaths.Add("Editor/WorldBrowser/Public");
-
-        PrivateIncludePaths.Add("Editor/WorldBrowser/Private");	// For PCH includes (because they don't work with relative paths, yet)
-
         PrivateIncludePathModuleNames.AddRange(
             new string[] {
                 "AssetRegistry",
 				"AssetTools",
-                "ContentBrowser",
-				"Landscape",
                 "MeshUtilities",
-                "MaterialUtilities",
                 "MeshMergeUtilities",
             }
         );
@@ -34,8 +27,10 @@ public class WorldBrowser : ModuleRules
 				"Landscape",
                 "Slate",
 				"SlateCore",
-                "EditorStyle",
-                "UnrealEd",
+                "EditorWidgets",
+                "ToolWidgets",
+				"EditorFramework",
+				"UnrealEd",
                 "GraphEditor",
                 "LevelEditor",
                 "PropertyEditor",
@@ -54,7 +49,9 @@ public class WorldBrowser : ModuleRules
                 "RHI",
                 "Json",
 				"ToolMenus",
-            }
+				"TypedElementRuntime",
+				"TypedElementFramework",
+			}
 		);
 
         DynamicallyLoadedModuleNames.AddRange(

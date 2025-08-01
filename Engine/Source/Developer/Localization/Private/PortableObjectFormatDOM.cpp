@@ -753,23 +753,23 @@ bool FPortableObjectFormatDOM::FromString( const FString& InStr, FText* OutError
 	return true;
 }
 
-void FPortableObjectFormatDOM::CreateNewHeader()
+void FPortableObjectFormatDOM::CreateNewHeader(  const FString& InCopyrightNotice )
 {
 	// Reference: http://www.gnu.org/software/gettext/manual/gettext.html#Header-Entry
 	// Reference: http://www.gnu.org/software/gettext/manual/html_node/Header-Entry.html
 
 	//Hard code some header entries for now in the following format
 	/*
-	# Engine English translation
-	# Copyright Epic Games, Inc. All Rights Reserved.
+	# {ProjectName} {LanguageName} translation
+	# {CopyrightNotice}
 	#
 	msgid ""
 	msgstr ""
-	"Project-Id-Version: Engine\n"
+	"Project-Id-Version: {ProjectName}\n"
 	"POT-Creation-Date: 2014-1-31 04:16+0000\n"
 	"PO-Revision-Date: 2014-1-31 04:16+0000\n"
 	"Language-Team: \n"
-	"Language: en-us\n"
+	"Language: {LanguageCode}\n"
 	"MIME-Version: 1.0\n"
 	"Content-Type: text/plain; charset=UTF-8\n"
 	"Content-Transfer-Encoding: 8bit\n"
@@ -790,7 +790,10 @@ void FPortableObjectFormatDOM::CreateNewHeader()
 	Header.SetEntryValue( TEXT("Plural-Forms"), Language.GetPluralForms() );
 
 	Header.Comments.Add( FString::Printf(TEXT("%s %s translation."), *GetProjectName(), *Language.EnglishName() ) );
-	Header.Comments.Add( TEXT("Copyright Epic Games, Inc. All Rights Reserved.") );
+	if (!InCopyrightNotice.IsEmpty())
+	{
+		Header.Comments.Add(InCopyrightNotice);
+	}
 	Header.Comments.Add( FString(TEXT("")) );
 }
 
@@ -848,9 +851,38 @@ void FPortableObjectFormatDOM::SortEntries()
 		EntryPair.Value->ReferenceComments.Sort();
 	}
 
-	// Sort by namespace, then keys, then source text.
+	// Sort by reference (source location) then namespace, then keys, then source text.
 	auto SortingPredicate = [](const TSharedPtr<FPortableObjectEntry>& A, const TSharedPtr<FPortableObjectEntry>& B) -> bool
 	{
+		// compare reference comment
+		const int32 ReferenceCommentCount = FMath::Max(A->ReferenceComments.Num(), B->ReferenceComments.Num());
+		for (int32 index = 0; index < ReferenceCommentCount; ++index)
+		{
+			// If A has no more comments, it is before B.
+			if (!A->ReferenceComments.IsValidIndex(index) && B->ReferenceComments.IsValidIndex(index))
+			{
+				return true;
+			}
+			// If B has no more comments, it is before A.
+			if (A->ReferenceComments.IsValidIndex(index) && !B->ReferenceComments.IsValidIndex(index))
+			{
+				return false;
+			}
+
+			check(A->ReferenceComments.IsValidIndex(index) && B->ReferenceComments.IsValidIndex(index));
+
+			// If A's reference is lexicographically less, it is before B.
+			if (A->ReferenceComments[index] < B->ReferenceComments[index])
+			{
+				return true;
+			}
+			// If B's comment is lexicographically less, it is before A.
+			if (A->ReferenceComments[index] > B->ReferenceComments[index])
+			{
+				return false;
+			}
+		}
+
 		// Compare namespace
 		if (A->MsgCtxt < B->MsgCtxt)
 		{

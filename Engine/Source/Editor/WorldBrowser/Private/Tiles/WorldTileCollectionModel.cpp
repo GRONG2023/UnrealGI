@@ -1,5 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "Tiles/WorldTileCollectionModel.h"
+
 #include "Misc/PackageName.h"
 #include "Components/PrimitiveComponent.h"
 #include "Misc/CoreDelegates.h"
@@ -21,7 +23,7 @@
 
 #include "Engine/WorldComposition.h"
 #include "IDetailsView.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "MeshUtilities.h"
 
 #include "StaticMeshAttributes.h"
@@ -47,6 +49,8 @@
 #include "IMeshReductionManagerModule.h"
 #include "IMeshMergeUtilities.h"
 #include "MeshMergeModule.h"
+#include "PrimitiveSceneProxy.h"
+#include "UObject/ObjectSaveContext.h"
 
 #define LOCTEXT_NAMESPACE "WorldBrowser"
 
@@ -71,8 +75,8 @@ FWorldTileCollectionModel::~FWorldTileCollectionModel()
 	GEditor->UnregisterForUndo(this);
 	FCoreDelegates::PreWorldOriginOffset.RemoveAll(this);
 	FCoreDelegates::PostWorldOriginOffset.RemoveAll(this);
-	FEditorDelegates::PreSaveWorld.RemoveAll(this);
-	FEditorDelegates::PostSaveWorld.RemoveAll(this);
+	FEditorDelegates::PreSaveWorldWithContext.RemoveAll(this);
+	FEditorDelegates::PostSaveWorldWithContext.RemoveAll(this);
 	FEditorDelegates::NewCurrentLevel.RemoveAll(this);
 }
 
@@ -86,8 +90,8 @@ void FWorldTileCollectionModel::Initialize(UWorld* InWorld)
 	GEditor->RegisterForUndo(this);
 	FCoreDelegates::PreWorldOriginOffset.AddSP(this, &FWorldTileCollectionModel::PreWorldOriginOffset);
 	FCoreDelegates::PostWorldOriginOffset.AddSP(this, &FWorldTileCollectionModel::PostWorldOriginOffset);
-	FEditorDelegates::PreSaveWorld.AddSP(this, &FWorldTileCollectionModel::OnPreSaveWorld);
-	FEditorDelegates::PostSaveWorld.AddSP(this, &FWorldTileCollectionModel::OnPostSaveWorld);
+	FEditorDelegates::PreSaveWorldWithContext.AddSP(this, &FWorldTileCollectionModel::OnPreSaveWorld);
+	FEditorDelegates::PostSaveWorldWithContext.AddSP(this, &FWorldTileCollectionModel::OnPostSaveWorld);
 	FEditorDelegates::NewCurrentLevel.AddSP(this, &FWorldTileCollectionModel::OnNewCurrentLevel);
 	BindCommands();
 			
@@ -533,10 +537,10 @@ void FWorldTileCollectionModel::FillAdjacentLandscapeSubMenu(FMenuBuilder& InMen
 {
 	const FLevelCollectionCommands& Commands = FLevelCollectionCommands::Get();
 
-	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelXNegative, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.DirectionXNegative"));
-	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelXPositive, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.DirectionXPositive"));
-	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelYNegative, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.DirectionYNegative"));
-	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelYPositive, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.DirectionYPositive"));
+	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelXNegative, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.DirectionXNegative"));
+	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelXPositive, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.DirectionXPositive"));
+	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelYNegative, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.DirectionYNegative"));
+	InMenuBuilder.AddMenuEntry(Commands.AddLandscapeLevelYPositive, NAME_None, TAttribute<FText>(), TAttribute<FText>(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.DirectionYPositive"));
 }
 
 void FWorldTileCollectionModel::FillReimportTiledLandscapeSubMenu(FMenuBuilder& InMenuBuilder) const
@@ -1188,7 +1192,7 @@ bool FWorldTileCollectionModel::AreAnySelectedLevelsHaveLandscape() const
 	return false;
 }
 
-FVector2D FWorldTileCollectionModel::SnapTranslationDelta(const FLevelModelList& InLevels, FVector2D InTranslationDelta, bool bBoundsSnapping, float InSnappingValue)
+FVector2D FWorldTileCollectionModel::SnapTranslationDelta(const FLevelModelList& InLevels, FVector2D InTranslationDelta, bool bBoundsSnapping, FVector2D::FReal InSnappingValue)
 {
 	for (auto It = InLevels.CreateConstIterator(); It; ++It)
 	{
@@ -1226,16 +1230,16 @@ FVector2D FWorldTileCollectionModel::SnapTranslationDelta(const FLevelModelList&
 						MovingLevelsBBoxExpected.Min.Y);
 	
 	// Test axis values
-	float TestPointsX1[4] = {	MovingLevelsBBoxExpected.Min.X, 
-								MovingLevelsBBoxExpected.Min.X, 
-								MovingLevelsBBoxExpected.Max.X, 
-								MovingLevelsBBoxExpected.Max.X 
+	float TestPointsX1[4] = {	(float)MovingLevelsBBoxExpected.Min.X, 
+								(float)MovingLevelsBBoxExpected.Min.X, 
+								(float)MovingLevelsBBoxExpected.Max.X, 
+								(float)MovingLevelsBBoxExpected.Max.X 
 	};
 
-	float TestPointsY1[4] = {	MovingLevelsBBoxExpected.Min.Y, 
-								MovingLevelsBBoxExpected.Min.Y, 
-								MovingLevelsBBoxExpected.Max.Y, 
-								MovingLevelsBBoxExpected.Max.Y 
+	float TestPointsY1[4] = {	(float)MovingLevelsBBoxExpected.Min.Y, 
+								(float)MovingLevelsBBoxExpected.Min.Y, 
+								(float)MovingLevelsBBoxExpected.Max.Y, 
+								(float)MovingLevelsBBoxExpected.Max.Y 
 	};
 	
 	for (auto It = StaticTileList.CreateConstIterator(); It; ++It)
@@ -1249,10 +1253,10 @@ FVector2D FWorldTileCollectionModel::SnapTranslationDelta(const FLevelModelList&
 		{
 
 			// Find closest X value
-			float TestPointsX2[4] = {	StaticLevelBBox.Min.X, 
-										StaticLevelBBox.Max.X, 
-										StaticLevelBBox.Min.X, 
-										StaticLevelBBox.Max.X 
+			FVector::FReal TestPointsX2[4] = {	(float)StaticLevelBBox.Min.X, 
+										(float)StaticLevelBBox.Max.X, 
+										(float)StaticLevelBBox.Min.X, 
+										(float)StaticLevelBBox.Max.X 
 			};
 
 			for (int32 i = 0; i < 4; i++)
@@ -1267,10 +1271,10 @@ FVector2D FWorldTileCollectionModel::SnapTranslationDelta(const FLevelModelList&
 			}
 			
 			// Find closest Y value
-			float TestPointsY2[4] = {	StaticLevelBBox.Min.Y, 
-										StaticLevelBBox.Max.Y, 
-										StaticLevelBBox.Min.Y, 
-										StaticLevelBBox.Max.Y 
+			float TestPointsY2[4] = {	(float)StaticLevelBBox.Min.Y, 
+										(float)StaticLevelBBox.Max.Y, 
+										(float)StaticLevelBBox.Min.Y, 
+										(float)StaticLevelBBox.Max.Y 
 			};
 
 			for (int32 i = 0; i < 4; i++)
@@ -1483,7 +1487,7 @@ static bool ReadHeightmapFile(TArray<uint16>& Result, const FString& Filename, i
 	ILandscapeEditorModule& LandscapeEditorModule = FModuleManager::GetModuleChecked<ILandscapeEditorModule>("LandscapeEditor");
 	const ILandscapeHeightmapFileFormat* HeightmapFormat = LandscapeEditorModule.GetHeightmapFormatByExtension(*FPaths::GetExtension(Filename, true));
 
-	FLandscapeHeightmapImportData ImportData = HeightmapFormat->Import(*Filename, {(uint32)ExpectedWidth, (uint32)ExpectedHeight});
+	FLandscapeHeightmapImportData ImportData = HeightmapFormat->Import(*Filename, NAME_None, {(uint32)ExpectedWidth, (uint32)ExpectedHeight});
 	if (ImportData.ResultCode != ELandscapeImportResult::Error)
 	{
 		Result = MoveTemp(ImportData.Data);
@@ -1608,7 +1612,7 @@ void FWorldTileCollectionModel::ImportTiledLandscape_Executed()
 		// Extract tile prefix
 		FString FolderName = FPaths::GetBaseFilename(ImportSettings.HeightmapFileList[0]);
 		int32 PrefixEnd = FolderName.Find(TEXT("_x"), ESearchCase::IgnoreCase, ESearchDir::FromEnd);
-		FolderName.LeftInline(PrefixEnd, false);
+		FolderName.LeftInline(PrefixEnd, EAllowShrinking::No);
 		WorldRootPath+= FolderName;
 		WorldRootPath+= TEXT("/");
 
@@ -1895,14 +1899,14 @@ void FWorldTileCollectionModel::ResetLevelOrigin_Executed()
 	RequestUpdateAllLevels();
 }
 
-void FWorldTileCollectionModel::OnPreSaveWorld(uint32 SaveFlags, UWorld* World)
+void FWorldTileCollectionModel::OnPreSaveWorld(UWorld* World, FObjectPreSaveContext ObjectSaveContext)
 {
 	// Levels during OnSave procedure might be moved to original position
 	// and then back to position with offset
 	bIsSavingLevel = true;
 }
 
-void FWorldTileCollectionModel::OnPostSaveWorld(uint32 SaveFlags, UWorld* World, bool bSuccess)
+void FWorldTileCollectionModel::OnPostSaveWorld(UWorld* World, FObjectPostSaveContext ObjectSaveContext)
 {
 	bIsSavingLevel = false;
 }
@@ -1995,15 +1999,15 @@ bool FWorldTileCollectionModel::GenerateLODLevels(FLevelModelList InLevelList, i
 		FString SourceShortPackageName = FPackageName::GetShortName(SourceLongPackageName);
 		// Target PackageName for generated level: /LongPackageName+LOD/ShortPackageName_LOD[LODIndex]
 		const FString LODLevelPackageName = FString::Printf(TEXT("%sLOD/%s_LOD%d"),	*SourceLongPackageName, *SourceShortPackageName, TargetLODIndex+1);
-		// Target level filename
-		const FString LODLevelFileName = FPackageName::LongPackageNameToFilename(LODLevelPackageName) + FPackageName::GetMapPackageExtension();
 
 		// Create a package for a LOD level
 		UPackage* LODPackage = CreatePackage( *LODLevelPackageName);
 		LODPackage->FullyLoad();
 		LODPackage->Modify();
 		// This is a hack to avoid save file dialog when we will be saving LOD map package
-		LODPackage->FileName = FName(*LODLevelFileName);
+		FPackagePath LODLevelPackagePath = FPackagePath::FromPackageNameChecked(LODLevelPackageName);
+		LODLevelPackagePath.SetHeaderExtension(EPackageExtension::Map);
+		LODPackage->SetLoadedPath(LODLevelPackagePath);
 
 		// This is current actors offset from their original position
 		FVector ActorsOffset = FVector(TileModel->GetAbsoluteLevelPosition() - GetWorld()->OriginLocation);
@@ -2169,12 +2173,14 @@ bool FWorldTileCollectionModel::GenerateLODLevels(FLevelModelList InLevelList, i
 			FMeshDescription* LandscapeRawMesh = StaticMesh->CreateMeshDescription(0);
 			FStaticMeshAttributes Attributes(*LandscapeRawMesh);
 		
-			Landscape->ExportToRawMesh(LandscapeLOD, *LandscapeRawMesh);
+			ALandscapeProxy::FRawMeshExportParams ExportParams;
+			ExportParams.ExportLOD = LandscapeLOD;
+			Landscape->ExportToRawMesh(ExportParams, *LandscapeRawMesh);
 		
-			TVertexAttributesRef<FVector> VertexPositions = Attributes.GetVertexPositions();
+			TVertexAttributesRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
 			for (const FVertexID VertexID : LandscapeRawMesh->Vertices().GetElementIDs())
 			{
-				VertexPositions[VertexID] -= LandscapeWorldLocation;
+				VertexPositions[VertexID] -= (FVector3f)LandscapeWorldLocation;
 			}
 
 			//Commit raw mesh and build the staticmesh
@@ -2241,8 +2247,8 @@ bool FWorldTileCollectionModel::GenerateLODLevels(FLevelModelList InLevelList, i
 				if (AssetInfo.SourceLandscape != nullptr)
 				{
 					ALandscapeMeshProxyActor* MeshActor = LODWorld->SpawnActor<ALandscapeMeshProxyActor>(Location, Rotation);
-					MeshActor->GetLandscapeMeshProxyComponent()->SetStaticMesh(AssetInfo.StaticMesh);
 					MeshActor->GetLandscapeMeshProxyComponent()->InitializeForLandscape(AssetInfo.SourceLandscape, AssetInfo.LandscapeLOD);
+					MeshActor->GetLandscapeMeshProxyComponent()->SetStaticMesh(AssetInfo.StaticMesh);			
 					MeshActor->SetActorLabel(AssetInfo.SourceLandscape->GetName());
 				}
 				else
@@ -2256,7 +2262,7 @@ bool FWorldTileCollectionModel::GenerateLODLevels(FLevelModelList InLevelList, i
 			// Save generated level
 			if (FEditorFileUtils::PromptToCheckoutLevels(false, LODWorld->PersistentLevel))
 			{
-				FEditorFileUtils::SaveLevel(LODWorld->PersistentLevel, LODLevelFileName);
+				FEditorFileUtils::SaveLevel(LODWorld->PersistentLevel, LODLevelPackagePath.GetLocalFullPath());
 				FAssetRegistryModule::AssetCreated(LODWorld);
 			}
 			

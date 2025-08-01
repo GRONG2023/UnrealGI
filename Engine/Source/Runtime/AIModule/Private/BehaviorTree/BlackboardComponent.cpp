@@ -17,7 +17,9 @@
 #include "BehaviorTree/Blackboard/BlackboardKeyType_String.h"
 #include "Misc/RuntimeErrors.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogBlackboard, Log, All);
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardComponent)
+
+DEFINE_LOG_CATEGORY(LogBlackboard);
 
 UBlackboardComponent::UBlackboardComponent(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -153,7 +155,10 @@ bool UBlackboardComponent::InitializeBlackboard(UBlackboardData& NewAsset)
 					KeyType->PreInitialize(*this);
 
 					const uint16 KeyMemory = KeyType->GetValueSize() + (KeyType->HasInstance() ? sizeof(FBlackboardInstancedKeyMemory) : 0);
-					InitList.Add(FBlackboardInitializationData(KeyIndex + It->GetFirstKeyID(), KeyMemory));
+					const int32 OffsetKey = KeyIndex + (int32)It->GetFirstKeyID();
+					check(FBlackboard::FKey(OffsetKey) != FBlackboard::InvalidKey);
+
+					InitList.Add(FBlackboardInitializationData(FBlackboard::FKey(OffsetKey), KeyMemory));
 				}
 			}
 		}
@@ -176,7 +181,10 @@ bool UBlackboardComponent::InitializeBlackboard(UBlackboardData& NewAsset)
 		for (int32 Index = 0; Index < InitList.Num(); Index++)
 		{
 			const FBlackboardEntry* KeyData = BlackboardAsset->GetKey(InitList[Index].KeyID);
-			KeyData->KeyType->InitializeKey(*this, InitList[Index].KeyID);
+			if (ensureMsgf(KeyData && KeyData->KeyType, TEXT("Too many elements in blackboard %s (%u)"),*GetNameSafe(BlackboardAsset), InitList.Num()))
+			{
+				KeyData->KeyType->InitializeKey(*this, InitList[Index].KeyID);
+			}
 		}
 
 		// naive initial synchronization with one of already instantiated blackboards using the same BB asset
@@ -203,8 +211,10 @@ void UBlackboardComponent::DestroyValues()
 			UBlackboardKeyType* KeyType = It->Keys[KeyIndex].KeyType;
 			if (KeyType)
 			{
-				const int32 UseIdx = KeyIndex + It->GetFirstKeyID();
-				uint8* KeyMemory = GetKeyRawData(UseIdx);
+				const int32 OffsetKey = KeyIndex + (int32)It->GetFirstKeyID();
+				check(FBlackboard::FKey(OffsetKey) != FBlackboard::InvalidKey);
+
+				uint8* KeyMemory = GetKeyRawData(FBlackboard::FKey(OffsetKey));
 				KeyType->WrappedFree(*this, KeyMemory);
 			}
 		}
@@ -227,27 +237,27 @@ void UBlackboardComponent::PopulateSynchronizedKeys()
 		UBlackboardComponent* OtherBlackboard = Iter.Value();
 		if (OtherBlackboard != nullptr && ShouldSyncWithBlackboard(*OtherBlackboard))
 		{
-			for (const auto& Key : BlackboardAsset->Keys)
+			for (const FBlackboardEntry& Key : BlackboardAsset->Keys)
 			{
 				if (Key.bInstanceSynced)
 				{
 					UBlackboardData* const OtherBlackboardAsset = OtherBlackboard->GetBlackboardAsset();
-					const int32 OtherKeyID = OtherBlackboardAsset ? OtherBlackboardAsset->GetKeyID(Key.EntryName) : FBlackboard::InvalidKey;
+					const FBlackboard::FKey OtherKeyID = OtherBlackboardAsset ? OtherBlackboardAsset->GetKeyID(Key.EntryName) : FBlackboard::InvalidKey;
 					if (OtherKeyID != FBlackboard::InvalidKey)
 					{
 						const FBlackboardEntry* const OtherKey = OtherBlackboard->GetBlackboardAsset()->GetKey(OtherKeyID);
 						check(Key.EntryName == OtherKey->EntryName);
-						check(Key.KeyType == OtherKey->KeyType);
+						check(Key.KeyType && OtherKey->KeyType && Key.KeyType->GetClass() == OtherKey->KeyType->GetClass());
 
 						const bool bKeyHasInstance = Key.KeyType->HasInstance();
 						const uint16 DataOffset = bKeyHasInstance ? sizeof(FBlackboardInstancedKeyMemory) : 0;
 
-						const int32 KeyID = BlackboardAsset->GetKeyID(Key.EntryName);
+						const FBlackboard::FKey KeyID = BlackboardAsset->GetKeyID(Key.EntryName);
 						uint8* RawData = GetKeyRawData(KeyID) + DataOffset;
 						uint8* RawSource = OtherBlackboard->GetKeyRawData(OtherKeyID) + DataOffset;
 
-						UBlackboardKeyType* KeyOb = bKeyHasInstance ? KeyInstances[KeyID] : Key.KeyType;
-						const UBlackboardKeyType* SourceKeyOb = bKeyHasInstance ? OtherBlackboard->KeyInstances[OtherKeyID] : Key.KeyType;
+						UBlackboardKeyType* KeyOb = bKeyHasInstance ? ToRawPtr(KeyInstances[KeyID]) : ToRawPtr(Key.KeyType);
+						const UBlackboardKeyType* SourceKeyOb = bKeyHasInstance ? ToRawPtr(OtherBlackboard->KeyInstances[OtherKeyID]) : ToRawPtr(Key.KeyType);
 
 						KeyOb->CopyValues(*this, RawData, SourceKeyOb, RawSource);
 					}
@@ -289,7 +299,7 @@ FBlackboard::FKey UBlackboardComponent::GetKeyID(const FName& KeyName) const
 
 TSubclassOf<UBlackboardKeyType> UBlackboardComponent::GetKeyType(FBlackboard::FKey KeyID) const
 {
-	return BlackboardAsset ? BlackboardAsset->GetKeyType(KeyID) : NULL;
+	return BlackboardAsset ? BlackboardAsset->GetKeyType(KeyID) : nullptr;
 }
 
 bool UBlackboardComponent::IsKeyInstanceSynced(FBlackboard::FKey KeyID) const
@@ -302,7 +312,7 @@ int32 UBlackboardComponent::GetNumKeys() const
 	return BlackboardAsset ? BlackboardAsset->GetNumKeys() : 0;
 }
 
-FDelegateHandle UBlackboardComponent::RegisterObserver(FBlackboard::FKey KeyID, UObject* NotifyOwner, FOnBlackboardChangeNotification ObserverDelegate)
+FDelegateHandle UBlackboardComponent::RegisterObserver(FBlackboard::FKey KeyID, const UObject* NotifyOwner, FOnBlackboardChangeNotification ObserverDelegate)
 {
 	for (auto It = Observers.CreateConstKeyIterator(KeyID); It; ++It)
 	{
@@ -349,7 +359,7 @@ void UBlackboardComponent::UnregisterObserver(FBlackboard::FKey KeyID, FDelegate
 	}
 }
 
-void UBlackboardComponent::UnregisterObserversFrom(UObject* NotifyOwner)
+void UBlackboardComponent::UnregisterObserversFrom(const UObject* NotifyOwner)
 {
 	for (auto It = ObserverHandles.CreateKeyIterator(NotifyOwner); It; ++It)
 	{
@@ -397,26 +407,9 @@ void UBlackboardComponent::ResumeObserverNotifications(bool bSendQueuedObserverN
 	QueuedUpdates.Empty();
 }
 
-void UBlackboardComponent::PauseUpdates()
-{
-	bPausedNotifies = true;
-}
-
-void UBlackboardComponent::ResumeUpdates()
-{
-	bPausedNotifies = false;
-
-	for (int32 UpdateIndex = 0; UpdateIndex < QueuedUpdates.Num(); UpdateIndex++)
-	{
-		NotifyObservers(QueuedUpdates[UpdateIndex]);
-	}
-
-	QueuedUpdates.Empty();
-}
-
 void UBlackboardComponent::NotifyObservers(FBlackboard::FKey KeyID) const
 {
-	TMultiMap<uint8, FOnBlackboardChangeNotificationInfo>::TKeyIterator KeyIt(Observers, KeyID);
+	TMultiMap<FBlackboard::FKey, FOnBlackboardChangeNotificationInfo>::TKeyIterator KeyIt(Observers, KeyID);
 
 	// checking it here mostly to avoid storing this update in QueuedUpdates while
 	// at this point no one observes it, and there can be someone added before QueuedUpdates
@@ -494,7 +487,7 @@ void UBlackboardComponent::NotifyObservers(FBlackboard::FKey KeyID) const
 	}
 }
 
-bool UBlackboardComponent::IsCompatibleWith(UBlackboardData* TestAsset) const
+bool UBlackboardComponent::IsCompatibleWith(const UBlackboardData* TestAsset) const
 {
 	for (UBlackboardData* It = BlackboardAsset; It; It = It->Parent)
 	{
@@ -517,7 +510,7 @@ EBlackboardCompare::Type UBlackboardComponent::CompareKeyValues(TSubclassOf<UBla
 	const uint8* KeyAMemory = GetKeyRawData(KeyA) + (KeyInstances[KeyA] ? sizeof(FBlackboardInstancedKeyMemory) : 0);
 	const uint8* KeyBMemory = GetKeyRawData(KeyB) + (KeyInstances[KeyB] ? sizeof(FBlackboardInstancedKeyMemory) : 0);
 
-	const UBlackboardKeyType* KeyAOb = KeyInstances[KeyA] ? KeyInstances[KeyA] : KeyType->GetDefaultObject<UBlackboardKeyType>();
+	const UBlackboardKeyType* KeyAOb = KeyInstances[KeyA] ? ToRawPtr(KeyInstances[KeyA]) : KeyType->GetDefaultObject<UBlackboardKeyType>();
 	return KeyAOb->CompareValues(*this, KeyAMemory, KeyInstances[KeyB], KeyBMemory);
 }
 
@@ -526,12 +519,15 @@ FString UBlackboardComponent::GetDebugInfoString(EBlackboardDescription::Type Mo
 	FString DebugString = FString::Printf(TEXT("Blackboard (asset: %s)\n"), *GetNameSafe(BlackboardAsset));
 
 	TArray<FString> KeyDesc;
-	uint8 Offset = 0;
+	int32 Offset = 0;
 	for (UBlackboardData* It = BlackboardAsset; It; It = It->Parent)
 	{
 		for (int32 KeyIndex = 0; KeyIndex < It->Keys.Num(); KeyIndex++)
 		{
-			KeyDesc.Add(DescribeKeyValue(KeyIndex + Offset, Mode));
+			const int32 OffsetKey = KeyIndex + Offset;
+			check(FBlackboard::FKey(OffsetKey) != FBlackboard::InvalidKey);
+
+			KeyDesc.Add(DescribeKeyValue(FBlackboard::FKey(OffsetKey), Mode));
 		}
 		Offset += It->Keys.Num();
 	}
@@ -548,14 +544,13 @@ FString UBlackboardComponent::GetDebugInfoString(EBlackboardDescription::Type Mo
 	{
 		DebugString += TEXT("Observed Keys:\n");
 
-		TArray<uint8> ObserversKeys;
+		TArray<FBlackboard::FKey> ObserversKeys;
 		if (Observers.Num() > 0)
 		{
 			Observers.GetKeys(ObserversKeys);
 
-			for (int32 KeyIndex = 0; KeyIndex < ObserversKeys.Num(); ++KeyIndex)
+			for (FBlackboard::FKey KeyID : ObserversKeys)
 			{
-				const FBlackboard::FKey KeyID = ObserversKeys[KeyIndex];
 				//@todo shouldn't be using a localized value?; GetKeyName() [10/11/2013 justin.sargent]
 				DebugString += FString::Printf(TEXT("  %s:\n"), *BlackboardAsset->GetKeyName(KeyID).ToString());
 			}
@@ -621,7 +616,10 @@ void UBlackboardComponent::DescribeSelfToVisLog(FVisualLogEntry* Snapshot) const
 			{
 				const FBlackboardEntry& Key = It->Keys[KeyIndex];
 
-				const uint8* ValueData = GetKeyRawData(It->GetFirstKeyID() + KeyIndex);
+				const int32 OffsetKey = (int32)It->GetFirstKeyID() + KeyIndex;
+				check(FBlackboard::FKey(OffsetKey) != FBlackboard::InvalidKey);
+
+				const uint8* ValueData = GetKeyRawData(FBlackboard::FKey(OffsetKey));
 				FString ValueDesc = Key.KeyType ? *(Key.KeyType->WrappedDescribeValue(*this, ValueData)) : TEXT("empty");
 
 				Category.Add(Key.EntryName.ToString(), ValueDesc);
@@ -799,7 +797,7 @@ void UBlackboardComponent::ClearValue(FBlackboard::FKey KeyID)
 					if (OtherBlackboard != nullptr && ShouldSyncWithBlackboard(*OtherBlackboard))
 					{
 						UBlackboardData* const OtherBlackboardAsset = OtherBlackboard->GetBlackboardAsset();
-						const int32 OtherKeyID = OtherBlackboardAsset ? OtherBlackboardAsset->GetKeyID(EntryInfo->EntryName) : FBlackboard::InvalidKey;
+						const FBlackboard::FKey OtherKeyID = OtherBlackboardAsset ? OtherBlackboardAsset->GetKeyID(EntryInfo->EntryName) : FBlackboard::InvalidKey;
 						if (OtherKeyID != FBlackboard::InvalidKey)
 						{
 							const FBlackboardEntry* OtherEntryInfo = OtherBlackboard->BlackboardAsset->GetKey(OtherKeyID);
@@ -899,3 +897,4 @@ bool UBlackboardComponent::GetRotationFromEntry(FBlackboard::FKey KeyID, FRotato
 
 	return false;
 }
+

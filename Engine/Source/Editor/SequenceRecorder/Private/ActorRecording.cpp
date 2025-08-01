@@ -134,7 +134,7 @@ bool UActorRecording::StartRecording(ULevelSequence* CurrentSequence, float Curr
 			if (EditorInstance)
 			{
 				UE_LOG(LogAnimation, Log, TEXT("Closing '%s' so we don't invalidate the open version when unloading it."), *TargetAnimation->GetName());
-				EditorInstance->CloseWindow();
+				EditorInstance->CloseWindow(EAssetEditorCloseReason::AssetUnloadingOrInvalid);
 			}
 		}
 
@@ -373,7 +373,7 @@ void UActorRecording::FindOrAddFolder(UMovieScene* MovieScene)
 	{
 		FolderToUse = NewObject<UMovieSceneFolder>(MovieScene, NAME_None, RF_Transactional);
 		FolderToUse->SetFolderName(FolderName);
-		MovieScene->GetRootFolders().Add(FolderToUse);
+		MovieScene->AddRootFolder(FolderToUse);
 	}
 
 	FolderToUse->AddChildObjectBinding(Guid);
@@ -475,8 +475,10 @@ void UActorRecording::StartRecordingActorProperties(ULevelSequence* CurrentSeque
 		{
 			if (bRecordToPossessable)
 			{ 
+				UWorld* World = Actor->GetWorld();
 				Guid = MovieScene->AddPossessable(ObjectBindingName, Actor->GetClass());
 				CurrentSequence->BindPossessableObject(Guid, *Actor, Actor->GetWorld());
+				MovieScene->FindPossessable(Guid)->FixupPossessedObjectClass(CurrentSequence, World);
 			}
 			else
 			{
@@ -641,7 +643,7 @@ TSharedPtr<FMovieSceneAnimationSectionRecorder> UActorRecording::StartRecordingC
 	FMovieScenePossessable* ChildPossessable = OwnerMovieScene->FindPossessable(PossessableGuid);
 	if (ensure(ChildPossessable))
 	{
-		ChildPossessable->SetParent(Guid);
+		ChildPossessable->SetParent(Guid, OwnerMovieScene);
 	}
 
 	FMovieSceneSpawnable* ParentSpawnable = OwnerMovieScene->FindSpawnable(Guid);
@@ -784,10 +786,10 @@ bool UActorRecording::StopRecording(ULevelSequence* OriginalSequence, float Curr
 	if (CurrentSequence && OriginalSequence && OriginalSequence != CurrentSequence)
 	{
 		UMovieScene* MovieScene = OriginalSequence->GetMovieScene();
-		UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(MovieScene->FindMasterTrack(UMovieSceneSubTrack::StaticClass()));
+		UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(MovieScene->FindTrack(UMovieSceneSubTrack::StaticClass()));
 		if (!SubTrack)
 		{
-			SubTrack = Cast<UMovieSceneSubTrack>(MovieScene->AddMasterTrack(UMovieSceneSubTrack::StaticClass()));
+			SubTrack = Cast<UMovieSceneSubTrack>(MovieScene->AddTrack(UMovieSceneSubTrack::StaticClass()));
 		}
 
 		// Remove the current take if it exists

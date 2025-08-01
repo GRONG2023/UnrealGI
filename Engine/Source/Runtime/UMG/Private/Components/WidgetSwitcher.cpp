@@ -4,6 +4,8 @@
 #include "SlateFwd.h"
 #include "Components/WidgetSwitcherSlot.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetSwitcher)
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
@@ -13,7 +15,7 @@ UWidgetSwitcher::UWidgetSwitcher(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bIsVariable = true;
-	Visibility = ESlateVisibility::SelfHitTestInvisible;
+	SetVisibilityInternal(ESlateVisibility::SelfHitTestInvisible);
 }
 
 void UWidgetSwitcher::ReleaseSlateResources(bool bReleaseChildren)
@@ -39,31 +41,44 @@ int32 UWidgetSwitcher::GetActiveWidgetIndex() const
 	{
 		return MyWidgetSwitcher->GetActiveWidgetIndex();
 	}
-
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	return ActiveWidgetIndex;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UWidgetSwitcher::SetActiveWidgetIndex(int32 Index)
 {
-	ActiveWidgetIndex = Index;
-	if ( MyWidgetSwitcher.IsValid() )
+	if (ActiveWidgetIndex != Index)
 	{
-		// Ensure the index is clamped to a valid range.
-		int32 SafeIndex = FMath::Clamp(ActiveWidgetIndex, 0, FMath::Max(0, Slots.Num() - 1));
-		MyWidgetSwitcher->SetActiveWidgetIndex(SafeIndex);
+		ActiveWidgetIndex = Index;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::ActiveWidgetIndex);
+		SetActiveWidgetIndexForSlateWidget();
 	}
 }
+
 
 void UWidgetSwitcher::SetActiveWidget(UWidget* Widget)
 {
-	ActiveWidgetIndex = GetChildIndex(Widget);
-	if ( MyWidgetSwitcher.IsValid() )
+	int32 NewIndex = GetChildIndex(Widget);
+	if (ActiveWidgetIndex != NewIndex)
+	{
+		ActiveWidgetIndex = NewIndex;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::ActiveWidgetIndex);
+		SetActiveWidgetIndexForSlateWidget();
+	}
+}
+
+void UWidgetSwitcher::SetActiveWidgetIndexForSlateWidget()
+{
+	if (MyWidgetSwitcher.IsValid())
 	{
 		// Ensure the index is clamped to a valid range.
 		int32 SafeIndex = FMath::Clamp(ActiveWidgetIndex, 0, FMath::Max(0, Slots.Num() - 1));
 		MyWidgetSwitcher->SetActiveWidgetIndex(SafeIndex);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 UWidget* UWidgetSwitcher::GetWidgetAtIndex( int32 Index ) const
 {
@@ -126,8 +141,7 @@ TSharedRef<SWidget> UWidgetSwitcher::RebuildWidget()
 void UWidgetSwitcher::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
-
-	SetActiveWidgetIndex(ActiveWidgetIndex);
+	SetActiveWidgetIndexForSlateWidget();
 }
 
 #if WITH_EDITOR
@@ -152,6 +166,7 @@ void UWidgetSwitcher::OnDescendantSelectedByDesigner(UWidget* DescendantWidget)
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UWidgetSwitcher::OnDescendantDeselectedByDesigner(UWidget* DescendantWidget)
 {
 	SetActiveWidgetIndex(ActiveWidgetIndex);
@@ -163,9 +178,11 @@ void UWidgetSwitcher::PostEditChangeProperty(struct FPropertyChangedEvent& Prope
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #endif
 
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

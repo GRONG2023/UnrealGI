@@ -6,9 +6,11 @@
 #include "LocalVertexFactory.h"
 #include "Containers/ResourceArray.h"
 #include "SceneManagement.h"
+#include "MaterialDomain.h"
 #include "MaterialShared.h"
 #include "Materials/Material.h"
 #include "RenderingThread.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "BaseMeshReconstructorModule.h"
 #include "MeshReconstructorBase.h"
 #include "AI/NavigationSystemHelpers.h"
@@ -17,8 +19,7 @@
 #include "PhysicsEngine/BodyInstance.h"
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "PhysicsPublic.h"
-#include "IPhysXCooking.h"
-#include "PhysXCookHelper.h"
+
 #include "Misc/RuntimeErrors.h"
 #include "Engine/Engine.h"
 #include "UObject/UObjectThreadContext.h"
@@ -26,17 +27,9 @@
 #include "UObject/ConstructorHelpers.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
-#if WITH_CHAOS
-	#include "Experimental/ChaosDerivedData.h"
-#endif
+#include "SceneInterface.h"
 
-// See ISpatialAcceleration.h, the header is not included to avoid having a dependency on Chaos
-#ifndef CHAOS_SERIALIZE_OUT
-#define CHAOS_SERIALIZE_OUT WITH_EDITOR
-#endif
-
-// When using the Chaos code path, we're using a private class FChaosDerivedDataCooker which is not exported
-#define SUPPORTS_PHYSICS_COOKING WITH_PHYSX && (PHYSICS_INTERFACE_PHYSX || (WITH_CHAOS && CHAOS_SERIALIZE_OUT && IS_MONOLITHIC))
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MRMeshComponent)
 
 DECLARE_CYCLE_STAT(TEXT("MrMesh SetCollisionProfileName"), STAT_MrMesh_SetCollisionProfileName, STATGROUP_Physics);
 DECLARE_CYCLE_STAT(TEXT("Update Collision"), STAT_UpdateCollision, STATGROUP_MRMESH);
@@ -84,15 +77,15 @@ class FMRMeshVertexBuffer : public FVertexBuffer
 {
 public:
 	int32 NumVerts = 0;
-	void InitRHIWith( const TArray<DataType>& PerVertexData )
+	void InitRHIWith(FRHICommandListBase& RHICmdList, const TArray<DataType>& PerVertexData )
 	{
 		NumVerts = PerVertexData.Num();
 
 		const uint32 SizeInBytes = PerVertexData.Num() * sizeof(DataType);
 
 		FMRMeshVertexResourceArray ResourceArray(PerVertexData.GetData(), SizeInBytes);
-		FRHIResourceCreateInfo CreateInfo(&ResourceArray);
-		VertexBufferRHI = RHICreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
+		FRHIResourceCreateInfo CreateInfo(TEXT("FMRMeshVertexBuffer"), &ResourceArray);
+		VertexBufferRHI = RHICmdList.CreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
 	}
 
 };
@@ -101,30 +94,34 @@ class FMRMeshIndexBuffer : public FIndexBuffer
 {
 public:
 	int32 NumIndices = 0;
-	void InitRHIWith( const TArray<uint32>& Indices )
+	void InitRHIWith(FRHICommandListBase& RHICmdList, const TArray<uint32>& Indices )
 	{
 		NumIndices = Indices.Num();
 
-		FRHIResourceCreateInfo CreateInfo;
-		void* Buffer = nullptr;
-		IndexBufferRHI = RHICreateAndLockIndexBuffer(sizeof(int32), Indices.Num() * sizeof(int32), BUF_Static, CreateInfo, Buffer);
+		const uint32 Size = Indices.Num() * sizeof(uint32);
+
+		FRHIResourceCreateInfo CreateInfo(TEXT("FMRMeshIndexBuffer"));
+		IndexBufferRHI = RHICmdList.CreateBuffer(Size, BUF_Static | BUF_IndexBuffer, sizeof(uint32), ERHIAccess::VertexOrIndexBuffer, CreateInfo);
 
 		// Write the indices to the index buffer.
-		FMemory::Memcpy(Buffer, Indices.GetData(), Indices.Num() * sizeof(int32));
-		RHIUnlockIndexBuffer(IndexBufferRHI);
+		void* Buffer = RHICmdList.LockBuffer(IndexBufferRHI, 0, Size, RLM_WriteOnly);
+		FMemory::Memcpy(Buffer, Indices.GetData(), Size);
+		RHICmdList.UnlockBuffer(IndexBufferRHI);
 	}
 
-	void InitRHIWith(const TArray<uint16>& Indices)
+	void InitRHIWith(FRHICommandListBase& RHICmdList, const TArray<uint16>& Indices)
 	{
 		NumIndices = Indices.Num();
 
-		FRHIResourceCreateInfo CreateInfo;
-		void* Buffer = nullptr;
-		IndexBufferRHI = RHICreateAndLockIndexBuffer(sizeof(uint16), Indices.Num() * sizeof(uint16), BUF_Static, CreateInfo, Buffer);
+		const uint32 Size = Indices.Num() * sizeof(uint16);
+
+		FRHIResourceCreateInfo CreateInfo(TEXT("FMRMeshIndexBuffer"));
+		IndexBufferRHI = RHICmdList.CreateBuffer(Size, BUF_Static | BUF_IndexBuffer, sizeof(uint16), ERHIAccess::VertexOrIndexBuffer, CreateInfo);
 
 		// Write the indices to the index buffer.
-		FMemory::Memcpy(Buffer, Indices.GetData(), Indices.Num() * sizeof(uint16));
-		RHIUnlockIndexBuffer(IndexBufferRHI);
+		void* Buffer = RHICmdList.LockBuffer(IndexBufferRHI, 0, Size, RLM_WriteOnly);
+		FMemory::Memcpy(Buffer, Indices.GetData(), Size);
+		RHICmdList.UnlockBuffer(IndexBufferRHI);
 	}
 };
 
@@ -136,7 +133,7 @@ struct FMRMeshProxySection
 	/** Which brick this section represents */
 	IMRMesh::FBrickId BrickId;
 	/** Position buffer */
-	FMRMeshVertexBuffer<FVector> PositionBuffer;
+	FMRMeshVertexBuffer<FVector3f> PositionBuffer;
 	/** Texture coordinates buffer */
 	FMRMeshVertexBuffer<FVector2D> UVBuffer;
 	/** Tangent space buffer */
@@ -187,13 +184,13 @@ static void InitVertexFactory(FLocalVertexFactory* VertexFactory, const FMRMeshP
 
 		{
 			NewData.PositionComponentSRV = MRMeshSection.PositionBufferSRV;
-			NewData.PositionComponent = FVertexStreamComponent(&MRMeshSection.PositionBuffer, 0, sizeof(FVector), VET_Float3, EVertexStreamUsage::Default);
+			NewData.PositionComponent = FVertexStreamComponent(&MRMeshSection.PositionBuffer, 0, sizeof(FVector3f), VET_Float3, EVertexStreamUsage::Default);
 		}
 
 		if (MRMeshSection.UVBuffer.NumVerts != 0)
 		{
 			NewData.TextureCoordinatesSRV = MRMeshSection.UVBufferSRV;
-			NewData.TextureCoordinates.Add(FVertexStreamComponent(&MRMeshSection.UVBuffer, 0, sizeof(FVector2D), VET_Float2, EVertexStreamUsage::ManualFetch));
+			NewData.TextureCoordinates.Add(FVertexStreamComponent(&MRMeshSection.UVBuffer, 0, sizeof(FVector2f), VET_Float2, EVertexStreamUsage::ManualFetch));
 			NewData.NumTexCoords = 1;
 		}
 
@@ -210,8 +207,8 @@ static void InitVertexFactory(FLocalVertexFactory* VertexFactory, const FMRMeshP
 			NewData.ColorComponent = FVertexStreamComponent(&MRMeshSection.ColorBuffer, 0, sizeof(FColor), VET_Color, EVertexStreamUsage::ManualFetch);
 		}
 
-		VertexFactory->SetData(NewData);
-		VertexFactory->InitResource();
+		VertexFactory->SetData(RHICmdList, NewData);
+		VertexFactory->InitResource(RHICmdList);
 	});
 }
 
@@ -249,6 +246,7 @@ public:
 	void RenderThread_UploadNewSection(IMRMesh::FSendBrickDataArgs Args)
 	{
 		check(IsInRenderingThread() || IsInRHIThread());
+		FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
 
 		FMRMeshProxySection* NewSection = new FMRMeshProxySection(Args.BrickId, FeatureLevel);
 		ProxySections.Add(NewSection);
@@ -261,49 +259,49 @@ public:
 
 		// POSITION BUFFER
 		{
-			NewSection->PositionBuffer.InitResource();
-			NewSection->PositionBuffer.InitRHIWith(Args.PositionData);
-			NewSection->PositionBufferSRV = RHICreateShaderResourceView(NewSection->PositionBuffer.VertexBufferRHI, sizeof(float), PF_R32_FLOAT);
+			NewSection->PositionBuffer.InitResource(RHICmdList);
+			NewSection->PositionBuffer.InitRHIWith(RHICmdList, Args.PositionData);
+			NewSection->PositionBufferSRV = RHICmdList.CreateShaderResourceView(NewSection->PositionBuffer.VertexBufferRHI, sizeof(float), PF_R32_FLOAT);
 		}
 
 		// TEXTURE COORDS BUFFER
 		{
-			NewSection->UVBuffer.InitResource();
+			NewSection->UVBuffer.InitResource(RHICmdList);
 			if (Args.UVData.Num())
 			{
-				NewSection->UVBuffer.InitRHIWith(Args.UVData);
-				NewSection->UVBufferSRV = RHICreateShaderResourceView(NewSection->UVBuffer.VertexBufferRHI, 8, PF_G32R32F);
+				NewSection->UVBuffer.InitRHIWith(RHICmdList, Args.UVData);
+				NewSection->UVBufferSRV = RHICmdList.CreateShaderResourceView(NewSection->UVBuffer.VertexBufferRHI, 8, PF_G32R32F);
 			}
 		}
 
 		// TANGENTS BUFFER
 		{
-			NewSection->TangentXZBuffer.InitResource();
+			NewSection->TangentXZBuffer.InitResource(RHICmdList);
 			if (Args.TangentXZData.Num())
 			{
-				NewSection->TangentXZBuffer.InitRHIWith(Args.TangentXZData);
+				NewSection->TangentXZBuffer.InitRHIWith(RHICmdList, Args.TangentXZData);
 			}
 
 			if (RHISupportsManualVertexFetch(GMaxRHIShaderPlatform))
 			{
-				NewSection->TangentXZBufferSRV = RHICreateShaderResourceView(NewSection->TangentXZBuffer.VertexBufferRHI, 4, PF_R8G8B8A8_SNORM);
+				NewSection->TangentXZBufferSRV = RHICmdList.CreateShaderResourceView(NewSection->TangentXZBuffer.VertexBufferRHI, 4, PF_R8G8B8A8_SNORM);
 			}
 		}
 
 		// COLOR
 		{
-			NewSection->ColorBuffer.InitResource();
+			NewSection->ColorBuffer.InitResource(RHICmdList);
 			if (Args.ColorData.Num())
 			{
-				NewSection->ColorBuffer.InitRHIWith(Args.ColorData);
-				NewSection->ColorBufferSRV = RHICreateShaderResourceView(NewSection->ColorBuffer.VertexBufferRHI, 4, PF_R8G8B8A8);
+				NewSection->ColorBuffer.InitRHIWith(RHICmdList, Args.ColorData);
+				NewSection->ColorBufferSRV = RHICmdList.CreateShaderResourceView(NewSection->ColorBuffer.VertexBufferRHI, 4, PF_R8G8B8A8);
 			}
 		}
 
 		// INDEX BUFFER
 		{
-			NewSection->IndexBuffer.InitResource();
-			NewSection->IndexBuffer.InitRHIWith(Args.Indices);
+			NewSection->IndexBuffer.InitResource(RHICmdList);
+			NewSection->IndexBuffer.InitRHIWith(RHICmdList, Args.Indices);
 		}
 
 		// VERTEX FACTORY
@@ -442,7 +440,7 @@ private:
 							Mesh.MaterialRenderProxy = MaterialProxy;
 
 							FDynamicPrimitiveUniformBuffer& DynamicPrimitiveUniformBuffer = Collector.AllocateOneFrameResource<FDynamicPrimitiveUniformBuffer>();
-							DynamicPrimitiveUniformBuffer.Set(GetLocalToWorld(), GetLocalToWorld(), InfiniteBounds, InfiniteBounds, true, false, DrawsVelocity(), false);
+							DynamicPrimitiveUniformBuffer.Set(Collector.GetRHICommandList(), GetLocalToWorld(), GetLocalToWorld(), InfiniteBounds, InfiniteBounds, true, false, AlwaysHasVelocity());
 							BatchElement.PrimitiveUniformBufferResource = &DynamicPrimitiveUniformBuffer.UniformBuffer;
 
 							BatchElement.FirstIndex = 0;
@@ -476,7 +474,7 @@ private:
 						const auto& BrickBounds = BrickVisibility.Value.Key;
 						FColor BoundsColor(BrickVisibility.Value.Value ? FColor::Green : ColorGray);
 						FPrimitiveDrawInterface *PDI = Collector.GetPDI(ViewIndex);
-						DrawWireBox(PDI, BrickBounds, BoundsColor, GetDepthPriorityGroup(Views[ViewIndex]));
+						DrawWireBox(PDI, BrickBounds, BoundsColor, (uint8)GetDepthPriorityGroup(Views[ViewIndex]));
 					}
 				}
 			}
@@ -496,7 +494,7 @@ private:
 		Result.bUsesLightingChannels = GetLightingChannelMask() != GetDefaultLightingChannelMask();
 		Result.bRenderCustomDepth = ShouldRenderCustomDepth();
 		TMicRecursionGuard RecursionGuard;
-		Result.bSeparateTranslucency = MaterialToUse->GetMaterial_Concurrent(RecursionGuard)->bEnableSeparateTranslucency;
+		Result.bSeparateTranslucency = MaterialToUse->GetMaterial_Concurrent(RecursionGuard)->TranslucencyPass == MTP_AfterDOF;
 		//MaterialRelevance.SetPrimitiveViewRelevance(Result);
 		return Result;
 	}
@@ -507,7 +505,7 @@ private:
 
 	uint32 GetAllocatedSize(void) const
 	{
-		return(FPrimitiveSceneProxy::GetAllocatedSize());
+		return((uint32)FPrimitiveSceneProxy::GetAllocatedSize());
 	}
 
 private:
@@ -546,9 +544,9 @@ void UMRMeshComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void UMRMeshComponent::OnActorEnableCollisionChanged()
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		BodyInstanceElement->UpdatePhysicsFilterData();
+		BodyHolderElement->BodyInstance.UpdatePhysicsFilterData();
 	}
 
 	Super::OnActorEnableCollisionChanged();
@@ -564,16 +562,16 @@ void UMRMeshComponent::SetCollisionEnabled(ECollisionEnabled::Type NewType)
 {
 	if (BodyInstance.GetCollisionEnabled() != NewType)
 	{
-		for (auto& BodyInstanceElement : BodyInstances)
+		for (auto& BodyHolderElement : BodyHolders)
 		{
-			BodyInstanceElement->SetCollisionEnabled(NewType);
+			BodyHolderElement->BodyInstance.SetCollisionEnabled(NewType);
 		}
 
 		if (IsRegistered() && BodyInstance.bSimulatePhysics && !IsWelded())
 		{
-			for (auto& BodyInstanceElement : BodyInstances)
+			for (auto& BodyHolderElement : BodyHolders)
 			{
-				BodyInstanceElement->ApplyWeldOnChildren();
+				BodyHolderElement->BodyInstance.ApplyWeldOnChildren();
 			}
 		}
 	}
@@ -589,16 +587,16 @@ void UMRMeshComponent::SetCollisionProfileName(FName InCollisionProfileName, boo
 	if (ThreadContext.ConstructedObject == this)
 	{
 		// If we are in our constructor, defer setup until PostInitProperties as derived classes
-		for (auto& BodyInstanceElement : BodyInstances)
+		for (auto& BodyHolderElement : BodyHolders)
 		{
-			BodyInstanceElement->SetCollisionProfileNameDeferred(InCollisionProfileName);
+			BodyHolderElement->BodyInstance.SetCollisionProfileNameDeferred(InCollisionProfileName);
 		}
 	}
 	else
 	{
-		for (auto& BodyInstanceElement : BodyInstances)
+		for (auto& BodyHolderElement : BodyHolders)
 		{
-			BodyInstanceElement->SetCollisionProfileName(InCollisionProfileName);
+			BodyHolderElement->BodyInstance.SetCollisionProfileName(InCollisionProfileName);
 		}
 	}
 
@@ -607,9 +605,9 @@ void UMRMeshComponent::SetCollisionProfileName(FName InCollisionProfileName, boo
 
 void UMRMeshComponent::SetCollisionObjectType(ECollisionChannel Channel)
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		BodyInstanceElement->SetObjectType(Channel);
+		BodyHolderElement->BodyInstance.SetObjectType(Channel);
 	}
 
 	Super::SetCollisionObjectType(Channel);
@@ -617,9 +615,9 @@ void UMRMeshComponent::SetCollisionObjectType(ECollisionChannel Channel)
 
 void UMRMeshComponent::SetCollisionResponseToChannel(ECollisionChannel Channel, ECollisionResponse NewResponse)
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		BodyInstanceElement->SetResponseToChannel(Channel, NewResponse);
+		BodyHolderElement->BodyInstance.SetResponseToChannel(Channel, NewResponse);
 	}
 
 	Super::SetCollisionResponseToChannel(Channel, NewResponse);
@@ -627,9 +625,9 @@ void UMRMeshComponent::SetCollisionResponseToChannel(ECollisionChannel Channel, 
 
 void UMRMeshComponent::SetCollisionResponseToAllChannels(enum ECollisionResponse NewResponse)
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		BodyInstanceElement->SetResponseToAllChannels(NewResponse);
+		BodyHolderElement->BodyInstance.SetResponseToAllChannels(NewResponse);
 	}
 
 	Super::SetCollisionResponseToAllChannels(NewResponse);
@@ -637,9 +635,9 @@ void UMRMeshComponent::SetCollisionResponseToAllChannels(enum ECollisionResponse
 
 void UMRMeshComponent::SetCollisionResponseToChannels(const FCollisionResponseContainer& NewResponses)
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		BodyInstanceElement->SetResponseToChannels(NewResponses);
+		BodyHolderElement->BodyInstance.SetResponseToChannels(NewResponses);
 	}
 
 	Super::SetCollisionResponseToChannels(NewResponses);
@@ -647,11 +645,11 @@ void UMRMeshComponent::SetCollisionResponseToChannels(const FCollisionResponseCo
 
 void UMRMeshComponent::UpdatePhysicsToRBChannels()
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		if (BodyInstanceElement->IsValidBodyInstance())
+		if (BodyHolderElement->BodyInstance.IsValidBodyInstance())
 		{
-			BodyInstanceElement->UpdatePhysicsFilterData();
+			BodyHolderElement->BodyInstance.UpdatePhysicsFilterData();
 		}
 	}
 
@@ -660,11 +658,11 @@ void UMRMeshComponent::UpdatePhysicsToRBChannels()
 
 void UMRMeshComponent::SetWalkableSlopeOverride(const FWalkableSlopeOverride& NewOverride)
 {
-	for (auto& BodyInstanceElement : BodyInstances)
+	for (auto& BodyHolderElement : BodyHolders)
 	{
-		if (BodyInstanceElement->IsValidBodyInstance())
+		if (BodyHolderElement->BodyInstance.IsValidBodyInstance())
 		{
-			BodyInstanceElement->SetWalkableSlopeOverride(NewOverride);
+			BodyHolderElement->BodyInstance.SetWalkableSlopeOverride(NewOverride);
 		}
 	}
 
@@ -717,41 +715,6 @@ void UMRMeshComponent::ClearAllBrickData()
 	FSimpleDelegateGraphTask::CreateAndDispatchWhenReady(ClearBrickDataTask, GET_STATID(STAT_UMRMeshComponent_ClearAllBrickData), nullptr, ENamedThreads::GameThread);
 }
 
-void UMRMeshComponent::CacheBodySetupHelper()
-{
-	CachedBodySetup = NewObject<UBodySetup>(this, NAME_None);
-	CachedBodySetup->BodySetupGuid = FGuid::NewGuid();
-	CachedBodySetup->bGenerateMirroredCollision = false;
-	CachedBodySetup->bHasCookedCollisionData = true;
-}
-
-UBodySetup* UMRMeshComponent::CreateBodySetupHelper()
-{
-	// The body setup in a template needs to be public since the property is Instanced and thus is the archetype of the instance meaning there is a direct reference
-	UBodySetup* NewBS = NewObject<UBodySetup>(this, NAME_None);
-	NewBS->BodySetupGuid = FGuid::NewGuid();
-	NewBS->bGenerateMirroredCollision = false;
-	NewBS->bHasCookedCollisionData = true;
-
-	// Copy the cached body setup (unless we are creating it)
-	if (CachedBodySetup == nullptr)
-	{
-		CacheBodySetupHelper();
-	}
-	NewBS->CopyBodyPropertiesFrom(CachedBodySetup);
-
-	return NewBS;
-}
-
-UBodySetup* UMRMeshComponent::GetBodySetup()
-{
-	if (CachedBodySetup == nullptr)
-	{
-		CacheBodySetupHelper();
-	}
-	return CachedBodySetup;
-}
-
 void UMRMeshComponent::SendBrickData_Internal(IMRMesh::FSendBrickDataArgs Args)
 {
 	check(IsInGameThread());
@@ -759,104 +722,78 @@ void UMRMeshComponent::SendBrickData_Internal(IMRMesh::FSendBrickDataArgs Args)
 	
 	OnBrickDataUpdatedDelegate.Broadcast(this, Args);
 
-#if SUPPORTS_PHYSICS_COOKING
 	UE_LOG(LogMrMesh, Log, TEXT("SendBrickData_Internal() processing brick %llu with %i triangles"), Args.BrickId, Args.Indices.Num() / 3);
 	
-	if (!IsPendingKill() && !bNeverCreateCollisionMesh)
+	// Collision generation.
+	if (IsValid(this) && !bNeverCreateCollisionMesh)
 	{
-		SCOPE_CYCLE_COUNTER(STAT_UpdateCollision);
-		// Physics update
-		UWorld* MyWorld = GetWorld();
-		if ( MyWorld && MyWorld->GetPhysicsScene() )
-		{
-			int32 BodyIndex = BodyIds.Find(Args.BrickId);
+			SCOPE_CYCLE_COUNTER(STAT_UpdateCollision);
 
-			if (bHasBrickData)
+			UWorld* World = GetWorld();
+			if (World && World->GetPhysicsScene())
 			{
-				bPhysicsStateCreated = true;
+				int32 BodyIndex = BodyIds.Find(Args.BrickId);
 
-				if (BodyIndex == INDEX_NONE)
+				if (bHasBrickData)
 				{
-					BodyIds.Add(Args.BrickId);
-					BodySetups.Add(CreateBodySetupHelper());
-					BodyInstances.Add(new FBodyInstance());
-					BodyIndex = BodyIds.Num() - 1;
+					bPhysicsStateCreated = true;
+
+					if (BodyIndex == INDEX_NONE)
+					{
+						TObjectPtr<UMRMeshBodyHolder> NewBodyHolder = NewObject<UMRMeshBodyHolder>(this, NAME_None, (IsTemplate() ? RF_Public | RF_ArchetypeObject : RF_NoFlags));
+						NewBodyHolder->Initialize(Args.BrickId);
+						BodyHolders.Add(NewBodyHolder);
+						BodyIndex = BodyIds.Add(Args.BrickId);
+					}
+
+					UMRMeshBodyHolder& BodyHolder = *BodyHolders[BodyIndex].Get();
+					check(BodyHolder.BrickId == Args.BrickId);
+
+					// Interrupt any in progress cook for this brick.
+					BodyHolder.AbortCook();
+
+					BodyHolder.Update(Args);
+
+					const bool bUseAsyncCook = bUseAsyncCooking && World->IsGameWorld();
+					if (bUseAsyncCook)
+					{
+						BodyHolder.bCookInProgress = true;
+						BodyHolder.BodySetup->CreatePhysicsMeshesAsync(FOnAsyncPhysicsCookFinished::CreateUObject(&BodyHolder, &UMRMeshBodyHolder::FinishPhysicsAsyncCook, BodyHolder.BodySetup.Get()));
+					}
+					else
+					{
+						// Also we want cooked data for this
+						BodyHolder.BodySetup->bHasCookedCollisionData = true;
+						BodyHolder.BodySetup->InvalidatePhysicsData();
+						BodyHolder.BodySetup->CreatePhysicsMeshes();
+						RecreatePhysicsState();
+
+						SuggestNavMeshUpdate();
+					}
+				}
+				else // !bHasBrickData
+				{
+					if (BodyIndex != INDEX_NONE)
+					{
+						RemoveBodyInstance(BodyIndex);
+
+						SuggestNavMeshUpdate();
+					}
+					else
+					{
+						// This brick already doesn't exist, so no work to be done.
+					}
 				}
 
-				UBodySetup* MyBS = BodySetups[BodyIndex];
-				MyBS->bHasCookedCollisionData = true;
-				MyBS->CollisionTraceFlag = CTF_UseComplexAsSimple;
-				MyBS->ClearPhysicsMeshes();
-				MyBS->InvalidatePhysicsData();
-
-#if PHYSICS_INTERFACE_PHYSX
-				FCookBodySetupInfo CookInfo;
-				// Disable mesh cleaning by passing in EPhysXMeshCookFlags::DeformableMesh
-				static const EPhysXMeshCookFlags CookFlags = EPhysXMeshCookFlags::FastCook | EPhysXMeshCookFlags::DeformableMesh;
-				MyBS->GetCookInfo(CookInfo, CookFlags);
-				CookInfo.bCookTriMesh = true;
-				CookInfo.TriMeshCookFlags = CookInfo.ConvexCookFlags = CookFlags;
-				CookInfo.TriangleMeshDesc.bFlipNormals = true;
-				CookInfo.TriangleMeshDesc.Vertices = Args.PositionData;
-				const int NumFaces = Args.Indices.Num() / 3;
-				CookInfo.TriangleMeshDesc.Indices.Reserve(Args.Indices.Num() / 3);
-				for (int i = 0; i < NumFaces; ++i)
-				{
-					CookInfo.TriangleMeshDesc.Indices.AddUninitialized(1);
-					CookInfo.TriangleMeshDesc.Indices[i].v0 = Args.Indices[3 * i + 0];
-					CookInfo.TriangleMeshDesc.Indices[i].v1 = Args.Indices[3 * i + 1];
-					CookInfo.TriangleMeshDesc.Indices[i].v2 = Args.Indices[3 * i + 2];
-				}
-
-				FPhysXCookHelper CookHelper(GetPhysXCookingModule());
-				CookHelper.CookInfo = CookInfo;
-				CookHelper.CreatePhysicsMeshes_Concurrent();
-
-				MyBS->FinishCreatingPhysicsMeshes_PhysX(CookHelper.OutNonMirroredConvexMeshes, CookHelper.OutMirroredConvexMeshes, CookHelper.OutTriangleMeshes);
-#else
-				// Chaos code path, save the temp pointers
-				TempPosition = &Args.PositionData;
-				TempIndices = &Args.Indices;
-				// It would be nice if we can call UBodySetup::CreatePhysicsMeshes directly, but currently that code path requires WITH_EDITOR
-				static const FName PhysicsFormatName(FPlatformProperties::GetPhysicsFormat());
-				// Build the collision data and saved it in a bulk data
-				FChaosDerivedDataCooker Cooker(MyBS, PhysicsFormatName);
-				TArray<uint8> OutData;
-				Cooker.Build(OutData);
-				FByteBulkData BulkData;
-				BulkData.Lock(LOCK_READ_WRITE);
-				FMemory::Memcpy(BulkData.Realloc(OutData.Num()), OutData.GetData(), OutData.Num());
-				BulkData.Unlock();
-				// Apply the collision data
-				MyBS->ProcessFormatData_Chaos(&BulkData);
-				// Clear the temp pointers since we don't own the data!
-				TempPosition = nullptr;
-				TempIndices = nullptr;
-#endif
-				FBodyInstance* MyBI = BodyInstances[BodyIndex];
-				MyBI->TermBody();
-				MyBI->InitBody(MyBS, GetComponentTransform(), this, MyWorld->GetPhysicsScene());
-				MyBI->CopyRuntimeBodyInstancePropertiesFrom(&BodyInstance);
 			}
 			else
 			{
-				if (BodyIndex != INDEX_NONE)
-				{
-					RemoveBodyInstance(BodyIndex);
-				}
-				else
-				{
-					// This brick already doesn't exist, so no work to be done.
-				}
+				// In A WORLD without physics you cannot COOK collision!
+				UE_LOG(LogMrMesh, Warning, TEXT("UMRMeshComponent::SendBrickData_Internal tried to cook collision without a world or in a world without physics!  No collision cooked."));
 			}
-		}
-		if (bHasBrickData && bUpdateNavMeshOnMeshUpdate && bHasCustomNavigableGeometry)
-		{
-			UpdateNavigationData();
-		}
 	}
-#endif // SUPPORTS_PHYSICS_COOKING
 
+	// Rendering generation
 	if (bCreateMeshProxySections)
 	{
 		if (SceneProxy != nullptr && GIsThreadedRendering)
@@ -884,10 +821,9 @@ void UMRMeshComponent::SendBrickData_Internal(IMRMesh::FSendBrickDataArgs Args)
 
 void UMRMeshComponent::RemoveBodyInstance(int32 BodyIndex)
 {
-	BodyInstances[BodyIndex]->TermBody();
-	delete BodyInstances[BodyIndex];
-	BodyInstances.RemoveAtSwap(BodyIndex);
-	BodySetups.RemoveAtSwap(BodyIndex);
+	auto& BH = BodyHolders[BodyIndex];
+	BH->Cleanup();
+	BodyHolders.RemoveAtSwap(BodyIndex);
 	BodyIds.RemoveAtSwap(BodyIndex);
 }
 
@@ -895,10 +831,10 @@ void UMRMeshComponent::OnUpdateTransform(EUpdateTransformFlags UpdateTransformFl
 {
 	Super::OnUpdateTransform(UpdateTransformFlags, Teleport);
 
-	for (FBodyInstance* BI : BodyInstances)
+	for (auto& BH : BodyHolders)
 	{
-		BI->SetBodyTransform(GetComponentTransform(), Teleport);
-		BI->UpdateBodyScale(GetComponentTransform().GetScale3D());
+		BH->BodyInstance.SetBodyTransform(GetComponentTransform(), Teleport);
+		BH->BodyInstance.UpdateBodyScale(GetComponentTransform().GetScale3D());
 	}
 }
 
@@ -979,19 +915,39 @@ bool UMRMeshComponent::DoCustomNavigableGeometryExport(FNavigableGeometryExport&
 {
 	check(bHasCustomNavigableGeometry);
 	
-	for (UBodySetup* BodySetup : BodySetups)
+	for (auto& BH : BodyHolders)
 	{
-		check(BodySetup);
-		GeomExport.ExportRigidBodySetup(*BodySetup, GetComponentTransform());
+		check(BH->BodySetup);
+		GeomExport.ExportRigidBodySetup(*BH->BodySetup, GetComponentTransform());
 	}
 
 	return false;
+}
+
+void UMRMeshComponent::SuggestNavMeshUpdate()
+{
+	bNavMeshUpdateSuggested = true;
+
+	if (bUpdateNavMeshOnMeshUpdate && bHasCustomNavigableGeometry)
+	{
+		bNavMeshUpdateSuggested = false;
+		UpdateNavigationData();
+	}
+}
+
+void UMRMeshComponent::RequestNavMeshUpdate()
+{
+	if (bNavMeshUpdateSuggested == true)
+	{
+		ForceNavMeshUpdate();
+	}
 }
 
 void UMRMeshComponent::ForceNavMeshUpdate()
 {
 	if (bHasCustomNavigableGeometry)
 	{
+		bNavMeshUpdateSuggested = false;
 		UpdateNavigationData();
 	}
 	else
@@ -1009,7 +965,7 @@ void UMRMeshComponent::Clear()
 struct FMeshArrayHolder :
 	public IMRMesh::FBrickDataReceipt
 {
-	TArray<FVector> Vertices;
+	TArray<FVector3f> Vertices;
 	TArray<MRMESH_INDEX_TYPE> Indices;
 	// Super wasteful of memory and perf, but the vertex factory requires these to be filled
 	// @todo Write a vertex factory that doesn't need all this overhead
@@ -1017,11 +973,51 @@ struct FMeshArrayHolder :
 	TArray<FPackedNormal> BogusTangents;
 	TArray<FColor> BogusColors;
 
+	FMeshArrayHolder(TArray<FVector3f>& InVertices, TArray<MRMESH_INDEX_TYPE>& InIndices, TArray<FVector2D>& UVData, TArray<FPackedNormal>& TangentXZData, TArray<FColor>& ColorData)
+		: Indices(MoveTemp(InIndices))
+	{
+		const int32 CurrentNumVertices = InVertices.Num();
+
+		// This constructor is a bit slower because it has to copy the vertices one by one to convert them from float to double.
+		Vertices.AddUninitialized(CurrentNumVertices);
+		for (int i = 0; i < CurrentNumVertices; i++)
+		{
+			Vertices[i] = InVertices[i];
+		}
+
+		if (UVData.Num() == CurrentNumVertices)
+		{
+			BogusUVs = MoveTemp(UVData);
+		}
+		else
+		{
+			BogusUVs.AddZeroed(CurrentNumVertices);
+		}
+
+		if (ColorData.Num() == CurrentNumVertices)
+		{
+			BogusColors = MoveTemp(ColorData);
+		}
+		else
+		{
+			BogusColors.AddZeroed(CurrentNumVertices);
+		}
+
+		if (TangentXZData.Num() == CurrentNumVertices * 2)
+		{
+			BogusTangents = MoveTemp(TangentXZData);
+		}
+		else
+		{
+			BogusTangents.AddZeroed(CurrentNumVertices * 2);
+		}
+	}
+
 	FMeshArrayHolder(TArray<FVector>& InVertices, TArray<MRMESH_INDEX_TYPE>& InIndices, TArray<FVector2D>& UVData, TArray<FPackedNormal>& TangentXZData, TArray<FColor>& ColorData)
 		: Vertices(MoveTemp(InVertices))
 		, Indices(MoveTemp(InIndices))
 	{
-		int32 CurrentNumVertices = Vertices.Num();
+		const int32 CurrentNumVertices = Vertices.Num();
 		
 		if (UVData.Num() == CurrentNumVertices)
 		{
@@ -1051,6 +1047,38 @@ struct FMeshArrayHolder :
 		}
 	}
 };
+
+void UMRMeshComponent::UpdateMesh(const FVector& InLocation, const FQuat& InRotation, const FVector& Scale, TArray<FVector3f>& Vertices, TArray<MRMESH_INDEX_TYPE>& Indices, TArray<FVector2D> UVData, TArray<FPackedNormal> TangentXZData, TArray<FColor> ColorData)
+{
+	SetRelativeLocationAndRotation(InLocation, InRotation);
+	SetRelativeScale3D(Scale);
+
+	// Create our struct that will hold the data until the render thread is done with it
+	TSharedPtr<FMeshArrayHolder, ESPMode::ThreadSafe> MeshHolder = MakeShared<FMeshArrayHolder>(Vertices, Indices, UVData, TangentXZData, ColorData);
+	// NOTE: Indices are empty due to MoveTemp()!!!
+	 
+	// Set a valid bounding box so meshes get correctly culled.
+	FBox bounds = FBox(ForceInit);
+	const int Num = Vertices.Num();
+	for (int i = 0; i < Num; i++)
+	{
+		bounds += (FVector)Vertices[i];
+	}
+	bounds = bounds.TransformBy(FTransform(InRotation.Rotator(), InLocation, Scale));
+
+	SendBrickData_Internal(IMRMesh::FSendBrickDataArgs
+		{
+			MeshHolder,
+			0,
+			MeshHolder->Vertices,
+			MeshHolder->BogusUVs,
+			MeshHolder->BogusTangents,
+			MeshHolder->BogusColors,
+			MeshHolder->Indices,
+			bounds
+		}
+	);
+}
 
 void UMRMeshComponent::UpdateMesh(const FVector& InLocation, const FQuat& InRotation, const FVector& Scale, TArray<FVector>& Vertices, TArray<MRMESH_INDEX_TYPE>& Indices, TArray<FVector2D> UVData, TArray<FPackedNormal> TangentXZData, TArray<FColor> ColorData)
 {
@@ -1137,37 +1165,120 @@ UMaterialInterface* UMRMeshComponent::GetMaterialToUse() const
 	}
 }
 
-bool UMRMeshComponent::GetPhysicsTriMeshData(struct FTriMeshCollisionData* CollisionData, bool InUseAllTriData)
+void UMRMeshBodyHolder::Initialize(IMRMesh::FBrickId InBrickId)
 {
-	if (TempPosition && TempIndices)
-	{
-		// Copy the vertices
-		CollisionData->Vertices = *TempPosition;
-		
-		// Copy the indices
-		const auto& Indices = *TempIndices;
-		CollisionData->Indices.Reset(Indices.Num() / 3);
-		for (auto Index = 0; Index < Indices.Num(); Index += 3)
-		{
-			FTriIndices Face;
-			Face.v0 = Indices[Index];
-			Face.v1 = Indices[Index + 1];
-			Face.v2 = Indices[Index + 2];
-			CollisionData->Indices.Add(Face);
-		}
-		
-		return true;
-	}
-	
-	return false;
+	check(BodySetup == nullptr);
+
+	BrickId = InBrickId;
+
+	BodySetup = NewObject<UBodySetup>(this, NAME_None, (IsTemplate() ? RF_Public | RF_ArchetypeObject : RF_NoFlags));
+	BodySetup->BodySetupGuid = FGuid::NewGuid();
+	BodySetup->bGenerateMirroredCollision = false;
+	BodySetup->bHasCookedCollisionData = true;
+	//BodySetup->bDoubleSidedGeometry = true;
+	BodySetup->CollisionTraceFlag = CTF_UseComplexAsSimple;
+
+	bCookInProgress = false;
 }
 
-bool UMRMeshComponent::ContainsPhysicsTriMeshData(bool InUseAllTriData) const
+void UMRMeshBodyHolder::Update(const IMRMesh::FSendBrickDataArgs& Args)
 {
-	if (TempPosition && TempIndices)
+	check(BodySetup != nullptr);
+	check(BrickId == Args.BrickId);
+	BrickDataReceipt = Args.BrickDataReceipt; // This would release hold on any previous receipt.
+	PositionData = &Args.PositionData;
+	Indices = &Args.Indices;
+	Bounds = Args.Bounds;
+}
+
+void UMRMeshBodyHolder::AbortCook()
+{
+	if (bCookInProgress)
 	{
+		BodySetup->AbortPhysicsMeshAsyncCreation();
+		bCookInProgress = false;
+
+		ReleaseArgData();
+	}
+}
+
+void UMRMeshBodyHolder::ReleaseArgData()
+{
+	// Null all the raw pointers and release our hold on the receipt.
+	PositionData = nullptr;
+	Indices = nullptr;
+	BrickDataReceipt.Reset();
+
+	// Leave the POD members alone.
+}
+
+void UMRMeshBodyHolder::Cleanup()
+{
+	AbortCook();
+	ReleaseArgData();
+
+	BodyInstance.TermBody();
+}
+
+bool UMRMeshBodyHolder::GetTriMeshSizeEstimates(struct FTriMeshCollisionDataEstimates& OutTriMeshEstimates, bool bInUseAllTriData) const
+{
+	if (BrickDataReceipt.IsValid() && Indices->Num() > 0)
+	{
+		OutTriMeshEstimates.VerticeCount = PositionData->Num();
+	}
+
+	return true;
+}
+
+bool UMRMeshBodyHolder::GetPhysicsTriMeshData(struct FTriMeshCollisionData* CollisionData, bool InUseAllTriData)
+{
+	if (BrickDataReceipt.IsValid() && Indices->Num() > 0)
+	{
+		// Copy the vertices
+		CollisionData->Vertices.AddUninitialized(PositionData->Num());
+		for (auto Position = 0; Position < PositionData->Num(); ++Position)
+		{
+			CollisionData->Vertices[Position] = (FVector3f)(*PositionData)[Position];
+		}
+
+		// Copy the indices
+		const auto& IndicesR = *Indices;
+		CollisionData->Indices.Reset(IndicesR.Num() / 3);
+		for (auto Index = 0; Index < IndicesR.Num(); Index += 3)
+		{
+			FTriIndices Face;
+			Face.v0 = IndicesR[Index];
+			Face.v1 = IndicesR[Index + 1];
+			Face.v2 = IndicesR[Index + 2];
+			CollisionData->Indices.Add(Face);
+		}
+
+		CollisionData->bFlipNormals = true;
+		CollisionData->bDeformableMesh = true;
+		CollisionData->bFastCook = true;
+
 		return true;
 	}
-	
+
 	return false;
 }
+bool UMRMeshBodyHolder::ContainsPhysicsTriMeshData(bool InUseAllTriData) const
+{
+	return (BrickDataReceipt.IsValid() && Indices->Num() > 0);
+}
+
+/** Once async physics cook is done, create needed state */
+void UMRMeshBodyHolder::FinishPhysicsAsyncCook(bool bSuccess, UBodySetup* FinishedBodySetup)
+{
+	UMRMeshComponent* MRMeshComponent = Cast<UMRMeshComponent>(GetOuter());
+	if (MRMeshComponent)
+	{
+		FTransform BodyTransform = MRMeshComponent->GetComponentTransform();
+		BodyInstance.TermBody();
+		BodyInstance.InitBody(BodySetup, BodyTransform, MRMeshComponent, GetWorld()->GetPhysicsScene());
+		BodyInstance.CopyRuntimeBodyInstancePropertiesFrom(MRMeshComponent->GetBodyInstance());
+
+		MRMeshComponent->SuggestNavMeshUpdate();
+	}
+}
+

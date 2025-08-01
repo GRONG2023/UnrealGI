@@ -7,6 +7,7 @@
 #include "Containers/Set.h"
 #include "Misc/MemStack.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RBFSolver)
 
 
 struct FRBFSolverData
@@ -48,18 +49,18 @@ void FRBFEntry::AddFromRotator(const FRotator& InRot)
 {
 	const int32 BaseIndex = Values.AddUninitialized(3);
 
-	Values[BaseIndex + 0] = InRot.Roll;
-	Values[BaseIndex + 1] = InRot.Pitch;
-	Values[BaseIndex + 2] = InRot.Yaw;
+	Values[BaseIndex + 0] = static_cast<float>(InRot.Roll);
+	Values[BaseIndex + 1] = static_cast<float>(InRot.Pitch);
+	Values[BaseIndex + 2] = static_cast<float>(InRot.Yaw);
 }
 
 void FRBFEntry::AddFromVector(const FVector& InVector)
 {
 	const int32 BaseIndex = Values.AddUninitialized(3);
 
-	Values[BaseIndex + 0] = InVector.X;
-	Values[BaseIndex + 1] = InVector.Y;
-	Values[BaseIndex + 2] = InVector.Z;
+	Values[BaseIndex + 0] = static_cast<float>(InVector.X);
+	Values[BaseIndex + 1] = static_cast<float>(InVector.Y);
+	Values[BaseIndex + 2] = static_cast<float>(InVector.Z);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -117,20 +118,20 @@ static float GetDistanceBetweenEntries(
 		switch (DistanceMetric)
 		{
 		case ERBFDistanceMethod::Euclidean:
-			Distance = RBFDistanceMetric::Euclidean(A.AsRotator(i), B.AsRotator(i));
+			Distance = static_cast<float>(RBFDistanceMetric::Euclidean(A.AsRotator(i), B.AsRotator(i)));
 			break;
 
 		case ERBFDistanceMethod::Quaternion:
-			Distance = RBFDistanceMetric::ArcLength(A.AsQuat(i), B.AsQuat(i));
+			Distance = static_cast<float>(RBFDistanceMetric::ArcLength(A.AsQuat(i), B.AsQuat(i)));
 			break;
 
 		case ERBFDistanceMethod::SwingAngle:
 		case ERBFDistanceMethod::DefaultMethod:
-			Distance += RBFDistanceMetric::SwingAngle(A.AsQuat(i), B.AsQuat(i), TwistAxis);
+			Distance += static_cast<float>(RBFDistanceMetric::SwingAngle(A.AsQuat(i), B.AsQuat(i), TwistAxis));
 			break;
 
 		case ERBFDistanceMethod::TwistAngle:
-			Distance += RBFDistanceMetric::TwistAngle(A.AsQuat(i), B.AsQuat(i), TwistAxis);
+			Distance += static_cast<float>(RBFDistanceMetric::TwistAngle(A.AsQuat(i), B.AsQuat(i), TwistAxis));
 			break;
 		}
 
@@ -152,8 +153,8 @@ float FRBFSolver::FindDistanceBetweenEntries(const FRBFEntry& A, const FRBFEntry
 
 // Sigma controls the falloff width. The larger the value the narrower the falloff
 static float GetWeightedValue(
-	float Value,
-	float KernelWidth,
+	float Value, 
+	float KernelWidth, 
 	ERBFFunctionType FalloffFunctionType,
 	bool bBackCompFix = false
 )
@@ -215,24 +216,24 @@ static float GetWeightedValue(
 
 static float GetOptimalKernelWidth(
 	const FRBFParams& Params,
-	const FVector& TwistAxis,
+	const FVector &TwistAxis,
 	const TArrayView<FRBFEntry>& Targets
-)
-{
-	float Sum = 0.0f;
-	int Count = 0;
-
-	for (const FRBFEntry& A : Targets)
+	)
 	{
-		for (const FRBFEntry& B : Targets)
+		float Sum = 0.0f;
+		int Count = 0;
+
+		for (const FRBFEntry& A : Targets)
 		{
-			if (&A != &B)
+			for (const FRBFEntry& B : Targets)
 			{
-				Sum += GetDistanceBetweenEntries(A, B, Params.DistanceMethod, TwistAxis);
+				if (&A != &B)
+				{
+					Sum += GetDistanceBetweenEntries(A, B, Params.DistanceMethod, TwistAxis);
 				Count++;
+				}
 			}
 		}
-	}
 
 	return Sum / float(Count);
 }
@@ -240,7 +241,7 @@ static float GetOptimalKernelWidth(
 static auto InterpolativeWeightFunction(
 	const FRBFParams& Params,
 	const TArrayView<FRBFEntry>& Targets
-)
+	)
 {
 	FVector TwistAxis = Params.GetTwistAxisVector();
 
@@ -249,7 +250,7 @@ static auto InterpolativeWeightFunction(
 	{
 		KernelWidth = GetOptimalKernelWidth(Params, TwistAxis, Targets);
 	}
-	else
+	else 
 	{
 		KernelWidth = FMath::DegreesToRadians(Params.Radius);
 	}
@@ -315,7 +316,7 @@ static void SolveAdditive(
 	const TArray<FRBFTarget>& Targets,
 	const FRBFEntry& Input,
 	float* AllWeights
-)
+	)
 {
 	// Iterate over each pose, adding its contribution
 	for (int32 TargetIdx = 0; TargetIdx < Targets.Num(); TargetIdx++)
@@ -447,46 +448,46 @@ void FRBFSolver::Solve(
 		{
 			switch (Params.NormalizeMethod)
 			{
-			case ERBFNormalizeMethod::OnlyNormalizeAboveOne:
-			{
-				break;
-			}
-			case ERBFNormalizeMethod::AlwaysNormalize:
-			{
-				WeightScale = 1.f / TotalWeight;
-				break;
-			}
-			case ERBFNormalizeMethod::NormalizeWithinMedian:
-			{
-				if (Params.MedianMax < Params.MedianMin)
+				case ERBFNormalizeMethod::OnlyNormalizeAboveOne:
 				{
 					break;
 				}
-
-				FRBFEntry MedianEntry;
-				while (Input.GetDimensions() > MedianEntry.GetDimensions())
-				{
-					MedianEntry.AddFromVector(Params.MedianReference);
-				}
-
-				float MedianDistance = FindDistanceBetweenEntries(Input, MedianEntry, Params);
-				if (MedianDistance > Params.MedianMax)
-				{
-					break;
-				}
-				if (MedianDistance <= Params.MedianMin)
+				case ERBFNormalizeMethod::AlwaysNormalize:
 				{
 					WeightScale = 1.f / TotalWeight;
 					break;
 				}
+				case ERBFNormalizeMethod::NormalizeWithinMedian:
+				{
+					if (Params.MedianMax < Params.MedianMin)
+					{
+						break;
+					}
 
-				float Bias = FMath::Clamp<float>((MedianDistance - Params.MedianMin) / (Params.MedianMax - Params.MedianMin), 0.f, 1.f);
-				WeightScale = FMath::Lerp<float>(1.f / TotalWeight, 1.f, Bias);
-				break;
-			}
+					FRBFEntry MedianEntry;
+					while (Input.GetDimensions() > MedianEntry.GetDimensions())
+					{
+						MedianEntry.AddFromVector(Params.MedianReference);
+					}
+					
+					float MedianDistance = FindDistanceBetweenEntries(Input, MedianEntry, Params);
+					if (MedianDistance > Params.MedianMax)
+					{
+						break;
+					}
+					if (MedianDistance <= Params.MedianMin)
+					{
+						WeightScale = 1.f / TotalWeight;
+						break;
+					}
+
+					float Bias = FMath::Clamp<float>((MedianDistance - Params.MedianMin) / (Params.MedianMax - Params.MedianMin), 0.f, 1.f);
+					WeightScale = FMath::Lerp<float>(1.f / TotalWeight, 1.f, Bias);
+					break;
+				}
 			}
 		}
-
+		
 		/// TotalWeight : (Params.bNormalizeWeightsBelowSumOfOne ? 1.f / TotalWeight : 1.f);
 		for (int32 TargetIdx = 0; TargetIdx < Targets.Num(); TargetIdx++)
 		{
@@ -564,3 +565,4 @@ float FRBFSolver::GetOptimalRadiusForTargets(const FRBFParams& Params, const TAr
 
 	return FMath::RadiansToDegrees(KernelWidth);
 }
+

@@ -6,16 +6,18 @@
 
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "GenericPlatform/GenericPlatformOutputDevices.h"
 
-struct CORE_API FUnixOutputDevices : public FGenericPlatformOutputDevices
+class FOutputDevice;
+class FOutputDeviceError;
+
+struct FUnixOutputDevices : public FGenericPlatformOutputDevices
 {
-	static void SetupOutputDevices();
-	static FString GetAbsoluteLogFilename();
-	static FOutputDevice* GetEventLog();
-	static FOutputDeviceError* GetError();
+	static CORE_API FString GetAbsoluteLogFilename();
+	static CORE_API FOutputDevice* GetEventLog();
+	static CORE_API FOutputDeviceError* GetError();
 };
 
 typedef FUnixOutputDevices FPlatformOutputDevices;

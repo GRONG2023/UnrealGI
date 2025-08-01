@@ -5,14 +5,14 @@
 #include "RenderingThread.h"
 #include "RenderUtils.h"
 
-FSlateFontTextureRHIResource::FSlateFontTextureRHIResource(uint32 InWidth, uint32 InHeight, const bool InIsGrayscale)
+FSlateFontTextureRHIResource::FSlateFontTextureRHIResource(uint32 InWidth, uint32 InHeight, ESlateFontAtlasContentType InContentType)
 	: Width(InWidth)
 	, Height(InHeight)
-	, bIsGrayscale(InIsGrayscale)
+	, ContentType(InContentType)
 {
 }
 
-void FSlateFontTextureRHIResource::InitDynamicRHI()
+void FSlateFontTextureRHIResource::InitRHI(FRHICommandListBase&)
 {
 	check( IsInRenderingThread() );
 
@@ -20,11 +20,31 @@ void FSlateFontTextureRHIResource::InitDynamicRHI()
 	if( Width > 0 && Height > 0 )
 	{
 		const EPixelFormat PixelFormat = GetRHIPixelFormat();
-		const ETextureCreateFlags TextCreateFlags = TexCreate_Dynamic | (bIsGrayscale ? TexCreate_None : TexCreate_SRGB);
 
 		check( !IsValidRef( ShaderResource) );
-		FRHIResourceCreateInfo CreateInfo;
-		ShaderResource = RHICreateTexture2D( Width, Height, PixelFormat, 1, 1, TextCreateFlags, CreateInfo );
+
+		const static FLazyName ClassName(TEXT("FSlateFontTextureRHIResource"));
+		FRHITextureCreateDesc Desc =
+			FRHITextureCreateDesc::Create2D(TEXT("FSlateFontTextureRHIResource"), Width, Height, PixelFormat)
+			.SetFlags(ETextureCreateFlags::Dynamic)
+			.SetClassName(ClassName);
+
+		switch (ContentType) {
+			case ESlateFontAtlasContentType::Alpha:
+			case ESlateFontAtlasContentType::Msdf:
+				break;
+			case ESlateFontAtlasContentType::Color:
+				Desc.AddFlags(ETextureCreateFlags::SRGB);
+				break;
+			default:
+				checkNoEntry();
+				// Default to Color
+				Desc.AddFlags(ETextureCreateFlags::SRGB);
+				break;
+		}
+
+		ShaderResource = RHICreateTexture(Desc);
+
 		check( IsValidRef( ShaderResource ) );
 
 		// Also assign the reference to the FTextureResource variable so that the Engine can access it
@@ -62,7 +82,7 @@ void FSlateFontTextureRHIResource::InitDynamicRHI()
 	}
 }
 
-void FSlateFontTextureRHIResource::ReleaseDynamicRHI()
+void FSlateFontTextureRHIResource::ReleaseRHI()
 {
 	check( IsInRenderingThread() );
 
@@ -79,15 +99,28 @@ void FSlateFontTextureRHIResource::ReleaseDynamicRHI()
 
 EPixelFormat FSlateFontTextureRHIResource::GetRHIPixelFormat() const
 {
-	return bIsGrayscale
-		? PF_A8
-		: PF_B8G8R8A8;
+	switch (ContentType) {
+		case ESlateFontAtlasContentType::Alpha:
+			return PF_A8;
+		case ESlateFontAtlasContentType::Color:
+		case ESlateFontAtlasContentType::Msdf:
+			return PF_B8G8R8A8;
+		default:
+			checkNoEntry();
+			// Default to Color
+			return PF_B8G8R8A8;
+	}
 }
 
-FSlateFontAtlasRHI::FSlateFontAtlasRHI(uint32 Width, uint32 Height, const bool InIsGrayscale)
-	: FSlateFontAtlas(Width, Height, InIsGrayscale) 
-	, FontTexture(new FSlateFontTextureRHIResource(Width, Height, InIsGrayscale))
+FSlateFontAtlasRHI::FSlateFontAtlasRHI(uint32 Width, uint32 Height, ESlateFontAtlasContentType InContentType, ESlateTextureAtlasPaddingStyle InPaddingStyle)
+	: FSlateFontAtlas(Width, Height, InContentType, InPaddingStyle)
+	, FontTexture(new FSlateFontTextureRHIResource(Width, Height, InContentType))
 {
+	if (InContentType == ESlateFontAtlasContentType::Msdf)
+	{
+		// Actually this should be done for all content types but to be safe, I want to avoid affecting non-MSDF code for now.
+		bNeedsUpdate = true;
+	}
 }
 
 FSlateFontAtlasRHI::~FSlateFontAtlasRHI()
@@ -107,12 +140,12 @@ void FSlateFontAtlasRHI::ConditionalUpdateTexture()
 	{
 		if (IsInRenderingThread())
 		{
-			FontTexture->InitResource();
+			FontTexture->InitResource(FRHICommandListImmediate::Get());
 
 			uint32 DestStride;
 			uint8* TempData = (uint8*)RHILockTexture2D( FontTexture->GetTypedResource(), 0, RLM_WriteOnly, /*out*/ DestStride, false );
 			// check( DestStride == Atlas.BytesPerPixel * Atlas.AtlasWidth ); // Temporarily disabling check
-			FMemory::Memcpy( TempData, AtlasData.GetData(), BytesPerPixel*AtlasWidth*AtlasHeight );
+			FMemory::Memcpy( TempData, AtlasData.GetData(), GetSlateFontAtlasContentBytesPerPixel(ContentType)*AtlasWidth*AtlasHeight );
 			RHIUnlockTexture2D( FontTexture->GetTypedResource(),0,false );
 		}
 		else
@@ -128,7 +161,7 @@ void FSlateFontAtlasRHI::ConditionalUpdateTexture()
 					uint32 DestStride;
 					uint8* TempData = (uint8*)RHILockTexture2D( Atlas->FontTexture->GetTypedResource(), 0, RLM_WriteOnly, /*out*/ DestStride, false );
 					// check( DestStride == Atlas.BytesPerPixel * Atlas.AtlasWidth ); // Temporarily disabling check
-					FMemory::Memcpy( TempData, Atlas->AtlasData.GetData(), Atlas->BytesPerPixel*Atlas->AtlasWidth*Atlas->AtlasHeight );
+					FMemory::Memcpy( TempData, Atlas->AtlasData.GetData(), GetSlateFontAtlasContentBytesPerPixel(Atlas->GetContentType())*Atlas->AtlasWidth*Atlas->AtlasHeight );
 					RHIUnlockTexture2D( Atlas->FontTexture->GetTypedResource(),0,false );
 				});
 		}
@@ -137,12 +170,12 @@ void FSlateFontAtlasRHI::ConditionalUpdateTexture()
 	}
 }
 
-FSlateFontTextureRHI::FSlateFontTextureRHI(const uint32 InWidth, const uint32 InHeight, const bool InIsGrayscale, const TArray<uint8>& InRawData)
-	: FontTexture(new FSlateFontTextureRHIResource(InWidth, InHeight, InIsGrayscale))
+FSlateFontTextureRHI::FSlateFontTextureRHI(const uint32 InWidth, const uint32 InHeight, ESlateFontAtlasContentType InContentType, const TArray<uint8>& InRawData)
+	: FontTexture(new FSlateFontTextureRHIResource(InWidth, InHeight, InContentType))
 {
 	if (IsInRenderingThread())
 	{
-		FontTexture->InitResource();
+		FontTexture->InitResource(FRHICommandListImmediate::Get());
 		UpdateTextureFromSource(InWidth, InHeight, InRawData);
 	}
 	else
@@ -176,7 +209,7 @@ void FSlateFontTextureRHI::ReleaseResources()
 
 void FSlateFontTextureRHI::UpdateTextureFromSource(const uint32 SourceWidth, const uint32 SourceHeight, const TArray<uint8>& SourceData)
 {
-	const uint32 BytesPerPixel = FontTexture->IsGrayscale() ? 1 : 4;
+	const uint32 BytesPerPixel = GetSlateFontAtlasContentBytesPerPixel(GetContentType());
 
 	uint32 DestStride;
 	uint8* LockedTextureData = static_cast<uint8*>(RHILockTexture2D(FontTexture->GetTypedResource(), 0, RLM_WriteOnly, /*out*/ DestStride, false));

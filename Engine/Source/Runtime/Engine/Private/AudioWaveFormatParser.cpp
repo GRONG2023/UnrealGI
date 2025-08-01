@@ -17,6 +17,12 @@
 
 bool ParseWaveFormatHeader(const uint8* InSrcBufferData, uint32 InSrcBufferDataSize, FWaveFormatInfo& OutHeader)
 {
+	if (!InSrcBufferData || InSrcBufferDataSize < sizeof(OutHeader.RiffWaveHeader))
+	{
+		UE_LOG(LogAudio, Error, TEXT("Failed to parse wave format header. Buffer data was null or empty."));
+		return false;
+	}
+
 	OutHeader.DataStartOffset = 0;
 
 	uint32 CurrByte = 0;
@@ -48,7 +54,7 @@ bool ParseWaveFormatHeader(const uint8* InSrcBufferData, uint32 InSrcBufferDataS
 		FChunkHeader ChunkHeader;
 		FMemory::Memcpy(&ChunkHeader, &InSrcBufferData[CurrByte], sizeof(FChunkHeader));
 
-		// Offset the byte index byt he sizeof chunk header
+		// Offset the byte index by the sizeof chunk header
 		CurrByte += sizeof(FChunkHeader);
 
 		// Now read which type of chunk this is and get the header info
@@ -121,7 +127,7 @@ bool ParseWaveFormatHeader(const uint8* InSrcBufferData, uint32 InSrcBufferDataS
 
 			default:
 			{
-				UE_LOG(LogAudio, Warning, TEXT("Wave file contained unknown RIFF chunk type (%d)"));
+				UE_LOG(LogAudio, Warning, TEXT("Wave file contained unknown RIFF chunk type (%d)"), ChunkHeader.ChunkId);
 			}
 			break;
 

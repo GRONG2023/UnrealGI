@@ -53,7 +53,7 @@ public:
 
 	//////////////////////////////////////////////////
 
-	/** @returns UI command list for the Networking Profiler manager. */
+	/** @return UI command list for the Networking Profiler manager. */
 	const TSharedRef<FUICommandList> GetCommandList() const;
 
 	/** @return an instance of the Networking Profiler commands. */
@@ -62,26 +62,28 @@ public:
 	/** @return an instance of the Networking Profiler action manager. */
 	static FNetworkingProfilerActionManager& GetActionManager();
 
-	void AddProfilerWindow(const TSharedRef<SNetworkingProfilerWindow>& InProfilerWindow)
+	/** @return the number of the "Networking Insights" windows currently available. */
+	int32 GetNumProfilerWindows() const
 	{
-		ProfilerWindows.Add(InProfilerWindow);
-	}
-
-	void RemoveProfilerWindow(const TSharedRef<SNetworkingProfilerWindow>& InProfilerWindow)
-	{
-		ProfilerWindows.Remove(InProfilerWindow);
+		return ProfilerWindows.Num();
 	}
 
 	/**
 	 * Converts profiler window weak pointer to a shared pointer and returns it.
 	 * Make sure the returned pointer is valid before trying to dereference it.
 	 */
-	TSharedPtr<class SNetworkingProfilerWindow> GetProfilerWindow(int32 Index) const
+	TSharedPtr<SNetworkingProfilerWindow> GetProfilerWindow(int32 Index) const
+	{
+		return (Index >= 0 && Index < ProfilerWindows.Num()) ? ProfilerWindows[Index].Pin() : nullptr;
+	}
+	TSharedPtr<SNetworkingProfilerWindow> GetProfilerWindowChecked(int32 Index) const
 	{
 		return ProfilerWindows[Index].Pin();
 	}
 
 	void OnSessionChanged();
+
+	const FName& GetLogListingName() const { return LogListingName; }
 
 private:
 	/** Binds our UI commands to delegates. */
@@ -98,6 +100,16 @@ private:
 	/** Updates this manager, done through FCoreTicker. */
 	bool Tick(float DeltaTime);
 
+	void AddProfilerWindow(const TSharedRef<SNetworkingProfilerWindow>& InProfilerWindow)
+	{
+		ProfilerWindows.Add(InProfilerWindow);
+	}
+
+	void RemoveProfilerWindow(const TSharedRef<SNetworkingProfilerWindow>& InProfilerWindow)
+	{
+		ProfilerWindows.Remove(InProfilerWindow);
+	}
+
 private:
 	bool bIsInitialized;
 	bool bIsAvailable;
@@ -107,7 +119,7 @@ private:
 	FTickerDelegate OnTick;
 
 	/** Handle to the registered OnTick. */
-	FDelegateHandle OnTickHandle;
+	FTSTicker::FDelegateHandle OnTickHandle;
 
 	/** List of UI commands for this manager. This will be filled by this and corresponding classes. */
 	TSharedRef<FUICommandList> CommandList;
@@ -120,4 +132,7 @@ private:
 
 	/** A shared pointer to the global instance of the NetworkingProfiler manager. */
 	static TSharedPtr<FNetworkingProfilerManager> Instance;
+
+	/** The name of the Networking Profiler log listing. */
+	FName LogListingName;
 };

@@ -16,6 +16,7 @@ namespace UnrealBuildTool.Rules
 				new string[] {
 					"CoreUObject",
 					"CurveEditor",
+					"EditorFramework",
 					"Engine",
 					"GraphEditor",
 					"InputBindingEditor",
@@ -26,7 +27,6 @@ namespace UnrealBuildTool.Rules
 					"UnrealEd",
                     "InternationalizationSettings",
 					"BlueprintGraph",
-                    "EditorStyle",
                     "Analytics",
                     "VREditor",
 					"ToolMenus"
@@ -36,12 +36,6 @@ namespace UnrealBuildTool.Rules
 			PrivateIncludePathModuleNames.AddRange(
 				new string[] {
 					"Settings",
-				}
-			);
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Editor/EditorSettingsViewer/Private",
 				}
 			);
 		}

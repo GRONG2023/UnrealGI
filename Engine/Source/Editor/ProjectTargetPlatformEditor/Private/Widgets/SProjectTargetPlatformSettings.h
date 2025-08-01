@@ -2,13 +2,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "HAL/Platform.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Interfaces/IProjectTargetPlatformEditorModule.h"
 
+class FText;
+class SWidget;
+namespace PlatformInfo { struct FTargetPlatformInfo; }
 struct FSlateBrush;
+
 enum class ECheckBoxState : uint8;
 
 class SProjectTargetPlatformSettings : public SCompoundWidget
@@ -34,5 +39,5 @@ private:
 	/** Handle the "enabled" checkbox state being changed for this platform */
 	void HandlePlatformCheckBoxStateChanged(ECheckBoxState InState, const FName PlatformName) const;
 
-	TArray<const PlatformInfo::FPlatformInfo*> AvailablePlatforms;
+	TArray<const PlatformInfo::FTargetPlatformInfo*> AvailablePlatforms;
 };

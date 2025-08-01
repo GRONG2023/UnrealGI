@@ -1,12 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Editor/UnrealEdEngine.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/CoreDelegates.h"
 #include "Misc/App.h"
+#include "Model.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/UObjectIterator.h"
 #include "Framework/Application/SlateApplication.h"
@@ -26,17 +27,18 @@
 #include "Components/ArrowComponent.h"
 #include "Components/BillboardComponent.h"
 #include "Components/BrushComponent.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/Selection.h"
 #include "Editor.h"
 #include "LevelEditorViewport.h"
+#include "EditorCommandLineUtils.h"
 #include "EditorModeRegistry.h"
 #include "EditorModeManager.h"
 #include "EditorModes.h"
+#include "Elements/Framework/EditorElements.h"
 #include "UnrealEdMisc.h"
 #include "UnrealEdGlobals.h"
 
-#include "Matinee/InterpData.h"
-#include "Matinee/MatineeActor.h"
 #include "Animation/AnimCompress.h"
 
 #include "EditorSupportDelegates.h"
@@ -44,7 +46,10 @@
 #include "EdMode.h"
 #include "PropertyEditorModule.h"
 #include "LevelEditor.h"
+#include "InstancedStaticMeshDelegates.h"
 #include "Interfaces/IMainFrameModule.h"
+#include "Settings/BlueprintEditorSettingsCustomization.h"
+#include "Settings/BlueprintEditorProjectSettingsCustomization.h"
 #include "Settings/EditorLoadingSavingSettingsCustomization.h"
 #include "Settings/GameMapsSettingsCustomization.h"
 #include "Settings/LevelEditorPlaySettingsCustomization.h"
@@ -53,7 +58,6 @@
 #include "StatsViewerModule.h"
 #include "SnappingUtils.h"
 #include "PackageAutoSaver.h"
-#include "DDCNotifications.h"
 #include "PerformanceMonitor.h"
 #include "BSPOps.h"
 #include "SourceCodeNavigation.h"
@@ -68,6 +72,19 @@
 #include "Logging/MessageLog.h"
 #include "Misc/MessageDialog.h"
 #include "Logging/MessageLog.h"
+#include "Subsystems/EditorActorSubsystem.h"
+#include "ProfilingDebugging/StallDetector.h"
+#include "Settings/EditorStyleSettings.h"
+#include "ISettingsModule.h"
+#include "Settings/EditorStyleSettingsCustomization.h"
+#include "GameMapsSettings.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "ObjectTools.h"
+#include "Cooker/ExternalCookOnTheFlyServer.h"
+#include "ISettingsSection.h"
+#include "DirectoryWatcherModule.h"
+#include "IDirectoryWatcher.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUnrealEdEngine, Log, All);
 
@@ -75,6 +92,10 @@ DEFINE_LOG_CATEGORY_STATIC(LogUnrealEdEngine, Log, All);
 void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 {
 	Super::Init(InEngineLoop);
+
+	RegisterEditorElements();
+
+	RebuildTemplateMapData();
 
 	// Display warnings to the user about disk space issues
 	ValidateFreeDiskSpace();
@@ -99,9 +120,19 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 	// Set-up the initial set of content mount paths to check for write permision
 	TArray<FString> RootPaths;
 	FPackageName::QueryRootContentPaths(RootPaths);
+	int32 RootPathIndex = 0;
+	FDirectoryWatcherModule* DirectoryWatcherModule = FModuleManager::GetModulePtr<FDirectoryWatcherModule>(TEXT("DirectoryWatcher"));
+	IDirectoryWatcher* DirectoryWatcher = DirectoryWatcherModule ? DirectoryWatcherModule->Get() : nullptr;
+
 	for (const FString& RootPath : RootPaths)
 	{
 		VerifyMountPointWritePermission(*RootPath);
+		// We're writing files to test the write permission, and this will send file events to the directory watcher. Tick
+		// every few writes so that we don't overflow the directory watcher's buffer and cause a FCA_RescanRequired event.
+		if (DirectoryWatcher && ((++RootPathIndex) % 10) == 0)
+		{
+			DirectoryWatcher->Tick(-1.0f);
+		}
 	}
 	// Watch for new content mount paths
 	FPackageName::OnContentPathMounted().AddUObject(this, &UUnrealEdEngine::OnContentPathMounted);
@@ -118,7 +149,8 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 	FEditorSupportDelegates::PreWindowsMessage.AddUObject(this, &UUnrealEdEngine::OnPreWindowsMessage);
 	FEditorSupportDelegates::PostWindowsMessage.AddUObject(this, &UUnrealEdEngine::OnPostWindowsMessage);
 
-	USelection::SelectionChangedEvent.AddUObject(this, &UUnrealEdEngine::OnEditorSelectionChanged);
+	FHierarchicalInstancedStaticMeshDelegates::OnTreeBuilt.AddUObject(this, &UUnrealEdEngine::OnHISMTreeBuilt);
+	USelection::SelectionElementSelectionPtrChanged.AddUObject(this, &UUnrealEdEngine::OnEditorElementSelectionPtrChanged);
 
 	// Initialize the snap manager
 	FSnappingUtils::InitEditorSnappingTools();
@@ -129,8 +161,6 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 	// Iterate over all always fully loaded packages and load them.
 	if (!IsRunningCommandlet())
 	{
-		DDCNotifications.Reset(new FDDCNotifications);
-
 		for( int32 PackageNameIndex=0; PackageNameIndex<PackagesToBeFullyLoadedAtStartup.Num(); PackageNameIndex++ )
 		{
 			const FString& PackageName = PackagesToBeFullyLoadedAtStartup[PackageNameIndex];
@@ -156,6 +186,8 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 
 	if (FPaths::IsProjectFilePathSet() && GIsEditor && !FApp::IsUnattended())
 	{
+
+		UE_SCOPED_ENGINE_ACTIVITY(TEXT("Initializing AutoReimportManager"));
 		AutoReimportManager = NewObject<UAutoReimportManager>();
 		AutoReimportManager->Initialize();
 	}
@@ -165,13 +197,48 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 	{
 		FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
+		PropertyModule.RegisterCustomClassLayout("BlueprintEditorSettings", FOnGetDetailCustomizationInstance::CreateStatic(&FBlueprintEditorSettingsCustomization::MakeInstance));
+		PropertyModule.RegisterCustomClassLayout("BlueprintEditorProjectSettings", FOnGetDetailCustomizationInstance::CreateStatic(&FBlueprintEditorProjectSettingsCustomization::MakeInstance));
 		PropertyModule.RegisterCustomClassLayout("EditorLoadingSavingSettings", FOnGetDetailCustomizationInstance::CreateStatic(&FEditorLoadingSavingSettingsCustomization::MakeInstance));
 		PropertyModule.RegisterCustomClassLayout("GameMapsSettings", FOnGetDetailCustomizationInstance::CreateStatic(&FGameMapsSettingsCustomization::MakeInstance));
 		PropertyModule.RegisterCustomClassLayout("LevelEditorPlaySettings", FOnGetDetailCustomizationInstance::CreateStatic(&FLevelEditorPlaySettingsCustomization::MakeInstance));
 		PropertyModule.RegisterCustomClassLayout("ProjectPackagingSettings", FOnGetDetailCustomizationInstance::CreateStatic(&FProjectPackagingSettingsCustomization::MakeInstance));
 
 		PropertyModule.RegisterCustomPropertyTypeLayout("LevelEditorPlayNetworkEmulationSettings", FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FLevelEditorPlayNetworkEmulationSettingsDetail::MakeInstance));
-		
+
+
+		UEditorStyleSettings* Settings = GetMutableDefault<UEditorStyleSettings>();
+		ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings"); 
+	
+
+		if (SettingsModule != nullptr)
+		{
+			ISettingsSectionPtr StyleSettingsPtr = SettingsModule->RegisterSettings("Editor", "General", "Appearance",
+				NSLOCTEXT("UnrealEd", "Appearance_UserSettingsName", "Appearance"),
+				NSLOCTEXT("UnrealEd", "Appearance_UserSettingsDescription", "Customize the look of the editor."),
+				Settings
+			);
+
+			StyleSettingsPtr->OnImport().BindUObject(Settings, &UEditorStyleSettings::OnImportBegin);
+			StyleSettingsPtr->OnExport().BindUObject(Settings, &UEditorStyleSettings::OnExportBegin);
+		} 
+
+
+		FPropertyEditorModule& PropertyEditorModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		PropertyEditorModule.RegisterCustomClassLayout("EditorStyleSettings", FOnGetDetailCustomizationInstance::CreateStatic(&FEditorStyleSettingsCustomization::MakeInstance));
+		PropertyEditorModule.RegisterCustomPropertyTypeLayout("StyleColorList", FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FStyleColorListCustomization::MakeInstance));
+
+	}
+
+	// Set the UE_EditorUIPid variable; must be set before constructing the UCookOnTheFlyServer
+	if (!IsRunningCommandlet())
+	{
+		FString ParentPid = FPlatformMisc::GetEnvironmentVariable(GEditorUIPidVariable);
+		if (ParentPid.IsEmpty())
+		{
+			FPlatformMisc::SetEnvironmentVar(GEditorUIPidVariable,
+				*LexToString(FPlatformProcess::GetCurrentProcessId()));
+		}
 	}
 
 	if (!IsRunningCommandlet())
@@ -197,13 +264,21 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 
 			CookServer = NewObject<UCookOnTheFlyServer>();
 			CookServer->Initialize(ECookMode::CookOnTheFlyFromTheEditor, BaseCookingFlags);
-			CookServer->StartNetworkFileServer(false);
+
+			UCookOnTheFlyServer::FCookOnTheFlyStartupOptions CookOnTheFlyStartupOptions;
+			CookOnTheFlyStartupOptions.bBindAnyPort = false;
+			CookOnTheFlyStartupOptions.bZenStore = GetDefault<UProjectPackagingSettings>()->bUseZenStore;
+			CookServer->StartCookOnTheFly(CookOnTheFlyStartupOptions);
 		}
 		else if (!ExperimentalSettings->bDisableCookInEditor)
 		{
 			CookServer = NewObject<UCookOnTheFlyServer>();
 			CookServer->Initialize(ECookMode::CookByTheBookFromTheEditor, BaseCookingFlags);
 		}
+
+#if WITH_COTF
+		ExternalCookOnTheFlyServer = new FExternalCookOnTheFlyServer();
+#endif
 	}
 
 	if (FParse::Param(FCommandLine::Get(), TEXT("nomcp")))
@@ -213,6 +288,26 @@ void UUnrealEdEngine::Init(IEngineLoop* InEngineLoop)
 	}
 
 	bPivotMovedIndependently = false;
+
+#if STALL_DETECTOR
+	// Start tracking stalls when we open the Main Frame
+	IMainFrameModule::Get().OnMainFrameCreationFinished().AddWeakLambda(this, [this](TSharedPtr<SWindow>, bool)
+		{
+			bRequiresStallDetectorShutdown = true;
+			UE::FStallDetector::Startup();
+		});
+
+	// Stop tracking stalls when we close the Main Frame, the closest event around
+	OnEditorClose().AddLambda([this]()
+		{
+			// We conditionally shutdown here because for now there is no UnreadEdEngine specific shutdown 
+			bRequiresStallDetectorShutdown = false;
+			if (UE::FStallDetector::IsRunning())
+			{
+				UE::FStallDetector::Shutdown();
+			}
+		});
+#endif
 }
 
 bool CanCookForPlatformInThisProcess( const FString& PlatformName )
@@ -234,10 +329,7 @@ bool CanCookForPlatformInThisProcess( const FString& PlatformName )
 	}
 	ConfigSetting = IniValueString.ToBool();
 
-	// this was stolen from void IsMobileHDR()
-	static TConsoleVariableData<int32>* MobileHDRCvar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.MobileHDR"));
-	const bool CurrentRSetting = MobileHDRCvar->GetValueOnAnyThread() == 1;
-
+	const bool CurrentRSetting = IsMobileHDR();
 	if ( CurrentRSetting != ConfigSetting )
 	{
 		UE_LOG(LogUnrealEdEngine, Warning, TEXT("Unable to use cook in editor because r.MobileHDR from Engine ini doesn't match console value r.MobileHDR"));
@@ -288,6 +380,10 @@ void UUnrealEdEngine::StartCookByTheBookInEditor( const TArray<ITargetPlatform*>
 	StartupOptions.CookDirectories = CookDirectories;
 	StartupOptions.CookCultures = CookCultures;
 	StartupOptions.IniMapSections = IniMapSections;
+	if (GetDefault<UProjectPackagingSettings>()->bUseZenStore)
+	{
+		StartupOptions.CookOptions |= ECookByTheBookOptions::ZenStore;
+	}
 
 	CookServer->StartCookByTheBook( StartupOptions );
 }
@@ -374,18 +470,37 @@ void UUnrealEdEngine::PreExit()
 {
 	FAssetSourceFilenameCache::Get().Shutdown();
 
+	ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
+
+	if (SettingsModule != nullptr)
+	{
+		SettingsModule->UnregisterSettings("Editor", "General", "Appearance");
+	}
+
+
 	Super::PreExit();
 }
 
-
+// Disable deprecated property warnings which are accessed when destructed here
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 UUnrealEdEngine::~UUnrealEdEngine()
 {
 	if (this == GUnrealEd)
 	{
 		GUnrealEd = NULL; 
 	}
-}
 
+#if STALL_DETECTOR
+	// Handle cases where OnEditorClose() was not called such as UE_LOG fatal errors or any call to RequestEngineExit()
+	// Without this stall detector thread will continue to run until it crashes trying to access cleaned up critical section
+	if (bRequiresStallDetectorShutdown && UE::FStallDetector::IsRunning())
+	{
+		bRequiresStallDetectorShutdown = false;
+		UE::FStallDetector::Shutdown();
+	}
+#endif // STALL_DETECTOR
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UUnrealEdEngine::FinishDestroy()
 {
@@ -395,6 +510,12 @@ void UUnrealEdEngine::FinishDestroy()
 		FCoreUObjectDelegates::OnObjectModified.RemoveAll(CookServer);
 	}
 
+	if (ExternalCookOnTheFlyServer)
+	{
+		delete ExternalCookOnTheFlyServer;
+		ExternalCookOnTheFlyServer = nullptr;
+	}
+
 	if(PackageAutoSaver.Get())
 	{
 		// We've finished shutting down, so disable the auto-save restore
@@ -402,11 +523,14 @@ void UUnrealEdEngine::FinishDestroy()
 		PackageAutoSaver.Reset();
 	}
 
-	DDCNotifications.Reset();
-
 	if( PerformanceMonitor )
 	{
 		delete PerformanceMonitor;
+	}
+
+	if (ISourceControlModule* SourceControlModule = FModuleManager::GetModulePtr<ISourceControlModule>(FName("SourceControl")))
+	{
+		SourceControlModule->UnregisterFilesDeleted(SourceControlFilesDeletedHandle);
 	}
 
 	FPackageName::OnContentPathMounted().RemoveAll(this);
@@ -425,7 +549,7 @@ void UUnrealEdEngine::Tick(float DeltaSeconds, bool bIdleMode)
 	// Increment the "seconds since last autosave" counter, then try to autosave.
 	if (!GSlowTaskOccurred)
 	{
-		// Don't increment autosave count while in game/pie/automation testing or while in Matinee
+		// Don't increment autosave count while in game/pie/automation testing
 		const bool PauseAutosave = (PlayWorld != nullptr) || GIsAutomationTesting;
 		if (!PauseAutosave && PackageAutoSaver.Get())
 		{
@@ -479,13 +603,14 @@ void UUnrealEdEngine::OnPackageDirtyStateUpdated( UPackage* Pkg)
 
 		if( !bIsAutoSaving && 
 			!GIsEditorLoadingPackage && // Don't ask if the package was modified as a result of a load
-			!GIsCookerLoadingPackage)   // don't ask if the package was modified as a result of a cooker load
+			!GIsCookerLoadingPackage && // don't ask if the package was modified as a result of a cooker load
+			!(Package->GetPackageFlags() & PKG_CompiledIn)) // don't ask if the package is a script package (changes are saved elsewhere via config files)
 		{
 			PackagesDirtiedThisTick.Add(Package);
 
 			const UEditorLoadingSavingSettings* Settings = GetDefault<UEditorLoadingSavingSettings>();
 			if (!bAlreadyAsked && // Don't ask if we already asked once!
-				(Settings->bPromptForCheckoutOnAssetModification || Settings->bAutomaticallyCheckoutOnAssetModification))
+				Settings->bPromptForCheckoutOnAssetModification)
 			{
 				PackageToNotifyState.Add(Package, NS_Updating);
 			}
@@ -501,6 +626,8 @@ void UUnrealEdEngine::OnPackageDirtyStateUpdated( UPackage* Pkg)
 
 void UUnrealEdEngine::AttemptModifiedPackageNotification()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UUnrealEdEngine::AttemptModifiedPackageNotification);
+
 	bool bIsCooking = CookServer && CookServer->IsCookingInEditor() && CookServer->IsCookByTheBookRunning();
 
 	if (bShowPackageNotification && !bIsCooking)
@@ -527,14 +654,18 @@ void UUnrealEdEngine::AttemptModifiedPackageNotification()
 
 				// if we do not have write permission under the mount point for this package log an error in the message log to link to.
 				PackageName = Package->GetName();
-				if (!HasMountWritePersmissionForPackage(PackageName))
+				if (!HasMountWritePermissionForPackage(PackageName))
 				{
 					bShowWritePermissionWarning = true;
 					EditorLog.Warning(FText::Format(NSLOCTEXT("UnrealEd", "WritePermissionFailureLog", "Insufficient writing permission to save {0}"), FText::FromString(PackageName)));
 				}
 			}
 		}
-		SourceControlProvider.Execute(ISourceControlOperation::Create<FUpdateStatus>(), SourceControlHelpers::AbsoluteFilenames(Files), EConcurrency::Asynchronous, FSourceControlOperationComplete::CreateUObject(this, &UUnrealEdEngine::OnSourceControlStateUpdated, Packages));
+
+		if (Files.Num() > 0)
+		{
+			SourceControlProvider.Execute(ISourceControlOperation::Create<FUpdateStatus>(), SourceControlHelpers::AbsoluteFilenames(Files), EConcurrency::Asynchronous, FSourceControlOperationComplete::CreateUObject(this, &UUnrealEdEngine::OnSourceControlStateUpdated, Packages));
+		}
 	}
 	
 	if (bShowWritePermissionWarning)
@@ -573,9 +704,6 @@ void UUnrealEdEngine::OnSourceControlStateUpdated(const FSourceControlOperationR
 		// Get the source control state of the package
 		ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 
-		TArray<TWeakObjectPtr<UPackage>> PackagesToAutomaticallyCheckOut;
-		TArray<FString> FilesToAutomaticallyCheckOut;
-
 		const UEditorLoadingSavingSettings* Settings = GetDefault<UEditorLoadingSavingSettings>();
 		for (const TWeakObjectPtr<UPackage>& PackagePtr : Packages)
 		{
@@ -596,12 +724,7 @@ void UUnrealEdEngine::OnSourceControlStateUpdated(const FSourceControlOperationR
 						}
 						else
 						{
-							if (Settings->bAutomaticallyCheckoutOnAssetModification)
-							{
-								PackagesToAutomaticallyCheckOut.Add(PackagePtr);
-								FilesToAutomaticallyCheckOut.Add(SourceControlHelpers::PackageFilename(Package));
-							}
-							else
+							if (!Settings->GetAutomaticallyCheckoutOnAssetModification())
 							{
 								PackageToNotifyState.Add(PackagePtr, NS_PendingPrompt);
 								bShowPackageNotification = true;
@@ -615,11 +738,6 @@ void UUnrealEdEngine::OnSourceControlStateUpdated(const FSourceControlOperationR
 					}
 				}
 			}
-		}
-
-		if (FilesToAutomaticallyCheckOut.Num() > 0)
-		{
-			SourceControlProvider.Execute(ISourceControlOperation::Create<FCheckOut>(), SourceControlHelpers::AbsoluteFilenames(FilesToAutomaticallyCheckOut), EConcurrency::Asynchronous, FSourceControlOperationComplete::CreateUObject(this, &UUnrealEdEngine::OnPackagesCheckedOut, PackagesToAutomaticallyCheckOut));
 		}
 	}
 }
@@ -676,7 +794,13 @@ void UUnrealEdEngine::OnPostGarbageCollect()
 		}
 	}
 
-	RedrawAllViewports();
+	for (FEditorViewportClient* ViewportClient : GetAllViewportClients())
+	{
+		if (ViewportClient && ViewportClient->Viewport)
+		{
+			ViewportClient->Viewport->InvalidateHitProxy();
+		}
+	}
 }
 
 
@@ -716,13 +840,6 @@ void UUnrealEdEngine::OnPostWindowsMessage(FViewport* Viewport, uint32 Message)
 	}		
 }
 
-
-void UUnrealEdEngine::OnOpenMatinee()
-{
-	// Register a delegate to pickup when Matinee is closed.
-	UpdateEdModeOnMatineeCloseDelegateHandle = GLevelEditorModeTools().OnEditorModeIDChanged().AddUObject( this, &UUnrealEdEngine::UpdateEdModeOnMatineeClose );
-}
-
 bool UUnrealEdEngine::IsAutosaving() const
 {
 	if (PackageAutoSaver)
@@ -732,50 +849,6 @@ bool UUnrealEdEngine::IsAutosaving() const
 	
 	return false;
 }
-
-
-void UUnrealEdEngine::ConvertMatinees()
-{
-	FVector StartLocation= FVector::ZeroVector;
-	UWorld* World = GWorld;
-	if( World )
-	{
-		ULevel* Level = World->GetCurrentLevel();
-		if( !Level )
-		{
-			Level = World->PersistentLevel;
-		}
-		check(Level);
-		for( TObjectIterator<UInterpData> It; It; ++It )
-		{
-			UInterpData* InterpData = *It;
-			if( InterpData->IsIn( Level ) ) 
-			{
-				// We dont care about renaming references or adding redirectors.  References to this will be old seqact_interps
-				RenameObject( InterpData, Level->GetOutermost(), *InterpData->GetName() );
-
-				AMatineeActor* MatineeActor = Level->OwningWorld->SpawnActor<AMatineeActor>(StartLocation, FRotator::ZeroRotator);
-				StartLocation.Y += 50;
-								
-				MatineeActor->MatineeData = InterpData;
-				FProperty* MatineeDataProp = NULL;
-				for( FProperty* Property = MatineeActor->GetClass()->PropertyLink; Property != NULL; Property = Property->PropertyLinkNext )
-				{
-					if( Property->GetName() == TEXT("MatineeData") )
-					{
-						MatineeDataProp = Property;
-						break;
-					}
-				}
-
-				FPropertyChangedEvent PropertyChangedEvent( MatineeDataProp ); 
-				MatineeActor->PostEditChangeProperty( PropertyChangedEvent );
-			}
-		}
-	}
-
-}
-
 
 void UUnrealEdEngine::ShowActorProperties()
 {
@@ -851,12 +924,6 @@ UUnrealEdKeyBindings::UUnrealEdKeyBindings(const FObjectInitializer& ObjectIniti
 {
 }
 
-UUnrealEdOptions::UUnrealEdOptions(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer)
-{
-}
-
-
 void UUnrealEdOptions::PostInitProperties()
 {
 	Super::PostInitProperties();
@@ -912,6 +979,32 @@ bool UUnrealEdEngine::PreferToStreamLevelsInPIE() const
 	return GetDefault<ULevelEditorPlaySettings>()->bPreferToStreamLevelsInPIE;
 }
 
+const TArray<FTemplateMapInfo>& UUnrealEdEngine::GetTemplateMapInfos() const
+{
+	return GetTemplateMapInfosDelegate.IsBound() ? GetTemplateMapInfosDelegate.Execute() : GetProjectDefaultMapTemplates();
+}
+
+const TArray<FTemplateMapInfo>& UUnrealEdEngine::GetProjectDefaultMapTemplates() const
+{
+	return TemplateMapInfoCache;
+}
+
+void UUnrealEdEngine::OnHISMTreeBuilt(UHierarchicalInstancedStaticMeshComponent* Component, bool bWasAsyncBuild)
+{
+	if (bWasAsyncBuild)
+	{
+		// Async tree builds require that hit-proxies be updated when the build has finished (as it generates new hit-proxies).
+		// Sadly we don't know which viewport needs updating, so we just have to update all of them.
+		for (FEditorViewportClient* ViewportClient : GetAllViewportClients())
+		{
+			if (ViewportClient && ViewportClient->Viewport)
+			{
+				ViewportClient->RequestInvalidateHitProxy(ViewportClient->Viewport);
+			}
+		}
+	}
+}
+
 void UUnrealEdEngine::RedrawLevelEditingViewports(bool bInvalidateHitProxies)
 {
 	// Redraw Slate based viewports
@@ -934,6 +1027,62 @@ void UUnrealEdEngine::TakeHighResScreenShots()
 	}
 }
 
+
+void UUnrealEdEngine::RebuildTemplateMapData()
+{
+	const TArray<FTemplateMapInfoOverride> TemplateMapOverrides = GetDefault<UGameMapsSettings>()->EditorTemplateMapOverrides;
+
+	if (TemplateMapOverrides.Num() > 0)
+	{
+		TemplateMapInfoCache.Reset(TemplateMapOverrides.Num());
+
+		for (const FTemplateMapInfoOverride& Override : TemplateMapOverrides)
+		{
+			FTemplateMapInfo NewInfo;
+			NewInfo.Thumbnail = Override.Thumbnail;
+			NewInfo.Map = Override.Map;
+			NewInfo.DisplayName = Override.DisplayName;
+			TemplateMapInfoCache.Add(MoveTemp(NewInfo));
+		}
+	}
+	else
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		TemplateMapInfoCache = TemplateMapInfos;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+}
+
+void UUnrealEdEngine::AppendTemplateMaps(const TArray<FTemplateMapInfo>& InTemplateMapInfos)
+{
+	bool bTemplateWasAdded = false;
+	
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	for (const FTemplateMapInfo& TemplateMapInfo : InTemplateMapInfos)
+	{
+		if (!TemplateMapInfos.ContainsByPredicate(
+			[&TemplateMapInfo](const FTemplateMapInfo& InTemplate)
+		{
+			return InTemplate.Map == TemplateMapInfo.Map
+				&& InTemplate.DisplayName.EqualTo(InTemplate.DisplayName);
+		}))
+		{
+			TemplateMapInfos.Emplace(TemplateMapInfo);
+			bTemplateWasAdded = true;
+		}
+		else
+		{
+			UE_LOG(LogUnrealEdEngine, Warning, TEXT("Attempted to register an already registered template map ('%s'). Skipping registration."), *TemplateMapInfo.Map.ToString());
+		}
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+
+	if (bTemplateWasAdded)
+	{
+		// A new template was added, so refresh
+		RebuildTemplateMapData();
+	}
+}
 
 void UUnrealEdEngine::SetCurrentClass( UClass* InClass )
 {
@@ -969,7 +1118,7 @@ void UUnrealEdEngine::GetPackageList( TArray<UPackage*>* InPackages, UClass* InC
 
 bool UUnrealEdEngine::CanSavePackage( UPackage* PackageToSave )
 {
-	return HasMountWritePersmissionForPackage(PackageToSave->GetName());
+	return HasMountWritePermissionForPackage(PackageToSave->GetName());
 }
 
 
@@ -984,9 +1133,29 @@ void UUnrealEdEngine::Serialize(FArchive& Ar)
 	Super::Serialize(Ar);
 	Ar << MaterialCopyPasteBuffer;
 	Ar << AnimationCompressionAlgorithms;
-	Ar << MatineeCopyPasteBuffer;
 }
 
+void UUnrealEdEngine::DuplicateSelectedActors(UWorld* InWorld)
+{
+	bool bHandled = false;
+	bHandled |= GLevelEditorModeTools().ProcessEditDuplicate();
+
+	// if not specially handled by the current editing mode,
+	if (!bHandled)
+	{
+		UEditorActorSubsystem* EditorActorSubsystem = GEditor->GetEditorSubsystem<UEditorActorSubsystem>();
+
+		if (EditorActorSubsystem)
+		{
+			EditorActorSubsystem->DuplicateSelectedActors(InWorld);
+		}
+	}
+	// DuplicateSelectedActors also calls RedrawLevelEditingViewports
+	else
+	{
+		RedrawLevelEditingViewports();
+	}
+}
 
 void UUnrealEdEngine::MakeSelectedActorsLevelCurrent()
 {
@@ -1303,7 +1472,7 @@ void UUnrealEdEngine::RegisterComponentVisualizer(FName ComponentClassName, TSha
 void UUnrealEdEngine::UnregisterComponentVisualizer(FName ComponentClassName)
 {
 	TSharedPtr<FComponentVisualizer> Visualizer = FindComponentVisualizer(ComponentClassName);
-	VisualizersForSelection.RemoveAll([&Visualizer](const auto& CachedComponentVisualizer) { return CachedComponentVisualizer.Visualizer == Visualizer; });
+	VisualizersForSelection.RemoveAll([&Visualizer](const FComponentVisualizerForSelection& VisualizerForSelection) { return VisualizerForSelection.ComponentVisualizer.Visualizer == Visualizer; });
 
 	ComponentVisualizerMap.Remove(ComponentClassName);
 }
@@ -1338,107 +1507,28 @@ TSharedPtr<class FComponentVisualizer> UUnrealEdEngine::FindComponentVisualizer(
 
 void UUnrealEdEngine::DrawComponentVisualizers(const FSceneView* View, FPrimitiveDrawInterface* PDI)
 {
-	for(FCachedComponentVisualizer& CachedVisualizer : VisualizersForSelection)
+	for(FComponentVisualizerForSelection& VisualizerForSelection : VisualizersForSelection)
 	{
-		CachedVisualizer.Visualizer->DrawVisualization(CachedVisualizer.ComponentPropertyPath.GetComponent(), View, PDI);
+		if (!VisualizerForSelection.IsEnabledDelegate.IsSet() || VisualizerForSelection.IsEnabledDelegate.GetValue()())
+		{
+			VisualizerForSelection.ComponentVisualizer.Visualizer->DrawVisualization(VisualizerForSelection.ComponentVisualizer.ComponentPropertyPath.GetComponent(), View, PDI);
+		}
 	}
 }
 
 
 void UUnrealEdEngine::DrawComponentVisualizersHUD(const FViewport* Viewport, const FSceneView* View, FCanvas* Canvas)
 {
-	for(FCachedComponentVisualizer& CachedVisualizer : VisualizersForSelection)
+	for(FComponentVisualizerForSelection& VisualizerForSelection : VisualizersForSelection)
 	{
-		CachedVisualizer.Visualizer->DrawVisualizationHUD(CachedVisualizer.ComponentPropertyPath.GetComponent(), Viewport, View, Canvas);
-	}
-}
-
-void UUnrealEdEngine::OnEditorSelectionChanged(UObject* SelectionThatChanged)
-{
-	auto GetVisualizersForSelection = [&](AActor* Actor)
-	{
-		// Iterate over components of that actor (and recurse through child components)
-		TInlineComponentArray<UActorComponent*> Components;
-		Actor->GetComponents(Components, true);
-
-		for (int32 CompIdx = 0; CompIdx < Components.Num(); CompIdx++)
+		if (!VisualizerForSelection.IsEnabledDelegate.IsSet() || VisualizerForSelection.IsEnabledDelegate.GetValue()())
 		{
-			UActorComponent* Comp = Components[CompIdx];
-			if (Comp->IsRegistered())
-			{
-				// Try and find a visualizer
-				TSharedPtr<FComponentVisualizer> Visualizer = FindComponentVisualizer(Comp->GetClass());
-				if (Visualizer.IsValid())
-				{
-					VisualizersForSelection.Add(FCachedComponentVisualizer(Comp, Visualizer));
-				}
-			}
-		}
-	};
-
-	if (SelectionThatChanged == GetSelectedActors())
-	{
-		// actor selection changed.  Update the list of component visualizers
-		// This is expensive so we do not search for visualizers each time they want to draw
-		VisualizersForSelection.Empty();
-
-		// Iterate over all selected actors
-		for (FSelectionIterator It(GetSelectedActorIterator()); It; ++It)
-		{
-			AActor* Actor = Cast<AActor>(*It);
-			if (Actor != nullptr)
-			{
-				GetVisualizersForSelection(Actor);
-			}
-		}
-	}
-	else if (SelectionThatChanged == GetSelectedComponents())
-	{
-		if (USelection* Selection = Cast<USelection>(SelectionThatChanged))
-		{
-			// Do not proceed if the selection contains no components. This occurs when a component is
-			// deselected while selecting its owner actor. But a corresponding actor selection is not invoked
-			// so if the visualizers are cleared here, they will not be properly reset for the selected actor. 
-			if (Selection->Num() > 0)
-			{
-				VisualizersForSelection.Empty();
-
-				TArray<AActor*> ActorsProcessed;
-
-				// Iterate over all selected components
-				for (FSelectionIterator It(GetSelectedComponentIterator()); It; ++It)
-				{
-					if (UActorComponent* Comp = Cast<UActorComponent>(*It))
-					{
-						if (AActor* Actor = Comp->GetOwner())
-						{
-							if (!ActorsProcessed.Contains(Actor))
-							{
-								GetVisualizersForSelection(Actor);
-								ActorsProcessed.Emplace(Actor);
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// If there is an undo/redo operation in progress, restore the active component visualizer.
-	if (GIsTransacting)
-	{
-		for (FCachedComponentVisualizer& CachedComponentVisualizer : VisualizersForSelection)
-		{
-			if (CachedComponentVisualizer.Visualizer->GetEditedComponent() != nullptr)
-			{
-				ComponentVisManager.SetActiveComponentVis(GCurrentLevelEditingViewportClient, CachedComponentVisualizer.Visualizer);
-				break;
-			}
+			VisualizerForSelection.ComponentVisualizer.Visualizer->DrawVisualizationHUD(VisualizerForSelection.ComponentVisualizer.ComponentPropertyPath.GetComponent(), Viewport, View, Canvas);
 		}
 	}
 }
 
-bool UUnrealEdEngine::HasMountWritePersmissionForPackage(const FString& PackageName)
+bool UUnrealEdEngine::HasMountWritePermissionForPackage(const FString& PackageName)
 {
 	FName MountPoint = FPackageName::GetPackageMountPoint(PackageName, false);
 	if (const bool* bWritePermission = MountPointCheckedForWritePermission.Find(MountPoint))
@@ -1482,21 +1572,6 @@ void UUnrealEdEngine::OnContentPathDismounted(const FString& AssetPath, const FS
 {
 	MountPointCheckedForWritePermission.Remove(*AssetPath);
 }
-void UUnrealEdEngine::UpdateEdModeOnMatineeClose(const FEditorModeID& EditorModeID, bool IsEntering)
-{
-	// if we are closing the Matinee editor
-	if (!IsEntering && EditorModeID == FBuiltinEditorModes::EM_InterpEdit)
-	{
-		// set the autosave timer to save soon
-		if (PackageAutoSaver)
-		{
-			PackageAutoSaver->ForceMinimumTimeTillAutoSave();
-		}
-
-		// Remove this delegate. 
-		GLevelEditorModeTools().OnEditorModeIDChanged().Remove(UpdateEdModeOnMatineeCloseDelegateHandle);
-	}
-}
 
 bool IsBelowFreeDiskSpaceLimit(const TCHAR* TestDir, FText& OutAppendMessage, const FText& LocationDescriptor, const uint64 MinMB = 5120)
 {
@@ -1508,9 +1583,9 @@ bool IsBelowFreeDiskSpaceLimit(const TCHAR* TestDir, FText& OutAppendMessage, co
 		const uint64 HardDriveFreeMB = FreeDiskSpace / (1024 * 1024);
 		if (HardDriveFreeMB < MinMB)
 		{
-			static const FText AppendWarning = NSLOCTEXT("DriveSpaceDialog", "LowHardDriveSpaceFormatMsg", "{0}\n  {1} MB Free \t\t {2}\n \t\t\t\t {3} \n");
+			static const FText AppendWarning = NSLOCTEXT("DriveSpaceDialog", "LowHardDriveSpaceFormatMsg", "{0}\n\n{1}\n\t\t{2}\n\t\tRecommended: {4} MB\n\t\tFree: {3} MB");
 
-			OutAppendMessage = FText::Format(AppendWarning, OutAppendMessage, HardDriveFreeMB, FText::FromString(FPaths::ConvertRelativePathToFull(TestDir)), LocationDescriptor);
+			OutAppendMessage = FText::Format(AppendWarning, OutAppendMessage, LocationDescriptor, FText::FromString(FPaths::ConvertRelativePathToFull(TestDir)), HardDriveFreeMB, MinMB);
 
 			return true;
 		}
@@ -1520,19 +1595,19 @@ bool IsBelowFreeDiskSpaceLimit(const TCHAR* TestDir, FText& OutAppendMessage, co
 
 void UUnrealEdEngine::ValidateFreeDiskSpace() const
 {
-	FText Message = NSLOCTEXT("DriveSpaceDialog", "LowHardDriveSpaceMsgHeader", "The following drive locations have limited free space.\nIt is recommended that you free some space to avoid issues such as crashed and data loss due to files not being able to be written and saved.\n");
+	FText Message = NSLOCTEXT("DriveSpaceDialog", "LowHardDriveSpaceMsgHeader", "The following locations have limited free space. To avoid potential problems, please consider freeing up at least the amounts recommended below.");
 	
 	bool bShowWarning = false;
-	bShowWarning |= IsBelowFreeDiskSpaceLimit(FPlatformProcess::BaseDir(), Message, NSLOCTEXT("DriveSpaceDialog", "BaseDirDescriptor", "The base engine directory."));
-	bShowWarning |= IsBelowFreeDiskSpaceLimit(FPlatformMisc::ProjectDir(), Message, NSLOCTEXT("DriveSpaceDialog", "ProjectDirDescriptor", "The project directory."));
-	bShowWarning |= IsBelowFreeDiskSpaceLimit(FPlatformProcess::UserDir(), Message, NSLOCTEXT("DriveSpaceDialog", "UserDirDescriptor", "User directory where user specific settings are stored."), 1024);
+	bShowWarning |= IsBelowFreeDiskSpaceLimit(FPlatformProcess::BaseDir(), Message, NSLOCTEXT("DriveSpaceDialog", "BaseDirDescriptor", "The base engine directory:"));
+	bShowWarning |= IsBelowFreeDiskSpaceLimit(FPlatformMisc::ProjectDir(), Message, NSLOCTEXT("DriveSpaceDialog", "ProjectDirDescriptor", "The project directory:"));
+	bShowWarning |= IsBelowFreeDiskSpaceLimit(FPlatformProcess::UserDir(), Message, NSLOCTEXT("DriveSpaceDialog", "UserDirDescriptor", "The current user directory, for saving user-specific settings:"), 1024);
 
 	if (bShowWarning)
 	{
 		FEngineAnalytics::LowDriveSpaceDetected();
 
-		const FText Title = NSLOCTEXT("DriveSpaceDialog", "LowHardDriveSpaceMsgTitle", "Low drive space warning");
+		const FText Title = NSLOCTEXT("DriveSpaceDialog", "LowHardDriveSpaceMsgTitle", "Warning: Low Drive Space");
 
-		FMessageDialog::Open(EAppMsgType::Ok, Message, &Title);
+		FMessageDialog::Open(EAppMsgType::Ok, Message, Title);
 	}
 }

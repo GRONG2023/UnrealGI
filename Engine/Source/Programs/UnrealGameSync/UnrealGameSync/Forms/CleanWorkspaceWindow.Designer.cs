@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 namespace UnrealGameSync
 {
@@ -65,7 +65,7 @@ namespace UnrealGameSync
 			// CleanBtn
 			// 
 			this.CleanBtn.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
-			this.CleanBtn.DialogResult = System.Windows.Forms.DialogResult.Cancel;
+			this.CleanBtn.DialogResult = System.Windows.Forms.DialogResult.OK;
 			this.CleanBtn.Location = new System.Drawing.Point(607, 560);
 			this.CleanBtn.Name = "CleanBtn";
 			this.CleanBtn.Size = new System.Drawing.Size(101, 26);
@@ -185,7 +185,6 @@ namespace UnrealGameSync
 			this.Controls.Add(this.CancelBtn);
 			this.Controls.Add(this.CleanBtn);
 			this.Controls.Add(this.TreeView);
-			this.Font = new System.Drawing.Font("Segoe UI", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 			this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
 			this.MinimumSize = new System.Drawing.Size(843, 594);
 			this.Name = "CleanWorkspaceWindow";

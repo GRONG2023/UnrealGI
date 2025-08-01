@@ -3,6 +3,7 @@
 #include "CrashUpload.h"
 #include "CrashReportCoreModule.h"
 #include "HAL/FileManager.h"
+#include "Misc/Compression.h"
 #include "Misc/FileHelper.h"
 #include "Internationalization/Internationalization.h"
 #include "Misc/Guid.h"
@@ -74,6 +75,11 @@ struct FCompressedHeader
 	/** Serialization operator. */
 	friend FArchive& operator << (FArchive& Ar, FCompressedHeader& Data)
 	{
+		// The 'CR1' marker prevents the data router backend to fallback to a backward compatibility version where
+		// a buggy/incomplete header was written at the beginning of the stream and the correct/valid one at the end.
+		uint8 Version[] = {'C', 'R', '1'};
+		Ar.Serialize(Version, sizeof(Version));
+
 		Data.DirectoryName.SerializeAsANSICharArray(Ar, 260);
 		Data.FileName.SerializeAsANSICharArray(Ar, 260);
 		Ar << Data.UncompressedSize;
@@ -149,30 +155,36 @@ bool FCrashUploadBase::CompressData(const TArray<FString>& InPendingFiles, FComp
 
 	const FString FullCrashDumpLocation = FPrimaryCrashProperties::Get()->FullCrashDumpLocation.AsString();
 
+	bool bIsFullDumpCrash = (FPrimaryCrashProperties::Get()->CrashDumpMode == ECrashDumpMode::FullDump ||
+		FPrimaryCrashProperties::Get()->CrashDumpMode == ECrashDumpMode::FullDumpAlways) &&
+		FPrimaryCrashProperties::Get()->CrashVersion >= ECrashDescVersions::VER_3_CrashContext;
+
 	// Loop to keep trying files until a send succeeds or we run out of files
 	for (const FString& PathOfFileToUpload : InPendingFiles)
 	{
 		const FString Filename = FPaths::GetCleanFilename(PathOfFileToUpload);
 
-		const bool bValidFullDumpForCopy = Filename == FGenericCrashContext::UE4MinidumpName &&
-			(FPrimaryCrashProperties::Get()->CrashDumpMode == ECrashDumpMode::FullDump || FPrimaryCrashProperties::Get()->CrashDumpMode == ECrashDumpMode::FullDumpAlways) &&
-			FPrimaryCrashProperties::Get()->CrashVersion >= ECrashDescVersions::VER_3_CrashContext &&
-			!FullCrashDumpLocation.IsEmpty();
+		const bool bIsFullDumpFile = Filename == FGenericCrashContext::UEMinidumpName && bIsFullDumpCrash;
+		const bool bValidFullDumpForCopy = bIsFullDumpFile && !FullCrashDumpLocation.IsEmpty();
 
-		if (bValidFullDumpForCopy)
+		if (bIsFullDumpFile)
 		{
-			const FString DestinationPath = FullCrashDumpLocation / FGenericCrashContext::UE4MinidumpName;
-			const bool bCreated = IFileManager::Get().MakeDirectory(*FullCrashDumpLocation, true);
-			if (!bCreated)
+			if (bValidFullDumpForCopy)
 			{
-				UE_LOG(CrashReportCoreLog, Error, TEXT("Couldn't create directory for full crash dump %s"), *DestinationPath);
-			}
-			else
-			{
-				UE_LOG(CrashReportCoreLog, Warning, TEXT("Copying full crash minidump to %s"), *DestinationPath);
-				IFileManager::Get().Copy(*DestinationPath, *PathOfFileToUpload, false);
+				const FString DestinationPath = FullCrashDumpLocation / FGenericCrashContext::UEMinidumpName;
+				const bool bCreated = IFileManager::Get().MakeDirectory(*FullCrashDumpLocation, true);
+				if (!bCreated)
+				{
+					UE_LOG(CrashReportCoreLog, Error, TEXT("Couldn't create directory for full crash dump %s"), *DestinationPath);
+				}
+				else
+				{
+					UE_LOG(CrashReportCoreLog, Warning, TEXT("Copying full crash minidump to %s"), *DestinationPath);
+					IFileManager::Get().Copy(*DestinationPath, *PathOfFileToUpload, false);
+				}
 			}
 
+			UE_LOG(CrashReportCoreLog, Log, TEXT("Skipping upload of full crash dump"));
 			continue;
 		}
 
@@ -227,7 +239,7 @@ bool FCrashUploadBase::CompressData(const TArray<FString>& InPendingFiles, FComp
 
 	if (OptionalHeader != nullptr)
 	{
-		FMemoryWriter MemoryHeaderWriter(UncompressedData, false, true);
+		FMemoryWriter MemoryHeaderWriter(UncompressedData);
 
 		OptionalHeader->UncompressedSize = UncompressedData.Num();
 		OptionalHeader->FileCount = CurrentFileIndex;
@@ -468,7 +480,7 @@ void FCrashUploadToReceiver::CompressAndSendData()
 
 	PendingFiles.Empty();
 
-	const FString Filename = ErrorReport.GetReportDirectoryLeafName() + TEXT(".ue4crash");
+	const FString Filename = ErrorReport.GetReportDirectoryLeafName() + TEXT(".uecrash");
 
 	// Set up request for upload
 	auto Request = CreateHttpRequest();
@@ -482,7 +494,7 @@ void FCrashUploadToReceiver::CompressAndSendData()
 	Request->SetHeader(TEXT("CompressedSize"), TTypeToString<int32>::ToString(CompressedData.CompressedSize) );
 	Request->SetHeader(TEXT("UncompressedSize"), TTypeToString<int32>::ToString(CompressedData.UncompressedSize) );
 	Request->SetHeader(TEXT("NumberOfFiles"), TTypeToString<int32>::ToString(CompressedData.FileCount) );
-	UE_LOG( CrashReportCoreLog, Log, TEXT( "Sending HTTP request: %s" ), *Request->GetURL() );
+	UE_LOG( CrashReportCoreLog, Log, TEXT( "Sending HTTP request: %s, Payload size: %d" ), *Request->GetURL(), CompressedData.Data.Num());
 
 	if (Request->ProcessRequest())
 	{
@@ -522,7 +534,7 @@ void FCrashUploadToReceiver::PostReportComplete()
 	Request->SetURL(UrlPrefix / TEXT("UploadComplete"));
 	Request->SetHeader( TEXT( "Content-Type" ), TEXT( "text/plain; charset=us-ascii" ) );
 	Request->SetContent(PostData);
-	UE_LOG( CrashReportCoreLog, Log, TEXT( "Sending HTTP request: %s" ), *Request->GetURL() );
+	UE_LOG( CrashReportCoreLog, Log, TEXT( "Sending HTTP request: %s, Payload size: %d" ), *Request->GetURL(), PostData.Num());
 
 	if (Request->ProcessRequest())
 	{
@@ -671,7 +683,7 @@ void FCrashUploadToReceiver::SendPingRequest()
 
 	if (Request->ProcessRequest())
 	{
-		FTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FCrashUploadToReceiver::PingTimeout), CrashUploadDefs::PingTimeoutSeconds);
+		FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FCrashUploadToReceiver::PingTimeout), CrashUploadDefs::PingTimeoutSeconds);
 	}
 	else
 	{
@@ -750,7 +762,7 @@ void FCrashUploadToDataRouter::CompressAndSendData()
 {
 	FCompressedHeader CompressedHeader;
 	CompressedHeader.DirectoryName = ErrorReport.GetReportDirectoryLeafName();
-	CompressedHeader.FileName = ErrorReport.GetReportDirectoryLeafName() + TEXT(".ue4crash");
+	CompressedHeader.FileName = ErrorReport.GetReportDirectoryLeafName() + TEXT(".uecrash");
 
 	FCompressedData CompressedData;
 	if (!CompressData(PendingFiles, CompressedData, PostData, &CompressedHeader))
@@ -777,7 +789,7 @@ void FCrashUploadToDataRouter::CompressAndSendData()
 	Request->SetHeader(TEXT("Content-Type"), TEXT("application/octet-stream"));
 	Request->SetURL(DataRouterUrl + UrlParams);
 	Request->SetContent(CompressedData.Data);
-	UE_LOG(CrashReportCoreLog, Log, TEXT("Sending HTTP request: %s"), *Request->GetURL());
+	UE_LOG(CrashReportCoreLog, Log, TEXT("Sending HTTP request: %s, Payload size: %d"), *Request->GetURL(), CompressedData.Data.Num());
 
 	if (Request->ProcessRequest())
 	{

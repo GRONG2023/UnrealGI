@@ -90,7 +90,7 @@ UTextureRenderTarget2D* FWidgetRenderer::CreateTargetFor(FVector2D DrawSize, Tex
 		RenderTarget->ClearColor = FLinearColor::Transparent;
 		RenderTarget->SRGB = bIsLinearSpace;
 		RenderTarget->TargetGamma = 1;
-		RenderTarget->InitCustomFormat(DrawSize.X, DrawSize.Y, requestedFormat, bIsLinearSpace);
+		RenderTarget->InitCustomFormat(FMath::FloorToInt32(DrawSize.X), FMath::FloorToInt32(DrawSize.Y), requestedFormat, bIsLinearSpace);
 		RenderTarget->UpdateResourceImmediate(true);
 
 		return RenderTarget;
@@ -154,7 +154,7 @@ void FWidgetRenderer::DrawWindow(
 	float DeltaTime,
 	bool bDeferRenderTargetUpdate)
 {
-	FGeometry WindowGeometry = FGeometry::MakeRoot(DrawSize * ( 1 / Scale ), FSlateLayoutTransform(Scale));
+	FGeometry WindowGeometry = FGeometry::MakeRoot(DrawSize * (1.0f / Scale), FSlateLayoutTransform(Scale));
 
 	DrawWindow
 	(
@@ -218,57 +218,57 @@ void FWidgetRenderer::DrawWindow(
 	FSlateRenderer* MainSlateRenderer = FSlateApplication::Get().GetRenderer();
 	FScopeLock ScopeLock(MainSlateRenderer->GetResourceCriticalSection());
 
-	if ( LIKELY(FApp::CanEverRender()) )
+	if (LIKELY(FApp::CanEverRender()))
 	{
-	    if ( bPrepassNeeded )
-	    {
-		    // Ticking can cause geometry changes.  Recompute
-		    Window->SlatePrepass(WindowGeometry.Scale);
-	    }
-	
+		if (bPrepassNeeded)
+		{
+			// Ticking can cause geometry changes.  Recompute
+			Window->SlatePrepass(WindowGeometry.Scale);
+		}
+
 		PaintArgs.GetHittestGrid().SetHittestArea(WindowClipRect.GetTopLeft(), WindowClipRect.GetSize());
 
-		if ( bClearHitTestGrid )
+		if (bClearHitTestGrid)
 		{
 			// Prepare the test grid 
 			PaintArgs.GetHittestGrid().Clear();
 		}
-    
-	    // Get the free buffer & add our virtual window
-	    FSlateDrawBuffer& DrawBuffer = Renderer->GetDrawBuffer();
-	    FSlateWindowElementList& WindowElementList = DrawBuffer.AddWindowElementList(Window);
 
-	    int32 MaxLayerId = 0;
-	    {
-		    // Paint the window
-		    MaxLayerId = Window->Paint(
-			    PaintArgs,
-			    WindowGeometry, WindowClipRect,
-			    WindowElementList,
-			    0,
-			    FWidgetStyle(),
-			    Window->IsEnabled());
-	    }
-
-		//MaxLayerId = WindowElementList.PaintDeferred(MaxLayerId);
-		DeferredPaints = WindowElementList.GetDeferredPaintList();
-
-		Renderer->DrawWindow_GameThread(DrawBuffer);
-
-		DrawBuffer.ViewOffset = ViewOffset;
-
-		FRenderThreadUpdateContext RenderThreadUpdateContext =
 		{
-			&DrawBuffer,
-			static_cast<float>(FApp::GetCurrentTime() - GStartTime),
-			static_cast<float>(FApp::GetDeltaTime()),
-			static_cast<float>(FPlatformTime::Seconds() - GStartTime),
-			RenderTarget,
-			Renderer.Get(),
-			bClearTarget
-		};
+			// Get the free buffer & add our virtual window
+			ISlate3DRenderer::FScopedAcquireDrawBuffer ScopedDrawBuffer{ *Renderer, bDeferRenderTargetUpdate };
+			FSlateWindowElementList& WindowElementList = ScopedDrawBuffer.GetDrawBuffer().AddWindowElementList(Window);
 
-		FSlateApplication::Get().GetRenderer()->AddWidgetRendererUpdate(RenderThreadUpdateContext, bDeferRenderTargetUpdate);
+			// Paint the window
+			int32 MaxLayerId = Window->Paint(
+				PaintArgs,
+				WindowGeometry, WindowClipRect,
+				WindowElementList,
+				0,
+				FWidgetStyle(),
+				Window->IsEnabled());
+
+			//MaxLayerId = WindowElementList.PaintDeferred(MaxLayerId);
+			DeferredPaints = WindowElementList.GetDeferredPaintList();
+
+			Renderer->DrawWindow_GameThread(ScopedDrawBuffer.GetDrawBuffer());
+
+			ScopedDrawBuffer.GetDrawBuffer().ViewOffset = ViewOffset;
+
+			FRenderThreadUpdateContext RenderThreadUpdateContext =
+			{
+				&(ScopedDrawBuffer.GetDrawBuffer()),
+				(FApp::GetCurrentTime() - GStartTime),
+				static_cast<float>(FApp::GetDeltaTime()),
+				(FPlatformTime::Seconds() - GStartTime),
+				static_cast<float>(FApp::GetDeltaTime()),
+				RenderTarget,
+				Renderer.Get(),
+				bClearTarget
+			};
+
+			MainSlateRenderer->AddWidgetRendererUpdate(RenderThreadUpdateContext, bDeferRenderTargetUpdate);
+		}
 	}
 #endif // !UE_SERVER
 }
@@ -295,53 +295,61 @@ bool FWidgetRenderer::DrawInvalidationRoot(TSharedRef<SVirtualWindow>& VirtualWi
 
 	if (LIKELY(FApp::CanEverRender()))
 	{
+
+		if (bPrepassNeeded)
+		{
+			VirtualWindow->ProcessWindowInvalidation();
+			VirtualWindow->SlatePrepass(Context.LayoutScaleMultiplier);
+		}
+
 		// Need to set a new window element list so make a copy
 		FSlateInvalidationContext ContextCopy = Context;
-		
-		// Get the free buffer & add our virtual window
-		FSlateDrawBuffer& DrawBuffer = Renderer->GetDrawBuffer();
-		FSlateWindowElementList& WindowElementList = DrawBuffer.AddWindowElementList(VirtualWindow);
+		ContextCopy.ViewOffset = ViewOffset;
 
-		ContextCopy.WindowElementList = &WindowElementList;
-		FSlateInvalidationResult Result = Root.PaintInvalidationRoot(ContextCopy);
-
-		const int32 MaxLayerId = Result.MaxLayerIdPainted;
-
-		if(Result.bRepaintedWidgets)
 		{
-			//MaxLayerId = WindowElementList.PaintDeferred(MaxLayerId);
-			DeferredPaints = WindowElementList.GetDeferredPaintList();
+			// Get the free buffer & add our virtual window
+			ISlate3DRenderer::FScopedAcquireDrawBuffer ScopedDrawBuffer{ *Renderer, bDeferRenderTargetUpdate };
+			FSlateWindowElementList& WindowElementList = ScopedDrawBuffer.GetDrawBuffer().AddWindowElementList(VirtualWindow);
 
-			Renderer->DrawWindow_GameThread(DrawBuffer);
+			// Populates cached element data lists using the provide invalidation root
+			ContextCopy.WindowElementList = &WindowElementList;
+			FSlateInvalidationResult Result = Root.PaintInvalidationRoot(ContextCopy);
 
-			DrawBuffer.ViewOffset = ViewOffset;
-
-			FRenderThreadUpdateContext RenderThreadUpdateContext =
+			if (Result.bRepaintedWidgets)
 			{
-				&DrawBuffer,
-				static_cast<float>(FApp::GetCurrentTime() - GStartTime),
-				static_cast<float>(FApp::GetDeltaTime()),
-				static_cast<float>(FPlatformTime::Seconds() - GStartTime),
-				static_cast<FRenderTarget*>(RenderTarget->GameThread_GetRenderTargetResource()),
-				Renderer.Get(),
-				bClearTarget
-			};
+				DeferredPaints = WindowElementList.GetDeferredPaintList();
 
-			bRepaintedWidgets = Result.bRepaintedWidgets;
-			FSlateApplication::Get().GetRenderer()->AddWidgetRendererUpdate(RenderThreadUpdateContext, bDeferRenderTargetUpdate);
+				Renderer->DrawWindow_GameThread(ScopedDrawBuffer.GetDrawBuffer());
+
+				ScopedDrawBuffer.GetDrawBuffer().ViewOffset = Result.ViewOffset;
+
+				FRenderThreadUpdateContext RenderThreadUpdateContext =
+				{
+					&(ScopedDrawBuffer.GetDrawBuffer()),
+					(FApp::GetCurrentTime() - GStartTime),
+					static_cast<float>(FApp::GetDeltaTime()),
+					(FPlatformTime::Seconds() - GStartTime),
+					static_cast<float>(FApp::GetDeltaTime()),
+					static_cast<FRenderTarget*>(RenderTarget->GameThread_GetRenderTargetResource()),
+					Renderer.Get(),
+					bClearTarget
+				};
+
+				bRepaintedWidgets = Result.bRepaintedWidgets;
+				FSlateApplication::Get().GetRenderer()->AddWidgetRendererUpdate(RenderThreadUpdateContext, bDeferRenderTargetUpdate);
 
 
-			// Any deferred painted elements of the retainer should be drawn directly by the main renderer, not rendered into the render target,
-			// as most of those sorts of things will break the rendering rect, things like tooltips, and popup menus.
-			for (auto& DeferredPaint : DeferredPaints)
-			{
-				Context.WindowElementList->QueueDeferredPainting(DeferredPaint->Copy(*Context.PaintArgs));
+				// Any deferred painted elements of the retainer should be drawn directly by the main renderer, not rendered into the render target,
+				// as most of those sorts of things will break the rendering rect, things like tooltips, and popup menus.
+				for (auto& DeferredPaint : DeferredPaints)
+				{
+					Context.WindowElementList->QueueDeferredPainting(DeferredPaint->Copy(*Context.PaintArgs));
+				}
 			}
-		}
-		else
-		{
-			WindowElementList.ResetElementList();
-			DrawBuffer.Unlock();
+			else
+			{
+				WindowElementList.ResetElementList();
+			}
 		}
 	}
 #endif // !UE_SERVER
@@ -349,4 +357,89 @@ bool FWidgetRenderer::DrawInvalidationRoot(TSharedRef<SVirtualWindow>& VirtualWi
 	return bRepaintedWidgets;
 }
 
+bool FWidgetRenderer::DrawInvalidationRoot(TSharedRef<SVirtualWindow>& VirtualWindow, UTextureRenderTarget2D* RenderTarget, FPaintArgs PaintArgs, float DrawScale, FVector2D DrawSize, bool bDeferRenderTargetUpdate)
+{
+	{
+		const bool bIsInvalidationRoot = VirtualWindow->Advanced_IsInvalidationRoot();
+		ensure(bIsInvalidationRoot);
+		if (!bIsInvalidationRoot)
+		{
+			return false;
+		}
+	}
+
+	bool bRepaintedWidgets = false;
+#if !UE_SERVER
+	FSlateRenderer* MainSlateRenderer = FSlateApplication::Get().GetRenderer();
+	FScopeLock ScopeLock(MainSlateRenderer->GetResourceCriticalSection());
+
+	if (LIKELY(FApp::CanEverRender()))
+	{
+		if (bPrepassNeeded)
+		{
+			VirtualWindow->ProcessWindowInvalidation();
+			VirtualWindow->SlatePrepass(DrawScale);
+		}
+
+		{
+			FGeometry WindowGeometry = FGeometry::MakeRoot(DrawSize * (1 / DrawScale), FSlateLayoutTransform(DrawScale));
+			PaintArgs.GetHittestGrid().SetHittestArea(WindowGeometry.GetLayoutBoundingRect().GetTopLeft(), WindowGeometry.GetLayoutBoundingRect().GetSize());
+		}
+
+		{
+			// Get the free buffer & add our virtual window
+			ISlate3DRenderer::FScopedAcquireDrawBuffer ScopedDrawBuffer{ *Renderer, bDeferRenderTargetUpdate };
+			FSlateWindowElementList& WindowElementList = ScopedDrawBuffer.GetDrawBuffer().AddWindowElementList(VirtualWindow);
+
+			// Populates cached element data lists using the provide invalidation root
+			FSlateInvalidationContext InvalidationContext(WindowElementList, FWidgetStyle());
+			InvalidationContext.bParentEnabled = true;
+			InvalidationContext.bAllowFastPathUpdate = true;
+			InvalidationContext.LayoutScaleMultiplier = DrawScale;
+			InvalidationContext.PaintArgs = &PaintArgs;
+			InvalidationContext.IncomingLayerId = 0;
+			InvalidationContext.CullingRect = VirtualWindow->GetClippingRectangleInWindow();
+
+			FSlateInvalidationResult Result = VirtualWindow->PaintInvalidationRoot(InvalidationContext);
+			if (Result.bRepaintedWidgets)
+			{
+				DeferredPaints = WindowElementList.GetDeferredPaintList();
+
+				Renderer->DrawWindow_GameThread(ScopedDrawBuffer.GetDrawBuffer());
+
+				ScopedDrawBuffer.GetDrawBuffer().ViewOffset = Result.ViewOffset;
+
+				FRenderThreadUpdateContext RenderThreadUpdateContext =
+				{
+					&(ScopedDrawBuffer.GetDrawBuffer()),
+					(FApp::GetCurrentTime() - GStartTime),
+					static_cast<float>(FApp::GetDeltaTime()),
+					(FPlatformTime::Seconds() - GStartTime),
+					static_cast<float>(FApp::GetDeltaTime()),
+					static_cast<FRenderTarget*>(RenderTarget->GameThread_GetRenderTargetResource()),
+					Renderer.Get(),
+					bClearTarget
+				};
+
+				bRepaintedWidgets = Result.bRepaintedWidgets;
+				FSlateApplication::Get().GetRenderer()->AddWidgetRendererUpdate(RenderThreadUpdateContext, bDeferRenderTargetUpdate);
+
+
+				// Any deferred painted elements of the retainer should be drawn directly by the main renderer, not rendered into the render target,
+				// as most of those sorts of things will break the rendering rect, things like tooltips, and popup menus.
+				for (auto& DeferredPaint : DeferredPaints)
+				{
+					InvalidationContext.WindowElementList->QueueDeferredPainting(DeferredPaint->Copy(*InvalidationContext.PaintArgs));
+				}
+			}
+			else
+			{
+				WindowElementList.ResetElementList();
+			}
+		}
+	}
+#endif // !UE_SERVER
+
+	return bRepaintedWidgets;
+}
 

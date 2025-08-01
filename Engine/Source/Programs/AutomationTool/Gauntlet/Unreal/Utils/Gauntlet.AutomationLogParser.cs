@@ -11,105 +11,6 @@ using System.Threading.Tasks;
 namespace Gauntlet
 {
 	/// <summary>
-	/// Result for a single automation result
-	/// </summary>
-	public class AutomationTestResult
-	{
-		/// <summary>
-		/// Short friendly name of this test
-		/// </summary>
-		public string		DisplayName;
-
-		/// <summary>
-		/// Full test name
-		/// </summary>
-		public string		TestName;
-
-		/// <summary>
-		/// True if the test completed (pass or fail)
-		/// </summary>
-		public bool			Completed;
-
-		/// <summary>
-		/// True if the test passed
-		/// </summary>
-		public bool			Passed;
-
-		/// <summary>
-		/// Events logged during the test. Should contain errors if the test failed
-		/// </summary>
-		public IEnumerable<string> Events;
-
-		/// <summary>
-		/// Returns all events that are a warning
-		/// </summary>
-		public IEnumerable<string> WarningEvents 
-		{  
-			get
-			{
-				return Events.Where(E => E.ToLower().Contains(": warning:"));
-			}
-		}
-
-		/// <summary>
-		/// Returns all events that are a error
-		/// </summary>
-		public IEnumerable<string> ErrorEvents
-		{
-			get
-			{
-				return Events.Where(E => E.ToLower().Contains(": error:"));
-			}
-		}
-
-		/// <summary>
-		/// Returns all events that are a error
-		/// </summary>
-		public IEnumerable<string> WarningAndErrorEvents
-		{
-			get
-			{
-				return Events.Where(E => E.ToLower().Contains(": error:") || E.ToLower().Contains(": warning:"));
-			}
-		}
-
-		/// <summary>
-		/// Returns the name of the test. If DisplayName and TestName differ they are joined
-		/// </summary>
-		public string FullName
-		{
-			get
-			{
-				string FullName = DisplayName;
-
-				if (TestName != DisplayName)
-				{
-					FullName += string.Format(": {0}", TestName);
-				}
-
-				return FullName;
-			}
-		}
-
-		/// <summary>
-		/// Result contstructor
-		/// </summary>
-		/// <param name="InDisplayName"></param>
-		/// <param name="InTestName"></param>
-		/// <param name="bInPassed"></param>
-		public AutomationTestResult(string InDisplayName, string InTestName, bool InCompleted, bool bInPassed, IEnumerable<string> InEvents)
-		{
-			DisplayName = InDisplayName;
-			TestName = InTestName;
-			Completed = InCompleted;
-			Passed = bInPassed;
-			Events = InEvents.ToArray();
-		}
-
-
-	};
-
-	/// <summary>
 	/// Helper class for parsing AutomationTest results from either an UnrealLogParser or log contents
 	/// </summary>
 	public class AutomationLogParser
@@ -123,16 +24,16 @@ namespace Gauntlet
 		/// <summary>
 		/// Returns entries in the log file related to automation
 		/// </summary>
-		public IEnumerable<UnrealLogParser.LogEntry> AutomationLogEntries { get; protected set; }
+		public IEnumerable<UnrealLog.LogEntry> AutomationLogEntries { get; protected set; }
 	
 		/// <summary>
 		/// Returns warning/errors in the logfile related to automation
 		/// </summary>
-		public IEnumerable<UnrealLogParser.LogEntry> AutomationWarningsAndErrors
+		public IEnumerable<UnrealLog.LogEntry> AutomationWarningsAndErrors
 		{
 			get
 			{
-				return AutomationLogEntries.Where(E => E.Level == UnrealLogParser.LogLevel.Error || E.Level == UnrealLogParser.LogLevel.Warning);
+				return AutomationLogEntries.Where(E => E.Level == UnrealLog.LogLevel.Error || E.Level == UnrealLog.LogLevel.Warning);
 			}
 		}
 
@@ -157,7 +58,7 @@ namespace Gauntlet
 				AutomationReportURL = ReportUrlMatch.First().Groups[1].ToString();
 			}
 
-			AutomationLogEntries = Parser.Entries.Where(
+			AutomationLogEntries = Parser.LogEntries.Where(
 										E => E.Category.StartsWith("Automation", StringComparison.OrdinalIgnoreCase)
 										|| E.Category.StartsWith("FunctionalTest", StringComparison.OrdinalIgnoreCase)
 										)
@@ -177,12 +78,12 @@ namespace Gauntlet
 		/// Returns all results found in our construction content.
 		/// </summary>
 		/// <returns></returns>
-		public IEnumerable<AutomationTestResult> GetResults()
+		public IEnumerable<UnrealAutomatedTestResult> GetResults()
 		{
-			IEnumerable<Match> TestStarts = Parser.GetAllMatches(@"LogAutomationController.+Test Started. Name={(.+?)}");
+			IEnumerable<Match> TestStarts = Parser.GetAllMatches(@"LogAutomationController.+Test Started. Name={(.+?)}\s+Path={(.+?)}");
 
 			// Find all automation results that succeeded/failed
-			// [00:10:54.148]   LogAutomationController: Display: Test Started. Name={ST_PR04}
+			// [00:10:54.148]   LogAutomationController: Display: Test Started. Name={ST_PR04} Path={Project.Functional Tests./Game/Tests/Rendering/PlanarReflection.ST_PR04}
 			// [2019.04.30-18.49.51:329][244]LogAutomationController: Display: Test Completed With Success. Name={ST_PR04} Path={Project.Functional Tests./Game/Tests/Rendering/PlanarReflection.ST_PR04}
 			// [2019.04.30-18.49.51:330] [244] LogAutomationController: BeginEvents: Project.Functional Tests./Game/Tests/Rendering/PlanarReflection.ST_PR04
 			// [2019.04.30 - 18.49.51:331][244] LogAutomationController: Screenshot 'ST_PR04' was similar!  Global Difference = 0.001377, Max Local Difference = 0.037953
@@ -191,22 +92,39 @@ namespace Gauntlet
 
 			string[] AutomationChannel = Parser.GetLogChannel("AutomationController").ToArray();
 
-			// Convert these lines into results by parsing out the details and then adding the events
-			IEnumerable<AutomationTestResult> Results = TestStarts.Select(TestMatch =>
+			Func<string, string> SantizeLine = (L) =>
 			{
+				L = L.Replace(": Error: ", ": ");
+				L = L.Replace(": Warning: ", ": ");
+				L = L.Replace("LogAutomationController: ", "");
+
+				return L;
+			};
+
+			// Convert these lines into results by parsing out the details and then adding the events
+			IEnumerable<UnrealAutomatedTestResult> Results = TestStarts.Select(TestMatch =>
+			{
+				UnrealAutomatedTestResult Result = new UnrealAutomatedTestResult();
 				string DisplayName = TestMatch.Groups[1].ToString();
-				string LongName = "";
-				bool Completed = false;
-				bool Passed = false;
-				List<string> Events = new List<string>();
+				string LongName = TestMatch.Groups[2].ToString(); ;
+				TestStateType State = TestStateType.InProcess;
 				
-				Match ResultMatch = TestResults.Where(M => M.Groups[2].ToString() == DisplayName).FirstOrDefault();
+				Match ResultMatch = TestResults.Where(M => M.Groups[3].ToString() == LongName).FirstOrDefault();
 
 				if (ResultMatch != null)
 				{
-					Completed = true;
-					Passed = ResultMatch.Groups[1].ToString().ToLower() == "passed" ? true : false;
-					LongName = ResultMatch.Groups[3].ToString();					
+					switch(ResultMatch.Groups[1].ToString().ToLower())
+					{
+					case "skipped":
+						State = TestStateType.Skipped;
+						break;
+					case "success":
+						State = TestStateType.Success;
+						break;
+					default:
+						State = TestStateType.Fail;
+						break;
+					}
 
 					string EventName = string.Format("BeginEvents: {0}", LongName);
 					int EventIndex = Array.FindIndex(AutomationChannel, S => S.Contains(EventName)) + 1;
@@ -222,16 +140,21 @@ namespace Gauntlet
 								break;
 							}
 
-							Events.Add(Event);
+							EventType EventType = Event.Contains(": Error: ") ? EventType.Error : Event.Contains(": Warning: ") ? EventType.Warning : EventType.Info;
+
+							Result.AddEvent(EventType, SantizeLine(Event));
 						}
 					}
 				}
 				else
 				{
-					Events.Add(string.Format("Gauntlet.AutomationLogParser: Error: Test {0} incomplete.", DisplayName));
+					Result.AddEvent(EventType.Error, string.Format("Test {0} incomplete.", DisplayName));
 				}
 
-				AutomationTestResult Result = new AutomationTestResult(DisplayName, LongName, Completed, Passed, Events);
+				Result.TestDisplayName = DisplayName;
+				Result.FullTestPath = LongName;
+				Result.State = State;
+
 				return Result;
 			});
 

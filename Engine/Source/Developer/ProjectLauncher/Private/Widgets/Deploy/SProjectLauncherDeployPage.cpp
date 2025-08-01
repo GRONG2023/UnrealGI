@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SProjectLauncherDeployPage.h"
+#include "Widgets/Deploy/SProjectLauncherDeployPage.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/Commands/UIAction.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "SlateOptMacros.h"
@@ -99,7 +99,7 @@ void SProjectLauncherDeployPage::Construct(const FArguments& InArgs, const TShar
 			.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 			[
 				SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 					.Padding(8.0f)
 					.Visibility(this, &SProjectLauncherDeployPage::HandleValidationErrorIconVisibility, ELauncherProfileValidationErrors::CopyToDeviceRequiresCookByTheBook)
 					[
@@ -109,7 +109,7 @@ void SProjectLauncherDeployPage::Construct(const FArguments& InArgs, const TShar
 							.AutoWidth()
 							[
 								SNew(SImage)
-									.Image(FEditorStyle::GetBrush(TEXT("Icons.Error")))
+									.Image(FAppStyle::GetBrush(TEXT("Icons.Error")))
 							]
 
 						+ SHorizontalBox::Slot()
@@ -119,6 +119,35 @@ void SProjectLauncherDeployPage::Construct(const FArguments& InArgs, const TShar
 							[
 								SNew(STextBlock)
 									.Text(LOCTEXT("CopyToDeviceRequiresCookByTheBookText", "This mode requires 'By The Book' cooking"))
+							]
+					]
+			]
+
+		+ SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+			[
+				SNew(SBorder)
+					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
+					.Padding(8.0f)
+					.Visibility(this, &SProjectLauncherDeployPage::HandleValidationErrorIconVisibility, ELauncherProfileValidationErrors::CopyToDeviceRequiresNoPackaging)
+					[
+						SNew(SHorizontalBox)
+
+						+ SHorizontalBox::Slot()
+							.AutoWidth()
+							[
+								SNew(SImage)
+									.Image(FAppStyle::GetBrush(TEXT("Icons.Error")))
+							]
+
+						+ SHorizontalBox::Slot()
+							.AutoWidth()
+							.Padding(4.0f, 0.0f)
+							.VAlign(VAlign_Center)
+							[
+								SNew(STextBlock)
+									.Text(LOCTEXT("CopyToDeviceRequiresNoPackaging", "This mode requires 'Do not package' packaging"))
 							]
 					]
 			]
@@ -165,29 +194,19 @@ FText SProjectLauncherDeployPage::HandleDeploymentModeComboButtonContentText() c
 
 	if (SelectedProfile.IsValid())
 	{
-		ELauncherProfileDeploymentModes::Type DeploymentMode = SelectedProfile->GetDeploymentMode();
-
-		if (DeploymentMode == ELauncherProfileDeploymentModes::CopyToDevice)
+		switch (SelectedProfile->GetDeploymentMode())
 		{
+		case ELauncherProfileDeploymentModes::CopyToDevice:
 			return LOCTEXT("CopyToDeviceAction", "Copy to device");
-		}
-
-		if (DeploymentMode == ELauncherProfileDeploymentModes::DoNotDeploy)
-		{
+		case ELauncherProfileDeploymentModes::DoNotDeploy:
 			return LOCTEXT("DoNotDeployAction", "Do not deploy");
-		}
-
-		if (DeploymentMode == ELauncherProfileDeploymentModes::FileServer)
-		{
+		case ELauncherProfileDeploymentModes::FileServer:
 			return LOCTEXT("FileServerAction", "File server");
-		}
-
-		if (DeploymentMode == ELauncherProfileDeploymentModes::CopyRepository)
-		{
+		case ELauncherProfileDeploymentModes::CopyRepository:
 			return LOCTEXT("CopyRepositoryAction", "Copy repository");
+		default:
+			return LOCTEXT("DeploymentModeComboButtonDefaultText", "Select...");
 		}
-
-		return LOCTEXT("DeploymentModeComboButtonDefaultText", "Select...");
 	}
 
 	return FText::GetEmpty();
@@ -229,7 +248,8 @@ EVisibility SProjectLauncherDeployPage::HandleDeployToDeviceSettingsVisibility()
 	{
 		if (SelectedProfile->GetDeploymentMode() == ELauncherProfileDeploymentModes::CopyToDevice)
 		{
-			if (!SelectedProfile->HasValidationError(ELauncherProfileValidationErrors::CopyToDeviceRequiresCookByTheBook))
+			if (!SelectedProfile->HasValidationError(ELauncherProfileValidationErrors::CopyToDeviceRequiresCookByTheBook) &&
+				!SelectedProfile->HasValidationError(ELauncherProfileValidationErrors::CopyToDeviceRequiresNoPackaging))
 			{
 				return EVisibility::Visible;
 			}

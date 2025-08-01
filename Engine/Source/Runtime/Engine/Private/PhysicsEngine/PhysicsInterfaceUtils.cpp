@@ -1,10 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Physics/PhysicsInterfaceUtils.h"
-#include "PhysXPublic.h"
-#include "WorldCollision.h"
+#include "CollisionQueryParams.h"
 #include "Physics/PhysicsFiltering.h"
-#include "Physics/PhysicsInterfaceTypes.h"
+#include "PhysicsInterfaceTypesCore.h"
 
 FCollisionFilterData CreateObjectQueryFilterData(const bool bTraceComplex, const int32 MultiTrace/*=1 if multi. 0 otherwise*/, const struct FCollisionObjectQueryParams & ObjectParam)
 {
@@ -103,4 +102,17 @@ FCollisionFilterData CreateQueryFilterData(const uint8 MyChannel, const bool bTr
 	{
 		return CreateTraceQueryFilterData(MyChannel, bTraceComplex, InCollisionResponseContainer, QueryParam);
 	}
+}
+
+//
+// NOTE: Once the old Create/Destroy methods are deprecated, remove the default implementations
+//
+
+#include "PhysicsReplication.h"
+TUniquePtr<IPhysicsReplication> IPhysicsReplicationFactory::CreatePhysicsReplication(FPhysScene* OwningPhysScene)
+{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	UE_LOG(LogPhysics, Warning, TEXT("\nIPhysicsReplicationFactory::Create has been deprecated in favor of IPhysicsReplicationFactory::CreatePhysicsReplication. Use the new CreatePhysicsReplication method instead moving forward, as the Create function will be removed in future versions. Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile."));
+	return TUniquePtr<IPhysicsReplication>(Create(OwningPhysScene));
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }

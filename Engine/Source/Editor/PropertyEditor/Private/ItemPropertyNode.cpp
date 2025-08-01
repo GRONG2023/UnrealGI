@@ -1,36 +1,39 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 #include "ItemPropertyNode.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Editor.h"
+#include "EditorMetadataOverrides.h"
 #include "ObjectPropertyNode.h"
 #include "PropertyEditorHelpers.h"
 #include "PropertyPathHelpers.h"
+#include "Settings/EditorStyleSettings.h"
+#include "UserInterface/PropertyEditor/SPropertyEditorArrayItem.h"
+
+#include "UObject/PropertyOptional.h"
 
 #define LOCTEXT_NAMESPACE "ItemPropertyNode"
 
-FItemPropertyNode::FItemPropertyNode(void)
-	: FPropertyNode()
+FItemPropertyNode::FItemPropertyNode()
 {
 	bCanDisplayFavorite = false;
 }
 
-FItemPropertyNode::~FItemPropertyNode(void)
+FItemPropertyNode::~FItemPropertyNode()
 {
 
 }
 
-uint8* FItemPropertyNode::GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData) const
+uint8* FItemPropertyNode::GetValueBaseAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct) const
 {
 	const FProperty* MyProperty = GetProperty();
-	if( MyProperty && ParentNodeWeakPtr.IsValid())
+	const TSharedPtr<FPropertyNode> ParentNode = ParentNodeWeakPtr.Pin();
+	if (MyProperty && ParentNode)
 	{
 		const FArrayProperty* OuterArrayProp = MyProperty->GetOwner<FArrayProperty>();
 		const FSetProperty* OuterSetProp = MyProperty->GetOwner<FSetProperty>();
 		const FMapProperty* OuterMapProp = MyProperty->GetOwner<FMapProperty>();
 
-		uint8* ValueBaseAddress = ParentNode->GetValueBaseAddress(StartAddress, bIsSparseData);
+		uint8* ValueBaseAddress = ParentNode->GetValueBaseAddress(StartAddress, bIsSparseData, bIsStruct);
 
 		if (OuterArrayProp != nullptr)
 		{
@@ -67,11 +70,11 @@ uint8* FItemPropertyNode::GetValueBaseAddress(uint8* StartAddress, bool bIsSpars
 		}
 		else
 		{
-			uint8* ValueAddress = ParentNode->GetValueAddress(StartAddress, bIsSparseData);
+			uint8* ValueAddress = ParentNode->GetValueAddress(StartAddress, bIsSparseData, bIsStruct);
 			if (ValueAddress != nullptr && ParentNode->GetProperty() != MyProperty)
 			{
 				// if this is not a fixed size array (in which the parent property and this property are the same), we need to offset from the property (otherwise, the parent already did that for us)
-				ValueAddress = Property->ContainerPtrToValuePtr<uint8>(ValueAddress);
+				ValueAddress = MyProperty->ContainerPtrToValuePtr<uint8>(ValueAddress);
 			}
 
 			if (ValueAddress != nullptr)
@@ -85,52 +88,89 @@ uint8* FItemPropertyNode::GetValueBaseAddress(uint8* StartAddress, bool bIsSpars
 	return nullptr;
 }
 
-uint8* FItemPropertyNode::GetValueAddress(uint8* StartAddress, bool bIsSparseData) const
+uint8* FItemPropertyNode::GetValueAddress(uint8* StartAddress, bool bIsSparseData, bool bIsStruct) const
 {
-	uint8* Result = GetValueBaseAddress(StartAddress, bIsSparseData);
-
-	const FProperty* MyProperty = GetProperty();
-
-	const FArrayProperty* ArrayProperty = CastField<FArrayProperty>(MyProperty);
-	const FSetProperty* SetProperty = CastField<FSetProperty>(MyProperty);
-	const FMapProperty* MapProperty = CastField<FMapProperty>(MyProperty);
-
-	if( Result && ArrayProperty)
-	{
-		FScriptArrayHelper ArrayHelper(ArrayProperty, Result);
-		Result = ArrayHelper.GetRawPtr();
-	}
-	else if (Result && SetProperty)
-	{
-		FScriptSetHelper SetHelper(SetProperty, Result);
-		Result = SetHelper.GetElementPtr(0);
-	}
-	else if (Result && MapProperty)
-	{
-		FScriptMapHelper MapHelper(MapProperty, Result);
-		Result = MapHelper.GetPairPtr(0);
-	}
-
+	uint8* Result = GetValueBaseAddress(StartAddress, bIsSparseData, bIsStruct);
 	return Result;
 }
 
 /**
  * Overridden function for special setup
  */
-void FItemPropertyNode::InitExpansionFlags (void)
+TSharedPtr<FPropertyNode>& FItemPropertyNode::GetOrCreateOptionalValueNode(void)
 {
-	
+	if (OptionalValueNode)
+	{
+		return OptionalValueNode;
+	}
+
+	FProperty* MyProperty = GetProperty();
+	if (FOptionalProperty* OptionalProperty = CastField<FOptionalProperty>(MyProperty))
+	{
+		void* Optional = NULL;
+		FReadAddressList Addresses;
+		if (GetReadAddress(Addresses))
+		{
+			for (int i = 0; i < Addresses.Num(); i++)
+			{
+				Optional = Addresses.GetAddress(i);
+				if (OptionalProperty->IsSet(Optional))
+				{
+					OptionalValueNode = TSharedRef<FPropertyNode>(new FItemPropertyNode());
+
+					FPropertyNodeInitParams InitParams;
+					InitParams.ParentNode = SharedThis(this);
+					InitParams.Property = OptionalProperty->GetValueProperty();
+					InitParams.bAllowChildren = true;
+					InitParams.bForceHiddenPropertyVisibility = !!HasNodeFlags(EPropertyNodeFlags::ShouldShowHiddenProperties);
+					InitParams.bCreateDisableEditOnInstanceNodes = !!HasNodeFlags(EPropertyNodeFlags::ShouldShowDisableEditOnInstance);
+
+					OptionalValueNode->OnRebuildChildren().AddLambda([this]() {
+						CachedReadAddresses.Reset();
+						bool bDestroySelf = false;
+						DestroyTree(bDestroySelf);
+
+						for (int i = 0; i < OptionalValueNode->GetNumChildNodes(); i++)
+						{
+							AddChildNode(OptionalValueNode->GetChildNode(i));
+						}
+
+						// Children have been rebuilt, clear any pending rebuild requests
+						bRebuildChildrenRequested = false;
+						bChildrenRebuilt = true;
+
+						// Notify any listener that children have been rebuilt
+						OnRebuildChildrenEvent.Broadcast();
+					});
+
+					OptionalValueNode->InitNode(InitParams);
+				}
+			}
+		}
+	}
+	return OptionalValueNode;
+}
+
+/**
+ * Overridden function for special setup
+ */
+void FItemPropertyNode::InitExpansionFlags(void)
+{
 	FProperty* MyProperty = GetProperty();
 
-	FReadAddressList Addresses;
+	if (TSharedPtr<FPropertyNode>& ValueNode = GetOrCreateOptionalValueNode())
+	{
+		// This is a set optional, so check its SetValue instead.
+		MyProperty = ValueNode->GetProperty();
+	}
 
-	bool bExpandableType = CastField<FStructProperty>(MyProperty) 
-		|| ( ( CastField<FArrayProperty>(MyProperty) || CastField<FSetProperty>(MyProperty) || CastField<FMapProperty>(MyProperty) ) && GetReadAddress(false,Addresses) );
+	bool bExpandableType = CastField<FStructProperty>(MyProperty)
+		|| (CastField<FArrayProperty>(MyProperty) || CastField<FSetProperty>(MyProperty) || CastField<FMapProperty>(MyProperty));
 
-	if(	bExpandableType
+	if (bExpandableType
 		|| HasNodeFlags(EPropertyNodeFlags::EditInlineNew)
 		|| HasNodeFlags(EPropertyNodeFlags::ShowInnerObjectProperties)
-		||	( MyProperty->ArrayDim > 1 && ArrayIndex == -1 ) )
+		|| (MyProperty->ArrayDim > 1 && ArrayIndex == -1))
 	{
 		SetNodeFlags(EPropertyNodeFlags::CanBeExpanded, true);
 	}
@@ -193,7 +233,7 @@ void FItemPropertyNode::InitChildNodes()
 	{
 		void* Array = NULL;
 		FReadAddressList Addresses;
-		if ( GetReadAddress(!!HasNodeFlags(EPropertyNodeFlags::SingleSelectOnly), Addresses ) )
+		if ( GetReadAddress(HasNodeFlags(EPropertyNodeFlags::SingleSelectOnly), Addresses ) )
 		{
 			Array = Addresses.GetAddress(0);
 		}
@@ -390,54 +430,85 @@ void FItemPropertyNode::InitChildNodes()
 	}
 }
 
-void FItemPropertyNode::SetFavorite(bool FavoriteValue)
+void FItemPropertyNode::SetFavorite(bool IsFavorite)
 {
-	const FObjectPropertyNode* CurrentObjectNode = FindObjectItemParent();
-	if (CurrentObjectNode == nullptr || CurrentObjectNode->GetNumObjects() <= 0)
-		return;
-	const UClass *ObjectClass = CurrentObjectNode->GetObjectBaseClass();
-	if (ObjectClass == nullptr)
-		return;
-	FString FullPropertyPath = ObjectClass->GetName() + TEXT(":") + PropertyPath;
-	if (FavoriteValue)
+	if (GEditor == nullptr)
 	{
-		GConfig->SetBool(TEXT("DetailPropertyFavorites"), *FullPropertyPath, FavoriteValue, GEditorPerProjectIni);
+		return;
+	}
+
+	UEditorMetadataOverrides* MetadataOverrides = GEditor->GetEditorSubsystem<UEditorMetadataOverrides>();
+	if (MetadataOverrides == nullptr)
+	{
+		return;
+	}
+
+	const FObjectPropertyNode* ObjectParent = FindObjectItemParent();
+	if (ObjectParent == nullptr)
+	{
+		return;
+	}
+				
+	FString Path;
+	GetQualifiedName(Path, /*bWithArrayIndex=*/true, ObjectParent, /*bIgnoreCategories=*/true);
+
+	static const FName FavoritePropertiesName("FavoriteProperties");
+
+	TArray<FString> FavoritePropertiesList;
+	if (MetadataOverrides->GetArrayMetadata(ObjectParent->GetObjectBaseClass(), FavoritePropertiesName, FavoritePropertiesList))
+	{
+		if (IsFavorite)
+		{
+			FavoritePropertiesList.AddUnique(Path);
+		}
+		else
+		{
+			FavoritePropertiesList.Remove(Path);
+		}
+
+		MetadataOverrides->SetArrayMetadata(ObjectParent->GetObjectBaseClass(), FavoritePropertiesName, FavoritePropertiesList);
 	}
 	else
 	{
-		GConfig->RemoveKey(TEXT("DetailPropertyFavorites"), *FullPropertyPath, GEditorPerProjectIni);
+		if (IsFavorite)
+		{
+			FavoritePropertiesList.Add(Path);
+			MetadataOverrides->SetArrayMetadata(ObjectParent->GetObjectBaseClass(), FavoritePropertiesName, FavoritePropertiesList);
+		}
 	}
 }
 
 bool FItemPropertyNode::IsFavorite() const
 {
-	const FObjectPropertyNode* CurrentObjectNode = FindObjectItemParent();
-	if (CurrentObjectNode == nullptr ||CurrentObjectNode->GetNumObjects() <= 0)
+	if (GEditor == nullptr)
+	{
 		return false;
-	const UClass *ObjectClass = CurrentObjectNode->GetObjectBaseClass();
-	if (ObjectClass == nullptr)
-		return false;
-	FString FullPropertyPath = ObjectClass->GetName() + TEXT(":") + PropertyPath;
-	bool FavoritesPropertyValue = false;
-	if (!GConfig->GetBool(TEXT("DetailPropertyFavorites"), *FullPropertyPath, FavoritesPropertyValue, GEditorPerProjectIni))
-		return false;
-	return FavoritesPropertyValue;
-}
+	}
 
-/**
-* Set the permission to display the favorite icon
-*/
-void FItemPropertyNode::SetCanDisplayFavorite(bool CanDisplayFavoriteIcon)
-{
-	bCanDisplayFavorite = CanDisplayFavoriteIcon;
-}
+	UEditorMetadataOverrides* MetadataOverrides = GEditor->GetEditorSubsystem<UEditorMetadataOverrides>();
+	if (MetadataOverrides == nullptr)
+	{
+		return false;
+	}
 
-/**
-* Set the permission to display the favorite icon
-*/
-bool FItemPropertyNode::CanDisplayFavorite() const
-{
-	return bCanDisplayFavorite;
+	const FObjectPropertyNode* ObjectParent = FindObjectItemParent();
+	if (ObjectParent == nullptr)
+	{
+		return false;
+	}
+
+	FString Path;
+	GetQualifiedName(Path, /*bWithArrayIndex=*/true, ObjectParent, /*bIgnoreCategories=*/true);
+
+	static const FName FavoritePropertiesName("FavoriteProperties");
+
+	TArray<FString> FavoritePropertiesList;
+	if (MetadataOverrides->GetArrayMetadata(ObjectParent->GetObjectBaseClass(), FavoritePropertiesName, FavoritePropertiesList))
+	{
+		return FavoritePropertiesList.Contains(Path);
+	}
+
+	return false;
 }
 
 void FItemPropertyNode::SetDisplayNameOverride( const FText& InDisplayNameOverride )
@@ -467,6 +538,8 @@ FText FItemPropertyNode::GetDisplayName() const
 				{
 					FString PropertyDisplayName;
 					bool bIsBoolProperty = CastField<const FBoolProperty>(PropertyPtr) != NULL;
+
+					const TSharedPtr<FPropertyNode> ParentNode = ParentNodeWeakPtr.Pin();
 					const FStructProperty* ParentStructProperty = CastField<const FStructProperty>(ParentNode->GetProperty());
 					if( ParentStructProperty && ParentStructProperty->Struct->GetFName() == NAME_Rotator )
 					{
@@ -504,8 +577,11 @@ FText FItemPropertyNode::GetDisplayName() const
 				FinalDisplayName =  FText::FromString( PropertyPtr->GetName() );
 			}
 		}
-		else
-		{
+		else if (const TSharedPtr<FPropertyNode> ParentNode = ParentNodeWeakPtr.Pin())
+		{	
+			// Sets and maps do not have a display index.
+			FProperty* ParentProperty = ParentNode->GetProperty();
+
 			// Get the ArraySizeEnum class from meta data.
 			static const FName NAME_ArraySizeEnum("ArraySizeEnum");
 			UEnum* ArraySizeEnum = NULL; 
@@ -513,10 +589,7 @@ FText FItemPropertyNode::GetDisplayName() const
 			{
 				ArraySizeEnum	= FindObject<UEnum>(NULL, *Property->GetMetaData(NAME_ArraySizeEnum));
 			}
-			
-			// Sets and maps do not have a display index.
-			FProperty* ParentProperty = ParentNode->GetProperty();
-
+		
 			// Also handle UArray's having the ArraySizeEnum entry...
 			if (ArraySizeEnum == nullptr && CastField<FArrayProperty>(ParentProperty) != nullptr && ParentProperty->HasMetaData(NAME_ArraySizeEnum))
 			{
@@ -529,8 +602,8 @@ FText FItemPropertyNode::GetDisplayName() const
 				{
 					// Check if this property has Title Property Meta
 					static const FName NAME_TitleProperty = FName(TEXT("TitleProperty"));
-					FName TitlePropertyName = *PropertyPtr->GetMetaData(NAME_TitleProperty);
-					if (TitlePropertyName != NAME_None)
+					FString TitleProperty = PropertyPtr->GetMetaData(NAME_TitleProperty);
+					if (!TitleProperty.IsEmpty())
 					{
 						FItemPropertyNode* NonConstThis = const_cast<FItemPropertyNode*>(this);
 
@@ -554,22 +627,20 @@ FText FItemPropertyNode::GetDisplayName() const
 						// Find the property and get the right property handle
 						if (PropertyStruct != nullptr)
 						{
-							FProperty* TitleProperty = PropertyStruct->FindPropertyByName(TitlePropertyName);
-							if (TitleProperty != nullptr)
+							const TSharedPtr<IPropertyHandle> ThisAsHandle = PropertyEditorHelpers::GetPropertyHandle(NonConstThis->AsShared(), nullptr, nullptr);
+							TSharedPtr<FTitleMetadataFormatter> TitleFormatter = FTitleMetadataFormatter::TryParse(ThisAsHandle, TitleProperty);
+							if (TitleFormatter)
 							{
-								const TSharedPtr<IPropertyHandle> ThisAsHandle = PropertyEditorHelpers::GetPropertyHandle(NonConstThis->AsShared(), nullptr, nullptr);
-								const TSharedPtr<IPropertyHandle> ChildPropertyHandle = ThisAsHandle->GetChildHandle(TitlePropertyName, true);
-
-								// Can be null in the case that it doesn't have a UI handle yet (like in the case of newly created instanced properties)
-								if (ChildPropertyHandle.IsValid())
-								{
-									ChildPropertyHandle->GetValueAsDisplayText(FinalDisplayName);
-								}
+								TitleFormatter->GetDisplayText(FinalDisplayName);
 							}
 						}
 					}
+				}
 
-					if (FinalDisplayName.IsEmpty())
+				if(FinalDisplayName.IsEmpty())
+				{
+					// This item is a member of an array, its display name is its index 
+					if (PropertyPtr == NULL || ArraySizeEnum == NULL)
 					{
 						if (ArraySizeEnum == nullptr)
 						{
@@ -580,19 +651,14 @@ FText FItemPropertyNode::GetDisplayName() const
 							FinalDisplayName = ArraySizeEnum->GetDisplayNameTextByIndex(GetArrayIndex());
 						}
 					}
-				}
-				// This item is a member of an array, its display name is its index 
-				else if (PropertyPtr == NULL || ArraySizeEnum == NULL)
-				{
-					FinalDisplayName = FText::AsNumber(GetArrayIndex());
-				}
-				else
-				{
-					FinalDisplayName = ArraySizeEnum->GetDisplayNameTextByIndex(GetArrayIndex());
+					else
+					{
+						FinalDisplayName = ArraySizeEnum->GetDisplayNameTextByIndex(GetArrayIndex());
+					}
 				}
 			}
 			// Maps should have display names that reflect the key and value types
-			else if (PropertyPtr != nullptr && CastField<FMapProperty>(ParentNode->GetProperty()) != nullptr)
+			else if (PropertyPtr != nullptr && CastField<FMapProperty>(ParentProperty) != nullptr)
 			{
 				FText FormatText = GetPropertyKeyNode().IsValid()
 					? LOCTEXT("MapValueDisplayFormat", "Value ({0})")
@@ -631,7 +697,7 @@ FText FItemPropertyNode::GetDisplayName() const
 
 					if (EndIndex != -1)
 					{
-						TypeName.MidInline(0, EndIndex, false);
+						TypeName.MidInline(0, EndIndex, EAllowShrinking::No);
 					}
 				}
 

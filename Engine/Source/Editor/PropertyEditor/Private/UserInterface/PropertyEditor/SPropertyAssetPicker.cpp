@@ -31,15 +31,15 @@ void SPropertyAssetPicker::Construct( const FArguments& InArgs )
 		.FillHeight(1)
 		[
 			SNew( SButton )
-			.ButtonStyle( FEditorStyle::Get(), "HoverHintOnly" )
+			.ButtonStyle( FAppStyle::Get(), "HoverHintOnly" )
 			.OnClicked( this, &SPropertyAssetPicker::OnClicked )
 			.ToolTipText(LOCTEXT("PickButtonLabel", "Pick Asset"))
-			.ContentPadding(0)
+			.ContentPadding(0.0f)
 			.ForegroundColor( FSlateColor::UseForeground() )
 			.IsFocusable(false)
 			[ 
 				SNew( SImage )
-				.Image( FEditorStyle::GetBrush("PropertyWindow.Button_PickAsset") )
+				.Image( FAppStyle::GetBrush("PropertyWindow.Button_PickAsset") )
 				.ColorAndOpacity( FSlateColor::UseForeground() )
 			]
 		]
@@ -68,7 +68,7 @@ TSharedRef<SWidget> SPropertyAssetPicker::OnGenerateAssetPicker()
 	for ( auto ClassIt = AllowedClasses.CreateConstIterator(); ClassIt; ++ClassIt )
 	{
 		const UClass* Class = (*ClassIt);
-		AssetPickerConfig.Filter.ClassNames.Add( Class->GetFName() );
+		AssetPickerConfig.Filter.ClassPaths.Add( Class->GetClassPathName() );
 	}
 	// Allow child classes
 	AssetPickerConfig.Filter.bRecursiveClasses = true;
@@ -83,11 +83,11 @@ TSharedRef<SWidget> SPropertyAssetPicker::OnGenerateAssetPicker()
 	
 	TSharedRef<SWidget> MenuContent = 
 		SNew(SBox)
-		.HeightOverride(300)
-		.WidthOverride(300)
+		.HeightOverride(300.0f)
+		.WidthOverride(300.0f)
 		[
 			SNew( SBorder )
-			.BorderImage( FEditorStyle::GetBrush("Menu.Background") )
+			.BorderImage( FAppStyle::GetBrush("Menu.Background") )
 			[
 				ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
 			]

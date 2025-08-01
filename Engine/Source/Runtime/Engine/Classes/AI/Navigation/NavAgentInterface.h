@@ -2,14 +2,17 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Interface.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
 #include "AI/Navigation/NavigationTypes.h"
+#endif
 #include "NavAgentInterface.generated.h"
 
 class AActor;
 class IPathFollowingAgentInterface;
+struct FNavAgentProperties;
 
 UINTERFACE(MinimalAPI, meta=(CannotImplementInterfaceInBlueprint))
 class UNavAgentInterface : public UInterface
@@ -26,7 +29,7 @@ class INavAgentInterface
 	 *	@NOTE the function will be renamed to GetNavAgentProperties in 4.8. Current name was introduced
 	 *		to help with deprecating old GetNavAgentProperties function
 	 */
-	virtual const FNavAgentProperties& GetNavAgentPropertiesRef() const { return FNavAgentProperties::DefaultProperties; }
+	ENGINE_API virtual const FNavAgentProperties& GetNavAgentPropertiesRef() const;
 
 	/**
 	 *	Retrieves Agent's location
@@ -68,3 +71,4 @@ class INavAgentInterface
 		GetMoveGoalReachTest((const AActor*)MovingActor, MoveOffset, GoalOffset, GoalRadius, GoalHalfHeight);
 	}
 };
+

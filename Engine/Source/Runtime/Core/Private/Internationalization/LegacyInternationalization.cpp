@@ -2,10 +2,11 @@
 
 #include "Internationalization/LegacyInternationalization.h"
 #include "Internationalization/Cultures/LeetCulture.h"
+#include "Internationalization/Cultures/KeysCulture.h"
 
 #if !UE_ENABLE_ICU
 
-#include "InvariantCulture.h"
+#include "Internationalization/Cultures/InvariantCulture.h"
 
 FLegacyInternationalization::FLegacyInternationalization(FInternationalization* const InI18N)
 	: I18N(InI18N)
@@ -23,6 +24,7 @@ bool FLegacyInternationalization::Initialize()
 
 #if ENABLE_LOC_TESTING
 	I18N->AddCustomCulture(MakeShared<FLeetCulture>(I18N->InvariantCulture.ToSharedRef()));
+	I18N->AddCustomCulture(MakeShared<FKeysCulture>(I18N->InvariantCulture.ToSharedRef()));
 #endif
 
 	return true;
@@ -70,8 +72,35 @@ void FLegacyInternationalization::GetCultureNames(TArray<FString>& CultureNames)
 
 TArray<FString> FLegacyInternationalization::GetPrioritizedCultureNames(const FString& Name)
 {
+	const FString CanonicalName = FCultureImplementation::GetCanonicalName(Name, *I18N);
 	TArray<FString> PrioritizedCultureNames;
-	PrioritizedCultureNames.Add(Name);
+	
+	if (!CanonicalName.IsEmpty())
+	{
+		TArray<FString> CultureFragments;
+		CanonicalName.ParseIntoArray(CultureFragments, TEXT("-"), true);
+
+		switch (CultureFragments.Num())
+		{
+		case 1: // Language
+			PrioritizedCultureNames = FCulture::GetPrioritizedParentCultureNames(CultureFragments[0], FString(), FString());
+			break;
+		case 2: // Language + Region
+			PrioritizedCultureNames = FCulture::GetPrioritizedParentCultureNames(CultureFragments[0], FString(), CultureFragments[1]);
+			break;
+		case 3: // Language + Script + Region
+			PrioritizedCultureNames = FCulture::GetPrioritizedParentCultureNames(CultureFragments[0], CultureFragments[1], CultureFragments[2]);
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (PrioritizedCultureNames.Num() == 0)
+	{
+		PrioritizedCultureNames.Add(CanonicalName);
+	}
+
 	return PrioritizedCultureNames;
 }
 

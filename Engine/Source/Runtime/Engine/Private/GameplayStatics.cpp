@@ -1,26 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Kismet/GameplayStatics.h"
-#include "Serialization/MemoryWriter.h"
-#include "Serialization/CustomVersion.h"
+#include "Engine/Blueprint.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/GameViewportClient.h"
+#include "Engine/OverlapResult.h"
 #include "Serialization/ObjectAndNameAsStringProxyArchive.h"
+#include "EngineLogs.h"
 #include "Misc/PackageName.h"
+#include "Kismet/GameplayStaticsTypes.h"
 #include "Misc/EngineVersion.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/DamageType.h"
-#include "GameFramework/Pawn.h"
-#include "WorldCollision.h"
+#include "Kismet/KismetSystemLibrary.h"
 #include "SceneView.h"
 #include "Components/PrimitiveComponent.h"
-#include "Serialization/MemoryReader.h"
+#include "Math/InverseRotationMatrix.h"
 #include "UObject/Package.h"
-#include "Audio.h"
-#include "GameFramework/WorldSettings.h"
 #include "Engine/CollisionProfile.h"
 #include "ParticleHelper.h"
+#include "Particles/ParticleSystem.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/LocalPlayer.h"
-#include "ActiveSound.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "AudioDevice.h"
@@ -28,9 +31,10 @@
 #include "DVRStreaming.h"
 #include "PlatformFeatures.h"
 #include "GameFramework/Character.h"
-#include "Sound/SoundBase.h"
 #include "Sound/DialogueWave.h"
 #include "GameFramework/SaveGame.h"
+#include "GameFramework/GameStateBase.h"
+#include "GameFramework/PlayerState.h"
 #include "PhysicalMaterials/PhysicalMaterial.h"
 #include "Components/DecalComponent.h"
 #include "Components/ForceFeedbackComponent.h"
@@ -40,20 +44,44 @@
 #include "PhysicsEngine/PhysicsSettings.h"
 #include "PhysicsEngine/BodySetup.h"
 #include "Misc/EngineVersion.h"
-#include "ContentStreaming.h"
-#include "Async/Async.h"
 #include "Engine/SceneCapture2D.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Sound/SoundCue.h"
-#include "Sound/SoundWave.h"
+#include "Audio/ActorSoundParameterInterface.h"
+#include "Engine/DamageEvents.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameplayStatics)
+
 #if WITH_ACCESSIBILITY
 #include "Framework/Application/SlateApplication.h"
+#include "UObject/UObjectIterator.h"
 #include "Widgets/Accessibility/SlateAccessibleMessageHandler.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "GameplayStatics"
 
-static const int UE4_SAVEGAME_FILE_TYPE_TAG = 0x53415647;		// "SAVG"
+namespace GameplayStatics
+{
+	AActor* GetActorOwnerFromWorldContextObject(UObject* WorldContextObject)
+	{
+		if (AActor* Actor = Cast<AActor>(WorldContextObject))
+		{
+			return Actor;
+		}
+		return WorldContextObject->GetTypedOuter<AActor>();
+	}
+	const AActor* GetActorOwnerFromWorldContextObject(const UObject* WorldContextObject)
+	{
+		if (const AActor* Actor = Cast<const AActor>(WorldContextObject))
+		{
+			return Actor;
+		}
+		return WorldContextObject->GetTypedOuter<AActor>();
+	}
+}
+
+static const int UE_SAVEGAME_FILE_TYPE_TAG = 0x53415647;		// "SAVG"
 
 struct FSaveGameFileVersion
 {
@@ -62,6 +90,8 @@ struct FSaveGameFileVersion
 		InitialVersion = 1,
 		// serializing custom versions into the savegame data to handle that type of versioning
 		AddedCustomVersions = 2,
+		// added a new UE5 version number to FPackageFileSummary
+		PackageFileSummaryVersionChange = 3,
 
 		// -----<new versions can be added above this line>-------------------------------------------------
 		VersionPlusOne,
@@ -76,6 +106,8 @@ DECLARE_CYCLE_STAT(TEXT("SpawnTime"), STAT_SpawnTime, STATGROUP_Game);
 //////////////////////////////////////////////////////////////////////////
 // FSaveGameHeader
 
+// This is the engine-level header for save game versioning and is not useful for game-specific version changes
+// To implement those, you would need to save the version number into the save game object using something like ULocalPlayerSaveGame
 struct FSaveGameHeader
 {
 	FSaveGameHeader();
@@ -89,7 +121,7 @@ struct FSaveGameHeader
 
 	int32 FileTypeTag;
 	int32 SaveGameFileVersion;
-	int32 PackageFileUE4Version;
+	FPackageFileVersion PackageFileUEVersion;
 	FEngineVersion SavedEngineVersion;
 	int32 CustomVersionFormat;
 	FCustomVersionContainer CustomVersions;
@@ -99,14 +131,13 @@ struct FSaveGameHeader
 FSaveGameHeader::FSaveGameHeader()
 	: FileTypeTag(0)
 	, SaveGameFileVersion(0)
-	, PackageFileUE4Version(0)
 	, CustomVersionFormat(static_cast<int32>(ECustomVersionSerializationFormat::Unknown))
 {}
 
 FSaveGameHeader::FSaveGameHeader(TSubclassOf<USaveGame> ObjectType)
-	: FileTypeTag(UE4_SAVEGAME_FILE_TYPE_TAG)
+	: FileTypeTag(UE_SAVEGAME_FILE_TYPE_TAG)
 	, SaveGameFileVersion(FSaveGameFileVersion::LatestVersion)
-	, PackageFileUE4Version(GPackageFileUE4Version)
+	, PackageFileUEVersion(GPackageFileUEVersion)
 	, SavedEngineVersion(FEngineVersion::Current())
 	, CustomVersionFormat(static_cast<int32>(ECustomVersionSerializationFormat::Latest))
 	, CustomVersions(FCurrentCustomVersions::GetAll())
@@ -117,7 +148,7 @@ void FSaveGameHeader::Empty()
 {
 	FileTypeTag = 0;
 	SaveGameFileVersion = 0;
-	PackageFileUE4Version = 0;
+	PackageFileUEVersion.Reset();
 	SavedEngineVersion.Empty();
 	CustomVersionFormat = (int32)ECustomVersionSerializationFormat::Unknown;
 	CustomVersions.Empty();
@@ -135,29 +166,34 @@ void FSaveGameHeader::Read(FMemoryReader& MemoryReader)
 
 	MemoryReader << FileTypeTag;
 
-	if (FileTypeTag != UE4_SAVEGAME_FILE_TYPE_TAG)
+	if (FileTypeTag != UE_SAVEGAME_FILE_TYPE_TAG)
 	{
-		// this is an old saved game, back up the file pointer to the beginning and assume version 1
+		// This is a very old saved game, back up the file pointer to the beginning and assume version 1
+		// This is unlikely to work without additional licensee-specific modifications to this code
 		MemoryReader.Seek(0);
 		SaveGameFileVersion = FSaveGameFileVersion::InitialVersion;
-
-		// Note for 4.8 and beyond: if you get a crash loading a pre-4.8 version of your savegame file and 
-		// you don't want to delete it, try uncommenting these lines and changing them to use the version 
-		// information from your previous build. Then load and resave your savegame file.
-		//MemoryReader.SetUE4Ver(MyPreviousUE4Version);				// @see GPackageFileUE4Version
-		//MemoryReader.SetEngineVer(MyPreviousEngineVersion);		// @see FEngineVersion::Current()
 	}
 	else
 	{
 		// Read version for this file format
 		MemoryReader << SaveGameFileVersion;
 
-		// Read engine and UE4 version information
-		MemoryReader << PackageFileUE4Version;
+		// Read engine and UE version information
+		if (SaveGameFileVersion >= FSaveGameFileVersion::PackageFileSummaryVersionChange)
+		{
+			MemoryReader << PackageFileUEVersion;
+		}
+		else
+		{
+			int32 OldUe4Version;
+			MemoryReader << OldUe4Version;
+
+			PackageFileUEVersion = FPackageFileVersion::CreateUE4Version(OldUe4Version);
+		}
 
 		MemoryReader << SavedEngineVersion;
 
-		MemoryReader.SetUE4Ver(PackageFileUE4Version);
+		MemoryReader.SetUEVer(PackageFileUEVersion);
 		MemoryReader.SetEngineVer(SavedEngineVersion);
 
 		if (SaveGameFileVersion >= FSaveGameFileVersion::AddedCustomVersions)
@@ -167,6 +203,10 @@ void FSaveGameHeader::Read(FMemoryReader& MemoryReader)
 			CustomVersions.Serialize(MemoryReader, static_cast<ECustomVersionSerializationFormat::Type>(CustomVersionFormat));
 			MemoryReader.SetCustomVersions(CustomVersions);
 		}
+
+		// This code does not handle SetLicenseeUEVer because save games are not expected to work across major licensee changes to the engine
+		// If your game wants to support advanced backward compatibility, you will probably want to implement a version number on the object itself
+		// ULocalPlayerSaveGame has an example of how to implement a version number in a way that can be accessed after serialization
 	}
 
 	// Get the class name
@@ -176,14 +216,14 @@ void FSaveGameHeader::Read(FMemoryReader& MemoryReader)
 void FSaveGameHeader::Write(FMemoryWriter& MemoryWriter)
 {
 	// write file type tag. identifies this file type and indicates it's using proper versioning
-	// since older UE4 versions did not version this data.
+	// since older UE versions did not version this data.
 	MemoryWriter << FileTypeTag;
 
 	// Write version for this file format
 	MemoryWriter << SaveGameFileVersion;
 
-	// Write out engine and UE4 version information
-	MemoryWriter << PackageFileUE4Version;
+	// Write out engine and UE version information
+	MemoryWriter << PackageFileUEVersion;
 	MemoryWriter << SavedEngineVersion;
 
 	// Write out custom version data
@@ -208,11 +248,128 @@ class UGameInstance* UGameplayStatics::GetGameInstance(const UObject* WorldConte
 	return World ? World->GetGameInstance() : nullptr;
 }
 
-class APlayerController* UGameplayStatics::GetPlayerController(const UObject* WorldContextObject, int32 PlayerIndex ) 
+int32 UGameplayStatics::GetNumPlayerStates(const UObject* WorldContextObject)
+{
+	AGameStateBase* GameState = GetGameState(WorldContextObject);
+
+	if (GameState)
+	{
+		return GameState->PlayerArray.Num();
+	}
+
+	return 0;
+}
+
+class APlayerState* UGameplayStatics::GetPlayerState(const UObject* WorldContextObject, int32 PlayerStateIndex)
+{
+	AGameStateBase* GameState = GetGameState(WorldContextObject);
+
+	if (GameState && GameState->PlayerArray.IsValidIndex(PlayerStateIndex))
+	{
+		return GameState->PlayerArray[PlayerStateIndex];
+	}
+
+	return nullptr;
+}
+
+class APlayerState* UGameplayStatics::GetPlayerStateFromUniqueNetId(const UObject* WorldContextObject, const FUniqueNetIdRepl& UniqueId)
+{
+	AGameStateBase* GameState = GetGameState(WorldContextObject);
+
+	if (GameState)
+	{
+		return GameState->GetPlayerStateFromUniqueNetId(UniqueId);
+	}
+
+	return nullptr;
+}
+
+int32 UGameplayStatics::GetNumPlayerControllers(const UObject* WorldContextObject)
 {
 	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
 	{
-		uint32 Index = 0;
+		return World->GetNumPlayerControllers();
+	}
+	return 0;
+}
+
+int32 UGameplayStatics::GetNumLocalPlayerControllers(const UObject* WorldContextObject)
+{
+	int32 Count = 0;
+	UGameInstance* GameInstance = GetGameInstance(WorldContextObject);
+
+	// We only want Local Players that have valid player controllers
+	if (GameInstance)
+	{
+		const TArray<ULocalPlayer*>& LocalPlayers = GameInstance->GetLocalPlayers();
+		for (ULocalPlayer* LocalPlayer : LocalPlayers)
+		{
+			if (APlayerController* PC = LocalPlayer->PlayerController)
+			{
+				Count++;
+			}
+		}
+	}
+	return Count;
+}
+
+class APlayerController* UGameplayStatics::GetPlayerController(const UObject* WorldContextObject, int32 PlayerIndex) 
+{
+	// The order for the player controller iterator is not consistent across map transfer/etc so we don't want to use that index
+	// 99% of the time people pass in index 0 and want the primary local player controller
+	// After we've finished iterating the local player controllers, iterate the GameState list to find remote ones in a consistent order
+
+	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+
+	if (!World)
+	{
+		return nullptr;
+	}
+
+	// Don't use the game instance if the passed in world isn't the primary active world
+	UGameInstance* GameInstance = World->GetGameInstance();
+	const bool bUseGameInstance = GameInstance && GameInstance->GetWorld() == World;
+
+	int32 Index = 0;
+	if (bUseGameInstance)
+	{		
+		const TArray<ULocalPlayer*>& LocalPlayers = GameInstance->GetLocalPlayers();
+		for (ULocalPlayer* LocalPlayer : LocalPlayers)
+		{
+			// Only count local players with an actual PC as part of the indexing
+			if (APlayerController* PC = LocalPlayer->PlayerController)
+			{
+				if (Index == PlayerIndex)
+				{
+					return PC;
+				}
+				Index++;
+			}
+		}
+	}
+
+	// If we have a game state, use the consistent order there to pick up remote player controllers
+	AGameStateBase* GameState = World->GetGameState();
+	if (GameState)
+	{
+		for (APlayerState* PlayerState : GameState->PlayerArray)
+		{
+			// Ignore local player controllers we would have found in the previous pass
+			APlayerController* PC = PlayerState ? PlayerState->GetPlayerController() : nullptr;
+			if (PC && !(bUseGameInstance && PC->GetLocalPlayer()))
+			{
+				if (Index == PlayerIndex)
+				{
+					return PC;
+				}
+				Index++;
+			}
+		}
+	}
+
+	// Fallback to the old behavior with a raw iterator, but only if we didn't find any potential player controllers with the other methods
+	if (Index == 0)
+	{
 		for (FConstPlayerControllerIterator Iterator = World->GetPlayerControllerIterator(); Iterator; ++Iterator)
 		{
 			APlayerController* PlayerController = Iterator->Get();
@@ -223,18 +380,24 @@ class APlayerController* UGameplayStatics::GetPlayerController(const UObject* Wo
 			Index++;
 		}
 	}
+
 	return nullptr;
 }
 
-class APlayerController* UGameplayStatics::GetPlayerControllerFromID(const UObject* WorldContextObject, int32 ControllerID)
+APlayerController* UGameplayStatics::GetPlayerControllerFromID(const UObject* WorldContextObject, int32 ControllerID)
+{
+	return GetPlayerControllerFromPlatformUser(WorldContextObject, FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerID));
+}
+
+APlayerController* UGameplayStatics::GetPlayerControllerFromPlatformUser(const UObject* WorldContextObject, FPlatformUserId UserId)
 {
 	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
 	{
 		for (FConstPlayerControllerIterator Iterator = World->GetPlayerControllerIterator(); Iterator; ++Iterator)
 		{
 			APlayerController* PlayerController = Iterator->Get();
-			int32 PlayerControllerID = GetPlayerControllerID(PlayerController);
-			if (PlayerControllerID != INDEX_NONE && PlayerControllerID == ControllerID)
+			FPlatformUserId PlayerControllerUserID = PlayerController->GetPlatformUserId();
+			if (PlayerControllerUserID.IsValid() && PlayerControllerUserID == UserId)
 			{
 				return PlayerController;
 			}
@@ -261,12 +424,54 @@ APlayerCameraManager* UGameplayStatics::GetPlayerCameraManager(const UObject* Wo
 	return PC ? PC->PlayerCameraManager : nullptr;
 }
 
+bool UGameplayStatics::IsAnyLocalPlayerCameraWithinRange(const UObject* WorldContextObject, const FVector& Location, float MaximumRange)
+{
+	if (!GEngine || IsRunningDedicatedServer())
+	{
+		return false;
+	}
+	
+	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	if (!World)
+	{
+		return false;
+	}
+
+	const float MaximumRangeSq = MaximumRange * MaximumRange; 
+
+	for (FConstPlayerControllerIterator PlayerControllerIterator = World->GetPlayerControllerIterator();
+		 PlayerControllerIterator; 
+		 ++PlayerControllerIterator)
+	{
+		const APlayerController* PlayerController = PlayerControllerIterator->Get();
+		if (!PlayerController || !PlayerController->IsLocalController())
+		{
+			continue;
+		}
+
+		if (const APlayerCameraManager* PlayerCameraManager = PlayerController->PlayerCameraManager)
+		{
+			if (FVector::DistSquared(PlayerCameraManager->GetCameraLocation(), Location) <= MaximumRangeSq)
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
 APlayerController* UGameplayStatics::CreatePlayer(const UObject* WorldContextObject, int32 ControllerId, bool bSpawnPlayerController)
+{
+	return CreatePlayerFromPlatformUser(WorldContextObject, FGenericPlatformMisc::GetPlatformUserForUserIndex(ControllerId), bSpawnPlayerController);
+}
+
+APlayerController* UGameplayStatics::CreatePlayerFromPlatformUser(const UObject* WorldContextObject, FPlatformUserId UserId, bool bSpawnPlayerController)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 	FString Error;
 
-	ULocalPlayer* LocalPlayer = World ? World->GetGameInstance()->CreateLocalPlayer(ControllerId, Error, bSpawnPlayerController) : nullptr;
+	ULocalPlayer* LocalPlayer = World ? World->GetGameInstance()->CreateLocalPlayer(UserId, Error, bSpawnPlayerController) : nullptr;
 
 	if (Error.Len() > 0)
 	{
@@ -296,24 +501,22 @@ void UGameplayStatics::RemovePlayer(APlayerController* PlayerController, bool bD
 
 int32 UGameplayStatics::GetPlayerControllerID(APlayerController* PlayerController)
 {
-	if (PlayerController)
-	{
-		if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
-		{
-			return LocalPlayer->GetControllerId();
-		}
-	}
-
-	return INDEX_NONE;
+	FPlatformUserId UserID = PlayerController ? PlayerController->GetPlatformUserId() : PLATFORMUSERID_NONE;
+	return FGenericPlatformMisc::GetUserIndexForPlatformUser(UserID);
 }
 
 void UGameplayStatics::SetPlayerControllerID(APlayerController* PlayerController, int32 ControllerId)
+{
+	SetPlayerPlatformUserId(PlayerController, FPlatformMisc::GetPlatformUserForUserIndex(ControllerId));
+}
+
+void UGameplayStatics::SetPlayerPlatformUserId(APlayerController* PlayerController, FPlatformUserId UserId)
 {
 	if (PlayerController)
 	{
 		if (ULocalPlayer* LocalPlayer = PlayerController->GetLocalPlayer())
 		{
-			LocalPlayer->SetControllerId(ControllerId);
+			LocalPlayer->SetPlatformUserId(UserId);
 		}
 	}
 }
@@ -333,6 +536,11 @@ AGameStateBase* UGameplayStatics::GetGameState(const UObject* WorldContextObject
 class UClass* UGameplayStatics::GetObjectClass(const UObject* Object)
 {
 	return Object ? Object->GetClass() : nullptr;
+}
+
+bool UGameplayStatics::ObjectIsA(const UObject* Object, TSubclassOf<UObject> ObjectClass)
+{
+	return (Object && ObjectClass) ? Object->IsA(ObjectClass) : false;
 }
 
 float UGameplayStatics::GetGlobalTimeDilation(const UObject* WorldContextObject)
@@ -489,7 +697,7 @@ static bool ComponentIsDamageableFrom(UPrimitiveComponent* VictimComp, FVector c
 			else
 			{
 				// if we hit something else blocking, it's not
-				UE_LOG(LogDamage, Log, TEXT("Radial Damage to %s blocked by %s (%s)"), *GetNameSafe(VictimComp), *GetNameSafe(OutHitResult.GetActor()), *GetNameSafe(OutHitResult.Component.Get()));
+				UE_LOG(LogDamage, Log, TEXT("Radial Damage to %s blocked by %s (%s)"), *GetNameSafe(VictimComp), *OutHitResult.GetHitObjectHandle().GetName(), *GetNameSafe(OutHitResult.Component.Get()));
 				return false;
 			}
 		}
@@ -528,10 +736,9 @@ bool UGameplayStatics::ApplyRadialDamageWithFalloff(const UObject* WorldContextO
 
 	// collate into per-actor list of hit components
 	TMap<AActor*, TArray<FHitResult> > OverlapComponentMap;
-	for (int32 Idx = 0; Idx < Overlaps.Num(); ++Idx)
+	for (const FOverlapResult& Overlap : Overlaps)
 	{
-		FOverlapResult const& Overlap = Overlaps[Idx];
-		AActor* const OverlapActor = Overlap.GetActor();
+		AActor* const OverlapActor = Overlap.OverlapObjectHandle.FetchActor();
 
 		if (OverlapActor &&
 			OverlapActor->CanBeDamaged() &&
@@ -643,14 +850,7 @@ class AActor* UGameplayStatics::BeginSpawningActorFromBlueprint(const UObject* W
 	return nullptr;
 }
 
-// deprecated
-class AActor* UGameplayStatics::BeginSpawningActorFromClass(const UObject* WorldContextObject, TSubclassOf<AActor> ActorClass, const FTransform& SpawnTransform, bool bNoCollisionFail /*= false*/, AActor* Owner /*= nullptr*/)
-{
-	ESpawnActorCollisionHandlingMethod const CollisionHandlingOverride = bNoCollisionFail ? ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButDontSpawnIfColliding : ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-	return BeginDeferredActorSpawnFromClass(WorldContextObject, ActorClass, SpawnTransform, CollisionHandlingOverride, Owner);
-}
-
-class AActor* UGameplayStatics::BeginDeferredActorSpawnFromClass(const UObject* WorldContextObject, TSubclassOf<AActor> ActorClass, const FTransform& SpawnTransform, ESpawnActorCollisionHandlingMethod CollisionHandlingOverride /*= ESpawnActorCollisionHandlingMethod::Undefined*/, AActor* Owner /*= nullptr*/)
+class AActor* UGameplayStatics::BeginDeferredActorSpawnFromClass(const UObject* WorldContextObject, TSubclassOf<AActor> ActorClass, const FTransform& SpawnTransform, ESpawnActorCollisionHandlingMethod CollisionHandlingOverride /*= ESpawnActorCollisionHandlingMethod::Undefined*/, AActor* Owner /*= nullptr*/, ESpawnActorScaleMethod TransformScaleMethod /*= ESpawnActorScaleMethod::MultiplyWithRoot*/)
 {
 	SCOPE_CYCLE_COUNTER(STAT_SpawnTime);
 	if (UClass* Class = *ActorClass)
@@ -670,27 +870,27 @@ class AActor* UGameplayStatics::BeginDeferredActorSpawnFromClass(const UObject* 
 
 		if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
 		{
-			return World->SpawnActorDeferred<AActor>(Class, SpawnTransform, Owner, AutoInstigator, CollisionHandlingOverride);
+			return World->SpawnActorDeferred<AActor>(Class, SpawnTransform, Owner, AutoInstigator, CollisionHandlingOverride, TransformScaleMethod);
 		}
 		else
 		{
 			//@TODO: RuntimeErrors: Overlogging
-			UE_LOG(LogScript, Warning, TEXT("UGameplayStatics::BeginSpawningActorFromClass: %s can not be spawned in NULL world"), *Class->GetName());		
+			UE_LOG(LogScript, Warning, TEXT("UGameplayStatics::BeginDeferredActorSpawnFromClass: %s can not be spawned in NULL world"), *Class->GetName());		
 		}
 	}
 	else
 	{
-		UE_LOG(LogScript, Warning, TEXT("UGameplayStatics::BeginSpawningActorFromClass: can not spawn an actor from a NULL class"));
+		UE_LOG(LogScript, Warning, TEXT("UGameplayStatics::BeginDeferredActorSpawnFromClass: can not spawn an actor from a NULL class"));
 	}
 	return nullptr;
 }
 
-AActor* UGameplayStatics::FinishSpawningActor(AActor* Actor, const FTransform& SpawnTransform)
+AActor* UGameplayStatics::FinishSpawningActor(AActor* Actor, const FTransform& SpawnTransform, ESpawnActorScaleMethod TransformScaleMethod)
 {
 	SCOPE_CYCLE_COUNTER(STAT_SpawnTime);
 	if (Actor)
 	{
-		Actor->FinishSpawning(SpawnTransform);
+		Actor->FinishSpawning(SpawnTransform, false, nullptr, TransformScaleMethod);
 	}
 
 	return Actor;
@@ -832,7 +1032,7 @@ FVector UGameplayStatics::GetActorArrayAverageLocation(const TArray<AActor*>& Ac
 	{
 		AActor* A = Actors[ActorIdx];
 		// Check actor is non-null, not deleted, and has a root component
-		if (A && !A->IsPendingKill() && A->GetRootComponent())
+		if (IsValid(A) && A->GetRootComponent())
 		{
 			LocationSum += A->GetActorLocation();
 			ActorCount++;
@@ -856,7 +1056,7 @@ void UGameplayStatics::GetActorArrayBounds(const TArray<AActor*>& Actors, bool b
 	{
 		AActor* A = Actors[ActorIdx];
 		// Check actor is non-null, not deleted
-		if(A && !A->IsPendingKill())
+		if(IsValid(A))
 		{
 			ActorBounds += A->GetComponentsBoundingBox(!bOnlyCollidingComponents);
 		}
@@ -900,10 +1100,10 @@ void UGameplayStatics::GetAllActorsOfClass(const UObject* WorldContextObject, TS
 	if (ActorClass)
 	{
 		if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
-	{
-		for(TActorIterator<AActor> It(World, ActorClass); It; ++It)
 		{
-			AActor* Actor = *It;
+			for (TActorIterator<AActor> It(World, ActorClass); It; ++It)
+			{
+				AActor* Actor = *It;
 				OutActors.Add(Actor);
 			}
 		}
@@ -916,20 +1116,22 @@ void UGameplayStatics::GetAllActorsWithInterface(const UObject* WorldContextObje
 	OutActors.Reset();
 
 	// We do nothing if no interface provided, rather than giving ALL actors!
-	if (Interface)
+	if (!Interface)
 	{
-		if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+		return;
+	}
+
+	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
 	{
-		for(FActorIterator It(World); It; ++It)
+		for (FActorIterator It(World); It; ++It)
 		{
 			AActor* Actor = *It;
-				if (Actor->GetClass()->ImplementsInterface(Interface))
+			if (Actor->GetClass()->ImplementsInterface(Interface))
 			{
 				OutActors.Add(Actor);
 			}
 		}
 	}
-}
 }
 
 void UGameplayStatics::GetAllActorsWithTag(const UObject* WorldContextObject, FName Tag, TArray<AActor*>& OutActors)
@@ -938,17 +1140,19 @@ void UGameplayStatics::GetAllActorsWithTag(const UObject* WorldContextObject, FN
 	OutActors.Reset();
 
 	// We do nothing if no tag is provided, rather than giving ALL actors!
-	if (!Tag.IsNone())
+	if (Tag.IsNone())
 	{
-		if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+		return;
+	}
+	
+	if (UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+	{
+		for (FActorIterator It(World); It; ++It)
 		{
-			for (FActorIterator It(World); It; ++It)
+			AActor* Actor = *It;
+			if (Actor->ActorHasTag(Tag))
 			{
-				AActor* Actor = *It;
-				if (Actor->ActorHasTag(Tag))
-				{
-					OutActors.Add(Actor);
-				}
+				OutActors.Add(Actor);
 			}
 		}
 	}
@@ -968,7 +1172,7 @@ void UGameplayStatics::GetAllActorsOfClassWithTag(const UObject* WorldContextObj
 		for (TActorIterator<AActor> It(World, ActorClass); It; ++It)
 		{
 			AActor* Actor = *It;
-			if (Actor && !Actor->IsPendingKill() && Actor->ActorHasTag(Tag))
+			if (IsValid(Actor) && Actor->ActorHasTag(Tag))
 			{
 				OutActors.Add(Actor);
 			}
@@ -1184,7 +1388,8 @@ UParticleSystemComponent* UGameplayStatics::SpawnEmitterAttached(UParticleSystem
 	return PSC;
 }
 
-void UGameplayStatics::BreakHitResult(const FHitResult& Hit, bool& bBlockingHit, bool& bInitialOverlap, float& Time, float& Distance, FVector& Location, FVector& ImpactPoint, FVector& Normal, FVector& ImpactNormal, UPhysicalMaterial*& PhysMat, AActor*& HitActor, UPrimitiveComponent*& HitComponent, FName& HitBoneName, int32& HitItem, int32& ElementIndex, int32& FaceIndex, FVector& TraceStart, FVector& TraceEnd)
+// FRED_TODO: propagate hit object handles further instead of converting to an actor here
+void UGameplayStatics::BreakHitResult(const FHitResult& Hit, bool& bBlockingHit, bool& bInitialOverlap, float& Time, float& Distance, FVector& Location, FVector& ImpactPoint, FVector& Normal, FVector& ImpactNormal, UPhysicalMaterial*& PhysMat, AActor*& HitActor, UPrimitiveComponent*& HitComponent, FName& HitBoneName, FName& BoneName, int32& HitItem, int32& ElementIndex, int32& FaceIndex, FVector& TraceStart, FVector& TraceEnd)
 {
 	SCOPE_CYCLE_COUNTER(STAT_BreakHitResult);
 	bBlockingHit = Hit.bBlockingHit;
@@ -1196,9 +1401,10 @@ void UGameplayStatics::BreakHitResult(const FHitResult& Hit, bool& bBlockingHit,
 	Normal = Hit.Normal;
 	ImpactNormal = Hit.ImpactNormal;	
 	PhysMat = Hit.PhysMaterial.Get();
-	HitActor = Hit.GetActor();
+	HitActor = Hit.GetHitObjectHandle().FetchActor();
 	HitComponent = Hit.GetComponent();
 	HitBoneName = Hit.BoneName;
+	BoneName = Hit.MyBoneName;
 	HitItem = Hit.Item;
 	ElementIndex = Hit.ElementIndex;
 	TraceStart = Hit.TraceStart;
@@ -1206,7 +1412,7 @@ void UGameplayStatics::BreakHitResult(const FHitResult& Hit, bool& bBlockingHit,
 	FaceIndex = Hit.FaceIndex;
 }
 
-FHitResult UGameplayStatics::MakeHitResult(bool bBlockingHit, bool bInitialOverlap, float Time, float Distance, FVector Location, FVector ImpactPoint, FVector Normal, FVector ImpactNormal, class UPhysicalMaterial* PhysMat, class AActor* HitActor, class UPrimitiveComponent* HitComponent, FName HitBoneName, int32 HitItem, int32 ElementIndex, int32 FaceIndex, FVector TraceStart, FVector TraceEnd)
+FHitResult UGameplayStatics::MakeHitResult(bool bBlockingHit, bool bInitialOverlap, float Time, float Distance, FVector Location, FVector ImpactPoint, FVector Normal, FVector ImpactNormal, class UPhysicalMaterial* PhysMat, class AActor* HitActor, class UPrimitiveComponent* HitComponent, FName HitBoneName, FName BoneName, int32 HitItem, int32 ElementIndex, int32 FaceIndex, FVector TraceStart, FVector TraceEnd)
 {
 	SCOPE_CYCLE_COUNTER(STAT_MakeHitResult);
 	FHitResult Hit;
@@ -1219,9 +1425,10 @@ FHitResult UGameplayStatics::MakeHitResult(bool bBlockingHit, bool bInitialOverl
 	Hit.Normal = Normal;
 	Hit.ImpactNormal = ImpactNormal;
 	Hit.PhysMaterial = PhysMat;
-	Hit.Actor = HitActor;
+	Hit.HitObjectHandle = FActorInstanceHandle(HitActor, HitComponent, HitItem);
 	Hit.Component = HitComponent;
 	Hit.BoneName = HitBoneName;
+	Hit.MyBoneName = BoneName;
 	Hit.Item = HitItem;
 	Hit.ElementIndex = ElementIndex;
 	Hit.TraceStart = TraceStart;
@@ -1381,7 +1588,7 @@ void UGameplayStatics::SetGlobalListenerFocusParameters(const UObject* WorldCont
 	}
 }
 
-void UGameplayStatics::PlaySound2D(const UObject* WorldContextObject, USoundBase* Sound, float VolumeMultiplier, float PitchMultiplier, float StartTime, USoundConcurrency* ConcurrencySettings, AActor* OwningActor, bool bIsUISound)
+void UGameplayStatics::PlaySound2D(const UObject* WorldContextObject, USoundBase* Sound, float VolumeMultiplier, float PitchMultiplier, float StartTime, USoundConcurrency* ConcurrencySettings, const AActor* OwningActor, bool bIsUISound)
 {
 	if (!Sound || !GEngine || !GEngine->UseSound())
 	{
@@ -1416,9 +1623,15 @@ void UGameplayStatics::PlaySound2D(const UObject* WorldContextObject, USoundBase
 		NewActiveSound.Priority = Sound->Priority;
 		NewActiveSound.SubtitlePriority = Sound->GetSubtitlePriority();
 
-		NewActiveSound.SetOwner(OwningActor);
+		// If OwningActor isn't supplied to this function, derive an owner from the WorldContextObject
+		const AActor* ActiveSoundOwner = OwningActor ? OwningActor : GameplayStatics::GetActorOwnerFromWorldContextObject(WorldContextObject);
 
-		AudioDevice->AddNewActiveSound(NewActiveSound);
+		NewActiveSound.SetOwner(ActiveSoundOwner);
+
+		TArray<FAudioParameter> Params;
+		UActorSoundParameterInterface::Fill(ActiveSoundOwner, Params);
+
+		AudioDevice->AddNewActiveSound(NewActiveSound, &Params);
 	}
 }
 
@@ -1435,9 +1648,12 @@ UAudioComponent* UGameplayStatics::CreateSound2D(const UObject* WorldContextObje
 		return nullptr;
 	}
 
+	// Derive an owner from the WorldContextObject
+	AActor* WorldContextOwner = GameplayStatics::GetActorOwnerFromWorldContextObject(const_cast<UObject*>(WorldContextObject));
+
 	FAudioDevice::FCreateComponentParams Params = bPersistAcrossLevelTransition
 		? FAudioDevice::FCreateComponentParams(ThisWorld->GetAudioDeviceRaw())
-		: FAudioDevice::FCreateComponentParams(ThisWorld);
+		: FAudioDevice::FCreateComponentParams(ThisWorld, WorldContextOwner);
 
 	if (ConcurrencySettings)
 	{
@@ -1454,6 +1670,7 @@ UAudioComponent* UGameplayStatics::CreateSound2D(const UObject* WorldContextObje
 		AudioComponent->bAutoDestroy = bAutoDestroy;
 		AudioComponent->bIgnoreForFlushing = bPersistAcrossLevelTransition;
 		AudioComponent->SubtitlePriority = Sound->GetSubtitlePriority();
+		AudioComponent->bStopWhenOwnerDestroyed = false;
 	}
 	return AudioComponent;
 }
@@ -1468,7 +1685,7 @@ UAudioComponent* UGameplayStatics::SpawnSound2D(const UObject* WorldContextObjec
 	return AudioComponent;
 }
 
-void UGameplayStatics::PlaySoundAtLocation(const UObject* WorldContextObject, class USoundBase* Sound, FVector Location, FRotator Rotation, float VolumeMultiplier, float PitchMultiplier, float StartTime, class USoundAttenuation* AttenuationSettings, class USoundConcurrency* ConcurrencySettings, AActor* OwningActor)
+void UGameplayStatics::PlaySoundAtLocation(const UObject* WorldContextObject, class USoundBase* Sound, FVector Location, FRotator Rotation, float VolumeMultiplier, float PitchMultiplier, float StartTime, class USoundAttenuation* AttenuationSettings, class USoundConcurrency* ConcurrencySettings, const AActor* OwningActor, const UInitialActiveSoundParams* InitialParams)
 {
 	if (!Sound || !GEngine || !GEngine->UseSound())
 	{
@@ -1483,7 +1700,17 @@ void UGameplayStatics::PlaySoundAtLocation(const UObject* WorldContextObject, cl
 
 	if (FAudioDeviceHandle AudioDevice = ThisWorld->GetAudioDevice())
 	{
-		AudioDevice->PlaySoundAtLocation(Sound, ThisWorld, VolumeMultiplier, PitchMultiplier, StartTime, Location, Rotation, AttenuationSettings, ConcurrencySettings, nullptr, OwningActor);
+		TArray<FAudioParameter> Params;
+		if (InitialParams)
+		{
+			Params.Append(InitialParams->AudioParams);
+		}
+
+		// If OwningActor isn't supplied to this function, derive an owner from the WorldContextObject
+		const AActor* ActiveSoundOwner = OwningActor ? OwningActor : GameplayStatics::GetActorOwnerFromWorldContextObject(WorldContextObject);
+		UActorSoundParameterInterface::Fill(ActiveSoundOwner, Params);
+
+		AudioDevice->PlaySoundAtLocation(Sound, ThisWorld, VolumeMultiplier, PitchMultiplier, StartTime, Location, Rotation, AttenuationSettings, ConcurrencySettings, &Params, ActiveSoundOwner);
 	}
 }
 
@@ -1502,7 +1729,10 @@ UAudioComponent* UGameplayStatics::SpawnSoundAtLocation(const UObject* WorldCont
 
 	const bool bIsInGameWorld = ThisWorld->IsGameWorld();
 
-	FAudioDevice::FCreateComponentParams Params(ThisWorld);
+	// Derive an owner from the WorldContextObject
+	AActor* WorldContextOwner = GameplayStatics::GetActorOwnerFromWorldContextObject(const_cast<UObject*>(WorldContextObject));
+
+	FAudioDevice::FCreateComponentParams Params(ThisWorld, WorldContextOwner);
 	Params.SetLocation(Location);
 	Params.AttenuationSettings = AttenuationSettings;
 	
@@ -1522,6 +1752,7 @@ UAudioComponent* UGameplayStatics::SpawnSoundAtLocation(const UObject* WorldCont
 		AudioComponent->bIsUISound				= !bIsInGameWorld;
 		AudioComponent->bAutoDestroy			= bAutoDestroy;
 		AudioComponent->SubtitlePriority		= Sound->GetSubtitlePriority();
+		AudioComponent->bStopWhenOwnerDestroyed = false;
 		AudioComponent->Play(StartTime);
 	}
 
@@ -1731,9 +1962,48 @@ void UGameplayStatics::PrimeSound(USoundBase* InSound)
 
 		if (InSoundWave->HasStreamingChunks() && InSoundWave->GetNumChunks() > 1)
 		{
-			IStreamingManager::Get().GetAudioStreamingManager().RequestChunk(InSoundWave, 1, [](EAudioChunkLoadResult) {});
+			IStreamingManager::Get().GetAudioStreamingManager().RequestChunk(InSoundWave->CreateSoundWaveProxy(), 1, [](EAudioChunkLoadResult) {});
 		}
 	}
+}
+
+TArray<FName> UGameplayStatics::GetAvailableSpatialPluginNames(const UObject* WorldContextObject)
+{
+	if(const UWorld* ThisWorld = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+	{
+		if (FAudioDeviceHandle AudioDevice = ThisWorld->GetAudioDevice())
+		{
+			return AudioDevice->GetAvailableSpatializationPluginNames();
+		}
+	}
+
+	return {};
+}
+
+FName UGameplayStatics::GetActiveSpatialPluginName(const UObject* WorldContextObject)
+{
+	if(const UWorld* ThisWorld = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+	{
+		if (FAudioDeviceHandle AudioDevice = ThisWorld->GetAudioDevice())
+		{
+			return AudioDevice->GetCurrentSpatializationPluginInterfaceInfo().PluginName;
+		}
+	}
+
+	return {};
+}
+
+bool UGameplayStatics::SetActiveSpatialPluginByName(const UObject* WorldContextObject, FName InPluginName)
+{
+	if(const UWorld* ThisWorld = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull))
+	{
+		if (FAudioDeviceHandle AudioDevice = ThisWorld->GetAudioDevice())
+		{
+			return AudioDevice->SetCurrentSpatializationPlugin(InPluginName);
+		}
+	}
+
+	return {};
 }
 
 void UGameplayStatics::PrimeAllSoundsInSoundClass(class USoundClass* InSoundClass)
@@ -2113,24 +2383,24 @@ bool UGameplayStatics::SaveDataToSlot(const TArray<uint8>& InSaveData, const FSt
 
 void UGameplayStatics::AsyncSaveGameToSlot(USaveGame* SaveGameObject, const FString& SlotName, const int32 UserIndex, FAsyncSaveGameToSlotDelegate SavedDelegate)
 {
-	TArray<uint8> ObjectBytes;
-	if (SaveGameToMemory(SaveGameObject, ObjectBytes))
-	{
-		AsyncTask(ENamedThreads::AnyHiPriThreadNormalTask, [SlotName, UserIndex, SavedDelegate, ObjectBytes]()
-		{
-			bool bSuccess = SaveDataToSlot(ObjectBytes, SlotName, UserIndex);
+	ISaveGameSystem* SaveSystem = IPlatformFeaturesModule::Get().GetSaveGameSystem();
 
-			// Now schedule the callback on the game thread, but only if it was bound to anything
-			if (SavedDelegate.IsBound())
+	TSharedRef<TArray<uint8>> ObjectBytes(new TArray<uint8>());
+
+	if (SaveSystem && (SlotName.Len() > 0) && 
+		SaveGameToMemory(SaveGameObject, *ObjectBytes) && (ObjectBytes->Num() > 0) )
+	{
+		FPlatformUserId PlatformUserId = FPlatformMisc::GetPlatformUserForUserIndex(UserIndex);
+
+		SaveSystem->SaveGameAsync(false, *SlotName, PlatformUserId, ObjectBytes, 
+			[SavedDelegate, UserIndex](const FString& SlotName, FPlatformUserId PlatformUserId, bool bSuccess)
 			{
-				AsyncTask(ENamedThreads::GameThread, [SlotName, UserIndex, SavedDelegate, bSuccess]()
-				{
-					SavedDelegate.ExecuteIfBound(SlotName, UserIndex, bSuccess);
-				});
+				check(IsInGameThread());
+				SavedDelegate.ExecuteIfBound(SlotName, UserIndex, bSuccess);
 			}
-		});
+		);
 	}
-	else if (SavedDelegate.IsBound())
+	else
 	{
 		SavedDelegate.ExecuteIfBound(SlotName, UserIndex, false);
 	}
@@ -2166,12 +2436,12 @@ bool UGameplayStatics::DeleteGameInSlot(const FString& SlotName, const int32 Use
 }
 
 USaveGame* UGameplayStatics::LoadGameFromMemory(const TArray<uint8>& InSaveData)
-	{
+{
 	if (InSaveData.Num() == 0)
-		{
+	{
 		// Empty buffer, return instead of causing a bad serialize that could crash
-	return nullptr;
-}
+		return nullptr;
+	}
 
 	USaveGame* OutSaveGameObject = nullptr;
 
@@ -2181,7 +2451,7 @@ USaveGame* UGameplayStatics::LoadGameFromMemory(const TArray<uint8>& InSaveData)
 	SaveHeader.Read(MemoryReader);
 
 	// Try and find it, and failing that, load it
-	UClass* SaveGameClass = FindObject<UClass>(ANY_PACKAGE, *SaveHeader.SaveGameClassName);
+	UClass* SaveGameClass = UClass::TryFindTypeSlow<UClass>(SaveHeader.SaveGameClassName);
 	if (SaveGameClass == nullptr)
 	{
 		SaveGameClass = LoadObject<UClass>(nullptr, *SaveHeader.SaveGameClassName);
@@ -2218,24 +2488,30 @@ bool UGameplayStatics::LoadDataFromSlot(TArray<uint8>& OutSaveData, const FStrin
 
 void UGameplayStatics::AsyncLoadGameFromSlot(const FString& SlotName, const int32 UserIndex, FAsyncLoadGameFromSlotDelegate LoadedDelegate)
 {
-	AsyncTask(ENamedThreads::AnyHiPriThreadNormalTask, [SlotName, UserIndex, LoadedDelegate]()
+	ISaveGameSystem* SaveSystem = IPlatformFeaturesModule::Get().GetSaveGameSystem();
+	if (SaveSystem && (SlotName.Len() > 0))
 	{
-		// Do the actual I/O on the background thread
-		TArray<uint8> ObjectBytes;
-		LoadDataFromSlot(ObjectBytes, SlotName, UserIndex);
+		FPlatformUserId PlatformUserId = FPlatformMisc::GetPlatformUserForUserIndex(UserIndex);
 
-		// Now schedule the serialize and callback on the game thread
-		AsyncTask(ENamedThreads::GameThread, [SlotName, UserIndex, LoadedDelegate, ObjectBytes]()
-		{
-			USaveGame* LoadedGame = nullptr;
-			if (ObjectBytes.Num() > 0)
+		SaveSystem->LoadGameAsync(false, *SlotName, PlatformUserId,
+			[LoadedDelegate, UserIndex](const FString& SlotName, FPlatformUserId PlatformUserId, bool bSuccess, const TArray<uint8>& Data)
 			{
-				LoadedGame = LoadGameFromMemory(ObjectBytes);
-			}
+				check(IsInGameThread());
 
-			LoadedDelegate.ExecuteIfBound(SlotName, UserIndex, LoadedGame);
-		});
-	});
+				USaveGame* LoadedGame = nullptr;
+				if (bSuccess)
+				{
+					LoadedGame = LoadGameFromMemory(Data);
+				}
+
+				LoadedDelegate.ExecuteIfBound(SlotName, UserIndex, LoadedGame);
+			}
+		);
+	}
+	else
+	{
+		LoadedDelegate.ExecuteIfBound(SlotName, UserIndex, nullptr);
+	}
 }
 
 USaveGame* UGameplayStatics::LoadGameFromSlot(const FString& SlotName, const int32 UserIndex)
@@ -2260,37 +2536,44 @@ FMemoryReader UGameplayStatics::StripSaveGameHeader(const TArray<uint8>& SaveDat
 	return MemoryReader;
 }
 
-float UGameplayStatics::GetWorldDeltaSeconds(const UObject* WorldContextObject)
+double UGameplayStatics::GetWorldDeltaSeconds(const UObject* WorldContextObject)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? World->GetDeltaSeconds() : 0.f;
+	return World ? World->GetDeltaSeconds() : 0.0;
 }
 
-float UGameplayStatics::GetTimeSeconds(const UObject* WorldContextObject)
+double UGameplayStatics::GetTimeSeconds(const UObject* WorldContextObject)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? World->GetTimeSeconds() : 0.f;
+	return World ? World->GetTimeSeconds() : 0.0;
 }
 
-float UGameplayStatics::GetUnpausedTimeSeconds(const UObject* WorldContextObject)
+double UGameplayStatics::GetUnpausedTimeSeconds(const UObject* WorldContextObject)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? World->GetUnpausedTimeSeconds() : 0.f;
+	return World ? World->GetUnpausedTimeSeconds() : 0.0;
 }
 
-float UGameplayStatics::GetRealTimeSeconds(const UObject* WorldContextObject)
+double UGameplayStatics::GetRealTimeSeconds(const UObject* WorldContextObject)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? World->GetRealTimeSeconds() : 0.f;
+	return World ? World->GetRealTimeSeconds() : 0.0;
 }
 
-float UGameplayStatics::GetAudioTimeSeconds(const UObject* WorldContextObject)
+double UGameplayStatics::GetAudioTimeSeconds(const UObject* WorldContextObject)
 {
 	UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	return World ? World->GetAudioTimeSeconds() : 0.f;
+	return World ? World->GetAudioTimeSeconds() : 0.0;
 }
 
 void UGameplayStatics::GetAccurateRealTime(int32& Seconds, float& PartialSeconds)
+{
+	double TimeSeconds = FPlatformTime::Seconds() - GStartTime;
+	Seconds = floor(TimeSeconds);
+	PartialSeconds = TimeSeconds - double(Seconds);
+}
+
+void UGameplayStatics::GetAccurateRealTime(int32& Seconds, double& PartialSeconds)
 {
 	double TimeSeconds = FPlatformTime::Seconds() - GStartTime;
 	Seconds = floor(TimeSeconds);
@@ -2311,188 +2594,223 @@ FString UGameplayStatics::GetPlatformName()
 	return FPlatformProperties::IniPlatformName();
 }
 
-bool UGameplayStatics::BlueprintSuggestProjectileVelocity(const UObject* WorldContextObject, FVector& OutTossVelocity, FVector StartLocation, FVector EndLocation, float LaunchSpeed, float OverrideGravityZ, ESuggestProjVelocityTraceOption::Type TraceOption, float CollisionRadius, bool bFavorHighArc, bool bDrawDebug)
+bool UGameplayStatics::BlueprintSuggestProjectileVelocity(const UObject* WorldContextObject, FVector& OutTossVelocity, FVector StartLocation, FVector EndLocation, float LaunchSpeed, float OverrideGravityZ, ESuggestProjVelocityTraceOption::Type TraceOption, float CollisionRadius, bool bFavorHighArc, bool bDrawDebug, bool bAcceptClosestOnNoSolutions)
 {
 	// simple pass-through to the C++ interface
-	return UGameplayStatics::SuggestProjectileVelocity(WorldContextObject, OutTossVelocity, StartLocation, EndLocation, LaunchSpeed, bFavorHighArc, CollisionRadius, OverrideGravityZ, TraceOption, FCollisionResponseParams::DefaultResponseParam, TArray<AActor*>(), bDrawDebug);
+	FSuggestProjectileVelocityParameters ProjectileParams = FSuggestProjectileVelocityParameters(WorldContextObject, StartLocation, EndLocation, LaunchSpeed);
+	ProjectileParams.bFavorHighArc = bFavorHighArc;
+	ProjectileParams.CollisionRadius = CollisionRadius;
+	ProjectileParams.OverrideGravityZ = OverrideGravityZ;
+	ProjectileParams.TraceOption = TraceOption;
+	ProjectileParams.bDrawDebug = bDrawDebug;
+	ProjectileParams.bAcceptClosestOnNoSolutions = bAcceptClosestOnNoSolutions;
+
+	return SuggestProjectileVelocity(ProjectileParams, OutTossVelocity);
+}
+
+bool UGameplayStatics::SuggestProjectileVelocity(const UObject* WorldContextObject, FVector& TossVelocity, FVector StartLocation, FVector EndLocation, float TossSpeed, bool bHighArc , float CollisionRadius, float OverrideGravityZ, ESuggestProjVelocityTraceOption::Type TraceOption, FCollisionResponseParams& ResponseParam, TArray<AActor*> ActorsToIgnore, bool bDrawDebug, bool bAcceptClosestOnNoSolutions)
+{
+	FSuggestProjectileVelocityParameters ProjectileParams = FSuggestProjectileVelocityParameters(WorldContextObject,StartLocation, EndLocation, TossSpeed);
+	ProjectileParams.bFavorHighArc = bHighArc;
+	ProjectileParams.CollisionRadius = CollisionRadius;
+	ProjectileParams.OverrideGravityZ = OverrideGravityZ;
+	ProjectileParams.TraceOption = TraceOption;
+	ProjectileParams.ResponseParam = ResponseParam;
+	ProjectileParams.ActorsToIgnore = ActorsToIgnore;
+	ProjectileParams.bDrawDebug = bDrawDebug;
+	ProjectileParams.bAcceptClosestOnNoSolutions = bAcceptClosestOnNoSolutions;
+
+	return SuggestProjectileVelocity(ProjectileParams, TossVelocity);
 }
 
 // note: this will automatically fall back to line test if radius is small enough
 // Based on analytic solution to ballistic angle of launch http://en.wikipedia.org/wiki/Trajectory_of_a_projectile#Angle_required_to_hit_coordinate_.28x.2Cy.29
-bool UGameplayStatics::SuggestProjectileVelocity(const UObject* WorldContextObject, FVector& OutTossVelocity, FVector Start, FVector End, float TossSpeed, bool bFavorHighArc, float CollisionRadius, float OverrideGravityZ, ESuggestProjVelocityTraceOption::Type TraceOption, const FCollisionResponseParams& ResponseParam, const TArray<AActor*>& ActorsToIgnore, bool bDrawDebug)
+bool UGameplayStatics::SuggestProjectileVelocity(const FSuggestProjectileVelocityParameters& ProjectileParams, FVector& OutTossVelocity)
 {
-	const FVector FlightDelta = End - Start;
+	const FVector FlightDelta = ProjectileParams.End - ProjectileParams.Start;
 	const FVector DirXY = FlightDelta.GetSafeNormal2D();
 	const float DeltaXY = FlightDelta.Size2D();
 
 	const float DeltaZ = FlightDelta.Z;
 
-	const float TossSpeedSq = FMath::Square(TossSpeed);
+	const float TossSpeedSq = FMath::Square(ProjectileParams.TossSpeed);
 
-	const UWorld* const World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	const UWorld* const World = GEngine->GetWorldFromContextObject(ProjectileParams.WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
 	if (World == nullptr)
 	{
 		return false;
 	}
-	const float GravityZ = FMath::IsNearlyEqual(OverrideGravityZ, 0.0f) ? -World->GetGravityZ() : -OverrideGravityZ;
+	const float GravityZ = FMath::IsNearlyEqual(ProjectileParams.OverrideGravityZ, 0.0f) ? -World->GetGravityZ() : -ProjectileParams.OverrideGravityZ;
+
+	FVector PrioritizedProjVelocities[2];
+	int32 NumSolutions;
 
 	// v^4 - g*(g*x^2 + 2*y*v^2)
-	const float InsideTheSqrt = FMath::Square(TossSpeedSq) - GravityZ * ( (GravityZ * FMath::Square(DeltaXY)) + (2.f * DeltaZ * TossSpeedSq) );
+	const float InsideTheSqrt = FMath::Square(TossSpeedSq) - GravityZ * ((GravityZ * FMath::Square(DeltaXY)) + (2.f * DeltaZ * TossSpeedSq));
+
 	if (InsideTheSqrt < 0.f)
 	{
-		// sqrt will be imaginary, therefore no solutions
-		return false;
+		if (ProjectileParams.bAcceptClosestOnNoSolutions)
+		{
+			NumSolutions = 1;
+			// To get closest, we want to maximise the displacement in the direction of the target
+			// R = v^2/g * 1/cos^2(theta) * (sin(2phi + theta) - sin(theta))
+			// R = range, theta= angle to target (incline), phi = launch angle
+			// 2phi + theta maximises at PI/2 rads
+			// phi = PI/4 - theta/2    for max R
+			// alpha = phi + theta
+			// Create a vector at angle alpha up from DirXY and * by TossSpeed
+			const FVector DirFlightDelta = FlightDelta.GetSafeNormal();
+			const float AngleToTarget = FMath::Acos(FVector::DotProduct(DirFlightDelta, DirXY));
+			const float AngleAlpha = UE_PI / 4 - (AngleToTarget / 2) + AngleToTarget;
+			const FVector Cross = DirXY.Cross(FVector(0, 0, 1));
+			const FVector TrajectoryHeading = DirXY.RotateAngleAxisRad(AngleAlpha, Cross);
+			PrioritizedProjVelocities[0] = TrajectoryHeading * ProjectileParams.TossSpeed;
+		}
+		else
+		{
+			return false;
+		}
+	}
+	else
+	{
+		// if we got here, there are 2 solutions: one high-angle and one low-angle.
+		NumSolutions = 2;
+
+		const float SqrtPart = FMath::Sqrt(InsideTheSqrt);
+
+		// this is the tangent of the firing angle for the first (+) solution
+		const float TanSolutionAngleA = (TossSpeedSq + SqrtPart) / (GravityZ * DeltaXY);
+		// this is the tangent of the firing angle for the second (-) solution
+		const float TanSolutionAngleB = (TossSpeedSq - SqrtPart) / (GravityZ * DeltaXY);
+
+		// mag in the XY dir = sqrt( TossSpeedSq / (TanSolutionAngle^2 + 1) );
+		const float MagXYSq_A = TossSpeedSq / (FMath::Square(TanSolutionAngleA) + 1.f);
+		const float MagXYSq_B = TossSpeedSq / (FMath::Square(TanSolutionAngleB) + 1.f);
+
+		float PrioritizedSolutionsMagXYSq[2];
+		PrioritizedSolutionsMagXYSq[0] = ProjectileParams.bFavorHighArc ? FMath::Min(MagXYSq_A, MagXYSq_B) : FMath::Max(MagXYSq_A, MagXYSq_B);
+		PrioritizedSolutionsMagXYSq[1] = ProjectileParams.bFavorHighArc ? FMath::Max(MagXYSq_A, MagXYSq_B) : FMath::Min(MagXYSq_A, MagXYSq_B);
+
+		float PrioritizedSolutionZSign[2];
+		PrioritizedSolutionZSign[0] = ProjectileParams.bFavorHighArc ?
+			(MagXYSq_A < MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB) :
+			(MagXYSq_A > MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB);
+		PrioritizedSolutionZSign[1] = ProjectileParams.bFavorHighArc ?
+			(MagXYSq_A > MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB) :
+			(MagXYSq_A < MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB);
+
+		// solutions in priority order
+		for (int32 CurrentSolutionIdx = 0; (CurrentSolutionIdx < 2); ++CurrentSolutionIdx)
+		{
+			const float MagXY = FMath::Sqrt(PrioritizedSolutionsMagXYSq[CurrentSolutionIdx]);
+			const float MagZ = FMath::Sqrt(TossSpeedSq - PrioritizedSolutionsMagXYSq[CurrentSolutionIdx]);		// pythagorean
+			const float ZSign = PrioritizedSolutionZSign[CurrentSolutionIdx];
+
+			PrioritizedProjVelocities[CurrentSolutionIdx] = (DirXY * MagXY) + (FVector::UpVector * MagZ * ZSign);
+		}
 	}
 
-	// if we got here, there are 2 solutions: one high-angle and one low-angle.
-
-	const float SqrtPart = FMath::Sqrt(InsideTheSqrt);
-
-	// this is the tangent of the firing angle for the first (+) solution
-	const float TanSolutionAngleA = (TossSpeedSq + SqrtPart) / (GravityZ * DeltaXY);
-	// this is the tangent of the firing angle for the second (-) solution
-	const float TanSolutionAngleB = (TossSpeedSq - SqrtPart) / (GravityZ * DeltaXY);
-	
-	// mag in the XY dir = sqrt( TossSpeedSq / (TanSolutionAngle^2 + 1) );
-	const float MagXYSq_A = TossSpeedSq / (FMath::Square(TanSolutionAngleA) + 1.f);
-	const float MagXYSq_B = TossSpeedSq / (FMath::Square(TanSolutionAngleB) + 1.f);
-
-	bool bFoundAValidSolution = false;
-
 	// trace if desired
-	if (TraceOption == ESuggestProjVelocityTraceOption::DoNotTrace)
+	if (ProjectileParams.TraceOption == ESuggestProjVelocityTraceOption::DoNotTrace)
 	{
-		// choose which arc
-		const float FavoredMagXYSq = bFavorHighArc ? FMath::Min(MagXYSq_A, MagXYSq_B) : FMath::Max(MagXYSq_A, MagXYSq_B);
-		const float ZSign = bFavorHighArc ?
-							(MagXYSq_A < MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB) :
-							(MagXYSq_A > MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB);
-
-		// finish calculations
-		const float MagXY = FMath::Sqrt(FavoredMagXYSq);
-		const float MagZ = FMath::Sqrt(TossSpeedSq - FavoredMagXYSq);		// pythagorean
-
-		// final answer!
-		OutTossVelocity = (DirXY * MagXY) + (FVector::UpVector * MagZ * ZSign);
-		bFoundAValidSolution = true;
-
+		OutTossVelocity = PrioritizedProjVelocities[0];
+		const float MagXY = OutTossVelocity.Size2D();
 #if ENABLE_DRAW_DEBUG
-	 	if (bDrawDebug)
-	 	{
-	 		static const float StepSize = 0.125f;
-	 		FVector TraceStart = Start;
-	 		for ( float Step=0.f; Step<1.f; Step+=StepSize )
-	 		{
-	 			const float TimeInFlight = (Step+StepSize) * DeltaXY/MagXY;
-	 
-	 			// d = vt + .5 a t^2
-				const FVector TraceEnd = Start + OutTossVelocity*TimeInFlight + FVector(0.f, 0.f, 0.5f * -GravityZ * FMath::Square(TimeInFlight) - CollisionRadius);
-	 
-	 			DrawDebugLine( World, TraceStart, TraceEnd, (bFoundAValidSolution ? FColor::Yellow : FColor::Red), true );
-	 			TraceStart = TraceEnd;
-	 		}
-	 	}
+		if (ProjectileParams.bDrawDebug)
+		{
+			static const float StepSize = 0.125f;
+			FVector TraceStart = ProjectileParams.Start;
+			for (float Step = 0.f; Step < 1.f; Step += StepSize)
+			{
+				const float TimeInFlight = (Step + StepSize) * DeltaXY / MagXY;
+
+				// d = vt + .5 a t^2
+				const FVector TraceEnd = ProjectileParams.Start + OutTossVelocity * TimeInFlight + FVector(0.f, 0.f, 0.5f * -GravityZ * FMath::Square(TimeInFlight) - ProjectileParams.CollisionRadius);
+
+				DrawDebugLine(World, TraceStart, TraceEnd, FColor::Yellow, true);
+				TraceStart = TraceEnd;
+			}
+		}
 #endif // ENABLE_DRAW_DEBUG
+		return true;
 	}
 	else
 	{
 		// need to trace to validate
-
-		// sort potential solutions by priority
-		float PrioritizedSolutionsMagXYSq[2];
-		PrioritizedSolutionsMagXYSq[0] = bFavorHighArc ? FMath::Min(MagXYSq_A, MagXYSq_B) : FMath::Max(MagXYSq_A, MagXYSq_B);
-		PrioritizedSolutionsMagXYSq[1] = bFavorHighArc ? FMath::Max(MagXYSq_A, MagXYSq_B) : FMath::Min(MagXYSq_A, MagXYSq_B);
-
-		float PrioritizedSolutionZSign[2];
-		PrioritizedSolutionZSign[0] = bFavorHighArc ?
-										(MagXYSq_A < MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB) :
-										(MagXYSq_A > MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB);
-		PrioritizedSolutionZSign[1] = bFavorHighArc ?
-										(MagXYSq_A > MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB) :
-										(MagXYSq_A < MagXYSq_B) ? FMath::Sign(TanSolutionAngleA) : FMath::Sign(TanSolutionAngleB);
-
-		FVector PrioritizedProjVelocities[2];
-
-		// try solutions in priority order
 		int32 ValidSolutionIdx = INDEX_NONE;
-		for (int32 CurrentSolutionIdx=0; (CurrentSolutionIdx<2); ++CurrentSolutionIdx)
+
+		for (int32 SolutionIdx = 0; SolutionIdx < NumSolutions; ++SolutionIdx)
 		{
-			const float MagXY = FMath::Sqrt( PrioritizedSolutionsMagXYSq[CurrentSolutionIdx] );
-			const float MagZ = FMath::Sqrt( TossSpeedSq - PrioritizedSolutionsMagXYSq[CurrentSolutionIdx] );		// pythagorean
-			const float ZSign = PrioritizedSolutionZSign[CurrentSolutionIdx];
-
-			PrioritizedProjVelocities[CurrentSolutionIdx] = (DirXY * MagXY) + (FVector::UpVector * MagZ * ZSign);
-
-			// iterate along the arc, doing stepwise traces
-			bool bFailedTrace = false;
-			static const float StepSize = 0.125f;
-			FVector TraceStart = Start;
-			for ( float Step=0.f; Step<1.f; Step+=StepSize )
+			// trace each solution
+			if (!IsProjectileTrajectoryBlocked(World, ProjectileParams.Start, PrioritizedProjVelocities[SolutionIdx], DeltaXY, GravityZ, ProjectileParams.CollisionRadius, ProjectileParams.TraceOption, ProjectileParams.ResponseParam, ProjectileParams.ActorsToIgnore, ProjectileParams.bDrawDebug))
 			{
-				const float TimeInFlight = (Step+StepSize) * DeltaXY/MagXY;
+				OutTossVelocity = PrioritizedProjVelocities[SolutionIdx];
+				return true;
+			}
+		}
 
-				// d = vt + .5 a t^2
-				const FVector TraceEnd = Start + PrioritizedProjVelocities[CurrentSolutionIdx]*TimeInFlight + FVector(0.f, 0.f, 0.5f * -GravityZ * FMath::Square(TimeInFlight) - CollisionRadius);
+		return false;
+	}
+}
 
-				if ( (TraceOption == ESuggestProjVelocityTraceOption::OnlyTraceWhileAscending) && (TraceEnd.Z < TraceStart.Z) )
-				{
-					// falling, we are done tracing
-					if (!bDrawDebug)
-					{
-						// if we're drawing, we continue stepping without the traces
-						// else we can just trivially end the iteration loop
-						break;
-					}
-				}
-				else
-				{
-					FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(SuggestProjVelTrace), true);
-					QueryParams.AddIgnoredActors(ActorsToIgnore);
-					if (World->SweepTestByChannel(TraceStart, TraceEnd, FQuat::Identity, ECC_WorldDynamic, FCollisionShape::MakeSphere(CollisionRadius), QueryParams, ResponseParam))
-					{
-						// hit something, failed
-						bFailedTrace = true;
+bool UGameplayStatics::IsProjectileTrajectoryBlocked(const UWorld* World, FVector StartLocation, FVector& ProjectileVelocity, float TargetDeltaXY, float GravityZ, float CollisionRadius, ESuggestProjVelocityTraceOption::Type TraceOption, const FCollisionResponseParams& ResponseParam, const TArray<AActor*>& ActorsToIgnore, bool bDrawDebug)
+{
+	
+	// iterate along the arc, doing stepwise traces
+	static const float StepSize = 0.125f;
+	const float MagXY = ProjectileVelocity.Size2D();
+	FVector TraceStart = StartLocation;
 
-#if ENABLE_DRAW_DEBUG
-						if (bDrawDebug)
-						{
-							// draw failed segment in red
-							DrawDebugLine( World, TraceStart, TraceEnd, FColor::Red, true );
-						}
-#endif // ENABLE_DRAW_DEBUG
+	for (float Step = 0.f; Step < 1.f; Step += StepSize)
+	{
+		const float TimeInFlight = (Step + StepSize) * TargetDeltaXY / MagXY;
 
-						break;
-					}
+		// d = vt + .5 a t^2
+		const FVector TraceEnd = StartLocation + ProjectileVelocity * TimeInFlight + FVector(0.f, 0.f, 0.5f * -GravityZ * FMath::Square(TimeInFlight) - CollisionRadius);
 
-				}
+		if ((TraceOption == ESuggestProjVelocityTraceOption::OnlyTraceWhileAscending) && (TraceEnd.Z < TraceStart.Z))
+		{
+			// falling, we are done tracing
+			if (!bDrawDebug)
+			{
+				// if we're drawing, we continue stepping without the traces
+				// else we can just trivially end the iteration loop
+				break;
+			}
+		}
+		else
+		{
+			FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(SuggestProjVelTrace), true);
+			QueryParams.AddIgnoredActors(ActorsToIgnore);
+			if (World->SweepTestByChannel(TraceStart, TraceEnd, FQuat::Identity, ECC_WorldDynamic, FCollisionShape::MakeSphere(CollisionRadius), QueryParams, ResponseParam))
+			{
+
 
 #if ENABLE_DRAW_DEBUG
 				if (bDrawDebug)
 				{
-					DrawDebugLine( World, TraceStart, TraceEnd, FColor::Yellow, true );
+					// draw failed segment in red
+					DrawDebugLine(World, TraceStart, TraceEnd, FColor::Red, true);
 				}
 #endif // ENABLE_DRAW_DEBUG
-
-				// advance
-				TraceStart = TraceEnd;
-			}
-
-			if (bFailedTrace == false)
-			{
-				// passes all traces along the arc, we have a valid solution and can be done
-				ValidSolutionIdx = CurrentSolutionIdx;
-				break;
+				// hit something, failed
+				return true;
 			}
 		}
 
-		if (ValidSolutionIdx != INDEX_NONE)
+#if ENABLE_DRAW_DEBUG
+		if (bDrawDebug)
 		{
-			OutTossVelocity = PrioritizedProjVelocities[ValidSolutionIdx];
-			bFoundAValidSolution = true;
+			DrawDebugLine(World, TraceStart, TraceEnd, FColor::Yellow, true);
 		}
+#endif // ENABLE_DRAW_DEBUG
+
+		// advance
+		TraceStart = TraceEnd;
 	}
 
-	return bFoundAValidSolution;
+	return false;
 }
 
 // note: this will automatically fall back to line test if radius is small enough
@@ -2502,7 +2820,7 @@ bool UGameplayStatics::PredictProjectilePath(const UObject* WorldContextObject, 
 	bool bBlockingHit = false;
 
 	UWorld const* const World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	if (World && PredictParams.SimFrequency > KINDA_SMALL_NUMBER)
+	if (World && PredictParams.SimFrequency > UE_KINDA_SMALL_NUMBER)
 	{
 		const float SubstepDeltaTime = 1.f / PredictParams.SimFrequency;
 		const float GravityZ = FMath::IsNearlyEqual(PredictParams.OverrideGravityZ, 0.0f) ? World->GetGravityZ() : PredictParams.OverrideGravityZ;
@@ -2607,45 +2925,6 @@ bool UGameplayStatics::PredictProjectilePath(const UObject* WorldContextObject, 
 	return bBlockingHit;
 }
 
-
-// TODO: Deprecated, remove
-bool UGameplayStatics::PredictProjectilePath(
-	const UObject* WorldContextObject,
-	FHitResult& OutHit,
-	TArray<FVector>& OutPathPositions,
-	FVector& OutLastTraceDestination,
-	FVector StartPos,
-	FVector LaunchVelocity,
-	bool bTracePath,
-	float ProjectileRadius,
-	const TArray<TEnumAsByte<EObjectTypeQuery> >& ObjectTypes,
-	bool bTraceComplex,
-	const TArray<AActor*>& ActorsToIgnore,
-	EDrawDebugTrace::Type DrawDebugType,
-	float DrawDebugTime,
-	float SimFrequency,
-	float MaxSimTime,
-	float OverrideGravityZ)
-{
-	return Blueprint_PredictProjectilePath_ByObjectType(
-		WorldContextObject,
-		OutHit,
-		OutPathPositions,
-		OutLastTraceDestination,
-		StartPos,
-		LaunchVelocity,
-		bTracePath,
-		ProjectileRadius,
-		ObjectTypes,
-		bTraceComplex,
-		ActorsToIgnore,
-		DrawDebugType,
-		DrawDebugTime,
-		SimFrequency,
-		MaxSimTime,
-		OverrideGravityZ);
-}
-
 bool UGameplayStatics::Blueprint_PredictProjectilePath_Advanced(const UObject* WorldContextObject, const FPredictProjectilePathParams& PredictParams, FPredictProjectilePathResult& PredictResult)
 {
 	return PredictProjectilePath(WorldContextObject, PredictParams, PredictResult);
@@ -2748,7 +3027,7 @@ bool UGameplayStatics::SuggestProjectileVelocity_CustomArc(const UObject* WorldC
 	float const StartToEndDist = StartToEnd.Size();
 
 	UWorld const* const World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
-	if (World && StartToEndDist > KINDA_SMALL_NUMBER)
+	if (World && StartToEndDist > UE_KINDA_SMALL_NUMBER)
 	{
 		const float GravityZ = FMath::IsNearlyEqual(OverrideGravityZ, 0.0f) ? World->GetGravityZ() : OverrideGravityZ;
 
@@ -2777,6 +3056,113 @@ bool UGameplayStatics::SuggestProjectileVelocity_CustomArc(const UObject* WorldC
 
 	OutLaunchVelocity = FVector::ZeroVector;
 	return false;
+}
+
+bool UGameplayStatics::SuggestProjectileVelocity_MovingTarget(const UObject* WorldContextObject, FVector& OutLaunchVelocity, FVector ProjectileStartLocation, AActor* TargetActor, FVector TargetLocationOffset /*= FVector::ZeroVector*/, double GravityZOverride /*= 0.f*/, double TimeToTarget /*= 1.f*/, EDrawDebugTrace::Type DrawDebugType /*= EDrawDebugTrace::Type::None*/, float DrawDebugTime /*= 3.f*/, FLinearColor DrawDebugColor /*= FLinearColor::Red*/)
+{
+	// Generally solved using the logic below. In code we also adjust for TargetLocationOffset and a GravityZOverride.
+	// 
+	// pp = projectile position
+	// pp0 = projectile initial position
+	// vp0 = projectile initial velocity (OutLaunchVelocity)
+	// g = gravity vector
+	// pt = target position
+	// pt0 = target initial position
+	// vt0 = target initial velocity
+	// 
+	// Projectile position as a function of time
+	// pp = pp0 + vp0*t + (g/2)*(t^2)
+	// 
+	// Target position as a function of time
+	// pt = pt0 + vt0*t
+	// 
+	// Since we want the projectile position and target position to be the same, we can set the equations equal to each other to get:
+	// vp0 = (pt0 + vt0*t - pp0 - (g/2)*(t^2)) / t
+	
+	if (!GEngine)
+	{
+		return false;
+	}
+
+	const UWorld* World = GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::LogAndReturnNull);
+	if (!World)
+	{
+		return false;
+	}
+
+	if (!TargetActor)
+	{
+		return false;
+	}
+
+	// Clamp TimeToTarget to ensure non-zero value
+	TimeToTarget = FMath::Clamp(TimeToTarget, 0.1, TimeToTarget);
+
+	// Find the target's velocity
+	FVector TargetVelocity = TargetActor->GetVelocity();
+
+	// If the target is a character moving on ground or the floor result is walkable (and therefore used for movement),
+	// GetVelocity() will return a vector with a Z value of 0, so we need to adjust for slope.
+	if (ACharacter* TargetCharacter = Cast<ACharacter>(TargetActor))
+	{
+		if (UCharacterMovementComponent* TargetMovementComp = TargetCharacter->GetCharacterMovement())
+		{
+			FFindFloorResult FloorResult = TargetMovementComp->CurrentFloor;
+			if (TargetMovementComp->IsMovingOnGround() || FloorResult.IsWalkableFloor())
+			{
+				FHitResult FloorHit = FloorResult.HitResult;
+				const double FloorAngleRadians = FMath::Acos(FloorHit.ImpactNormal.Z);
+
+				// z = x * tan(theta)
+				const double ZMagnitude = TargetVelocity.Size2D() * FMath::Tan(FloorAngleRadians);
+				TargetVelocity.Z = TargetVelocity.Dot(FloorHit.ImpactNormal) < 0.0 ? ZMagnitude : -ZMagnitude;
+			}
+		}
+	}
+
+	// Find projectile's velocity using the target's velocity
+	const FVector TargetCurrentLocationPlusOffset = TargetActor->GetActorLocation() + TargetLocationOffset;
+	const double GravityZ = FMath::IsNearlyZero(GravityZOverride) ? World->GetGravityZ() : GravityZOverride;
+	const FVector GravityVector = FVector(0.0, 0.0, GravityZ);
+	
+	OutLaunchVelocity = (TargetCurrentLocationPlusOffset + (TargetVelocity * TimeToTarget) - ProjectileStartLocation - (0.5 * GravityVector * FMath::Square(TimeToTarget))) / TimeToTarget;
+
+#if ENABLE_DRAW_DEBUG
+	if (DrawDebugType != EDrawDebugTrace::None)
+	{
+		const bool bPersistentLines = DrawDebugType == EDrawDebugTrace::Persistent;
+		const float LifeTime = (DrawDebugType == EDrawDebugTrace::ForDuration) ? DrawDebugTime : 0.f;
+		
+		// Draw bounding box of target at current location
+		const float BoxThickness = 2.f;
+		const FQuat CurrentRotation = TargetActor->GetActorRotation().Quaternion();
+		FBox BodyBox(ForceInit);
+		FVector BoundingBoxExtent = FVector::ZeroVector;
+		FVector BoundingBoxCenter = TargetActor->GetActorLocation();
+		if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(TargetActor->GetRootComponent()))
+		{
+			BodyBox = PrimitiveComponent->Bounds.GetBox();
+			BodyBox.GetCenterAndExtents(BoundingBoxCenter, BoundingBoxExtent);
+		}
+
+		DrawDebugBox(World, BoundingBoxCenter, BoundingBoxExtent, DrawDebugColor.ToFColor(true), bPersistentLines, LifeTime, 0, BoxThickness);
+
+		// Draw arrow indicating aim direction from start location
+		const float DirectionalArrowLength = 30.f;
+		const float DirectionalArrowsize = 5.f;
+		const float DirectionalArrowThickness = 2.f;
+		DrawDebugDirectionalArrow(World, ProjectileStartLocation, ProjectileStartLocation + OutLaunchVelocity.GetSafeNormal() * DirectionalArrowLength, DirectionalArrowsize, DrawDebugColor.ToFColor(true), bPersistentLines, LifeTime, 0, DirectionalArrowThickness);
+
+		// Draw sphere at the target's final location (where the projectile should pass through after TimeToTarget seconds)
+		const float SphereRadius = 16.f;
+		const int32 SphereSegments = 16;
+		const float SphereThickness = 2.f;
+		const FVector TargetFinalLocation = TargetCurrentLocationPlusOffset + (TargetVelocity * TimeToTarget);
+		DrawDebugSphere(World, TargetFinalLocation, SphereRadius, SphereSegments, DrawDebugColor.ToFColor(true), bPersistentLines, LifeTime, 0, SphereThickness);
+	}
+#endif //ENABLE_DRAW_DEBUG
+
+	return true;
 }
 
 FIntVector UGameplayStatics::GetWorldOriginLocation(const UObject* WorldContextObject)
@@ -2841,10 +3227,60 @@ bool UGameplayStatics::DeprojectScreenToWorld(APlayerController const* Player, c
 	{
 		// get the projection data
 		FSceneViewProjectionData ProjectionData;
-		if (LP->GetProjectionData(LP->ViewportClient->Viewport, eSSP_FULL, /*out*/ ProjectionData))
+		if (LP->GetProjectionData(LP->ViewportClient->Viewport, /*out*/ ProjectionData))
 		{
 			FMatrix const InvViewProjMatrix = ProjectionData.ComputeViewProjectionMatrix().InverseFast();
 			FSceneView::DeprojectScreenToWorld(ScreenPosition, ProjectionData.GetConstrainedViewRect(), InvViewProjMatrix, /*out*/ WorldPosition, /*out*/ WorldDirection);
+			return true;
+		}
+	}
+
+	// something went wrong, zero things and return false
+	WorldPosition = FVector::ZeroVector;
+	WorldDirection = FVector::ZeroVector;
+	return false;
+}
+
+bool UGameplayStatics::DeprojectSceneCaptureToWorld(ASceneCapture2D const* SceneCapture2D, const FVector2D& TargetUV, FVector& WorldPosition, FVector& WorldDirection)
+{
+	if (USceneCaptureComponent2D* SceneCaptureComponent2D = SceneCapture2D->GetCaptureComponent2D())
+	{
+		if (SceneCaptureComponent2D->TextureTarget)
+		{
+			FMinimalViewInfo ViewInfo;
+			SceneCaptureComponent2D->GetCameraView(0.0f, ViewInfo);
+
+			FMatrix ProjectionMatrix;
+			if (SceneCaptureComponent2D->bUseCustomProjectionMatrix)
+			{
+				ProjectionMatrix = AdjustProjectionMatrixForRHI(SceneCaptureComponent2D->CustomProjectionMatrix);
+			}
+			else//
+			{
+				ProjectionMatrix = AdjustProjectionMatrixForRHI(ViewInfo.CalculateProjectionMatrix());
+			}
+			FMatrix InvProjectionMatrix = ProjectionMatrix.Inverse();
+
+			// A view matrix is the inverse of the viewer's matrix, so an inverse view matrix is just the viewer's matrix.
+			// To save precision, we directly compute the viewer's matrix, plus it also avoids the cost of the inverse.
+			// The matrix to convert from world coordinate space to view coordinate space also needs to be included (this
+			// is the transpose of the similar matrix used in CalculateViewProjectionMatricesFromMinimalView).
+			FMatrix InvViewMatrix = FMatrix(
+				FPlane(0, 1, 0, 0),
+				FPlane(0, 0, 1, 0),
+				FPlane(1, 0, 0, 0),
+				FPlane(0, 0, 0, 1)) * FRotationTranslationMatrix(ViewInfo.Rotation, ViewInfo.Location);
+
+			FIntPoint TargetSize = FIntPoint(SceneCaptureComponent2D->TextureTarget->SizeX, SceneCaptureComponent2D->TextureTarget->SizeY);
+
+			FSceneView::DeprojectScreenToWorld(
+				TargetUV * FVector2D(TargetSize),
+				FIntRect(FIntPoint(0, 0), TargetSize),
+				InvViewMatrix,
+				InvProjectionMatrix,
+				WorldPosition,
+				WorldDirection);
+
 			return true;
 		}
 	}
@@ -2862,7 +3298,7 @@ bool UGameplayStatics::ProjectWorldToScreen(APlayerController const* Player, con
 	{
 		// get the projection data
 		FSceneViewProjectionData ProjectionData;
-		if (LP->GetProjectionData(LP->ViewportClient->Viewport, eSSP_FULL, /*out*/ ProjectionData))
+		if (LP->GetProjectionData(LP->ViewportClient->Viewport, /*out*/ ProjectionData))
 		{
 			FMatrix const ViewProjectionMatrix = ProjectionData.ComputeViewProjectionMatrix();
 			bool bResult = FSceneView::ProjectWorldToScreen(WorldPosition, ProjectionData.GetConstrainedViewRect(), ViewProjectionMatrix, ScreenPosition);
@@ -2947,14 +3383,14 @@ bool UGameplayStatics::GrabOption( FString& Options, FString& Result )
 		const int32 QMIdx = Result.Find(QuestionMark, ESearchCase::CaseSensitive);
 		if (QMIdx != INDEX_NONE)
 		{
-			Result.LeftInline(QMIdx, false);
+			Result.LeftInline(QMIdx, EAllowShrinking::No);
 		}
 
 		// Update options.
-		Options.MidInline(1, MAX_int32, false);
+		Options.MidInline(1, MAX_int32, EAllowShrinking::No);
 		if (Options.Contains(QuestionMark, ESearchCase::CaseSensitive))
 		{
-			Options.MidInline(Options.Find(QuestionMark, ESearchCase::CaseSensitive), MAX_int32, false);
+			Options.MidInline(Options.Find(QuestionMark, ESearchCase::CaseSensitive), MAX_int32, EAllowShrinking::No);
 		}
 		else
 		{
@@ -3037,9 +3473,5 @@ void UGameplayStatics::AnnounceAccessibleString(const FString& AnnouncementStrin
 #endif
 }
 
-/**
- * Calculate projection matrices from a specified view target
- */
-static void GetProjectionMatricesFromViewTarget(AActor* InViewTarget, FMatrix& OutViewProjectionMatrix, FMatrix& OutInvViewProjectionMatrix);
-
 #undef LOCTEXT_NAMESPACE
+

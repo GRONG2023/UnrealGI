@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "HAL/IConsoleManager.h"
 
 /**
@@ -41,14 +42,14 @@ private:
 /**
  * A class which manages requests to throttle parts of the engine to ensure Slate UI performance                   
  */
-class SLATECORE_API FSlateThrottleManager
+class FSlateThrottleManager
 {
 public:
 
 	/**
 	 * Constructor                   
 	 */
-	FSlateThrottleManager();
+	SLATECORE_API FSlateThrottleManager();
 
 public:
 
@@ -57,7 +58,7 @@ public:
 	 *
 	 * @return A handle to the request to enter responsive mode.  Can only be ended with this request
 	 */
-	FThrottleRequest EnterResponsiveMode();
+	SLATECORE_API FThrottleRequest EnterResponsiveMode();
 
 	/**
 	 * Request to leave responsive mode.  
@@ -65,21 +66,30 @@ public:
 	 *
 	 * @param InHandle	The handle that was created with EnterResponsiveMode
 	 */
-	void LeaveResponsiveMode( FThrottleRequest& InHandle );
+	SLATECORE_API void LeaveResponsiveMode( FThrottleRequest& InHandle );
 
 	/**
 	 * Whether or not we allow expensive tasks which could hurt performance to occur
 	 *
 	 * @return true if we allow expensive tasks, false otherwise
 	 */
-	bool IsAllowingExpensiveTasks() const;
+	SLATECORE_API bool IsAllowingExpensiveTasks() const;
+
+	/**
+	 * Explicitly disable Slate throttling. This is intended to be used for code-driven exemptions
+	 * to Slate throttling such as interactive actions that require multiple refreshes & world ticks.
+	 * For single refresh scenarios, consider FEditorViewportClient.Invalidate(false, false).
+	 *
+	 * @param bState true if throttling should be disabled.
+	 */
+	SLATECORE_API void DisableThrottle(bool bState);
 
 public:
 
 	/**
 	 * Gets the instance of this manager                   
 	 */
-	static FSlateThrottleManager& Get( );
+	static SLATECORE_API FSlateThrottleManager& Get( );
 
 private:
 	/** CVar variable to check if we allow throttling (int32 for compatibility) */
@@ -90,4 +100,7 @@ private:
 
 	/** Number of active throttle requests */
 	uint32 ThrottleCount;
+
+	/** If false, then throttling is explicitly disabled. */
+	int32 DisableThrottleCount;
 };

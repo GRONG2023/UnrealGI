@@ -13,7 +13,7 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogUObjectLinker, Log, All);
 
-//@todo UE4 Console - Check that the mapping of UObjects to linkers is sparse and that we aren't spending a ton of time with these lookups.
+//@todo UE Console - Check that the mapping of UObjects to linkers is sparse and that we aren't spending a ton of time with these lookups.
 
 struct FLinkerIndexPair
 {
@@ -105,10 +105,22 @@ void UObject::SetLinker( FLinkerLoad* LinkerLoad, int32 LinkerIndex, bool bShoul
 {
 	FLinkerIndexPair Existing = LinkerAnnotation.GetAnnotation(this);
 	Existing.CheckInvariants();
+
+	if (Existing.Linker == LinkerLoad && Existing.LinkerIndex == LinkerIndex)
+	{
+		// Nothing to do
+		return;
+	}
+
 	// Detach from existing linker.
 	if( Existing.Linker && bShouldDetachExisting )
 	{
-		checkf(!HasAnyFlags(RF_NeedLoad|RF_NeedPostLoad), TEXT("Detaching from existing linker for %s while object %s needs loaded"), *Existing.Linker->GetArchiveName(), *GetFullName());
+		UE_CLOG(HasAnyFlags(RF_NeedLoad|RF_NeedPostLoad), LogUObjectLinker, Error,
+			TEXT("Detaching from existing linker %s while object %s needs loading (%s). Setting linker to %s."),
+			*Existing.Linker->GetArchiveName(),
+			*GetFullName(),
+			*LexToString(GetFlags()),
+			LinkerLoad ? *LinkerLoad->GetDebugName() : TEXT("nullptr"));
 		check(Existing.Linker->ExportMap[Existing.LinkerIndex].Object!=nullptr);
 		check(Existing.Linker->ExportMap[Existing.LinkerIndex].Object==this);
 		Existing.Linker->ExportMap[Existing.LinkerIndex].ResetObject();
@@ -125,6 +137,7 @@ void UObject::SetLinker( FLinkerLoad* LinkerLoad, int32 LinkerIndex, bool bShoul
 	}
 	if (Existing.Linker != LinkerLoad || Existing.LinkerIndex != LinkerIndex)
 	{
+		LLM_SCOPE_BYTAG(UObject_Linker);
 		LinkerAnnotation.AddAnnotation(this, FLinkerIndexPair(LinkerLoad, LinkerIndex));
 	}
 	if (bShouldDetachExisting)
@@ -135,9 +148,9 @@ void UObject::SetLinker( FLinkerLoad* LinkerLoad, int32 LinkerIndex, bool bShoul
 		UE_CLOG(Existing.Linker && LinkerLoad, LogUObjectLinker, Fatal,
 			TEXT("It is only legal to change linkers in the editor. Trying to change linker on %s from %s (Existing->LinkerRoot=%s) to %s (LinkerLoad->LinkerRoot=%s)"),
 			*GetFullName(),
-			*Existing.Linker->Filename,
+			*Existing.Linker->GetDebugName(),
 			*GetNameSafe(Existing.Linker->LinkerRoot),
-			*LinkerLoad->Filename,
+			*LinkerLoad->GetDebugName(),
 			*GetNameSafe(LinkerLoad->LinkerRoot));
 #endif
 	}

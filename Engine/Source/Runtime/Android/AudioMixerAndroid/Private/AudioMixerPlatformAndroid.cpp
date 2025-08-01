@@ -6,10 +6,9 @@
 #include "CoreGlobals.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopeLock.h"
+#include "AudioDevice.h"
 
 #if WITH_ENGINE
-#include "VorbisAudioInfo.h"
-#include "ADPCMAudioInfo.h"
 #include "AudioPluginUtilities.h"
 #endif
 
@@ -400,11 +399,6 @@ namespace Audio
 		}
 	}
 
-	bool FMixerPlatformAndroid::SupportsRealtimeDecompression() const
-	{
-		return true;
-	}
-
 	void FMixerPlatformAndroid::SubmitBuffer(const uint8* Buffer)
 	{
 		check(DeviceBuffer.Num() == NumSamplesPerDeviceCallback);
@@ -421,52 +415,7 @@ namespace Audio
 			SLresult Result = (*SL_PlayerBufferQueue)->Enqueue(SL_PlayerBufferQueue, Buffer, BufferSize);
 			OPENSLES_LOG_ON_FAIL(Result);
 		}
-	}
-
-	FName FMixerPlatformAndroid::GetRuntimeFormat(USoundWave* InSoundWave)
-	{
-#if WITH_ENGINE
-		static FName NAME_ADPCM(TEXT("ADPCM"));
-
-		if (InSoundWave->IsSeekableStreaming())
-		{
-			return NAME_ADPCM;
-		}
-
-#if WITH_OGGVORBIS
-		static FName NAME_OGG(TEXT("OGG"));
-		if (InSoundWave->HasCompressedData(NAME_OGG))
-		{
-			return NAME_OGG;
-		}
-#endif // WITH_OGGVORBIS
-		return NAME_ADPCM;
-#else
-		return FName(TEXT("None"));
-#endif //WITH_ENGINE
-	}
-
-	bool FMixerPlatformAndroid::HasCompressedAudioInfoClass(USoundWave* InSoundWave)
-	{
-		return true;
-	}
-
-	ICompressedAudioInfo* FMixerPlatformAndroid::CreateCompressedAudioInfo(USoundWave* InSoundWave)
-	{
-#if WITH_ENGINE
-		static FName NAME_OGG(TEXT("OGG"));
-		static FName NAME_ADPCM(TEXT("ADPCM"));
-
-		if (InSoundWave->IsSeekableStreaming())
-		{
-			return new FADPCMAudioInfo();
-		}
-
-		return new FVorbisAudioInfo();
-#else
-		return nullptr;
-#endif // WITH_ENGINE
-	}
+	}	
 
 	FString FMixerPlatformAndroid::GetDefaultDeviceName()
 	{

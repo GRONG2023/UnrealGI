@@ -7,23 +7,37 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Toolkits/ToolkitManager.h"
 #include "Interfaces/IMainFrameModule.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "UObject/Package.h"
-
+#include "StatusBarSubsystem.h"
 #include "ToolMenus.h"
+#include "EditorModeManager.h"
+#include "EditorModes.h"
+#include "WidgetDrawerConfig.h"
+#include "Elements/Framework/TypedElementCommonActions.h"
 
 #define LOCTEXT_NAMESPACE "StandaloneAssetEditorToolkit"
 
+static int32 StatusBarIdGenerator = 0;
+
 void SStandaloneAssetEditorToolkitHost::Construct( const SStandaloneAssetEditorToolkitHost::FArguments& InArgs, const TSharedPtr<FTabManager>& InTabManager, const FName InitAppName )
 {
+	ToolbarSlot = nullptr;
+
 	EditorCloseRequest = InArgs._OnRequestClose;
 	EditorClosing = InArgs._OnClose;
 	AppName = InitAppName;
 
+	// Asset editors have non-unique names. For example every material editor is just "MaterialEditor" so the base app name plus a unique number to generate uniqueness. This number is not used across sessions and should never be saved.
+	StatusBarName = FName(AppName, ++StatusBarIdGenerator);
+
 	MyTabManager = InTabManager;
+
+	CommonActions = NewObject<UTypedElementCommonActions>();
+	CommonActions->AddToRoot();
 }
 
 void SStandaloneAssetEditorToolkitHost::SetupInitialContent( const TSharedRef<FTabManager::FLayout>& DefaultLayout, const TSharedPtr<SDockTab>& InHostTab, const bool bCreateDefaultStandaloneMenu )
@@ -59,8 +73,24 @@ void SStandaloneAssetEditorToolkitHost::SetupInitialContent( const TSharedRef<FT
 
 	HostTabPtr = InHostTab;
 
+	MenuOverlayWidgetContent = SNew(SBox);
+
 	RestoreFromLayout(DefaultLayout);
 	GenerateMenus(bCreateDefaultStandaloneMenu);
+
+	if (InHostTab)
+	{
+		InHostTab->SetRightContent(
+			SNew(SHorizontalBox)
+			+SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.Padding(8.0f, 0.0f, 8.0f, 0.0f)
+			[
+				MenuOverlayWidgetContent.ToSharedRef()
+			]
+		);
+	}
+
 }
 
 void SStandaloneAssetEditorToolkitHost::CreateDefaultStandaloneMenuBar(UToolMenu* MenuBar)
@@ -71,10 +101,26 @@ void SStandaloneAssetEditorToolkitHost::CreateDefaultStandaloneMenuBar(UToolMenu
 		{
 			const FName MenuName = *(InMenuBar->GetMenuName().ToString() + TEXT(".") + TEXT("File"));
 			UToolMenu* Menu = UToolMenus::Get()->ExtendMenu(MenuName);
+
+			FToolMenuSection& FileAssetSection = Menu->FindOrAddSection("FileAsset");
+
+			FileAssetSection.Label = LOCTEXT("FileAssetSectionHeading", "Open");
+			
+			FileAssetSection.AddDynamicEntry(NAME_None, FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+			{
+				if (UAssetEditorToolkitMenuContext* Context = InSection.FindContext<UAssetEditorToolkitMenuContext>())
+				{
+					Context->Toolkit.Pin()->FillDefaultFileMenuOpenCommands(InSection);
+				}
+			}));
+			
 			FToolMenuSection& Section = Menu->FindOrAddSection("FileLoadAndSave");
 			Section.AddDynamicEntry(NAME_None, FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
 			{
-				InSection.FindContext<UAssetEditorToolkitMenuContext>()->Toolkit.Pin()->FillDefaultFileMenuCommands(InSection);
+				if (UAssetEditorToolkitMenuContext* Context = InSection.FindContext<UAssetEditorToolkitMenuContext>())
+				{
+					Context->Toolkit.Pin()->FillDefaultFileMenuCommands(InSection);
+				}
 			}));
 		}
 
@@ -83,7 +129,10 @@ void SStandaloneAssetEditorToolkitHost::CreateDefaultStandaloneMenuBar(UToolMenu
 			FToolMenuSection& Section = InMenu->AddSection("AssetEditorActions", LOCTEXT("ActionsHeading", "Actions"));
 			Section.AddDynamicEntry(NAME_None, FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
 			{
-				InSection.FindContext<UAssetEditorToolkitMenuContext>()->Toolkit.Pin()->FillDefaultAssetMenuCommands(InSection);
+				if (UAssetEditorToolkitMenuContext* Context = InSection.FindContext<UAssetEditorToolkitMenuContext>())
+				{
+					Context->Toolkit.Pin()->FillDefaultAssetMenuCommands(InSection);
+				}
 			}));
 		}
 
@@ -91,11 +140,14 @@ void SStandaloneAssetEditorToolkitHost::CreateDefaultStandaloneMenuBar(UToolMenu
 		{
 			const FName MenuName = *(InMenuBar->GetMenuName().ToString() + TEXT(".") + TEXT("Help"));
 			UToolMenu* Menu = UToolMenus::Get()->ExtendMenu(MenuName);
-			FToolMenuSection& Section = Menu->AddSection("HelpBrowse", NSLOCTEXT("MainHelpMenu", "Browse", "Browse"));
-			Section.InsertPosition = FToolMenuInsert("HelpOnline", EToolMenuInsertType::Before);
-			Section.AddDynamicEntry(NAME_None, FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+			Menu->AddDynamicSection(NAME_None, FNewToolMenuDelegate::CreateLambda([](UToolMenu* InMenu)
 			{
-				InSection.FindContext<UAssetEditorToolkitMenuContext>()->Toolkit.Pin()->FillDefaultHelpMenuCommands(InSection);
+				TSharedPtr<FAssetEditorToolkit> Toolkit = InMenu->FindContext<UAssetEditorToolkitMenuContext>()->Toolkit.Pin();
+				FFormatNamedArguments Args;
+				Args.Add(TEXT("Editor"), Toolkit->GetBaseToolkitName());
+				FToolMenuSection& Section = InMenu->AddSection("HelpResources", FText::Format(NSLOCTEXT("MainHelpMenu", "AssetEditorHelpResources", "{Editor} Resources"), Args));
+				Section.InsertPosition = FToolMenuInsert("Learn", EToolMenuInsertType::First);
+				Toolkit->FillDefaultHelpMenuCommands(Section);
 			}));
 		}
 	};
@@ -107,7 +159,7 @@ void SStandaloneAssetEditorToolkitHost::CreateDefaultStandaloneMenuBar(UToolMenu
 	MenuBar->FindOrAddSection(NAME_None).AddDynamicEntry("DynamicAssetEntry", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
 	{
 		UAssetEditorToolkitMenuContext* Context = InSection.FindContext<UAssetEditorToolkitMenuContext>();
-		if (Context->Toolkit.Pin()->IsActuallyAnAsset())
+		if (Context && Context->Toolkit.IsValid() && Context->Toolkit.Pin()->IsActuallyAnAsset())
 		{
 			InSection.AddSubMenu(
 				"Asset",
@@ -125,8 +177,9 @@ void SStandaloneAssetEditorToolkitHost::CreateDefaultStandaloneMenuBar(UToolMenu
 
 void SStandaloneAssetEditorToolkitHost::RestoreFromLayout( const TSharedRef<FTabManager::FLayout>& NewLayout )
 {
+	BindEditorCloseRequestToHostTab();
+
 	const TSharedRef<SDockTab> HostTab = HostTabPtr.Pin().ToSharedRef();
-	HostTab->SetCanCloseTab(EditorCloseRequest);
 	HostTab->SetOnTabClosed(SDockTab::FOnTabClosedCallback::CreateSP(this, &SStandaloneAssetEditorToolkitHost::OnTabClosed));
 
 	this->ChildSlot[SNullWidget::NullWidget];
@@ -135,50 +188,29 @@ void SStandaloneAssetEditorToolkitHost::RestoreFromLayout( const TSharedRef<FTab
 	TSharedPtr<SWindow> ParentWindow = FSlateApplication::Get().FindWidgetWindow( HostTab );
 	TSharedPtr<SWidget> RestoredUI = MyTabManager->RestoreFrom( NewLayout, ParentWindow );
 
+	StatusBarWidget = GEditor->GetEditorSubsystem<UStatusBarSubsystem>()->MakeStatusBarWidget(StatusBarName, HostTab);
+
 	checkf(RestoredUI.IsValid(), TEXT("The layout must have a primary dock area") );
-	
-	MenuOverlayWidgetContent.Reset();
-	MenuWidgetContent.Reset();
+
 	this->ChildSlot
 	[
-		SNew( SVerticalBox )
-			// Menu bar area
-			+SVerticalBox::Slot()
-				.AutoHeight()
-				[
-					SNew(SOverlay)
-					// The menu bar
-					+SOverlay::Slot()
-					[
-						SAssignNew(MenuWidgetContent, SBorder)
-						.Padding(0)
-						.BorderImage(FEditorStyle::GetBrush("NoBorder"))
-						[
-							DefaultMenuWidget.ToSharedRef()
-						]
-					]
-					// The menu bar overlay
-					+SOverlay::Slot()
-					.HAlign(HAlign_Right)
-					[
-						SNew(SHorizontalBox)
-						+ SHorizontalBox::Slot()
-						[
-							SAssignNew(MenuOverlayWidgetContent, SBorder)
-							.Padding(0)
-							.BorderImage(FEditorStyle::GetBrush("NoBorder"))
-						]				
-					]
-				]
-			// Viewport/Document/Docking area
-			+SVerticalBox::Slot()
-				.Padding( 1.0f )
-				
-				// Fills all leftover space
-				.FillHeight( 1.0f )
-				[
-					RestoredUI.ToSharedRef()
-				]
+		SNew(SVerticalBox)
+		+ SVerticalBox::Slot()
+		.Padding(FMargin(0.0f, 0.0f, 0.0f, 2.0f))
+		.AutoHeight()
+		.Expose(ToolbarSlot)
+		+ SVerticalBox::Slot()
+		.Padding(4.f, 2.f, 4.f, 2.f)
+		.FillHeight(1.0f)
+		[
+			RestoredUI.ToSharedRef()
+		]
+	+ SVerticalBox::Slot()
+		.Padding(0.0f, 2.0f, 0.0f, 0.0f)
+		.AutoHeight()
+		[
+			StatusBarWidget.ToSharedRef()
+		]
 	];
 }
 
@@ -205,12 +237,10 @@ void SStandaloneAssetEditorToolkitHost::GenerateMenus(bool bForceCreateMenu)
 
 		UAssetEditorToolkitMenuContext* ContextObject = NewObject<UAssetEditorToolkitMenuContext>();
 		ContextObject->Toolkit = HostedAssetEditorToolkit;
-		FToolMenuContext ToolMenuContext(HostedAssetEditorToolkit->GetToolkitCommands(), FExtender::Combine(MenuExtenders).ToSharedRef(), ContextObject);
+		FToolMenuContext ToolMenuContext(HostedAssetEditorToolkit->GetToolkitCommands(), FExtender::Combine(MenuExtenders), ContextObject);
 		HostedAssetEditorToolkit->InitToolMenuContext(ToolMenuContext);
 		IMainFrameModule& MainFrameModule = FModuleManager::LoadModuleChecked<IMainFrameModule>( "MainFrame" );
 		DefaultMenuWidget = MainFrameModule.MakeMainMenu( MyTabManager, AssetEditorMenuName, ToolMenuContext );
-
-		MenuWidgetContent->SetContent(DefaultMenuWidget.ToSharedRef());
 	}
 }
 
@@ -219,12 +249,60 @@ void SStandaloneAssetEditorToolkitHost::SetMenuOverlay( TSharedRef<SWidget> NewO
 	MenuOverlayWidgetContent->SetContent(NewOverlay);
 }
 
+void SStandaloneAssetEditorToolkitHost::SetToolbar(TSharedPtr<SWidget> Toolbar)
+{
+	if (Toolbar)
+	{
+		(*ToolbarSlot)
+		[
+			Toolbar.ToSharedRef()
+		];
+	}
+	else
+	{
+		(*ToolbarSlot)
+		[
+			SNullWidget::NullWidget
+		];
+	}
+}
+
+void SStandaloneAssetEditorToolkitHost::RegisterDrawer(FWidgetDrawerConfig&& Drawer, int32 SlotIndex)
+{
+	if (StatusBarWidget.IsValid())
+	{
+		GEditor->GetEditorSubsystem<UStatusBarSubsystem>()->RegisterDrawer(StatusBarName, MoveTemp(Drawer), SlotIndex);
+	}
+}
+
+FEditorModeTools& SStandaloneAssetEditorToolkitHost::GetEditorModeManager() const
+{
+	check(HostedAssetEditorToolkit.IsValid());
+
+	return HostedAssetEditorToolkit->GetEditorModeManager();
+}
+
+void SStandaloneAssetEditorToolkitHost::BindEditorCloseRequestToHostTab()
+{
+	if (TSharedPtr<SDockTab> HostTab = HostTabPtr.Pin())
+	{
+		HostTab->SetCanCloseTab(EditorCloseRequest);
+	}
+}
+
+void SStandaloneAssetEditorToolkitHost::UnbindEditorCloseRequestFromHostTab()
+{
+	if (TSharedPtr<SDockTab> HostTab = HostTabPtr.Pin())
+	{
+		HostTab->SetCanCloseTab(SDockTab::FCanCloseTab());
+	}
+}
+
 SStandaloneAssetEditorToolkitHost::~SStandaloneAssetEditorToolkitHost()
 {
-	// Let the toolkit manager know that we're going away now
-	FToolkitManager::Get().OnToolkitHostDestroyed( this );
-	HostedToolkits.Reset();
-	HostedAssetEditorToolkit.Reset();
+	ShutdownToolkitHost();
+	
+	CommonActions->RemoveFromRoot();
 }
 
 
@@ -251,13 +329,6 @@ void SStandaloneAssetEditorToolkitHost::BringToFront()
 	FGlobalTabmanager::Get()->DrawAttentionToTabManager( this->MyTabManager.ToSharedRef() );
 }
 
-
-TSharedRef< SDockTabStack > SStandaloneAssetEditorToolkitHost::GetTabSpot( const EToolkitTabSpot::Type TabSpot )
-{
-	return TSharedPtr<SDockTabStack>().ToSharedRef();
-}
-
-
 void SStandaloneAssetEditorToolkitHost::OnToolkitHostingStarted( const TSharedRef< class IToolkit >& Toolkit )
 {
 	// Keep track of the toolkit we're hosting
@@ -276,6 +347,19 @@ void SStandaloneAssetEditorToolkitHost::OnToolkitHostingStarted( const TSharedRe
 	}
 }
 
+void SStandaloneAssetEditorToolkitHost::ShutdownToolkitHost()
+{
+	const TSharedPtr<SDockTab> HostTab = HostTabPtr.Pin();
+	if (HostTab.IsValid())
+	{
+		HostTab->RequestCloseTab();
+	}
+
+	// Let the toolkit manager know that we're going away now
+	FToolkitManager::Get().OnToolkitHostDestroyed(this);
+	HostedToolkits.Reset();
+	HostedAssetEditorToolkit.Reset();
+}
 
 void SStandaloneAssetEditorToolkitHost::OnToolkitHostingFinished( const TSharedRef< class IToolkit >& Toolkit )
 {
@@ -287,13 +371,7 @@ void SStandaloneAssetEditorToolkitHost::OnToolkitHostingFinished( const TSharedR
 	// Standalone Asset Editors close by shutting down their major tab.
 	if (Toolkit == HostedAssetEditorToolkit)
 	{
-		HostedAssetEditorToolkit.Reset();
-
-		const TSharedPtr<SDockTab> HostTab = HostTabPtr.Pin();
-		if (HostTab.IsValid())
-		{
-			HostTab->RequestCloseTab();
-		}
+		ShutdownToolkitHost();
 	}
 	else if (HostedAssetEditorToolkit.IsValid())
 	{
@@ -310,60 +388,37 @@ UWorld* SStandaloneAssetEditorToolkitHost::GetWorld() const
 }
 
 
+UTypedElementCommonActions* SStandaloneAssetEditorToolkitHost::GetCommonActions() const
+{
+	return CommonActions.Get();
+}
+
+void SStandaloneAssetEditorToolkitHost::AddViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget, TSharedPtr<IAssetViewport> InViewport)
+{
+	if (HostedAssetEditorToolkit.IsValid())
+	{
+		HostedAssetEditorToolkit->AddViewportOverlayWidget(InOverlaidWidget);
+	}
+}
+
+void SStandaloneAssetEditorToolkitHost::RemoveViewportOverlayWidget(TSharedRef<SWidget> InOverlaidWidget, TSharedPtr<IAssetViewport> InViewport)
+{
+	if (HostedAssetEditorToolkit.IsValid())
+	{
+		HostedAssetEditorToolkit->RemoveViewportOverlayWidget(InOverlaidWidget);
+	}
+}
+
+
 FReply SStandaloneAssetEditorToolkitHost::OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent )
 {
-	// Check to see if any of the actions for the level editor can be processed by the current event
+	// Check to see if any of the actions for the toolkits can be processed by the current event
 	// If we are in debug mode do not process commands
 	if (FSlateApplication::Get().IsNormalExecution())
 	{
-		// Figure out if any of our toolkit's tabs is the active tab.  This is important because we want
-		// the toolkit to have it's own keybinds (which may overlap the level editor's keybinds or any
-		// other toolkit).  When a toolkit tab is active, we give that toolkit a chance to process
-		// commands instead of the level editor.
-		TSharedPtr< IToolkit > ActiveToolkit;
+		for (TSharedPtr<IToolkit>& HostedToolkit : HostedToolkits)
 		{
-			const TSharedPtr<SDockableTab> CurrentActiveTab;// = FSlateApplication::xxxGetGlobalTabManager()->GetActiveTab();
-
-			for (auto HostedToolkitIt = HostedToolkits.CreateConstIterator(); HostedToolkitIt && !ActiveToolkit.IsValid(); ++HostedToolkitIt)
-			{
-				const auto& CurToolkit = *HostedToolkitIt;
-				if (CurToolkit.IsValid())
-				{
-					// Iterate over this toolkits spawned tabs
-					const auto& ToolkitTabsInSpots = CurToolkit->GetToolkitTabsInSpots();
-
-					for (auto CurSpotIt(ToolkitTabsInSpots.CreateConstIterator()); CurSpotIt && !ActiveToolkit.IsValid(); ++CurSpotIt)
-					{
-						const auto& TabsForSpot = CurSpotIt.Value();
-						for (auto CurTabIt(TabsForSpot.CreateConstIterator()); CurTabIt; ++CurTabIt)
-						{
-							const auto& PinnedTab = CurTabIt->Pin();
-							if (PinnedTab.IsValid())
-							{
-								if (PinnedTab == CurrentActiveTab)
-								{
-									ActiveToolkit = CurToolkit;
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		//@TODO: This seems wrong (should prioritize it but not totally block it)
-		if (ActiveToolkit.IsValid())
-		{
-			// A toolkit tab is active, so direct all command processing to it
-			if (ActiveToolkit->ProcessCommandBindings(InKeyEvent))
-			{
-				return FReply::Handled();
-			}
-		}
-		else
-		{
-			// No toolkit tab is active, so let the underlying asset editor have a chance at the keystroke
-			if (HostedAssetEditorToolkit->ProcessCommandBindings(InKeyEvent))
+			if (HostedToolkit->ProcessCommandBindings(InKeyEvent))
 			{
 				return FReply::Handled();
 			}
@@ -379,7 +434,8 @@ void SStandaloneAssetEditorToolkitHost::OnTabClosed(TSharedRef<SDockTab> TabClos
 	check(TabClosed == HostTabPtr.Pin());
 
 	EditorClosing.ExecuteIfBound();
-	MyTabManager->SetMenuMultiBox(nullptr);
+
+	MyTabManager->SetMenuMultiBox(nullptr, nullptr);
 	
 	if(HostedAssetEditorToolkit.IsValid())
 	{

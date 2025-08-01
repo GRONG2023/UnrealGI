@@ -1,7 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commandlets/GenerateGatherArchiveCommandlet.h"
+
+#include "Commandlets/Commandlet.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/InternationalizationArchive.h"
+#include "Internationalization/InternationalizationManifest.h"
 #include "Internationalization/InternationalizationMetadata.h"
+#include "Internationalization/Text.h"
+#include "LocTextHelper.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Templates/SharedPointer.h"
+#include "Trace/Detail/Channel.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGenerateArchiveCommandlet, Log, All);
 
@@ -204,6 +218,7 @@ int32 UGenerateGatherArchiveCommandlet::Main( const FString& Params )
 
 	// Load the manifest and all archives
 	FLocTextHelper LocTextHelper(DestinationPath, ManifestName, ArchiveName, NativeCulture, CulturesToGenerate, GatherManifestHelper->GetLocFileNotifies(), GatherManifestHelper->GetPlatformSplitMode());
+	LocTextHelper.SetCopyrightNotice(GatherManifestHelper->GetCopyrightNotice());
 	{
 		FText LoadError;
 		if (!LocTextHelper.LoadAll(ELocTextHelperLoadFlags::LoadOrCreate, &LoadError))

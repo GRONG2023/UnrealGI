@@ -47,6 +47,9 @@ private:
 	/** Builds the widget for an individual parameter group */
 	void CreateSingleGroupWidget(struct FEditorParameterGroup& ParameterGroup, TSharedPtr<IPropertyHandle> ParameterGroupProperty, class IDetailGroup& DetailGroup);
 
+	/** Enable/Disable all parameter properties in a group */
+	static void EnableGroupParameters(struct FEditorParameterGroup& ParameterGroup, bool ShouldEnable);
+
 	/** These methods generate the custom widgets for the various parameter types */
 	void CreateParameterValueWidget(class UDEditorParameterValue* Parameter, TSharedPtr<IPropertyHandle> ParameterProperty, IDetailGroup& DetailGroup);
 	void CreateMaskParameterValueWidget(class UDEditorParameterValue* Parameter, TSharedPtr<IPropertyHandle> ParameterProperty, IDetailGroup& DetailGroup);
@@ -74,6 +77,29 @@ private:
 	/** Returns true if the refraction options should be displayed */
 	EVisibility ShouldShowSubsurfaceProfile() const;
 
+	//Functions supporting copy/paste of entire parameter groups.
+
+	/**
+	 * Copy all parameter values in a parameter group to the clipboard
+	 * in the format "Param1=\"Value1\"\nParams2=\"Value2\"..."
+	 */
+	void OnCopyParameterValues(int32 ParameterGroupIndex);
+
+	/** Whether it is possible to copy parameter values for the given parent group index */
+	bool CanCopyParameterValues(int32 ParameterGroupIndex);
+
+	/**
+	 * Paste parameter values from the clipboard, assumed to be
+	 * in the format copied by CopyParameterValues.
+	 */
+	void OnPasteParameterValues(int32 ParameterGroupIndex);
+
+	/**
+	 * Whether it is possible to paste parameter values onto the given group index,
+	 * and if there is anything on the clipboard to paste from.
+	 */
+	bool CanPasteParameterValues(int32 ParameterGroupIndex);
+
 	/** Creates all the lightmass property override widgets. */
 	void CreateLightmassOverrideWidgets(IDetailLayoutBuilder& DetailLayout);
 
@@ -88,12 +114,26 @@ private:
 	bool OverrideBlendModeEnabled() const;
 	bool OverrideShadingModelEnabled() const;
 	bool OverrideTwoSidedEnabled() const;
+	bool OverrideIsThinSurfaceEnabled() const;
 	bool OverrideDitheredLODTransitionEnabled() const;
+	bool OverrideOutputTranslucentVelocityEnabled() const;
+	bool OverrideHasPixelAnimationEnabled() const;
+	bool OverrideTessellationEnabled() const;
+	bool OverrideDisplacementScalingEnabled() const;
+	bool OverrideMaxWorldPositionOffsetDisplacementEnabled() const;
 	void OnOverrideOpacityClipMaskValueChanged(bool NewValue);
 	void OnOverrideBlendModeChanged(bool NewValue);
 	void OnOverrideShadingModelChanged(bool NewValue);
 	void OnOverrideTwoSidedChanged(bool NewValue);
+	void OnOverrideIsThinSurfaceChanged(bool NewValue);
 	void OnOverrideDitheredLODTransitionChanged(bool NewValue);
+	void OnOverrideOutputTranslucentVelocityChanged(bool NewValue);
+	void OnOverrideHasPixelAnimationChanged(bool NewValue);
+	void OnOverrideEnableTessellationChanged(bool NewValue);
+	void OnOverrideDisplacementScalingChanged(bool NewValue);
+	void OnOverrideMaxWorldPositionOffsetDisplacementChanged(bool NewValue);
+	bool OverrideCastDynamicShadowAsMaskedEnabled() const;
+	void OnOverrideCastDynamicShadowAsMaskedChanged(bool NewValue);
 
 private:
 	/** Object that stores all of the possible parameters we can edit */

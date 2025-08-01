@@ -1,10 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "PngImageWrapper.h"
+#include "Formats/PngImageWrapper.h"
 #include "ImageWrapperPrivate.h"
 
+#include "Math/GuardedInt.h"
 #include "Misc/ScopeLock.h"
-
+#include "ImageCoreUtils.h"
 
 #if WITH_UNREALPNG
 
@@ -14,9 +15,10 @@
 	#pragma warning(disable:4611)
 #endif
 
+#if PLATFORM_ANDROID
 /** Only allow one thread to use libpng at a time (it's not thread safe) */
-FCriticalSection GPNGSection;
-
+static FCriticalSection GPNGSection;
+#endif
 
 /* Local helper classes
  *****************************************************************************/
@@ -117,6 +119,35 @@ FPngImageWrapper::FPngImageWrapper()
 
 /* FImageWrapper interface
  *****************************************************************************/
+ 
+// CanSetRawFormat returns true if SetRaw will accept this format
+bool FPngImageWrapper::CanSetRawFormat(const ERGBFormat InFormat, const int32 InBitDepth) const
+{
+	return (InFormat == ERGBFormat::RGBA || InFormat == ERGBFormat::BGRA || InFormat == ERGBFormat::Gray) && 
+		( InBitDepth == 8 || InBitDepth == 16 );
+}
+
+// returns InFormat if supported, else maps to something supported
+ERawImageFormat::Type FPngImageWrapper::GetSupportedRawFormat(const ERawImageFormat::Type InFormat) const
+{
+	switch(InFormat)
+	{
+	case ERawImageFormat::G8:
+	case ERawImageFormat::BGRA8:
+	case ERawImageFormat::RGBA16:
+	case ERawImageFormat::G16:
+		return InFormat; // directly supported
+	case ERawImageFormat::BGRE8:
+	case ERawImageFormat::RGBA16F:
+	case ERawImageFormat::RGBA32F:
+	case ERawImageFormat::R16F:
+	case ERawImageFormat::R32F:
+		return ERawImageFormat::RGBA16; // needs conversion
+	default:
+		check(0);
+		return ERawImageFormat::BGRA8;
+	};
+}
 
 void FPngImageWrapper::Compress(int32 Quality)
 {
@@ -125,7 +156,7 @@ void FPngImageWrapper::Compress(int32 Quality)
 	if (!CompressedData.Num())
 	{
 		//Preserve old single thread code on some platform in relation to a type incompatibility at compile time.
-#if PLATFORM_ANDROID || PLATFORM_LUMIN || PLATFORM_LUMINGL4
+#if PLATFORM_ANDROID
 		// thread safety
 		FScopeLock PNGLock(&GPNGSection);
 #endif
@@ -136,8 +167,8 @@ void FPngImageWrapper::Compress(int32 Quality)
 
 		// Reset to the beginning of file so we can use png_read_png(), which expects to start at the beginning.
 		ReadOffset = 0;
-
-		png_structp png_ptr	= png_create_write_struct(PNG_LIBPNG_VER_STRING, this, FPngImageWrapper::user_error_fn, FPngImageWrapper::user_warning_fn);
+		
+		png_structp png_ptr	= png_create_write_struct_2(PNG_LIBPNG_VER_STRING, this, FPngImageWrapper::user_error_fn, FPngImageWrapper::user_warning_fn, NULL, FPngImageWrapper::user_malloc, FPngImageWrapper::user_free);
 		check(png_ptr);
 
 		png_infop info_ptr	= png_create_info_struct(png_ptr);
@@ -148,7 +179,7 @@ void FPngImageWrapper::Compress(int32 Quality)
 		PNGGuard.SetRowPointers( row_pointers );
 
 		// Store the current stack pointer in the jump buffer. setjmp will return non-zero in the case of a write error.
-#if PLATFORM_ANDROID || PLATFORM_LUMIN || PLATFORM_LUMINGL4
+#if PLATFORM_ANDROID
 		//Preserve old single thread code on some platform in relation to a type incompatibility at compile time.
 		if (setjmp(SetjmpBuffer) != 0)
 #else
@@ -156,6 +187,8 @@ void FPngImageWrapper::Compress(int32 Quality)
 		if (setjmp(png_jmpbuf(png_ptr)) != 0)
 #endif
 		{
+			CompressedData.Empty();
+			UE_LOG(LogImageWrapper, Error, TEXT("PNG Compress Error"));
 			return;
 		}
 
@@ -163,12 +196,45 @@ void FPngImageWrapper::Compress(int32 Quality)
 		// Anything allocated on the stack after this point will not be destructed correctly in the case of an error
 
 		{
-			png_set_compression_level(png_ptr, Z_BEST_SPEED);
-			png_set_IHDR(png_ptr, info_ptr, Width, Height, RawBitDepth, (RawFormat == ERGBFormat::Gray) ? PNG_COLOR_TYPE_GRAY : PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+			int ZlibLevel = 3; // default
+			// Quality == 0 is the default argument, does not set a zlib level
+			if ( Quality != 0 )
+			{
+				if ( Quality == (int32)EImageCompressionQuality::Uncompressed )
+				{
+					ZlibLevel = 0; // compression off
+				}
+				else if ( -Quality >= 1 && -Quality <= 9 )
+				{
+					// negative quality for zlib level
+					ZlibLevel = -Quality;
+				}
+				else if ( Quality >= 20 && Quality <= 100 )
+				{
+					// JPEG quality, just ignore
+					// calls to GetCompressed(100) are common
+				}
+				else
+				{
+					UE_LOG(LogImageWrapper, Warning, TEXT("PNG Quality ZlibLevel out of range %d"), Quality );
+				}
+			}
+
+			png_set_compression_level(png_ptr, ZlibLevel);
+			png_set_IHDR(png_ptr, info_ptr, Width, Height, BitDepth, (Format == ERGBFormat::Gray) ? PNG_COLOR_TYPE_GRAY : PNG_COLOR_TYPE_RGBA, PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
 			png_set_write_fn(png_ptr, this, FPngImageWrapper::user_write_compressed, FPngImageWrapper::user_flush_data);
 
-			const uint64 PixelChannels = (RawFormat == ERGBFormat::Gray) ? 1 : 4;
-			const uint64 BytesPerPixel = (RawBitDepth * PixelChannels) / 8;
+			// If we're writing an uncompressed PNG, then we're expecting to be compressing
+			// externally and we can assume we're interested in speed. In this case, we force
+			// the fastest filter to avoid things like Paeth. This is ~2x speedup in decompressing
+			// bulk data encoded in this manner.
+			if (Quality == (int32)EImageCompressionQuality::Uncompressed)
+			{
+				png_set_filter(png_ptr, 0, PNG_FILTER_UP | PNG_FILTER_VALUE_UP);
+			}
+
+			const uint64 PixelChannels = (Format == ERGBFormat::Gray) ? 1 : 4;
+			const uint64 BytesPerPixel = (BitDepth * PixelChannels) / 8;
 			const uint64 BytesPerRow = BytesPerPixel * Width;
 
 			for (int64 i = 0; i < Height; i++)
@@ -177,12 +243,12 @@ void FPngImageWrapper::Compress(int32 Quality)
 			}
 			png_set_rows(png_ptr, info_ptr, row_pointers);
 
-			uint32 Transform = (RawFormat == ERGBFormat::BGRA) ? PNG_TRANSFORM_BGR : PNG_TRANSFORM_IDENTITY;
+			uint32 Transform = (Format == ERGBFormat::BGRA) ? PNG_TRANSFORM_BGR : PNG_TRANSFORM_IDENTITY;
 
 			// PNG files store 16-bit pixels in network byte order (big-endian, ie. most significant bits first).
 #if PLATFORM_LITTLE_ENDIAN
 			// We're little endian so we need to swap
-			if (RawBitDepth == 16)
+			if (BitDepth == 16)
 			{
 				Transform |= PNG_TRANSFORM_SWAP_ENDIAN;
 			}
@@ -206,15 +272,70 @@ void FPngImageWrapper::Reset()
 
 bool FPngImageWrapper::SetCompressed(const void* InCompressedData, int64 InCompressedSize)
 {
-	bool bResult = FImageWrapperBase::SetCompressed(InCompressedData, InCompressedSize);
+	if ( ! FImageWrapperBase::SetCompressed(InCompressedData, InCompressedSize) )
+	{
+		return false;
+	}
 
-	return bResult && LoadPNGHeader();	// Fetch the variables from the header info
+	if ( ! LoadPNGHeader() )
+	{
+		return false;
+	}
+	
+	if ((BitDepth == 1 || BitDepth == 2 || BitDepth == 4) && ((ColorType & PNG_COLOR_MASK_ALPHA) == 0))
+	{
+		// PNG specfication:
+		//  (http://www.libpng.org/pub/png/spec/1.2/PNG-Chunks.html)
+		if ((ColorType == PNG_COLOR_TYPE_PALETTE) || (ColorType == PNG_COLOR_TYPE_GRAY))
+		{
+			//From png specification:
+			//  Note that the palette uses 8 bits (1 byte) per sample regardless of the image bit depth specification. 
+			//  In particular, the palette is 8 bits deep even when it is a suggested quantization of a 16-bit truecolor image.
+
+			// ColorType == PNG_COLOR_TYPE_PALETTE supported via:
+			//	png_set_palette_to_rgb (called in UncompressPNGData)
+
+			// ColorType == PNG_COLOR_TYPE_GRAYsupported via:
+			//	png_set_expand_gray_1_2_4_to_8 (called in UncompressPNGData)
+
+			if (!RawData.Num())
+			{
+				check(CompressedData.Num());
+				UncompressPNGData(Format, 8);
+
+				// after UncompressPNGData , BitDepth is now changed to 8
+			}
+		}
+		else if (ColorType == PNG_COLOR_TYPE_RGB)
+		{
+			//according to png specification this is not a possiblity
+		}
+	}
+	
+	if ( (Format == ERGBFormat::BGRA || Format == ERGBFormat::RGBA || Format == ERGBFormat::Gray) &&
+		(BitDepth == 8 || BitDepth == 16) )
+	{
+	
+		if ( ! FImageCoreUtils::IsImageImportPossible(Width,Height) )
+		{
+			SetError(TEXT("Image dimensions are not possible to import"));
+			return false;
+		}
+
+		return true;
+	}
+	else
+	{
+		// Other formats unsupported at present
+		UE_LOG(LogImageWrapper, Warning, TEXT("PNG Unsupported Format"));
+		return false;
+	}
 }
 
 
 void FPngImageWrapper::Uncompress(const ERGBFormat InFormat, const int32 InBitDepth)
 {
-	if(!RawData.Num() || InFormat != RawFormat || InBitDepth != RawBitDepth)
+	if(!RawData.Num() || InFormat != Format || InBitDepth != BitDepth)
 	{
 		check(CompressedData.Num());
 		UncompressPNGData(InFormat, InBitDepth);
@@ -225,7 +346,7 @@ void FPngImageWrapper::Uncompress(const ERGBFormat InFormat, const int32 InBitDe
 void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 InBitDepth)
 {
 	//Preserve old single thread code on some platform in relation to a type incompatibility at compile time.
-#if PLATFORM_ANDROID || PLATFORM_LUMIN || PLATFORM_LUMINGL4
+#if PLATFORM_ANDROID
 	// thread safety
 	FScopeLock PNGLock(&GPNGSection);
 #endif
@@ -235,8 +356,8 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 	check(Height > 0);
 
 	// Note that PNGs on PC tend to be BGR
-	check(InFormat == ERGBFormat::BGRA || InFormat == ERGBFormat::RGBA || InFormat == ERGBFormat::Gray)	// Other formats unsupported at present
-	check(InBitDepth == 8 || InBitDepth == 16)	// Other formats unsupported at present
+	check(InFormat == ERGBFormat::BGRA || InFormat == ERGBFormat::RGBA || InFormat == ERGBFormat::Gray);	// Other formats unsupported at present
+	check(InBitDepth == 1 || InBitDepth == 2 || InBitDepth == 4 || InBitDepth == 8 || InBitDepth == 16);	// Other formats unsupported at present
 
 	// Reset to the beginning of file so we can use png_read_png(), which expects to start at the beginning.
 	ReadOffset = 0;
@@ -256,7 +377,7 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 		PNGGuard.SetRowPointers(row_pointers);
 
 		// Store the current stack pointer in the jump buffer. setjmp will return non-zero in the case of a read error.
-#if PLATFORM_ANDROID || PLATFORM_LUMIN || PLATFORM_LUMINGL4
+#if PLATFORM_ANDROID
 		//Preserve old single thread code on some platform in relation to a type incompatibility at compile time.
 		if (setjmp(SetjmpBuffer) != 0)
 #else
@@ -264,6 +385,8 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 		if (setjmp(png_jmpbuf(png_ptr)) != 0)
 #endif
 		{
+			RawData.Empty();
+			UE_LOG(LogImageWrapper, Error, TEXT("PNG Decompress Error"));
 			return;
 		}
 
@@ -275,7 +398,9 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 				png_set_palette_to_rgb(png_ptr);
 			}
 
-			if ((ColorType & PNG_COLOR_MASK_COLOR) == 0 && BitDepth < 8)
+			// @todo Oodle: really we should just call png_expand() here and remove all these conditionals
+
+			if (((ColorType & PNG_COLOR_MASK_COLOR) == 0) && BitDepth < 8)
 			{
 				png_set_expand_gray_1_2_4_to_8(png_ptr);
 			}
@@ -284,14 +409,10 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 			if ((ColorType & PNG_COLOR_MASK_ALPHA) == 0 && (InFormat == ERGBFormat::BGRA || InFormat == ERGBFormat::RGBA))
 			{
 				// png images don't set PNG_COLOR_MASK_ALPHA if they have alpha from a tRNS chunk, but png_set_add_alpha seems to be safe regardless
-				if ((ColorType & PNG_COLOR_MASK_COLOR) == 0)
-				{
-					png_set_tRNS_to_alpha(png_ptr);
-				}
-				else if (ColorType == PNG_COLOR_TYPE_PALETTE)
-				{
-					png_set_tRNS_to_alpha(png_ptr);
-				}
+				png_set_tRNS_to_alpha(png_ptr);
+
+				// note: png_set_tRNS_to_alpha is just an alias for png_expand
+
 				if (InBitDepth == 8)
 				{
 					png_set_add_alpha(png_ptr, 0xff , PNG_FILLER_AFTER);
@@ -305,9 +426,14 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 			// Calculate Pixel Depth
 			const uint64 PixelChannels = (InFormat == ERGBFormat::Gray) ? 1 : 4;
 			const uint64 BytesPerPixel = (InBitDepth * PixelChannels) / 8;
-			const uint64 BytesPerRow = BytesPerPixel * Width;
-			RawData.Empty(Height * BytesPerRow);
-			RawData.AddUninitialized(Height * BytesPerRow);
+			check(BytesPerPixel > 0);
+
+			const int64 BytesPerRow = BytesPerPixel * Width;
+			check(Height <= MAX_int64 / BytesPerRow);	// check for overflow on multiplication
+			const int64 TotalBytes = Height * BytesPerRow;
+
+			RawData.Empty(TotalBytes);
+			RawData.AddUninitialized(TotalBytes);
 
 			png_set_read_fn(png_ptr, this, FPngImageWrapper::user_read_compressed);
 
@@ -327,6 +453,10 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 				Transform |= PNG_TRANSFORM_SWAP_ENDIAN;
 			}
 #endif
+
+			// @todo Oodle : remove all these conversions
+			//	ImageWrappers should load images as they are in the file
+			//	FImage does conversions after loading
 
 			// Convert grayscale png to RGB if requested
 			if ((ColorType & PNG_COLOR_MASK_COLOR) == 0 &&
@@ -384,12 +514,12 @@ void FPngImageWrapper::UncompressPNGData(const ERGBFormat InFormat, const int32 
 		 *	an unhandled exception upon a CRC error. This code 
 		 *	catches our custom exception thrown in user_error_fn.
 		 */
-		UE_LOG(LogImageWrapper, Error, TEXT("%s"), *e.ErrorText);
+		UE_LOG(LogImageWrapper, Error, TEXT("FPNGImageCRCError: %s"), *e.ErrorText);
 	}
 #endif
 
-	RawFormat = InFormat;
-	RawBitDepth = InBitDepth;
+	Format = InFormat;
+	BitDepth = InBitDepth;
 }
 
 
@@ -412,7 +542,6 @@ bool FPngImageWrapper::IsPNG() const
 	return false;
 }
 
-
 bool FPngImageWrapper::LoadPNGHeader()
 {
 	check(CompressedData.Num());
@@ -420,8 +549,10 @@ bool FPngImageWrapper::LoadPNGHeader()
 	// Test whether the data this PNGLoader is pointing at is a PNG or not.
 	if (IsPNG())
 	{
+#if PLATFORM_ANDROID
 		// thread safety
 		FScopeLock PNGLock(&GPNGSection);
+#endif
 
 		png_structp png_ptr = png_create_read_struct_2(PNG_LIBPNG_VER_STRING, this, FPngImageWrapper::user_error_fn, FPngImageWrapper::user_warning_fn, NULL, FPngImageWrapper::user_malloc, FPngImageWrapper::user_free);
 		check(png_ptr);
@@ -430,6 +561,26 @@ bool FPngImageWrapper::LoadPNGHeader()
 		check(info_ptr);
 
 		PNGReadGuard PNGGuard(&png_ptr, &info_ptr);
+
+		// Store the current stack pointer in the jump buffer. setjmp will return non-zero in the case of a read error.
+#if PLATFORM_ANDROID
+		//Preserve old single thread code on some platform in relation to a type incompatibility at compile time.
+		if (setjmp(SetjmpBuffer) != 0)
+#else
+		//Use libPNG jump buffer solution to allow concurrent compression\decompression on concurrent threads.
+		if (setjmp(png_jmpbuf(png_ptr)) != 0)
+#endif
+		{
+			UE_LOG(LogImageWrapper, Error, TEXT("PNG Header Error"));
+			return false;
+		}
+
+		// ---------------------------------------------------------------------------------------------------------
+		// Anything allocated on the stack after this point will not be destructed correctly in the case of an error
+		
+#if !PLATFORM_EXCEPTIONS_DISABLED
+		try
+#endif
 		{
 			png_set_read_fn(png_ptr, this, FPngImageWrapper::user_read_compressed);
 
@@ -454,6 +605,18 @@ bool FPngImageWrapper::LoadPNGHeader()
 				Format = ERGBFormat::BGRA;
 			}
 		}
+#if !PLATFORM_EXCEPTIONS_DISABLED
+		catch (const FPNGImageCRCError& e)
+		{
+			/** 
+			 *	libPNG has a known issue in version 1.5.2 causing
+			 *	an unhandled exception upon a CRC error. This code 
+			 *	catches our custom exception thrown in user_error_fn.
+			 */
+			UE_LOG(LogImageWrapper, Error, TEXT("FPNGImageCRCError: %s"), *e.ErrorText);
+			return false;
+		}
+#endif
 
 		return true;
 	}
@@ -468,15 +631,23 @@ bool FPngImageWrapper::LoadPNGHeader()
 void FPngImageWrapper::user_read_compressed(png_structp png_ptr, png_bytep data, png_size_t length)
 {
 	FPngImageWrapper* ctx = (FPngImageWrapper*)png_get_io_ptr(png_ptr);
-	if (ctx->ReadOffset + (int64)length <= ctx->CompressedData.Num())
+	if (IntFitsIn<int64>(length) == false)
 	{
-		FMemory::Memcpy(data, &ctx->CompressedData[ctx->ReadOffset], length);
-		ctx->ReadOffset += length;
+		UE_LOG(LogImageWrapper, Warning, TEXT("Bad PNG read length: %llu"), length);
+		ctx->SetError(TEXT("Invalid length in read_compressed")); // this doesn't seem to get logged on failure.
+		return;
 	}
-	else
+
+	FGuardedInt64 GuardedEndOffset = FGuardedInt64(ctx->ReadOffset) + length;
+	if (GuardedEndOffset.InvalidOrGreaterThan(ctx->CompressedData.Num()))
 	{
-		ctx->SetError(TEXT("Invalid read position for CompressedData."));
+		UE_LOG(LogImageWrapper, Warning, TEXT("Bad PNG read position: offset %d num %lld length: %llu"), ctx->ReadOffset, ctx->CompressedData.Num(), length);
+		ctx->SetError(TEXT("Invalid read position for CompressedData.")); // this doesn't seem to get logged on failure.
+		return;
 	}
+
+	FMemory::Memcpy(data, &ctx->CompressedData[ctx->ReadOffset], length);
+	ctx->ReadOffset = GuardedEndOffset.Get(0);
 }
 
 
@@ -502,7 +673,7 @@ void FPngImageWrapper::user_error_fn(png_structp png_ptr, png_const_charp error_
 		FString ErrorMsg = ANSI_TO_TCHAR(error_msg);
 		ctx->SetError(*ErrorMsg);
 
-		UE_LOG(LogImageWrapper, Error, TEXT("PNG Error: %s"), *ErrorMsg);
+		UE_LOG(LogImageWrapper, Error, TEXT("PNG Error(%s): %s"), ctx->DebugImageName != nullptr ? ctx->DebugImageName : TEXT(""), *ErrorMsg);
 
 	#if !PLATFORM_EXCEPTIONS_DISABLED
 		/** 
@@ -520,7 +691,7 @@ void FPngImageWrapper::user_error_fn(png_structp png_ptr, png_const_charp error_
 
 	// Ensure that FString is destructed prior to executing the longjmp
 
-#if PLATFORM_ANDROID || PLATFORM_LUMIN || PLATFORM_LUMINGL4
+#if PLATFORM_ANDROID
 	//Preserve old single thread code on some platform in relation to a type incompatibility at compile time.
 	//The other platforms use libPNG jump buffer solution to allow concurrent compression\decompression on concurrent threads. The jump is trigered in libPNG after this function returns.
 	longjmp(ctx->SetjmpBuffer, 1);
@@ -531,7 +702,9 @@ void FPngImageWrapper::user_error_fn(png_structp png_ptr, png_const_charp error_
 
 void FPngImageWrapper::user_warning_fn(png_structp png_ptr, png_const_charp warning_msg)
 {
-	UE_LOG(LogImageWrapper, Warning, TEXT("PNG Warning: %s"), ANSI_TO_TCHAR(warning_msg));
+	FPngImageWrapper* ctx = (FPngImageWrapper*)png_get_error_ptr(png_ptr);
+	const TCHAR* LocalDebugImageName = ctx != nullptr ? ctx->DebugImageName : nullptr;
+	UE_LOG(LogImageWrapper, Warning, TEXT("PNG Warning(%s) %s"), LocalDebugImageName != nullptr ? LocalDebugImageName : TEXT(""), ANSI_TO_TCHAR(warning_msg));
 }
 
 void* FPngImageWrapper::user_malloc(png_structp /*png_ptr*/, png_size_t size)

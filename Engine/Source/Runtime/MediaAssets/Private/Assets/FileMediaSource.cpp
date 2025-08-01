@@ -5,6 +5,8 @@
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FileMediaSource)
+
 namespace FileMediaSource
 {
 	/** Name of the PrecacheFile media option. */
@@ -52,6 +54,7 @@ void UFileMediaSource::PostEditChangeProperty(FPropertyChangedEvent& PropertyCha
 	if (PropertyChangedEvent.GetPropertyName() == GET_MEMBER_NAME_CHECKED(UFileMediaSource, FilePath))
 	{
 		ClearResolvedFullPath();
+		GenerateThumbnail();
 	}
 }
 #endif
@@ -144,3 +147,4 @@ bool UFileMediaSource::Validate() const
 
 	return FPaths::FileExists(ResolvedFullPath);
 }
+

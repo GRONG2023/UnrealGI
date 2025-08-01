@@ -1,7 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WidgetPaletteFavorites.h"
-#include "UObject/UnrealType.h"
+
+#include "HAL/PlatformCrt.h"
 
 UWidgetPaletteFavorites::UWidgetPaletteFavorites(FObjectInitializer const& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -19,7 +20,7 @@ void UWidgetPaletteFavorites::Add(const FString& InWidgetTemplateName)
 
 void UWidgetPaletteFavorites::Remove(const FString& InWidgetTemplateName)
 {
-	Favorites.Remove(InWidgetTemplateName);
+	Favorites.RemoveSingle(InWidgetTemplateName);
 
 	SaveConfig();
 

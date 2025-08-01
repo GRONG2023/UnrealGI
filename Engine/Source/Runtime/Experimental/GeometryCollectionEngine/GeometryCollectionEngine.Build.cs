@@ -6,9 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
         public GeometryCollectionEngine(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PrivateIncludePaths.Add("Runtime/Experimental/GeometryCollectionEngine/Private");
-            PublicIncludePaths.Add(ModuleDirectory + "/Public");
-
 			SetupModulePhysicsSupport(Target);
 
 			PublicDependencyModuleNames.AddRange(
@@ -19,30 +16,35 @@ namespace UnrealBuildTool.Rules
                     "Engine",
                     "RenderCore",
                     "RHI",
-                    "PhysX",
+					"Renderer",
                     "FieldSystemEngine",
 	                "ChaosSolverEngine",
 					"NetCore",
-                    "IntelISPC"
-                }
-                );
-
-			if (Target.bCompileAPEX)
-			{
-				PublicDependencyModuleNames.Add("APEX");
-			}
-
-	        if (!Target.bBuildRequiresCookedData)
-			{
-	            DynamicallyLoadedModuleNames.AddRange(new string[] { "DerivedDataCache" });
-		    }
+					"IntelISPC",
+					"DataflowCore",
+					"DataflowEngine",
+					"MeshDescription",
+					"StaticMeshDescription",
+				}
+				);
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"MeshConversion",
+					"GeometryCore",
+				}
+				);
 
 			PrivateIncludePathModuleNames.Add("DerivedDataCache");
 
-			if(Target.bBuildEditor)
+			if (Target.bBuildEditor)
             {
+				DynamicallyLoadedModuleNames.Add("NaniteBuilder");
+				PrivateIncludePathModuleNames.Add("NaniteBuilder");
+
+				PublicDependencyModuleNames.Add("EditorFramework");
                 PublicDependencyModuleNames.Add("UnrealEd");
-            }
+			}
 
 			PrivateDefinitions.Add("CHAOS_INCLUDE_LEVEL_1=1");
 		}

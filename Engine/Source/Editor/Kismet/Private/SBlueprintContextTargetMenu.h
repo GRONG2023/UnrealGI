@@ -2,10 +2,14 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "BlueprintActionMenuUtils.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Layout/SBorder.h"
-#include "BlueprintActionMenuUtils.h"
+
+struct FBlueprintActionContext;
 
 enum class ECheckBoxState : uint8;
 
@@ -48,6 +52,7 @@ class SBlueprintContextTargetMenu : public SBorder
 public:
 	SLATE_BEGIN_ARGS(SBlueprintContextTargetMenu){}
 		SLATE_EVENT(FOnTargetMaskChanged, OnTargetMaskChanged)
+		SLATE_NAMED_SLOT(FArguments, CustomTargetContent)
 	SLATE_END_ARGS()
 
 	// SWidget interface

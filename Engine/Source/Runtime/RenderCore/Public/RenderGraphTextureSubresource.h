@@ -2,7 +2,10 @@
 
 #pragma once
 
-#include "RenderGraphDefinitions.h"
+#include "RHI.h"
+
+template <typename InElementType, typename InAllocatorType = FDefaultAllocator>
+using TRDGTextureSubresourceArray = TArray<InElementType, InAllocatorType>;
 
 struct FRDGTextureSubresource
 {
@@ -77,6 +80,10 @@ struct FRDGTextureSubresourceLayout
 		, NumArraySlices(InNumArraySlices)
 	{}
 
+	FRDGTextureSubresourceLayout(const FRHITextureDesc& Desc)
+		: FRDGTextureSubresourceLayout(Desc.NumMips, Desc.ArraySize * (Desc.IsTextureCube() ? 6 : 1), IsStencilFormat(Desc.Format) ? 2 : 1)
+	{}
+
 	inline uint32 GetSubresourceCount() const
 	{
 		return NumMips * NumArraySlices * NumPlaneSlices;
@@ -86,6 +93,15 @@ struct FRDGTextureSubresourceLayout
 	{
 		check(Subresource < GetMaxSubresource());
 		return Subresource.MipIndex + (Subresource.ArraySlice * NumMips) + (Subresource.PlaneSlice * NumMips * NumArraySlices);
+	}
+
+	inline FRDGTextureSubresource GetSubresource(uint32 Index) const
+	{
+		FRDGTextureSubresource Subresource;
+		Subresource.MipIndex = Index % NumMips;
+		Subresource.ArraySlice = (Index / NumMips) % NumArraySlices;
+		Subresource.PlaneSlice = Index / (NumMips * NumArraySlices);
+		return Subresource;
 	}
 
 	inline FRDGTextureSubresource GetMaxSubresource() const
@@ -145,6 +161,11 @@ struct FRDGTextureSubresourceRange
 		return !(*this == RHS);
 	}
 
+	inline uint32 GetSubresourceCount() const
+	{
+		return NumMips * NumArraySlices * NumPlaneSlices;
+	}
+
 	FRDGTextureSubresource GetMinSubresource() const
 	{
 		return FRDGTextureSubresource(MipIndex, ArraySlice, PlaneSlice);
@@ -183,6 +204,13 @@ struct FRDGTextureSubresourceRange
 			&& NumArraySlices == Layout.NumArraySlices;
 	}
 
+	bool IsValid(const FRDGTextureSubresourceLayout& Layout) const
+	{
+		return MipIndex + NumMips <= Layout.NumMips
+			&& PlaneSlice + NumPlaneSlices <= Layout.NumPlaneSlices
+			&& ArraySlice + NumArraySlices <= Layout.NumArraySlices;
+	}
+
 	uint32 MipIndex       : 8;
 	uint32 PlaneSlice     : 8;
 	uint32 ArraySlice     : 16;
@@ -195,23 +223,15 @@ template <typename ElementType, typename AllocatorType>
 FORCEINLINE void VerifyLayout(const TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout)
 {
 	checkf(Layout.GetSubresourceCount() > 0, TEXT("Subresource layout has no subresources."));
-	checkf(SubresourceArray.Num() == 1 || SubresourceArray.Num() == Layout.GetSubresourceCount(), TEXT("Subresource array does not match the subresource layout."));
+	checkf(SubresourceArray.Num() == Layout.GetSubresourceCount(), TEXT("Subresource array does not match the subresource layout."));
 }
 
 template <typename ElementType, typename AllocatorType>
-FORCEINLINE void InitAsWholeResource(TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const ElementType& Element = {})
-{
-	SubresourceArray.SetNum(1, false);
-	SubresourceArray[0] = Element;
-}
-
-template <typename ElementType, typename AllocatorType>
-inline void InitAsSubresources(TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout, const ElementType& Element = {})
+inline void InitTextureSubresources(TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout, const ElementType& Element = {})
 {
 	const uint32 SubresourceCount = Layout.GetSubresourceCount();
-	checkf(SubresourceCount > 0, TEXT("Subresource layout has no subresources."));
-	checkf(SubresourceCount > 1, TEXT("Subresource layout has only 1 resource. Use InitAsWholeResource instead."));
-	SubresourceArray.SetNum(SubresourceCount, false);
+	SubresourceArray.Reserve(SubresourceCount);
+	SubresourceArray.SetNum(SubresourceCount);
 	for (uint32 SubresourceIndex = 0; SubresourceIndex < SubresourceCount; ++SubresourceIndex)
 	{
 		SubresourceArray[SubresourceIndex] = Element;
@@ -219,38 +239,9 @@ inline void InitAsSubresources(TRDGTextureSubresourceArray<ElementType, Allocato
 }
 
 template <typename ElementType, typename AllocatorType>
-FORCEINLINE bool IsWholeResource(const TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray)
-{
-	checkf(SubresourceArray.Num() > 0, TEXT("IsWholeResource is only valid on initialized arrays."));
-	return SubresourceArray.Num() == 1;
-}
-
-template <typename ElementType, typename AllocatorType>
-FORCEINLINE bool IsSubresources(const TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray)
-{
-	checkf(SubresourceArray.Num() > 0, TEXT("IsSubresources is only valid on initialized arrays."));
-	return SubresourceArray.Num() > 1;
-}
-
-template <typename ElementType, typename AllocatorType>
-FORCEINLINE const ElementType& GetWholeResource(const TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray)
-{
-	check(IsWholeResource(SubresourceArray));
-	return SubresourceArray[0];
-}
-
-template <typename ElementType, typename AllocatorType>
-FORCEINLINE ElementType& GetWholeResource(TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray)
-{
-	checkf(IsWholeResource(SubresourceArray), TEXT("GetWholeResource with a may only be called an array initialized with InitAsWholeResource."));
-	return SubresourceArray[0];
-}
-
-template <typename ElementType, typename AllocatorType>
 FORCEINLINE const ElementType& GetSubresource(const TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout, FRDGTextureSubresource Subresource)
 {
 	VerifyLayout(SubresourceArray, Layout);
-	checkf(IsSubresources(SubresourceArray), TEXT("GetSubresource with a may only be called an array initialized InitAsSubresources."));
 	return SubresourceArray[Layout.GetSubresourceIndex(Subresource)];
 }
 
@@ -258,7 +249,6 @@ template <typename ElementType, typename AllocatorType>
 FORCEINLINE ElementType& GetSubresource(TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout, FRDGTextureSubresource Subresource)
 {
 	VerifyLayout(SubresourceArray, Layout);
-	checkf(IsSubresources(SubresourceArray), TEXT("GetSubresource with a may only be called an array initialized InitAsSubresources."));
 	return SubresourceArray[Layout.GetSubresourceIndex(Subresource)];
 }
 
@@ -266,7 +256,6 @@ template <typename ElementType, typename AllocatorType, typename FunctionType>
 inline void EnumerateSubresourceRange(TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout, const FRDGTextureSubresourceRange& Range, FunctionType Function)
 {
 	VerifyLayout(SubresourceArray, Layout);
-	checkf(IsSubresources(SubresourceArray), TEXT("EnumerateSubresources with a range may only be called an array initialized as subresources."));
 	Range.EnumerateSubresources([&](FRDGTextureSubresource Subresource)
 	{
 		Function(GetSubresource(SubresourceArray, Layout, Subresource));
@@ -277,7 +266,6 @@ template <typename ElementType, typename AllocatorType, typename FunctionType>
 inline void EnumerateSubresourceRange(const TRDGTextureSubresourceArray<ElementType, AllocatorType>& SubresourceArray, const FRDGTextureSubresourceLayout& Layout, const FRDGTextureSubresourceRange& Range, FunctionType Function)
 {
 	VerifyLayout(SubresourceArray, Layout);
-	checkf(IsSubresources(SubresourceArray), TEXT("EnumerateSubresources with a range may only be called an array initialized as subresources."));
 	Range.EnumerateSubresources([&](FRDGTextureSubresource Subresource)
 	{
 		Function(GetSubresource(SubresourceArray, Layout, Subresource));

@@ -83,12 +83,12 @@ public:
 
 			// Update sub-systems.
 			FTaskGraphInterface::Get().ProcessThreadUntilIdle(ENamedThreads::GameThread);
-			FTicker::GetCoreTicker().Tick(DeltaTime);
+			FTSTicker::GetCoreTicker().Tick(DeltaTime);
 			AutomationWorkerModule.Tick();
 			AutomationControllerModule.Tick();
 
 			// Flush threaded logs.
-			GLog->FlushThreadedLogs();
+			GLog->FlushThreadedLogs(EOutputDeviceRedirectorFlushOptions::Async);
 
 			// Throttle frame rate.
 			FPlatformProcess::Sleep(FMath::Max<float>(0.0f, MainsFrameTime - (FPlatformTime::Seconds() - LastTime)));
@@ -100,7 +100,8 @@ public:
 		}
 
 		// Check for failures and exit.
-		bool bSuccess = !GIsCriticalError && RecursiveCheckReports(AutomationControllerManager->GetReports());
+		TArray<TSharedPtr<IAutomationReport>> Reports = AutomationControllerManager->GetEnabledReports();
+		bool bSuccess = !GIsCriticalError && RecursiveCheckReports(Reports);
 		return bSuccess ? EReturnCode::OK : EReturnCode::ToolFailure;
 	}
 

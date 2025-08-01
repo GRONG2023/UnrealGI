@@ -6,10 +6,11 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/Script.h"
+#include "HAL/Platform.h"
 #include "UObject/Object.h"
+#include "UObject/Script.h"
 
+class UObject;
 struct FFrame;
 
 /** The type of a native function callable by script */
@@ -21,10 +22,6 @@ struct FNameNativePtrPair
 	const char* NameUTF8;
 	FNativeFuncPtr Pointer;
 };
-
-extern COREUOBJECT_API FNativeFuncPtr GCasts[];
-uint8 COREUOBJECT_API GRegisterCast( int32 CastCode, const FNativeFuncPtr& Func );
-
 
 /** A struct that maps a string name to a native function */
 struct FNativeFunctionRegistrar
@@ -39,3 +36,7 @@ struct FNativeFunctionRegistrar
 
 	static COREUOBJECT_API void RegisterFunctions(class UClass* Class, const FNameNativePtrPair* InArray, int32 NumFunctions);
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "MaterialValueType.h"
 #include "Materials/MaterialExpression.h"
 #include "UObject/ObjectMacros.h"
 #include "MaterialExpressionDistanceFieldsRenderingSwitch.generated.h"
@@ -28,6 +29,8 @@ class UMaterialExpressionDistanceFieldsRenderingSwitch : public UMaterialExpress
 	virtual uint32 GetInputType(int32 InputIndex) override { return MCT_Unknown; }
 	virtual uint32 GetOutputType(int32 OutputIndex) override { return MCT_Unknown; }
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
 #endif
 	//~ End UMaterialExpression Interface
 };

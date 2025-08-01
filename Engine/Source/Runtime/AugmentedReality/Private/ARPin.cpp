@@ -1,12 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ARPin.h"
+#include "ARSupportInterface.h"
 #include "ARSystem.h"
 #include "ARDebugDrawHelpers.h"
 #include "DrawDebugHelpers.h"
 #include "Components/SceneComponent.h"
+#include "IXRTrackingSystem.h"
 
 #include "Engine/Engine.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ARPin)
 
 //
 //
@@ -149,3 +153,4 @@ TSharedPtr<FARSupportInterface , ESPMode::ThreadSafe> UARPin::GetARSystem() cons
 	auto MyARSystem = ARSystem.Pin();
 	return MyARSystem;
 }
+

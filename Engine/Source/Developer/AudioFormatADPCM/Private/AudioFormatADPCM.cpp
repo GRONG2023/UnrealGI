@@ -12,15 +12,13 @@
 #include "Interfaces/IAudioFormatModule.h"
 #include "AudioDecompress.h"
 #include "Audio.h"
-#include "ADPCMAudioInfo.h"
+#include "Decoders/ADPCMAudioInfo.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogAudioFormatADPCM, Log, All);
 
 #define UE_MAKEFOURCC(ch0, ch1, ch2, ch3)\
 	((uint32)(uint8)(ch0) | ((uint32)(uint8)(ch1) << 8) |\
 	((uint32)(uint8)(ch2) << 16) | ((uint32)(uint8)(ch3) << 24 ))
-
-static FName NAME_ADPCM(TEXT("ADPCM"));
 
 namespace
 {
@@ -418,7 +416,7 @@ class FAudioFormatADPCM : public IAudioFormat
 	enum
 	{
 		/** Version for ADPCM format, this becomes part of the DDC key. */
-		UE_AUDIO_ADPCM_VER = 1,
+		UE_AUDIO_ADPCM_VER = 7,
 	};
 
 	void InterleaveBuffers(const TArray<TArray<uint8> >& SrcBuffers, TArray<uint8> & InterleavedBuffer) const
@@ -447,24 +445,26 @@ class FAudioFormatADPCM : public IAudioFormat
 public:
 	virtual bool AllowParallelBuild() const
 	{
-		return false;
+		return true;
 	}
 
 	virtual uint16 GetVersion(FName Format) const override
 	{
-		check(Format == NAME_ADPCM);
+		check(Format == Audio::NAME_ADPCM || Format == Audio::NAME_PCM);
 		return UE_AUDIO_ADPCM_VER;
 	}
 
 
 	virtual void GetSupportedFormats(TArray<FName>& OutFormats) const
 	{
-		OutFormats.Add(NAME_ADPCM);
+		OutFormats.Add(Audio::NAME_ADPCM);
+		OutFormats.Add(Audio::NAME_PCM);
 	}
 
 	virtual bool Cook(FName Format, const TArray<uint8>& SrcBuffer, FSoundQualityInfo& QualityInfo, TArray<uint8>& CompressedDataStore) const
 	{
-		check(Format == NAME_ADPCM);
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAudioFormatADPCM::Cook);
+		check(Format == Audio::NAME_ADPCM || Format == Audio::NAME_PCM);
 
 		if (QualityInfo.Quality == 100)
 		{
@@ -480,8 +480,10 @@ public:
 
 	virtual bool CookSurround(FName Format, const TArray<TArray<uint8> >& SrcBuffers, FSoundQualityInfo& QualityInfo, TArray<uint8>& CompressedDataStore) const
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FAudioFormatADPCM::CookSurround);
+
 		// Ensure the right format
-		check(Format == NAME_ADPCM);
+		check(Format == Audio::NAME_ADPCM || Format == Audio::NAME_PCM);
 		// Ensure at least two channel
 		check(SrcBuffers.Num() > 1);
 		// Ensure one buffer per channel
@@ -506,7 +508,7 @@ public:
 
 	virtual int32 Recompress(FName Format, const TArray<uint8>& SrcBuffer, FSoundQualityInfo& QualityInfo, TArray<uint8>& OutBuffer) const
 	{
-		check(Format == NAME_ADPCM);
+		check(Format == Audio::NAME_ADPCM || Format == Audio::NAME_PCM);
 
 		// Recompress is only necessary during editor previews
 		return 0;
@@ -613,6 +615,7 @@ public:
 				SrcSize -= SizeOfNewChunk;
 				SrcData += SizeOfNewChunk;
 
+				
 				if (SrcSize > 0)
 				{
 					DataLeftInCurChunk = MaxChunkSize;
@@ -631,7 +634,7 @@ public:
 	// Add a new chunk and reserve ChunkSize bytes in it
 	void AddNewChunk(TArray<TArray<uint8>>& OutBuffers, int32 ChunkReserveSize) const
 	{
-		TArray<uint8>& NewBuffer = *new (OutBuffers) TArray<uint8>;
+		TArray<uint8>& NewBuffer = OutBuffers.AddDefaulted_GetRef();
 		NewBuffer.Empty(ChunkReserveSize);
 	}
 	

@@ -4,6 +4,8 @@
 
 #include "Insights/TimingProfilerCommon.h"
 
+#define LOCTEXT_NAMESPACE "SStatsAggregator"
+
 namespace Insights
 {
 
@@ -14,8 +16,9 @@ namespace Insights
 class FStatsAggregationTask : public FNonAbandonableTask
 {
 public:
-	FStatsAggregationTask(IStatsAggregationWorker* InWorker)
-		: Worker(InWorker)
+	FStatsAggregationTask(IStatsAggregationWorker* InWorker, TSharedPtr<TraceServices::FCancellationToken> InCancellationToken)
+		: CancellationToken(InCancellationToken)
+		, Worker(InWorker)
 	{
 		check(Worker != nullptr);
 	}
@@ -24,7 +27,7 @@ public:
 
 	IStatsAggregationWorker* GetWorker() { return Worker; }
 
-	void DoWork() { Worker->DoWork(); }
+	void DoWork() { Worker->DoWork(CancellationToken); }
 
 	FORCEINLINE TStatId GetStatId() const
 	{
@@ -32,6 +35,7 @@ public:
 	}
 
 private:
+	TSharedPtr<TraceServices::FCancellationToken> CancellationToken;
 	IStatsAggregationWorker* Worker;
 };
 
@@ -44,13 +48,13 @@ FStatsAggregator::FStatsAggregator(const FString InLogName)
 	, IntervalStartTime(0.0)
 	, IntervalEndTime(0.0)
 	, AsyncTask(nullptr)
-	, bIsCancelRequested(false)
 	, bIsStartRequested(false)
 	, bIsFinished(false)
 	, AllOpsStopwatch()
 	, CurrentOpStopwatch()
 	, OperationCount(0)
 {
+	CancellationToken = MakeShared<TraceServices::FCancellationToken>();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -69,7 +73,7 @@ void FStatsAggregator::ResetAsyncTask()
 	{
 		if (!AsyncTask->Cancel())
 		{
-			bIsCancelRequested = true;
+			CancellationToken->Cancel();
 			AsyncTask->EnsureCompletion();
 		}
 
@@ -90,20 +94,35 @@ void FStatsAggregator::Start()
 			OperationCount = 0;
 		}
 
-		UE_LOG(TimingProfiler, Log, TEXT("[%s] Request async aggregation (op %d)..."), *LogName, OperationCount + 1);
+		UE_LOG(TimingProfiler, Log, TEXT("[%s] Request async aggregation (op %d) [%fs to %fs] (%fs)..."),
+			*LogName, OperationCount + 1, IntervalStartTime, IntervalEndTime, IntervalEndTime - IntervalStartTime);
 		bIsStartRequested = true;
 	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FStatsAggregator::Tick(TSharedPtr<const Trace::IAnalysisSession> InSession, const double InCurrentTime, const float InDeltaTime, TFunctionRef<void()> OnFinishedCallback)
+void FStatsAggregator::Cancel()
+{
+	if (AsyncTask)
+	{
+		UE_LOG(TimingProfiler, Log, TEXT("[%s] Cancel requested for async aggregation (op %d)..."), *LogName, OperationCount);
+		CancellationToken->Cancel();
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void FStatsAggregator::Tick(TSharedPtr<const TraceServices::IAnalysisSession> InSession,
+							const double InCurrentTime,
+							const float InDeltaTime,
+							TFunctionRef<void()> OnFinishedCallback)
 {
 	if (AsyncTask && AsyncTask->IsDone())
 	{
 		double FinishedDuration = 0.0;
 
-		if (!bIsStartRequested && !bIsCancelRequested)
+		if (!bIsStartRequested && !CancellationToken->ShouldCancel())
 		{
 			FStopwatch FinishedStopwatch;
 			FinishedStopwatch.Start();
@@ -130,7 +149,7 @@ void FStatsAggregator::Tick(TSharedPtr<const Trace::IAnalysisSession> InSession,
 		UE_LOG(TimingProfiler, Log, TEXT("[%s] Aggregated stats computed in %.4fs (%.4fs + %.4fs)%s%s - total: %.4fs (%d ops)"),
 			*LogName,
 			CurrentOpDuration, CurrentOpDuration - FinishedDuration, FinishedDuration,
-			bIsCancelRequested ? TEXT(" - CANCELED") : TEXT(""),
+			CancellationToken->ShouldCancel() ? TEXT(" - CANCELED") : TEXT(""),
 			bIsStartRequested ? TEXT(" - IGNORED") : TEXT(""),
 			AllOpsDuration, OperationCount);
 	}
@@ -139,8 +158,12 @@ void FStatsAggregator::Tick(TSharedPtr<const Trace::IAnalysisSession> InSession,
 	{
 		if (AsyncTask)
 		{
-			// Cancel and wait for the previous async task to finish.
-			bIsCancelRequested = true;
+			if (!CancellationToken->ShouldCancel())
+			{
+				// Cancel and wait for the previous async task to finish.
+				UE_LOG(TimingProfiler, Log, TEXT("[%s] Cancel previous async aggregation (op %d)..."), *LogName, OperationCount);
+				CancellationToken->Cancel();
+			}
 		}
 		else
 		{
@@ -148,17 +171,24 @@ void FStatsAggregator::Tick(TSharedPtr<const Trace::IAnalysisSession> InSession,
 			++OperationCount;
 
 			bIsStartRequested = false;
-			bIsCancelRequested = false;
+			CancellationToken->Reset();
 
 			UE_LOG(TimingProfiler, Log, TEXT("[%s] Start async aggregation (op %d)..."), *LogName, OperationCount);
 
 			IStatsAggregationWorker* Worker = CreateWorker(InSession);
 			check(Worker);
 
-			AsyncTask = new FStatsAggregationAsyncTask(Worker);
+			AsyncTask = new FStatsAggregationAsyncTask(Worker, CancellationToken);
 			AsyncTask->StartBackgroundTask();
 		}
 	}
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+FText FStatsAggregator::GetCurrentOperationName() const
+{
+	return LOCTEXT("OperationName", "Computing aggregated stats");
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -174,3 +204,5 @@ IStatsAggregationWorker* FStatsAggregator::GetWorker() const
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace Insights
+
+#undef LOCTEXT_NAMESPACE

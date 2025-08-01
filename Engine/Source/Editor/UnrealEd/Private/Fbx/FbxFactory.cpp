@@ -3,13 +3,15 @@
 #include "Factories/FbxFactory.h"
 
 #include "Animation/AnimSequence.h"
+#include "Animation/Skeleton.h"
 #include "AssetImportTask.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ContentBrowserModule.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "EditorReimportHandler.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Engine/StaticMesh.h"
 #include "Factories/FbxAnimSequenceImportData.h"
 #include "Factories/FbxImportUI.h"
@@ -34,6 +36,9 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopedSlowTask.h"
 #include "ObjectTools.h"
+#include "PackageTools.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "StaticMeshResources.h"
 #include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "FBXFactory"
@@ -400,6 +405,10 @@ UObject* UFbxFactory::FactoryCreateFile
 				ImportOptions->bUpdateSkeletonReferencePose = false;
 			}
 		}
+		if (!FbxImporter->CanImportClass(UPhysicsAsset::StaticClass()))
+		{
+			ImportOptions->bCreatePhysicsAsset = false;
+		}
 		
 		if ( !FbxImporter->ImportFromFile( *UFactory::CurrentFilename, Type, true ) )
 		{
@@ -426,12 +435,17 @@ UObject* UFbxFactory::FactoryCreateFile
 			bool bCombineMeshes = ImportUI->StaticMeshImportData->bCombineMeshes;
 			bool bCombineMeshesLOD = false;
 
-			if ( ImportUI->MeshTypeToImport == FBXIT_SkeletalMesh )
+			const bool bCanImportStaticMesh = FbxImporter->CanImportClass(UStaticMesh::StaticClass());
+			//We can import skeletal mesh only if we can import skeleton or a skeleton was specified in the import options
+			const bool bCanImportSkeletalMesh = FbxImporter->CanImportClass(USkeletalMesh::StaticClass()) && (ImportOptions->SkeletonForAnimation || FbxImporter->CanImportClass(USkeleton::StaticClass()));
+			const bool bCanImportAnimSequence = FbxImporter->CanImportClass(UAnimSequence::StaticClass());
+
+			if (bCanImportSkeletalMesh && ImportUI->MeshTypeToImport == FBXIT_SkeletalMesh )
 			{
 				FbxImporter->FillFbxSkelMeshArrayInScene(RootNodeToImport, SkelMeshArray, false, (ImportOptions->bImportAsSkeletalGeometry || ImportOptions->bImportAsSkeletalSkinning));
 				InterestingNodeCount = SkelMeshArray.Num();
 			}
-			else if( ImportUI->MeshTypeToImport == FBXIT_StaticMesh )
+			else if(bCanImportStaticMesh && ImportUI->MeshTypeToImport == FBXIT_StaticMesh )
 			{
 				FbxImporter->ApplyTransformSettingsToFbxNode(RootNodeToImport, ImportUI->StaticMeshImportData);
 
@@ -472,7 +486,7 @@ UObject* UFbxFactory::FactoryCreateFile
 				int32 NodeIndex = 0;
 
 				int32 ImportedMeshCount = 0;
-				if ( ImportUI->MeshTypeToImport == FBXIT_StaticMesh )  // static mesh
+				if (bCanImportStaticMesh && ImportUI->MeshTypeToImport == FBXIT_StaticMesh )  // static mesh
 				{
 					UStaticMesh* NewStaticMesh = NULL;
 					if (bCombineMeshes)
@@ -625,12 +639,12 @@ UObject* UFbxFactory::FactoryCreateFile
 					CreatedObject = NewStaticMesh;
 
 				}
-				else if ( ImportUI->MeshTypeToImport == FBXIT_SkeletalMesh )// skeletal mesh
+				else if ( bCanImportSkeletalMesh && ImportUI->MeshTypeToImport == FBXIT_SkeletalMesh )// skeletal mesh
 				{
 					int32 TotalNumNodes = 0;
-
 					for (int32 i = 0; i < SkelMeshArray.Num() && !bOperationCanceled; i++)
 					{
+						UPackage* Package = (SkelMeshArray.Num() == 1 ? Cast<UPackage>(InParent) : nullptr);
 						USkeletalMesh* BaseSkeletalMesh = nullptr;
 						TArray<FbxNode*> NodeArray = *SkelMeshArray[i];
 					
@@ -692,12 +706,34 @@ UObject* UFbxFactory::FactoryCreateFile
 								}
 							}
 							FSkeletalMeshImportData OutData;
+							bool bMapMorphTargetToTimeZero = false;
 							if (LODIndex == 0 && SkelMeshNodeArray.Num() != 0)
 							{
-								FName OutputName = FbxImporter->MakeNameForMesh(Name.ToString(), SkelMeshNodeArray[0]);
+								FName OutputName = NAME_None;
+								if (Package == nullptr)
+								{
+									FString NewPackageName;
+									OutputName = FbxImporter->MakeNameForMesh(TEXT("None"), SkelMeshNodeArray[0]);
+									if (InParent != nullptr && InParent->GetOutermost() != nullptr)
+									{
+										NewPackageName = FPackageName::GetLongPackagePath(InParent->GetOutermost()->GetName()) + TEXT("/") + OutputName.ToString();
+									}
+									else
+									{
+										FbxImporter->AddTokenizedErrorMessage(FTokenizedMessage::Create(EMessageSeverity::Error, FText::Format(LOCTEXT("ImportSkeletalMesh", "Invalid Parent package when importing {0}.\nThe asset will not be imported."), FText::FromName(OutputName))), FFbxErrors::Generic_ImportingNewObjectFailed);
+										NewPackageName = OutputName.ToString();
+									}
+									NewPackageName = UPackageTools::SanitizePackageName(NewPackageName);
+									Package = CreatePackage(*NewPackageName);
+									Package->FullyLoad();
+								}
+								else
+								{
+									OutputName = FbxImporter->MakeNameForMesh(Name.ToString(), SkelMeshNodeArray[0]);
+								}
 
 								UnFbx::FFbxImporter::FImportSkeletalMeshArgs ImportSkeletalMeshArgs;
-								ImportSkeletalMeshArgs.InParent = InParent;
+								ImportSkeletalMeshArgs.InParent = Package;
 								ImportSkeletalMeshArgs.NodeArray = SkelMeshNodeArray;
 								ImportSkeletalMeshArgs.Name = OutputName;
 								ImportSkeletalMeshArgs.Flags = Flags;
@@ -718,11 +754,12 @@ UObject* UFbxFactory::FactoryCreateFile
 										// We need to remove all scaling from the root node before we set up animation data.
 										// Othewise some of the global transform calculations will be incorrect.
 										FbxImporter->RemoveTransformSettingsFromFbxNode(RootNodeToImport, ImportUI->SkeletalMeshImportData);
-										FbxImporter->SetupAnimationDataFromMesh(BaseSkeletalMesh, InParent, SkelMeshNodeArray, ImportUI->AnimSequenceImportData, OutputName.ToString());
+										FbxImporter->SetupAnimationDataFromMesh(BaseSkeletalMesh, Package, SkelMeshNodeArray, ImportUI->AnimSequenceImportData, OutputName.ToString());
 
 										// Reapply the transforms for the rest of the import
 										FbxImporter->ApplyTransformSettingsToFbxNode(RootNodeToImport, ImportUI->SkeletalMeshImportData);
 									}
+									bMapMorphTargetToTimeZero = ImportSkeletalMeshArgs.bMapMorphTargetToTimeZero;
 									ImportedSuccessfulLodIndex = SuccessfulLodIndex;
 									//Increment the LOD index
 									SuccessfulLodIndex++;
@@ -762,6 +799,7 @@ UObject* UFbxFactory::FactoryCreateFile
 									FSkeletalMeshLODInfo* LODInfo = BaseSkeletalMesh->GetLODInfo(SuccessfulLodIndex);
 									LODInfo->bImportWithBaseMesh = true;
 									LODInfo->SourceImportFilename = FString(TEXT(""));
+									bMapMorphTargetToTimeZero = ImportSkeletalMeshArgs.bMapMorphTargetToTimeZero;
 									ImportedSuccessfulLodIndex = SuccessfulLodIndex;
 									SuccessfulLodIndex++;
 								}
@@ -782,7 +820,7 @@ UObject* UFbxFactory::FactoryCreateFile
 								uint32 bImportTextures = ImportOptions->bImportTextures;
 								ImportOptions->bImportTextures = 0;
 
-								FbxImporter->ImportFbxMorphTarget(SkelMeshNodeArray, BaseSkeletalMesh, ImportedSuccessfulLodIndex, OutData);
+								FbxImporter->ImportFbxMorphTarget(SkelMeshNodeArray, BaseSkeletalMesh, ImportedSuccessfulLodIndex, OutData, bMapMorphTargetToTimeZero);
 								bOperationCanceled |= FbxImporter->GetImportOperationCancelled();
 							
 								ImportOptions->bImportMaterials = !!bImportMaterials;
@@ -827,7 +865,7 @@ UObject* UFbxFactory::FactoryCreateFile
 							FFbxErrors::SkeletalMesh_NoMeshFoundOnRoot);
 					}
 				}
-				else if ( ImportUI->MeshTypeToImport == FBXIT_Animation )// animation
+				else if (bCanImportAnimSequence && ImportUI->MeshTypeToImport == FBXIT_Animation )// animation
 				{
 					if (ImportOptions->SkeletonForAnimation)
 					{
@@ -889,11 +927,11 @@ void UFbxFactory::CancelObjectCreation(UnFbx::FFbxImporter* FbxImporter) const
 		const TWeakObjectPtr<UObject>& CurrentObject = CreatedObjects[CreatedObjectIndex];
 		if (CurrentObject.IsValid())
 		{
-			AssetsToDelete.Emplace(AssetRegistryModule.Get().GetAssetByObjectPath(FName(*CurrentObject->GetPathName())));
+			AssetsToDelete.Emplace(AssetRegistryModule.Get().GetAssetByObjectPath(FSoftObjectPath(CurrentObject.Get())));
 			PotentialPackageToDeleteReferences.Add(CurrentObject->GetOutermost());
 			CurrentObject->ClearFlags(RF_Standalone | RF_Public);
 			CurrentObject->RemoveFromRoot();
-			CurrentObject->MarkPendingKill();
+			CurrentObject->MarkAsGarbage();
 		}
 	}
 	CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
@@ -1110,7 +1148,7 @@ UObject* UFbxFactory::RecursiveImportNode(UnFbx::FFbxImporter* FbxImporter, void
 
 void UFbxFactory::CleanUp() 
 {
-	UnFbx::FFbxImporter* FFbxImporter = UnFbx::FFbxImporter::GetInstance();
+	UnFbx::FFbxImporter* FFbxImporter = UnFbx::FFbxImporter::GetInstance(true/*bDoNotCreate*/);
 	bDetectImportTypeOnImport = true;
 	bShowOption = true;
 	// load options
@@ -1147,6 +1185,46 @@ bool UFbxFactory::CanImportBeCanceled() const
 IImportSettingsParser* UFbxFactory::GetImportSettingsParser()
 {
 	return ImportUI;
+}
+
+TArray<FString> UFbxFactory::GetFormats() const
+{
+	return GetFbxFormats(this);
+}
+
+TArray<FString> UFbxFactory::GetFbxFormats(const UFactory* Factory)
+{
+	TArray<FString> FormatArray;
+	const IConsoleVariable* CVarFbx = IConsoleManager::Get().FindConsoleVariable(TEXT("Interchange.FeatureFlags.Import.FBX"));
+	const IConsoleVariable* CVarFbxLevel = IConsoleManager::Get().FindConsoleVariable(TEXT("Interchange.FeatureFlags.Import.FBX.ToLevel"));
+	const bool bUseLegacyFbx = (!CVarFbx || !CVarFbx->GetBool()) || (!CVarFbxLevel || !CVarFbxLevel->GetBool());
+	const IConsoleVariable* CVarObj = IConsoleManager::Get().FindConsoleVariable(TEXT("Interchange.FeatureFlags.Import.OBJ"));
+	const bool bUseLegacyObj = (!CVarObj || !CVarObj->GetBool());
+
+	for (const FString& Format : Factory->Formats)
+	{
+		if (Format.StartsWith(TEXT("fbx")))
+		{
+			//Skip if interchange fbx is enabled
+			if (bUseLegacyFbx)
+			{
+				FormatArray.Add(Format);
+			}
+		}
+		else if (Format.StartsWith(TEXT("obj")))
+		{
+			//Skip if interchange obj is enabled
+			if (bUseLegacyObj)
+			{
+				FormatArray.Add(Format);
+			}
+		}
+		else
+		{
+			FormatArray.Add(Format);
+		}
+	}
+	return FormatArray;
 }
 
 UFbxImportUI::UFbxImportUI(const FObjectInitializer& ObjectInitializer)
@@ -1210,7 +1288,7 @@ void UFbxImportUI::ParseFromJson(TSharedRef<class FJsonObject> ImportSettingsJso
 	FJsonObjectConverter::JsonObjectToUStruct(ImportSettingsJson, GetClass(), this, 0, SkipFlags);
 
 	bAutomatedImportShouldDetectType = true;
-	if(ImportSettingsJson->TryGetField("MeshTypeToImport").IsValid())
+	if(ImportSettingsJson->TryGetField(TEXT("MeshTypeToImport")).IsValid())
 	{
 		// Import type was specified by the user if MeshTypeToImport exists
 		bAutomatedImportShouldDetectType = false;
@@ -1405,6 +1483,11 @@ namespace ImportCompareHelper
 		{
 			if (CurrentIndex == ReferenceSkeleton.GetParentIndex(ChildIndex))
 			{
+				//Skip virtual bones
+				if (ReferenceSkeleton.GetRequiredVirtualBones().Contains(ChildIndex))
+				{
+					return;
+				}
 				FSkeletonTreeNode& ChildNode = SkeletonTreeNode.Childrens.AddDefaulted_GetRef();
 				ChildNode.JointName = ReferenceSkeleton.GetBoneName(ChildIndex);
 				FillRecursivelySkeleton(ReferenceSkeleton, ChildIndex, ChildNode);
@@ -1824,7 +1907,7 @@ void UFbxImportUI::LoadOptions(UObject* ObjectToLoadOptions)
 		FArrayProperty* Array = CastField<FArrayProperty>(Property);
 		if (Array)
 		{
-			FConfigSection* Sec = GConfig->GetSectionPrivate(*Section, 0, 1, *GEditorPerProjectIni);
+			const FConfigSection* Sec = GConfig->GetSection(*Section, 0, *GEditorPerProjectIni);
 			if (Sec != nullptr)
 			{
 				TArray<FConfigValue> List;
@@ -1838,7 +1921,7 @@ void UFbxImportUI::LoadOptions(UObject* ObjectToLoadOptions)
 					ArrayHelper.EmptyAndAddValues(List.Num());
 					for (int32 i = List.Num() - 1, c = 0; i >= 0; i--, c++)
 					{
-						Array->Inner->ImportText(*List[i].GetValue(), ArrayHelper.GetRawPtr(c), PortFlags, ObjectToLoadOptions);
+						Array->Inner->ImportText_Direct(*List[i].GetValue(), ArrayHelper.GetRawPtr(c), ObjectToLoadOptions, PortFlags);
 					}
 				}
 				else
@@ -1863,7 +1946,7 @@ void UFbxImportUI::LoadOptions(UObject* ObjectToLoadOptions)
 						{
 							// expand the array if necessary so that Index is a valid element
 							ArrayHelper.ExpandForIndex(Index);
-							Array->Inner->ImportText(*ElementValue->GetValue(), ArrayHelper.GetRawPtr(Index), PortFlags, ObjectToLoadOptions);
+							Array->Inner->ImportText_Direct(*ElementValue->GetValue(), ArrayHelper.GetRawPtr(Index), ObjectToLoadOptions, PortFlags);
 						}
 
 						Index++;
@@ -1885,7 +1968,7 @@ void UFbxImportUI::LoadOptions(UObject* ObjectToLoadOptions)
 
 				if (bFoundValue)
 				{
-					if (Property->ImportText(*Value, Property->ContainerPtrToValuePtr<uint8>(ObjectToLoadOptions, i), PortFlags, ObjectToLoadOptions) == NULL)
+					if (Property->ImportText_Direct(*Value, Property->ContainerPtrToValuePtr<uint8>(ObjectToLoadOptions, i), ObjectToLoadOptions, PortFlags) == NULL)
 					{
 						// this should be an error as the properties from the .ini / .int file are not correctly being read in and probably are affecting things in subtle ways
 						UE_LOG(LogFbx, Error, TEXT("FBX Options LoadOptions (%s): import failed for %s in: %s"), *ObjectToLoadOptions->GetPathName(), *Property->GetName(), *Value);
@@ -1917,16 +2000,14 @@ void UFbxImportUI::SaveOptions(UObject* ObjectToSaveOptions)
 		FArrayProperty* Array = CastField<FArrayProperty>(Property);
 		if (Array)
 		{
-			FConfigSection* Sec = GConfig->GetSectionPrivate(*Section, 1, 0, *GEditorPerProjectIni);
-			check(Sec);
-			Sec->Remove(*Key);
+			GConfig->RemoveKeyFromSection(*Section, *Key, GEditorPerProjectIni);
 
 			FScriptArrayHelper_InContainer ArrayHelper(Array, ObjectToSaveOptions);
 			for (int32 i = 0; i < ArrayHelper.Num(); i++)
 			{
 				FString	Buffer;
-				Array->Inner->ExportTextItem(Buffer, ArrayHelper.GetRawPtr(i), ArrayHelper.GetRawPtr(i), ObjectToSaveOptions, PortFlags);
-				Sec->Add(*Key, *Buffer);
+				Array->Inner->ExportTextItem_Direct(Buffer, ArrayHelper.GetRawPtr(i), ArrayHelper.GetRawPtr(i), ObjectToSaveOptions, PortFlags);
+				GConfig->AddToSection(*Section, *Key, Buffer, GEditorPerProjectIni);
 			}
 		}
 		else

@@ -5,10 +5,13 @@
 =============================================================================*/
 
 #include "Engine/Texture2DDynamic.h"
+#include "EngineLogs.h"
 #include "UObject/Package.h"
 #include "TextureResource.h"
 #include "DeviceProfiles/DeviceProfile.h"
 #include "DeviceProfiles/DeviceProfileManager.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Texture2DDynamic)
 
 /*-----------------------------------------------------------------------------
 	FTexture2DDynamicResource
@@ -33,7 +36,7 @@ uint32 FTexture2DDynamicResource::GetSizeY() const
 }
 
 /** Called when the resource is initialized. This is only called by the rendering thread. */
-void FTexture2DDynamicResource::InitRHI()
+void FTexture2DDynamicResource::InitRHI(FRHICommandListBase&)
 {
 	// Create the sampler state RHI resource.
 	ESamplerAddressMode SamplerAddressMode = Owner->SamplerAddressMode;
@@ -46,22 +49,28 @@ void FTexture2DDynamicResource::InitRHI()
 	);
 	SamplerStateRHI = GetOrCreateSamplerState( SamplerStateInitializer );
 
-	ETextureCreateFlags  Flags = TexCreate_None;
-	if ( Owner->bIsResolveTarget )
+	FString Name = Owner->GetName();
+
+	FRHITextureCreateDesc Desc =
+		FRHITextureCreateDesc::Create2D(*Name, GetSizeX(), GetSizeY(), Owner->Format)
+		.SetNumMips(Owner->NumMips);
+
+	if (Owner->bIsResolveTarget)
 	{
-		Flags |= TexCreate_ResolveTargetable;
-		bIgnoreGammaConversions = true;		// Note, we're ignoring Owner->SRGB (it should be false).
+		Desc.AddFlags(ETextureCreateFlags::ResolveTargetable);
 	}
-	else if ( Owner->SRGB )
+	else if (Owner->SRGB)
 	{
-		Flags |= TexCreate_SRGB;
+		Desc.AddFlags(ETextureCreateFlags::SRGB);
 	}
-	if ( Owner->bNoTiling )
+
+	if (Owner->bNoTiling)
 	{
-		Flags |= TexCreate_NoTiling;
+		Desc.AddFlags(ETextureCreateFlags::NoTiling);
 	}
-	FRHIResourceCreateInfo CreateInfo;
-	Texture2DRHI = RHICreateTexture2D(GetSizeX(), GetSizeY(), Owner->Format, Owner->NumMips, 1, Flags, CreateInfo);
+
+	Texture2DRHI = RHICreateTexture(Desc);
+
 	TextureRHI = Texture2DRHI;
 	TextureRHI->SetName(Owner->GetFName());
 	RHIUpdateTextureReference(Owner->TextureReference.TextureReferenceRHI,TextureRHI);
@@ -81,6 +90,45 @@ FTexture2DRHIRef FTexture2DDynamicResource::GetTexture2DRHI()
 	return Texture2DRHI;
 }
 
+#if !UE_SERVER
+void FTexture2DDynamicResource::WriteRawToTexture_RenderThread(TArrayView64<const uint8> RawData)
+{
+	check(IsInRenderingThread());
+
+	const uint32 Width = Texture2DRHI->GetSizeX();
+	const uint32 Height = Texture2DRHI->GetSizeY();
+
+	// Prevent from locking texture if the source is empty or of size 0 or if source is is too small.
+	const uint64 SourceSize = RawData.Num();
+	if (!ensure(Width * Height != 0 && SourceSize >= Width * Height && Texture2DRHI->GetDesc().Format == EPixelFormat::PF_B8G8R8A8))
+	{
+		return;
+	}
+
+	uint32 DestStride = 0;
+	uint8* DestData = reinterpret_cast<uint8*>(RHILockTexture2D(Texture2DRHI, 0, RLM_WriteOnly, DestStride, false, false));
+
+
+	for (uint32 y = 0; y < Height; y++)
+	{
+		const uint64 CurrentLine = ((uint64)Height - 1 - y);
+		uint8* DestPtr = &DestData[CurrentLine * DestStride];
+
+		const FColor* SrcPtr = &((FColor*)(RawData.GetData()))[CurrentLine * Width];
+		for (uint32 x = 0; x < Width; x++)
+		{
+			*DestPtr++ = SrcPtr->B;
+			*DestPtr++ = SrcPtr->G;
+			*DestPtr++ = SrcPtr->R;
+			*DestPtr++ = SrcPtr->A;
+			SrcPtr++;
+		}
+	}
+
+	RHIUnlockTexture2D(Texture2DRHI, 0, false, false);
+}
+
+#endif
 
 /*-----------------------------------------------------------------------------
 	UTexture2DDynamic
@@ -176,3 +224,4 @@ UTexture2DDynamic* UTexture2DDynamic::Create(int32 InSizeX, int32 InSizeY, const
 		return NULL;
 	}
 }
+

@@ -5,7 +5,7 @@
 #include "Engine/Engine.h"
 #include "IHeadMountedDisplay.h"
 #include "IXRTrackingSystem.h"
-#include "RenderingCompositionGraph.h"
+#include "SceneRendering.h"
 
 /** The filter vertex declaration resource type. */
 class FDistortionVertexDeclaration : public FRenderResource
@@ -16,7 +16,7 @@ public:
 	/** Destructor. */
 	virtual ~FDistortionVertexDeclaration() {}
 
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		uint16 Stride = sizeof(FDistortionVertex);
 		FVertexDeclarationElementList Elements;
@@ -41,8 +41,8 @@ TGlobalResource<FDistortionVertexDeclaration> GDistortionVertexDeclaration;
 BEGIN_SHADER_PARAMETER_STRUCT(FHMDDistortionParameters, )
 	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputTexture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)
-	SHADER_PARAMETER(FVector2D, EyeToSrcUVScale)
-	SHADER_PARAMETER(FVector2D, EyeToSrcUVOffset)
+	SHADER_PARAMETER(FVector2f, EyeToSrcUVScale)
+	SHADER_PARAMETER(FVector2f, EyeToSrcUVOffset)
 	RENDER_TARGET_BINDING_SLOTS()
 END_SHADER_PARAMETER_STRUCT()
 
@@ -96,12 +96,12 @@ FScreenPassTexture AddDefaultHMDDistortionPass(FRDGBuilder& GraphBuilder, const 
 	IHeadMountedDisplay* HMDDevice = GEngine->XRSystem->GetHMDDevice();
 
 	{
-		FRenderingCompositePassContext PassContext(GraphBuilder.RHICmdList, View);
+		FHeadMountedDisplayPassContext PassContext(GraphBuilder.RHICmdList, View);
 		FVector2D EyeToSrcUVScaleValue;
 		FVector2D EyeToSrcUVOffsetValue;
 		HMDDevice->GetEyeRenderParams_RenderThread(PassContext, EyeToSrcUVScaleValue, EyeToSrcUVOffsetValue);
-		PassParameters->EyeToSrcUVScale = EyeToSrcUVScaleValue;
-		PassParameters->EyeToSrcUVOffset = EyeToSrcUVOffsetValue;
+		PassParameters->EyeToSrcUVScale = FVector2f(EyeToSrcUVScaleValue);		// LWC_TODO: Precision loss
+		PassParameters->EyeToSrcUVOffset = FVector2f(EyeToSrcUVOffsetValue);	// LWC_TODO: Precision loss
 	}
 
 	TShaderMapRef<FHMDDistortionVS> VertexShader(View.ShaderMap);
@@ -124,7 +124,7 @@ FScreenPassTexture AddDefaultHMDDistortionPass(FRDGBuilder& GraphBuilder, const 
 		SetShaderParameters(RHICmdList, VertexShader, VertexShader.GetVertexShader(), *PassParameters);
 		SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
 
-		FRenderingCompositePassContext PassContext(RHICmdList, View);
+		FHeadMountedDisplayPassContext PassContext(RHICmdList, View);
 		HMDDevice->DrawDistortionMesh_RenderThread(PassContext, PassParameters->InputTexture->Desc.Extent);
 	});
 

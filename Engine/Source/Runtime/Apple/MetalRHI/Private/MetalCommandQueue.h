@@ -3,10 +3,6 @@
 #pragma once
 
 #include <Metal/Metal.h>
-#include "device.hpp"
-#include "command_queue.hpp"
-#include "command_buffer.hpp"
-
 #include "Containers/LockFreeList.h"
 
 class FMetalCommandList;
@@ -29,8 +25,8 @@ typedef NS_OPTIONS(uint64, EMetalFeatures)
 	EMetalFeaturesLayeredRendering = 1 << 4,
 	/** Support for specifying small buffers as byte arrays */
 	EMetalFeaturesSetBytes = 1 << 5,
-	/** Supports tessellation rendering */
-	EMetalFeaturesTessellation = 1 << 6,
+	/** Unused Reserved Bit */
+	EMetalFeaturesUnusedReservedBit6 = 1 << 6, // was EMetalFeaturesTessellation
 	/** Supports framework-level validation */
 	EMetalFeaturesValidation = 1 << 7,
 	/** Supports detailed statistics */
@@ -71,8 +67,8 @@ typedef NS_OPTIONS(uint64, EMetalFeatures)
     EMetalFeaturesPipelineBufferMutability = 1llu << 25llu,
     /** Supports tile shaders */
     EMetalFeaturesTileShaders = 1llu << 26llu,
-	/** Supports separate tessellation shader execution */
-	EMetalFeaturesSeparateTessellation = 1llu << 27llu,
+	/** Unused Reserved Bit */
+	EMetalFeaturesUnusedReservedBit27 = 1llu << 27llu, // was EMetalFeaturesSeparateTessellation
 	/** Supports indirect argument buffers Tier 2 */
 	EMetalFeaturesTier2IABs = 1llu << 28llu,
 };
@@ -90,7 +86,7 @@ public:
 	 * @param Device The Metal device to create on.
 	 * @param MaxNumCommandBuffers The maximum number of incomplete command-buffers, defaults to 0 which implies the system default.
 	 */
-	FMetalCommandQueue(mtlpp::Device Device, uint32 const MaxNumCommandBuffers = 0);
+	FMetalCommandQueue(MTL::Device* Device, uint32 const MaxNumCommandBuffers = 0);
 	
 	/** Destructor */
 	~FMetalCommandQueue(void);
@@ -102,38 +98,30 @@ public:
 	 * Instead call EndEncoding & CommitCommandBuffer before calling this.
 	 * @param CommandBuffer The new command buffer to begin encoding to.
 	 */
-	mtlpp::CommandBuffer CreateCommandBuffer(void);
+    FMetalCommandBuffer* CreateCommandBuffer(void);
 	
 	/**
 	 * Commit the supplied command buffer immediately.
-	 * @param CommandBuffer The command buffer to commit, must be non-nil.
+	 * @param CommandBuffer The command buffer to commit, must not be null
  	 */
-	void CommitCommandBuffer(mtlpp::CommandBuffer& CommandBuffer);
-	
-	/**
-	 * Deferred contexts submit their internal lists of command-buffers out of order, the command-queue takes ownership and handles reordering them & lazily commits them once all command-buffer lists are submitted.
-	 * @param BufferList The list of buffers to enqueue into the command-queue at the given index.
-	 * @param Index The 0-based index to commit BufferList's contents into relative to other active deferred contexts.
-	 * @param Count The total number of deferred contexts that will submit - only once all are submitted can any command-buffer be committed.
-	 */
-	void SubmitCommandBuffers(TArray<mtlpp::CommandBuffer> BufferList, uint32 Index, uint32 Count);
+	void CommitCommandBuffer(FMetalCommandBuffer* CommandBuffer);
 
-	/** @returns Creates a new MTLFence or nil if this is unsupported */
-	FMetalFence* CreateFence(ns::String const& Label) const;
+	/** @returns Creates a new MTLFence or nullptr if this is unsupported */
+	FMetalFence* CreateFence(NS::String* Label) const;
 	
 	/** @params Fences An array of command-buffer fences for the committed command-buffers */
-	void GetCommittedCommandBufferFences(TArray<mtlpp::CommandBufferFence>& Fences);
+	void GetCommittedCommandBufferFences(TArray<TSharedPtr<FMetalCommandBufferFence, ESPMode::ThreadSafe>>& Fences);
 	
 #pragma mark - Public Command Queue Accessors -
 	
 	/** @returns The command queue's native device. */
-	mtlpp::Device& GetDevice(void);
+	MTL::Device* GetDevice(void);
 	
 	/** @returns The command queue's native device. */
-	mtlpp::CommandQueue& GetQueue(void) { return CommandQueue; }
+	MTL::CommandQueue* GetQueue(void) { return CommandQueue; }
 
 	/** Converts a Metal v1.1+ resource option to something valid on the current version. */
-	static mtlpp::ResourceOptions GetCompatibleResourceOptions(mtlpp::ResourceOptions Options);
+	static MTL::ResourceOptions GetCompatibleResourceOptions(MTL::ResourceOptions Options);
 	
 	/**
 	 * @param InFeature A specific Metal feature to check for.
@@ -149,7 +137,7 @@ public:
 	static inline bool SupportsSeparateMSAAAndResolveTarget() { return (PLATFORM_MAC != 0 || GMaxRHIFeatureLevel >= ERHIFeatureLevel::SM5); }
 
 	/** @returns True on UMA system; false otherwise.  */
-	static inline bool IsUMASystem() { return (GRHIVendorId == 0x106B); }
+	static inline bool IsUMASystem() { return IsRHIDeviceApple(); }
 
 #pragma mark - Public Debug Support -
 
@@ -164,12 +152,10 @@ public:
 
 private:
 #pragma mark - Private Member Variables -
-	mtlpp::Device Device;
-	mtlpp::CommandQueue CommandQueue;
-	TArray<TArray<mtlpp::CommandBuffer>> CommandBuffers;
-	TLockFreePointerListLIFO<mtlpp::CommandBufferFence> CommandBufferFences;
-	uint64 ParallelCommandLists;
+	MTL::Device* Device;
+	MTL::CommandQueue* CommandQueue;
+	TArray<TSharedPtr<FMetalCommandBufferFence, ESPMode::ThreadSafe>> CommandBufferFences;
 	int32 RuntimeDebuggingLevel;
-	static NSUInteger PermittedOptions;
+	static NS::UInteger PermittedOptions;
 	static uint64 Features;
 };

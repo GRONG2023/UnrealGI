@@ -2,27 +2,49 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Containers/Map.h"
 #include "Containers/Array.h"
-#include "EntitySystem/MovieSceneEntitySystemLinkerSharedExtension.h"
+#include "Containers/ContainerAllocationPolicies.h"
+#include "Containers/Map.h"
+#include "Containers/SortedMap.h"
+#include "Containers/SparseArray.h"
+#include "CoreTypes.h"
 #include "EntitySystem/MovieScenePropertySystemTypes.h"
-#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStorageID.h"
+#include "EntitySystem/MovieSceneSequenceInstanceHandle.h"
+#include "Evaluation/MovieSceneAnimTypeID.h"
 #include "Evaluation/PreAnimatedState/IMovieScenePreAnimatedStorage.h"
 #include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStateTypes.h"
+#include "Evaluation/PreAnimatedState/MovieScenePreAnimatedStorageID.h"
+#include "Misc/AssertionMacros.h"
+#include "Templates/Less.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/ObjectKey.h"
+
+class FReferenceCollector;
+class UMovieSceneEntitySystemLinker;
+class UObject;
+struct FMovieSceneAnimTypeID;
+struct FScopedPreAnimatedCaptureSource;
+struct IMovieScenePreAnimatedGlobalTokenProducer;
+struct IMovieScenePreAnimatedTokenProducer;
 
 namespace UE
 {
 namespace MovieScene
 {
 
-// Fwd declarations
-struct IPreAnimatedStorage;
-struct IPreAnimatedCaptureSource;
-struct FPreAnimatedStateExtension;
+struct FAnimTypePreAnimatedStateObjectStorage;
+struct FAnimTypePreAnimatedStateRootStorage;
 struct FPreAnimatedEntityCaptureSource;
+struct FPreAnimatedEvaluationHookCaptureSources;
+struct FPreAnimatedStateEntry;
+struct FPreAnimatedStateExtension;
+struct FPreAnimatedTemplateCaptureSources;
 struct FPreAnimatedTrackInstanceCaptureSources;
-
+struct FPreAnimatedTrackInstanceInputCaptureSources;
+struct FRestoreStateParams;
+struct IPreAnimatedCaptureSource;
+struct IPreAnimatedStorage;
 
 /**
  * Interface required for any logical grouping of pre-animated state
@@ -32,8 +54,8 @@ struct IPreAnimatedStateGroupManager
 	virtual ~IPreAnimatedStateGroupManager(){}
 	virtual void InitializeGroupManager(FPreAnimatedStateExtension* Extension) = 0;
 	virtual void OnGroupDestroyed(FPreAnimatedStorageGroupHandle Group) = 0;
+	virtual void GatherStaleStorageGroups(TArray<FPreAnimatedStorageGroupHandle>& StaleGroupStorage) const = 0;
 };
-
 
 
 /**
@@ -46,23 +68,16 @@ struct IPreAnimatedStateGroupManager
  *     - Pre-animated state is grouped into buckets in order to preserve significant ordering constraints (for instance, each object must restore state in the reverse order it was cached)
  *     - Groups are managed by registered IPreAnimatedStateGroupManager instances. The main implementation is FPreAnimatedObjectGroupManager, which maintains an object to group mapping
  */
-struct MOVIESCENE_API FPreAnimatedStateExtension : TSharedEntitySystemLinkerExtension<FPreAnimatedStateExtension>
+struct FPreAnimatedStateExtension
 {
 public:
 
-	FPreAnimatedStateExtension(UMovieSceneEntitySystemLinker* InLinker);
-
-	FPreAnimatedStateExtension(const FPreAnimatedStateExtension&) = delete;
-	FPreAnimatedStateExtension& operator=(const FPreAnimatedStateExtension&) = delete;
-
-	~FPreAnimatedStateExtension();
+	MOVIESCENE_API FPreAnimatedStateExtension();
+	MOVIESCENE_API ~FPreAnimatedStateExtension();
 
 public:
 
-	/**
-	 * Get this extension's application-wide ID for identification within UMovieSceneEntitySystemLinker
-	 */
-	static TEntitySystemLinkerExtensionID<FPreAnimatedStateExtension> GetExtensionID();
+	MOVIESCENE_API void Initialize(UMovieSceneEntitySystemLinker* InLinker);
 
 	/**
 	 * Called from TAutoRegisterPreAnimatedStorageID to register a new application-wide storage type
@@ -174,12 +189,12 @@ public:
 	/**
 	 * Called by group managers to allocate a new group
 	 */
-	FPreAnimatedStorageGroupHandle AllocateGroup(TSharedPtr<IPreAnimatedStateGroupManager> GroupManager);
+	MOVIESCENE_API FPreAnimatedStorageGroupHandle AllocateGroup(TSharedPtr<IPreAnimatedStateGroupManager> GroupManager);
 
 	/**
 	 * Called by group managers to free an existing group
 	 */
-	void FreeGroup(FPreAnimatedStorageGroupHandle Index);
+	MOVIESCENE_API void FreeGroup(FPreAnimatedStorageGroupHandle Index);
 
 public:
 
@@ -215,7 +230,14 @@ public:
 	 *
 	 * @param Params    Parameters for restoration - if TerminalInstanceHandle is invalid then _all_ state will be restored, regardless of the instance it was cached from
 	 */
-	void RestoreGlobalState(const FRestoreStateParams& Params);
+	MOVIESCENE_API void RestoreGlobalState(const FRestoreStateParams& Params);
+
+	/**
+	 * Discards any state for any persistent tokens captured during the course of evaluation without restoring it.
+	 *
+	 * @param Params    Parameters for restoration - if TerminalInstanceHandle is invalid then _all_ state will be discarded, regardless of the instance it was cached from
+	 */
+	MOVIESCENE_API void DiscardGlobalState(const FRestoreStateParams& Params);
 
 	/**
 	 * Restore any state cached for the specified group
@@ -223,54 +245,95 @@ public:
 	 * @params GroupHandle  Handle to the group to restore
 	 * @param  Params       Parameters for restoration
 	 */
-	void RestoreStateForGroup(FPreAnimatedStorageGroupHandle GroupHandle, const FRestoreStateParams& Params);
+	MOVIESCENE_API void RestoreStateForGroup(FPreAnimatedStorageGroupHandle GroupHandle, const FRestoreStateParams& Params);
+
+	/**
+	* Called during Garbage Collection to clean up preanimated state on invalid bound objects. Does not restore state.
+	*/
+	void DiscardStaleObjectState();
 
 	/**
 	 * Called during blueprint re-instancing to replace the object bound to a specific group handle with another.
 	 */
-	void ReplaceObjectForGroup(FPreAnimatedStorageGroupHandle GroupHandle, const FObjectKey& OldObject, const FObjectKey& NewObject);
+	MOVIESCENE_API void ReplaceObjectForGroup(FPreAnimatedStorageGroupHandle GroupHandle, const FObjectKey& OldObject, const FObjectKey& NewObject);
+
 
 	/**
 	 * Discard any transient state and all meta-data for any currently animating objects, whilst preserving the cached values internally.
 	 * Calling this function will cause any currently animating 'RestoreState' sections to re-cache their values if they are re-evaluated
 	 * Any 'RestoreState' sections which are deleted or subsequently not-evaluated will not cause their values to be restored
 	 */
-	void DiscardTransientState();
+	MOVIESCENE_API void DiscardTransientState();
 
 	/**
 	 * Discard any and all cached values for the specified group without restoring them.
 	 * @note This function should only be used to forcibly serialize animated values into a level
 	 */
-	void DiscardStateForGroup(FPreAnimatedStorageGroupHandle GroupHandle);
+	MOVIESCENE_API void DiscardStateForGroup(FPreAnimatedStorageGroupHandle GroupHandle);
+
+	/**
+	 * Discard the specified cached value and any and all capture source tracking related to it.
+	 */
+	MOVIESCENE_API void DiscardStateForStorage(FPreAnimatedStorageID StorageID, FPreAnimatedStorageIndex StorageIndex);
 
 	/**
 	 * Search for any captured state that originated from the specified root instance handle
 	 * WARNING: This is a linear search across all state, and so is potentially very slow
 	 */
-	bool ContainsAnyStateForInstanceHandle(FInstanceHandle RootInstanceHandle) const;
+	MOVIESCENE_API bool ContainsAnyStateForInstanceHandle(FRootInstanceHandle RootInstanceHandle) const;
+
+
+	// Use FScopedPreAnimatedCaptureSource to capture from a specific source rather than globally
+	MOVIESCENE_API void SavePreAnimatedState(FMovieSceneAnimTypeID InTokenType, const IMovieScenePreAnimatedGlobalTokenProducer& Producer);
+	MOVIESCENE_API void SavePreAnimatedState(UObject& InObject, FMovieSceneAnimTypeID InTokenType, const IMovieScenePreAnimatedTokenProducer& Producer);
+
+	MOVIESCENE_API void SavePreAnimatedStateDirectly(FMovieSceneAnimTypeID InTokenType, const IMovieScenePreAnimatedGlobalTokenProducer& Producer);
+	MOVIESCENE_API void SavePreAnimatedStateDirectly(UObject& InObject, FMovieSceneAnimTypeID InTokenType, const IMovieScenePreAnimatedTokenProducer& Producer);
 
 public:
 
-	FPreAnimatedEntityCaptureSource* GetEntityMetaData() const;
-	FPreAnimatedEntityCaptureSource* GetOrCreateEntityMetaData();
+	MOVIESCENE_API FPreAnimatedEntityCaptureSource* GetEntityMetaData() const;
+	MOVIESCENE_API FPreAnimatedEntityCaptureSource* GetOrCreateEntityMetaData();
 
-	FPreAnimatedTrackInstanceCaptureSources* GetTrackInstanceMetaData() const;
-	FPreAnimatedTrackInstanceCaptureSources* GetOrCreateTrackInstanceMetaData();
+	MOVIESCENE_API FPreAnimatedTrackInstanceCaptureSources* GetTrackInstanceMetaData() const;
+	MOVIESCENE_API FPreAnimatedTrackInstanceCaptureSources* GetOrCreateTrackInstanceMetaData();
 
-	void AddWeakCaptureSource(TWeakPtr<IPreAnimatedCaptureSource> InWeakMetaData);
-	void RemoveWeakCaptureSource(TWeakPtr<IPreAnimatedCaptureSource> InWeakMetaData);
+	MOVIESCENE_API FPreAnimatedTrackInstanceInputCaptureSources* GetTrackInstanceInputMetaData() const;
+	MOVIESCENE_API FPreAnimatedTrackInstanceInputCaptureSources* GetOrCreateTrackInstanceInputMetaData();
 
-	void EnsureMetaData(const FPreAnimatedStateEntry& Entry);
+	MOVIESCENE_API FPreAnimatedTemplateCaptureSources* GetTemplateMetaData() const;
+	MOVIESCENE_API FPreAnimatedTemplateCaptureSources* GetOrCreateTemplateMetaData();
 
-	void AddMetaData(const FPreAnimatedStateMetaData& MetaData);
-	void RemoveMetaData(const FPreAnimatedStateMetaData& MetaData);
-	void UpdateMetaData(const FPreAnimatedStateMetaData& MetaData);
+	MOVIESCENE_API FPreAnimatedEvaluationHookCaptureSources* GetEvaluationHookMetaData() const;
+	MOVIESCENE_API FPreAnimatedEvaluationHookCaptureSources* GetOrCreateEvaluationHookMetaData();
 
-	EPreAnimatedStorageRequirement GetStorageRequirement(const FPreAnimatedStateEntry& Entry) const;
+	MOVIESCENE_API bool HasActiveCaptureSource() const;
+
+	MOVIESCENE_API void AddWeakCaptureSource(TWeakPtr<IPreAnimatedCaptureSource> InWeakMetaData);
+	MOVIESCENE_API void RemoveWeakCaptureSource(TWeakPtr<IPreAnimatedCaptureSource> InWeakMetaData);
+
+	MOVIESCENE_API void EnsureMetaData(const FPreAnimatedStateEntry& Entry);
+	MOVIESCENE_API void AddSourceMetaData(const FPreAnimatedStateEntry& Entry);
+	MOVIESCENE_API bool MetaDataExists(const FPreAnimatedStateEntry& Entry) const;
+
+	MOVIESCENE_API void AddMetaData(const FPreAnimatedStateMetaData& MetaData);
+	MOVIESCENE_API void RemoveMetaData(const FPreAnimatedStateMetaData& MetaData);
+	MOVIESCENE_API void UpdateMetaData(const FPreAnimatedStateMetaData& MetaData);
+
+	MOVIESCENE_API EPreAnimatedStorageRequirement GetStorageRequirement(const FPreAnimatedStateEntry& Entry) const;
 
 private:
 
-	void FreeGroupInternal(FPreAnimatedStorageGroupHandle Handle);
+	MOVIESCENE_API void FreeGroupInternal(FPreAnimatedStorageGroupHandle Handle);
+	MOVIESCENE_API bool ShouldCaptureAnyState() const;
+
+	MOVIESCENE_API void AddReferencedObjects(UMovieSceneEntitySystemLinker*, FReferenceCollector& ReferenceCollector);
+
+	using FContributionRemover = TFunctionRef<void(IPreAnimatedStorage&, FPreAnimatedStorageIndex)>;
+	void HandleMetaDataToRemove(
+			const FRestoreStateParams& Params, 
+			TArrayView<FPreAnimatedStateMetaData> MetaDataToRemove, 
+			FContributionRemover RemoveFunc);
 
 public:
 
@@ -285,10 +348,26 @@ private:
 	/** Meta-data pertaining to pre-animated state originating from track instances */
 	TUniquePtr<FPreAnimatedTrackInstanceCaptureSources> TrackInstanceCaptureSource;
 
+	/** Meta-data pertaining to pre-animated state originating from track instances from a specific input */
+	TUniquePtr<FPreAnimatedTrackInstanceInputCaptureSources> TrackInstanceInputCaptureSource;
+
+	/** Meta-data ledger for any pre-animated state that originates from track templates */
+	TUniquePtr<UE::MovieScene::FPreAnimatedTemplateCaptureSources> TemplateCaptureSource;
+
+	/** Meta-data ledger for any pre-animated state that originates from evaluation hooks */
+	TUniquePtr<UE::MovieScene::FPreAnimatedEvaluationHookCaptureSources> EvaluationHookCaptureSource;
+
 	/** Weakly held meta data provided by FMovieScenePreAnimatedState for various other origins */
 	TArray<TWeakPtr<IPreAnimatedCaptureSource>> WeakExternalCaptureSources;
 
+	/** Pointers to the storage for state bound to objects, organized by FMovieSceneAnimTypeID */
+	TWeakPtr<FAnimTypePreAnimatedStateObjectStorage> WeakGenericObjectStorage;
+	/** Pointers to the storage for state created from root tracks, or otherwise not bound to objects */
+	TWeakPtr<FAnimTypePreAnimatedStateRootStorage> WeakGenericRootStorage;
+
 private:
+
+	friend struct ::FScopedPreAnimatedCaptureSource;
 
 	struct FAggregatePreAnimatedStateMetaData
 	{
@@ -305,6 +384,11 @@ private:
 		bool bEligibleForGlobalRestore = false;
 	};
 
+	MOVIESCENE_API FAggregatePreAnimatedStateMetaData* FindMetaData(const FPreAnimatedStateEntry& Entry);
+	MOVIESCENE_API const FAggregatePreAnimatedStateMetaData* FindMetaData(const FPreAnimatedStateEntry& Entry) const;
+
+	MOVIESCENE_API FAggregatePreAnimatedStateMetaData* GetOrAddMetaDataInternal(const FPreAnimatedStateEntry& Entry);
+
 	struct FPreAnimatedGroupMetaData
 	{
 		TSharedPtr<IPreAnimatedStateGroupManager> GroupManagerPtr;
@@ -313,16 +397,70 @@ private:
 
 	TSparseArray<FPreAnimatedGroupMetaData> GroupMetaData;
 
+	TMap<FPreAnimatedStateCachedValueHandle, FAggregatePreAnimatedStateMetaData> UngroupedMetaData;
+
 	TSortedMap<FPreAnimatedStorageID, TSharedPtr<IPreAnimatedStorage>> StorageImplementations;
 	TSortedMap<FPreAnimatedStorageID, TWeakPtr<IPreAnimatedStateGroupManager>> GroupManagers;
+
+	/** Linker is always valid because this extension is owned by the Linker */
+	UMovieSceneEntitySystemLinker* Linker;
 
 	bool bEntriesInvalidated;
 
 private:
 
-	static FPreAnimatedStorageID RegisterStorageInternal();
+	static MOVIESCENE_API FPreAnimatedStorageID RegisterStorageInternal();
 };
 
+
+template<typename KeyType>
+struct TPreAnimatedStateGroupManager : IPreAnimatedStateGroupManager, TSharedFromThis<TPreAnimatedStateGroupManager<KeyType>>
+{
+	void InitializeGroupManager(FPreAnimatedStateExtension* InExtension) override
+	{
+		Extension = InExtension;
+	}
+
+	void OnGroupDestroyed(FPreAnimatedStorageGroupHandle Group) override
+	{
+		KeyType Temp = StorageGroupsToKey.FindChecked(Group);
+
+		StorageGroupsByKey.Remove(Temp);
+		StorageGroupsToKey.Remove(Group);
+	}
+
+	
+	virtual void GatherStaleStorageGroups(TArray<FPreAnimatedStorageGroupHandle>& StaleGroupStorage) const override
+	{
+		
+	}
+
+	FPreAnimatedStorageGroupHandle FindGroupForKey(const KeyType& InKey) const
+	{
+		return StorageGroupsByKey.FindRef(InKey);
+	}
+
+	FPreAnimatedStorageGroupHandle MakeGroupForKey(const KeyType& InKey)
+	{
+		FPreAnimatedStorageGroupHandle GroupHandle = StorageGroupsByKey.FindRef(InKey);
+		if (GroupHandle)
+		{
+			return GroupHandle;
+		}
+
+		GroupHandle = Extension->AllocateGroup(this->AsShared());
+		StorageGroupsByKey.Add(InKey, GroupHandle);
+		StorageGroupsToKey.Add(GroupHandle, InKey);
+		return GroupHandle;
+	}
+
+protected:
+
+	TMap<KeyType, FPreAnimatedStorageGroupHandle> StorageGroupsByKey;
+	TMap<FPreAnimatedStorageGroupHandle, KeyType> StorageGroupsToKey;
+
+	FPreAnimatedStateExtension* Extension;
+};
 
 } // namespace MovieScene
 } // namespace UE

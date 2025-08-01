@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Containers/ChunkedArray.h"
+#include "Templates/UnrealTemplate.h"
 
 // Indicates how many "k / 2" there are in the k-DOP. 3 == AABB == 6 DOP. The code relies on this being 3.
 #define NUM_PLANES	3
@@ -165,14 +166,14 @@ FORCEINLINE bool appLineCheckTriangle(const FVector4& Start, const FVector4& End
 }
 
 /** ( -0.0001f, -0.0001f, -0.0001f, -0.0001f ) */
-static const VectorRegister GSmallNegativeNumber = { -0.0001f, -0.0001f, -0.0001f, -0.0001f };
+static const VectorRegister GSmallNegativeNumber = MakeVectorRegister(-0.0001f, -0.0001f, -0.0001f, -0.0001f);
 //extern const VectorRegister GSmallNegativeNumber;
 
 /** ( 0.0001f, 0.0001f, 0.0001f, 0.0001f ) */
-static const VectorRegister GSmallNumber = { 0.0001f, 0.0001f, 0.0001f, 0.0001f };
+static const VectorRegister GSmallNumber = MakeVectorRegister( 0.0001f, 0.0001f, 0.0001f, 0.0001f );
 //extern const VectorRegister GSmallNumber;
 
-static const VectorRegister GZeroVectorRegister = { 0, 0, 0, 0 };
+static const VectorRegister GZeroVectorRegister = MakeVectorRegister( 0.f, 0.f, 0.f, 0.f );
 
 static const VectorRegister VectorNegativeOne = MakeVectorRegister( -1.0f, -1.0f, -1.0f, -1.0f );
 
@@ -230,9 +231,9 @@ static int32 appLineCheckTriangleSOA(const FVector3SOA& Start, const FVector3SOA
 		const VectorRegister EdgeX = VectorSubtract( Triangle4.Positions[(SideIndex + 1) % 3].X, Triangle4.Positions[SideIndex].X );
 		const VectorRegister EdgeY = VectorSubtract( Triangle4.Positions[(SideIndex + 1) % 3].Y, Triangle4.Positions[SideIndex].Y );
 		const VectorRegister EdgeZ = VectorSubtract( Triangle4.Positions[(SideIndex + 1) % 3].Z, Triangle4.Positions[SideIndex].Z );
-		const VectorRegister SideDirectionX = VectorSubtract( VectorMultiply( Triangle4.Normals.Y, EdgeZ ), VectorMultiply(Triangle4.Normals.Z, EdgeY) );
-		const VectorRegister SideDirectionY = VectorSubtract( VectorMultiply( Triangle4.Normals.Z, EdgeX ), VectorMultiply(Triangle4.Normals.X, EdgeZ) );
-		const VectorRegister SideDirectionZ = VectorSubtract( VectorMultiply( Triangle4.Normals.X, EdgeY ), VectorMultiply(Triangle4.Normals.Y, EdgeX) );
+		const VectorRegister SideDirectionX = VectorNegateMultiplyAdd( Triangle4.Normals.Z, EdgeY, VectorMultiply( Triangle4.Normals.Y, EdgeZ ) );
+		const VectorRegister SideDirectionY = VectorNegateMultiplyAdd( Triangle4.Normals.X, EdgeZ, VectorMultiply( Triangle4.Normals.Z, EdgeX ) );
+		const VectorRegister SideDirectionZ = VectorNegateMultiplyAdd( Triangle4.Normals.Y, EdgeX, VectorMultiply( Triangle4.Normals.X, EdgeY ) );
 		VectorRegister SideW;
 		SideW = VectorMultiply( SideDirectionX, Triangle4.Positions[SideIndex].X );
 		SideW = VectorMultiplyAdd( SideDirectionY, Triangle4.Positions[SideIndex].Y, SideW );
@@ -444,69 +445,100 @@ struct TkDOPNode
 			int32 BestPlane = -1;
 			float BestMean = 0.f;
 			float BestVariance = 0.f;
+
 			// Determine how to split using the splatter algorithm
-			for (int32 nPlane = 0; nPlane < NUM_PLANES; nPlane++)
 			{
-				float Mean = 0.f;
-				float Variance = 0.f;
+				double Mean[NUM_PLANES] = { 0 };
+				double Variance[NUM_PLANES] = { 0 };
+
 				// Compute the mean for the triangle list
 				for (int32 nTriangle = Start; nTriangle < Start + NumTris; nTriangle++)
 				{
 					// Project the centroid of the triangle against the plane
 					// normals and accumulate to find the total projected
 					// weighting
-					Mean += BuildTriangles[nTriangle].GetCentroid()[nPlane];
+					FVector4 Centroid = BuildTriangles[nTriangle].GetCentroid();
+
+					for (int32 nPlane = 0; nPlane < NUM_PLANES; nPlane++)
+					{
+						Mean[nPlane] += Centroid[nPlane];
+					}
 				}
+
 				// Divide by the number of triangles to get the average
-				Mean /= float(NumTris);
+				for (int32 nPlane = 0; nPlane < NUM_PLANES; nPlane++)
+				{
+					Mean[nPlane] /= NumTris;
+				}
+
 				// Compute variance of the triangle list
-				for (int32 nTriangle = Start; nTriangle < Start + NumTris;nTriangle++)
+				for (int32 nTriangle = Start; nTriangle < Start + NumTris; nTriangle++)
 				{
 					// Project the centroid again
-					float Dot = BuildTriangles[nTriangle].GetCentroid()[nPlane];
+					FVector4 Centroid = BuildTriangles[nTriangle].GetCentroid();
+
 					// Now calculate the variance and accumulate it
-					Variance += (Dot - Mean) * (Dot - Mean);
+					for (int32 nPlane = 0; nPlane < NUM_PLANES; nPlane++)
+					{
+						Variance[nPlane] += (Centroid[nPlane] - Mean[nPlane]) * (Centroid[nPlane] - Mean[nPlane]);
+					}
 				}
-				// Get the average variance
-				Variance /= float(NumTris);
-				// Determine if this plane is the best to split on or not
-				if (Variance >= BestVariance)
+
+				// Determine which plane is the best to split on
+				for (int32 nPlane = 0; nPlane < NUM_PLANES; nPlane++)
 				{
-					BestPlane = nPlane;
-					BestVariance = Variance;
-					BestMean = Mean;
+					// Get the average variance
+					Variance[nPlane] /= NumTris;
+					if (Variance[nPlane] >= BestVariance)
+					{
+						BestPlane = nPlane;
+						BestVariance = (float)Variance[nPlane];
+						BestMean = (float)Mean[nPlane];
+					}
 				}
 			}
+
 			// Now that we have the plane to split on, work through the triangle
 			// list placing them on the left or right of the splitting plane
 			int32 Left = Start - 1;
 			int32 Right = Start + NumTris;
-			// Keep working through until the left index passes the right
-			while (Left < Right)
+			// Keep working through until the left index passes the right; we test that condition after each interior loop
+			for (;;)
 			{
+				// Loop invariants: (1) Left < Right,
+				// (2) All triangles <= Left belong on the left, all triangles >= Right belong on the right
+				// (3) Left+1 is an untested triangle, Right-1 is an untested triangle
 				float Dot;
-				// Find all the triangles to the "left" of the splitting plane
-				do
+				// Increment Left until it points to triangle that belongs on the right, or Right==Left
+				for (++Left; Left < Right; ++Left)
 				{
-					Dot = BuildTriangles[++Left].GetCentroid()[BestPlane];
+					Dot = BuildTriangles[Left].GetCentroid()[BestPlane];
+					if (Dot < BestMean)
+					{
+						break;
+					}
 				}
-				while (Dot < BestMean && Left < Right);
-				// Find all the triangles to the "right" of the splitting plane
-				do
+				if (Left == Right)
 				{
-					Dot = BuildTriangles[--Right].GetCentroid()[BestPlane];
+					break;
 				}
-				while (Dot >= BestMean && Right > 0 && Left < Right);
-				// Don't swap the triangle data if we just hit the end
-				if (Left < Right)
+				// Decrement Right until it points to triangle that belongs on the left, or Right==Left
+				for (--Right; Left < Right; --Right)
 				{
-					// Swap the triangles since they are on the wrong sides of the
-					// splitting plane
-					FkDOPBuildCollisionTriangle<KDOP_IDX_TYPE> Temp = BuildTriangles[Left];
-					BuildTriangles[Left] = BuildTriangles[Right];
-					BuildTriangles[Right] = Temp;
+					Dot = BuildTriangles[Right].GetCentroid()[BestPlane];
+					if (Dot >= BestMean)
+					{
+						break;
+					}
 				}
+				if (Left == Right)
+				{
+					break;
+				}
+				// Left points to a triangle that belongs on the Right; Right points to a triangle that belongs on the Left. Swap them.
+				Swap(BuildTriangles[Left], BuildTriangles[Right]);
 			}
+			// After loop array is partitioned and Left is the first index that belongs on the right side of the plane.
 			// Check for wacky degenerate case where more than GKDOPMaxTrisPerLeaf
 			// fall all in the same kDOP
 			if (Left == Start + NumTris || Right == Start)
@@ -587,9 +619,9 @@ struct TkDOPNode
 			FBox BoundingVolume(ForceInit);
 			for (int32 TriangleIndex=Start; TriangleIndex<Start + NumTris; TriangleIndex++)
 			{
-				BoundingVolume += BuildTriangles[TriangleIndex].V0;
-				BoundingVolume += BuildTriangles[TriangleIndex].V1;
-				BoundingVolume += BuildTriangles[TriangleIndex].V2;			
+				BoundingVolume += FVector(BuildTriangles[TriangleIndex].V0);
+				BoundingVolume += FVector(BuildTriangles[TriangleIndex].V1);
+				BoundingVolume += FVector(BuildTriangles[TriangleIndex].V2);
 			}
 			BoundingVolumes.SetBox(0,BoundingVolume);
 			BoundingVolumes.SetBox(1,BoundingVolume);
@@ -865,9 +897,9 @@ struct TkDOPNode
 			if ( SubIndex >= 0 )
 			{
 				bHit = true;
-				Check.LocalHitNormal.X = VectorGetComponent(TriangleSOA.Normals.X, SubIndex);
-				Check.LocalHitNormal.Y = VectorGetComponent(TriangleSOA.Normals.Y, SubIndex);
-				Check.LocalHitNormal.Z = VectorGetComponent(TriangleSOA.Normals.Z, SubIndex);
+				Check.LocalHitNormal.X = VectorGetComponentDynamic(TriangleSOA.Normals.X, SubIndex);
+				Check.LocalHitNormal.Y = VectorGetComponentDynamic(TriangleSOA.Normals.Y, SubIndex);
+				Check.LocalHitNormal.Z = VectorGetComponentDynamic(TriangleSOA.Normals.Z, SubIndex);
 				Check.Result->Item = TriangleSOA.Payload[SubIndex];
 				Check.HitNodeIndex = History.GetOldestNode();
 
@@ -1059,9 +1091,9 @@ template <typename COLL_DATA_PROVIDER, typename KDOP_IDX_TYPE> struct TkDOPLineC
 		// Calculate the vector's direction in local space
 		LocalDir = LocalEnd - LocalStart;
 		// Build the one over dir
-		LocalOneOverDir.X = LocalDir.X ? 1.f / LocalDir.X : MAX_FLT;
-		LocalOneOverDir.Y = LocalDir.Y ? 1.f / LocalDir.Y : MAX_FLT;
-		LocalOneOverDir.Z = LocalDir.Z ? 1.f / LocalDir.Z : MAX_FLT;
+		LocalOneOverDir.X = LocalDir.X ? 1.f / LocalDir.X : UE_MAX_FLT;
+		LocalOneOverDir.Y = LocalDir.Y ? 1.f / LocalDir.Y : UE_MAX_FLT;
+		LocalOneOverDir.Z = LocalDir.Z ? 1.f / LocalDir.Z : UE_MAX_FLT;
 
 		// Construct the SOA data
 		StartSOA.X = VectorLoadFloat1( &LocalStart.X );

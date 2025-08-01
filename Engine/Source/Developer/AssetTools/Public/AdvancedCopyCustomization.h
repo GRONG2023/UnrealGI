@@ -4,13 +4,13 @@
 
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
-#include "ARFilter.h"
+#include "AssetRegistry/ARFilter.h"
 #include "IAssetTools.h"
 #include "AdvancedCopyCustomization.generated.h"
 
 
 
-UCLASS(notplaceable)
+UCLASS()
 class ASSETTOOLS_API UAdvancedCopyCustomization : public UObject
 {
 	GENERATED_BODY()
@@ -25,7 +25,7 @@ public:
 	}
 
 	/* Returns the ARFilter for this advanced copy */
-	FARFilter GetARFilter() const
+	virtual FARFilter GetARFilter() const
 	{
 		return FilterForExcludingDependencies;
 	}

@@ -17,17 +17,20 @@ class IBreakIterator;
 class FShapedGlyphFaceData
 {
 public:
-	FShapedGlyphFaceData(TWeakPtr<FFreeTypeFace> InFontFace, const uint32 InGlyphFlags, const int32 InFontSize, const float InFontScale)
+	FShapedGlyphFaceData(TWeakPtr<FFreeTypeFace> InFontFace, const uint32 InGlyphFlags, const float InFontSize, const float InFontScale, const float InFontSkew)
 		: FontFace(MoveTemp(InFontFace))
 		, GlyphFlags(InGlyphFlags)
 		, FontSize(InFontSize)
 		, FontScale(InFontScale)
 		, BitmapRenderScale(1.0f)
+		, FontSkew(InFontSkew)
+		, bSupportsSdf(false)
 	{
 #if WITH_FREETYPE
 		if (TSharedPtr<FFreeTypeFace> FontFacePin = FontFace.Pin())
 		{
 			BitmapRenderScale = FontFacePin->GetBitmapRenderScale();
+			bSupportsSdf = FontFacePin->SupportsSdf();
 		}
 #endif	// WITH_FREETYPE
 	}
@@ -37,11 +40,15 @@ public:
 	/** Provides the glyph flags used to render the font */
 	uint32 GlyphFlags;
 	/** Provides the point size used to render the font */
-	int32 FontSize;
+	float FontSize;
 	/** Provides the final scale used to render to the font */
 	float FontScale;
 	/** Any additional scale that should be applied when rendering this glyph */
 	float BitmapRenderScale;
+	/** The skew transform amount for the rendered font */
+	float FontSkew;
+	/** Is the Face eligible for signed distance field rendering */
+	bool bSupportsSdf;
 };
 
 
@@ -71,7 +78,7 @@ private:
 	void PerformHarfBuzzTextShaping(const TCHAR* InText, const int32 InTextStart, const int32 InTextLen, const FSlateFontInfo& InFontInfo, const float InFontScale, const TextBiDi::ETextDirection InTextDirection, TArray<FShapedGlyphEntry>& OutGlyphsToRender) const;
 #endif // WITH_HARFBUZZ
 
-	bool InsertSubstituteGlyphs(const TCHAR* InText, const int32 InCharIndex, const TSharedRef<FShapedGlyphFaceData>& InShapedGlyphFaceData, const TSharedRef<FFreeTypeAdvanceCache>& AdvanceCache, TArray<FShapedGlyphEntry>& OutGlyphsToRender, const float InLetterSpacingScaled = 0) const;
+	bool InsertSubstituteGlyphs(const TCHAR* InText, const int32 InCharIndex, const TSharedRef<FShapedGlyphFaceData>& InShapedGlyphFaceData, const TSharedRef<FFreeTypeAdvanceCache>& AdvanceCache, TArray<FShapedGlyphEntry>& OutGlyphsToRender, const int16 InLetterSpacingScaled = 0) const;
 
 	FFreeTypeCacheDirectory* FTCacheDirectory;
 	FCompositeFontCache* CompositeFontCache;

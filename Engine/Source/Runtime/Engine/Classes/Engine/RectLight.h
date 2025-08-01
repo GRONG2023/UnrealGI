@@ -13,18 +13,11 @@ class ARectLight : public ALight
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category="Light", meta=(ExposeFunctionCategories="RectLight,Rendering|Lighting"))
-	class URectLightComponent* RectLightComponent;
+	TObjectPtr<class URectLightComponent> RectLightComponent;
 
 #if WITH_EDITOR
 	//~ Begin AActor Interface.
 	virtual void EditorApplyScale(const FVector& DeltaScale, const FVector* PivotLocation, bool bAltDown, bool bShiftDown, bool bCtrlDown) override;
 	//~ End AActor Interface.
 #endif
-
-	//~ Begin UObject Interface.
-	virtual void PostLoad() override;
-	//~ End UObject Interface.
 };
-
-
-

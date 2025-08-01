@@ -2,89 +2,100 @@
 
 
 #include "NodeFactory.h"
-#include "UObject/Class.h"
-#include "InputCoreTypes.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "MaterialGraph/MaterialGraphNode_Comment.h"
-#include "MaterialGraph/MaterialGraphNode_Base.h"
-#include "MaterialGraph/MaterialGraphNode.h"
-#include "MaterialGraph/MaterialGraphNode_Root.h"
-#include "MaterialGraph/MaterialGraphSchema.h"
-#include "SoundCueGraph/SoundCueGraphNode.h"
-#include "SoundCueGraph/SoundCueGraphNode_Root.h"
-#include "SoundCueGraph/SoundCueGraphSchema.h"
-#include "Engine/CollisionProfile.h"
-#include "SGraphPin.h"
+
+#include "BlueprintConnectionDrawingPolicy.h"
+#include "ConnectionDrawingPolicy.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphNode_Documentation.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "EdGraphNode_Comment.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphUtilities.h"
+#include "Engine/CollisionProfile.h"
+#include "InputCoreTypes.h"
 #include "K2Node.h"
-#include "K2Node_Event.h"
 #include "K2Node_AddPinInterface.h"
-#include "K2Node_CallArrayFunction.h"
 #include "K2Node_CallMaterialParameterCollectionFunction.h"
 #include "K2Node_Composite.h"
 #include "K2Node_Copy.h"
 #include "K2Node_CreateDelegate.h"
+#include "K2Node_Event.h"
 #include "K2Node_FormatText.h"
-#include "K2Node_GetArrayItem.h"
 #include "K2Node_Knot.h"
 #include "K2Node_MakeStruct.h"
+#include "K2Node_PromotableOperator.h"
 #include "K2Node_SpawnActor.h"
 #include "K2Node_SpawnActorFromClass.h"
 #include "K2Node_Switch.h"
 #include "K2Node_Timeline.h"
-
-
-#include "SGraphNodeDefault.h"
-#include "SGraphNodeComment.h"
-#include "SGraphNodeDocumentation.h"
-#include "EdGraph/EdGraphNode_Documentation.h"
-#include "SGraphNodeKnot.h"
-
-#include "KismetNodes/SGraphNodeK2Default.h"
-#include "KismetNodes/SGraphNodeK2Var.h"
+#include "KismetNodes/SGraphNodeCallParameterCollectionFunction.h"
+#include "KismetNodes/SGraphNodeFormatText.h"
 #include "KismetNodes/SGraphNodeK2Composite.h"
-#include "KismetNodes/SGraphNodeSwitchStatement.h"
+#include "KismetNodes/SGraphNodeK2Copy.h"
+#include "KismetNodes/SGraphNodeK2CreateDelegate.h"
+#include "KismetNodes/SGraphNodeK2Default.h"
+#include "KismetNodes/SGraphNodeK2Event.h"
 #include "KismetNodes/SGraphNodeK2Sequence.h"
 #include "KismetNodes/SGraphNodeK2Timeline.h"
+#include "KismetNodes/SGraphNodeK2Var.h"
+#include "KismetNodes/SGraphNodeMakeStruct.h"
 #include "KismetNodes/SGraphNodeSpawnActor.h"
 #include "KismetNodes/SGraphNodeSpawnActorFromClass.h"
-#include "KismetNodes/SGraphNodeK2CreateDelegate.h"
-#include "KismetNodes/SGraphNodeCallParameterCollectionFunction.h"
-#include "KismetNodes/SGraphNodeK2Event.h"
-#include "KismetNodes/SGraphNodeFormatText.h"
-#include "KismetNodes/SGraphNodeMakeStruct.h"
-#include "KismetNodes/SGraphNodeK2Copy.h"
-
+#include "KismetNodes/SGraphNodeSwitchStatement.h"
 #include "KismetPins/SGraphPinBool.h"
-#include "KismetPins/SGraphPinString.h"
-#include "KismetPins/SGraphPinText.h"
-#include "KismetPins/SGraphPinObject.h"
 #include "KismetPins/SGraphPinClass.h"
-#include "KismetPins/SGraphPinStruct.h"
-#include "KismetPins/SGraphPinExec.h"
-#include "KismetPins/SGraphPinNum.h"
-#include "KismetPins/SGraphPinInteger.h"
+#include "KismetPins/SGraphPinCollisionProfile.h"
 #include "KismetPins/SGraphPinColor.h"
 #include "KismetPins/SGraphPinEnum.h"
+#include "KismetPins/SGraphPinExec.h"
+#include "KismetPins/SGraphPinIndex.h"
+#include "KismetPins/SGraphPinInteger.h"
 #include "KismetPins/SGraphPinKey.h"
+#include "KismetPins/SGraphPinNum.h"
+#include "KismetPins/SGraphPinObject.h"
+#include "KismetPins/SGraphPinString.h"
+#include "KismetPins/SGraphPinStruct.h"
+#include "KismetPins/SGraphPinText.h"
 #include "KismetPins/SGraphPinVector.h"
 #include "KismetPins/SGraphPinVector2D.h"
-#include "KismetPins/SGraphPinVector4.h"
-#include "KismetPins/SGraphPinIndex.h"
-#include "KismetPins/SGraphPinCollisionProfile.h"
-
+#include "MaterialGraph/MaterialGraphNode.h"
+#include "MaterialGraph/MaterialGraphNode_Base.h"
+#include "MaterialGraph/MaterialGraphNode_Comment.h"
+#include "MaterialGraph/MaterialGraphNode_Composite.h"
+#include "MaterialGraph/MaterialGraphNode_Root.h"
+#include "MaterialGraph/MaterialGraphSchema.h"
+#include "MaterialGraphConnectionDrawingPolicy.h"
+#include "MaterialGraphNode_Knot.h"
 #include "MaterialNodes/SGraphNodeMaterialBase.h"
 #include "MaterialNodes/SGraphNodeMaterialComment.h"
+#include "MaterialNodes/SGraphNodeMaterialComposite.h"
 #include "MaterialNodes/SGraphNodeMaterialResult.h"
-#include "MaterialGraphNode_Knot.h"
+#include "Math/Rotator.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Optional.h"
+#include "SGraphNodeComment.h"
+#include "SGraphNodeDefault.h"
+#include "SGraphNodeDocumentation.h"
+#include "SGraphNodeKnot.h"
+#include "SGraphNodePromotableOperator.h"
+#include "SGraphPin.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 
-#include "MaterialPins/SGraphPinMaterialInput.h"
+struct FLinearColor;
 
-#include "ConnectionDrawingPolicy.h"
-#include "BlueprintConnectionDrawingPolicy.h"
-#include "MaterialGraphConnectionDrawingPolicy.h"
-
-#include "EdGraphUtilities.h"
 TSharedPtr<SGraphNode> FNodeFactory::CreateNodeWidget(UEdGraphNode* InNode)
 {
 	check(InNode != NULL);
@@ -112,22 +123,6 @@ TSharedPtr<SGraphNode> FNodeFactory::CreateNodeWidget(UEdGraphNode* InNode)
 		}
 	}
 
-	if (UMaterialGraphNode_Base* BaseMaterialNode = Cast<UMaterialGraphNode_Base>(InNode))
-	{
-		if (UMaterialGraphNode_Root* RootMaterialNode = Cast<UMaterialGraphNode_Root>(InNode))
-		{
-			return SNew(SGraphNodeMaterialResult, RootMaterialNode);
-		}
-		else if (UMaterialGraphNode_Knot* MaterialKnot = Cast<UMaterialGraphNode_Knot>(InNode))
-		{
-			return SNew(SGraphNodeKnot, MaterialKnot);
-		}
-		else if (UMaterialGraphNode* MaterialNode = Cast<UMaterialGraphNode>(InNode))
-		{
-			return SNew(SGraphNodeMaterialBase, MaterialNode);
-		}
-	}
-
 	if (UK2Node* K2Node = Cast<UK2Node>(InNode))
 	{
 		if (UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(InNode))
@@ -141,6 +136,10 @@ TSharedPtr<SGraphNode> FNodeFactory::CreateNodeWidget(UEdGraphNode* InNode)
 		else if (UK2Node_Switch* SwitchNode = Cast<UK2Node_Switch>(InNode))
 		{
 			return SNew(SGraphNodeSwitchStatement, SwitchNode);
+		}
+		else if(UK2Node_PromotableOperator* PromotableOperator = Cast<UK2Node_PromotableOperator>(InNode))
+		{
+			return SNew(SGraphNodePromotableOperator, PromotableOperator);
 		}
 		else if (InNode->GetClass()->ImplementsInterface(UK2Node_AddPinInterface::StaticClass()))
 		{
@@ -239,18 +238,6 @@ TSharedPtr<SGraphPin> FNodeFactory::CreatePinWidget(UEdGraphPin* InPin)
 			return K2PinWidget;
 		}
 	}
-
-	if (const UMaterialGraphSchema* MaterialGraphSchema = Cast<const UMaterialGraphSchema>(InPin->GetSchema()))
-	{
-		if (InPin->PinType.PinCategory == MaterialGraphSchema->PC_MaterialInput)
-		{
-			return SNew(SGraphPinMaterialInput, InPin);
-		}
-		else
-		{
-			return SNew(SGraphPin, InPin);
-		}
-	}
 	
 	// If we didn't pick a custom pin widget, use an uncustomized basic pin
 	return SNew(SGraphPin, InPin);
@@ -307,9 +294,9 @@ TSharedPtr<SGraphPin> FNodeFactory::CreateK2PinWidget(UEdGraphPin* InPin)
 	{
 		return SNew(SGraphPinNum<int64>, InPin);
 	}
-	else if (InPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Float)
+	else if (InPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Real)
 	{
-		return SNew(SGraphPinNum<float>, InPin);
+		return SNew(SGraphPinNum<double>, InPin);
 	}
 	else if (InPin->PinType.PinCategory == UEdGraphSchema_K2::PC_String || InPin->PinType.PinCategory == UEdGraphSchema_K2::PC_Name)
 	{
@@ -320,6 +307,7 @@ TSharedPtr<SGraphPin> FNodeFactory::CreateK2PinWidget(UEdGraphPin* InPin)
 		// If you update this logic you'll probably need to update UEdGraphSchema_K2::ShouldHidePinDefaultValue!
 		UScriptStruct* ColorStruct = TBaseStructure<FLinearColor>::Get();
 		UScriptStruct* VectorStruct = TBaseStructure<FVector>::Get();
+		UScriptStruct* Vector3fStruct = TVariantStructure<FVector3f>::Get();
 		UScriptStruct* Vector2DStruct = TBaseStructure<FVector2D>::Get();
 		UScriptStruct* RotatorStruct = TBaseStructure<FRotator>::Get();
 
@@ -327,13 +315,13 @@ TSharedPtr<SGraphPin> FNodeFactory::CreateK2PinWidget(UEdGraphPin* InPin)
 		{
 			return SNew(SGraphPinColor, InPin);
 		}
-		else if ((InPin->PinType.PinSubCategoryObject == VectorStruct) || (InPin->PinType.PinSubCategoryObject == RotatorStruct))
+		else if ((InPin->PinType.PinSubCategoryObject == VectorStruct) || (InPin->PinType.PinSubCategoryObject == Vector3fStruct) || (InPin->PinType.PinSubCategoryObject == RotatorStruct))
 		{
-			return SNew(SGraphPinVector, InPin);
+			return SNew(SGraphPinVector<double>, InPin);
 		}
 		else if (InPin->PinType.PinSubCategoryObject == Vector2DStruct)
 		{
-			return SNew(SGraphPinVector2D, InPin);
+			return SNew(SGraphPinVector2D<double>, InPin);
 		}
 		else if (InPin->PinType.PinSubCategoryObject == FKey::StaticStruct())
 		{

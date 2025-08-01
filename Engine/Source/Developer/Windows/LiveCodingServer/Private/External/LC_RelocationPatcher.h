@@ -1,12 +1,14 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
 #pragma once
 
+// BEGIN EPIC MOD
 #include "CoreTypes.h"
+// END EPIC MOD
 #include "LC_Coff.h"
 #include "LC_Symbols.h"
 #include "LC_ModuleCache.h"
-#include "LC_Process.h"
+#include "LC_ProcessTypes.h"
 
 
 namespace relocations
@@ -63,15 +65,19 @@ namespace relocations
 		const types::StringSet& forceRelocationSymbols,
 		const ModuleCache* moduleCache,
 		const ImmutableString& srcSymbolName,
+		const ImmutableString& dstSymbolName,
 		const symbols::Symbol* srcSymbol,
 		size_t newModuleIndex,
 		void* newModuleBases[]
+// BEGIN EPIC MOD
+		, bool forceBackwards
+// END EPIC MOD
 	);
 
 	void PatchRelocation
 	(
 		const Record& record,
-		process::Handle processHandle,
+		Process::Handle processHandle,
 		void* processModuleBases[],
 		void* newModuleBase
 	);

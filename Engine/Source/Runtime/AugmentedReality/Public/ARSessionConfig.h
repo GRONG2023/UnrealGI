@@ -246,6 +246,18 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "AR Settings")
 	void AddCandidateImage(UARCandidateImage* NewCandidateImage);
     
+	// Remove a candidate image from the ARSessionConfig, by pointer, note the image object must match, not the content of the image.
+	UFUNCTION(BlueprintCallable, Category = "AR Settings")
+	void RemoveCandidateImage(UARCandidateImage* CandidateImage);
+
+	// Remove a candidate image from the ARSessionConfig, by index.
+	UFUNCTION(BlueprintCallable, Category = "AR Settings")
+	void RemoveCandidateImageAtIndex(int Index);
+
+	// Remove all candidate images from the ARSessionConfig
+	UFUNCTION(BlueprintCallable, Category = "AR Settings")
+	void ClearCandidateImages();
+
 	/** @see MaxNumSimultaneousImagesTracked */
 	UFUNCTION(BlueprintCallable, Category = "AR Settings")
     int32 GetMaxNumSimultaneousImagesTracked() const;
@@ -345,7 +357,7 @@ public:
 	/** @see MaxNumberOfTrackedFaces */
 	int32 GetMaxNumberOfTrackedFaces() const { return MaxNumberOfTrackedFaces; }
 	
-	/** Boolean to determine whether the AR system should generate mesh data that can be used for rendering, collision, NavMesh, and more. This feature is used by OpenXR, Windows Mixed Reality, and Magic Leap. */
+	/** Boolean to determine whether the AR system should generate mesh data that can be used for rendering, collision, NavMesh, and more. This feature is used by OpenXR, Windows Mixed Reality. */
 	UPROPERTY(EditAnywhere, Category = "AR Settings | World Mapping")
 	bool bGenerateMeshDataFromTrackedGeometry;
 
@@ -444,7 +456,7 @@ protected:
 	
 	/** The list of candidate images to detect within the AR camera view. This feature is used by ARKit. */
 	UPROPERTY(EditAnywhere, Category="AR Settings | Image Tracking")
-	TArray<UARCandidateImage*> CandidateImages;
+	TArray<TObjectPtr<UARCandidateImage>> CandidateImages;
 
 	/** The maximum number of images to track at the same time. Defaults to 1. This feature is used by ARKit. */
     UPROPERTY(EditAnywhere, Category="AR Settings | Image Tracking")
@@ -460,7 +472,7 @@ protected:
 
 	/** The list of candidate objects to search for in the scene. This feature is used by ARKit. */
 	UPROPERTY(EditAnywhere, Category="AR Settings")
-	TArray<UARCandidateObject*> CandidateObjects;
+	TArray<TObjectPtr<UARCandidateObject>> CandidateObjects;
 
 	/**
 	 * The desired video format (or the default, if not supported) that this session should use if the camera is enabled.
@@ -539,9 +551,9 @@ protected:
 	
 	/** The default mesh material used by the generated mesh component. */
 	UPROPERTY(EditAnywhere, Category = "AR Settings | World Mapping")
-	UMaterialInterface* DefaultMeshMaterial;
+	TObjectPtr<UMaterialInterface> DefaultMeshMaterial;
 
 	/** The default mesh material used by the wireframe setting of the generated mesh component.  Note: It is recommended to ignore this wireframe feature and use a wireframe material for the DefaultMeshMaterial instead. */
 	UPROPERTY(EditAnywhere, Category = "AR Settings | World Mapping")
-	UMaterialInterface* DefaultWireframeMeshMaterial;
+	TObjectPtr<UMaterialInterface> DefaultWireframeMeshMaterial;
 };

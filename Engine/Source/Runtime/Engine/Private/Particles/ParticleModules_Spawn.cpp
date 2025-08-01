@@ -4,12 +4,12 @@
 	ParticleModules_Spawn.cpp: Particle spawn-related module implementations.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "HAL/IConsoleManager.h"
-#include "ParticleHelper.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/ParticleSystemComponent.h"
 #include "Distributions/DistributionFloatConstant.h"
+#include "Particles/ParticleEmitter.h"
 #include "Particles/Spawn/ParticleModuleSpawnBase.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/Spawn/ParticleModuleSpawn.h"
 #include "Particles/Spawn/ParticleModuleSpawnPerUnit.h"
 #include "Distributions/DistributionFloatConstantCurve.h"
@@ -73,7 +73,7 @@ void UParticleModuleSpawn::PostLoad()
 {
 	Super::PostLoad();
 
-	if (GetLinkerUE4Version() < VER_UE4_GLOBAL_EMITTER_SPAWN_RATE_SCALE && Rate.Distribution)
+	if (GetLinkerUEVersion() < VER_UE4_GLOBAL_EMITTER_SPAWN_RATE_SCALE && Rate.Distribution)
 	{
 		Rate.Distribution->ConditionalPostLoad();//Ensure the distribution is loaded.
 		if (Rate.Distribution->IsA(UDistributionFloatConstant::StaticClass()) && Rate.GetValue() <= 1.0f)

@@ -248,7 +248,7 @@ void FStatsTreeElement::UpdatePostMeasurement(double InCyclesPerTimerToRemove)
 	};
 
 	// remove the cycles for the timers
-	if (InCyclesPerTimerToRemove > SMALL_NUMBER)
+	if (InCyclesPerTimerToRemove > UE_SMALL_NUMBER)
 	{
 		Local::RemoveCyclesForTimers(this, InCyclesPerTimerToRemove);
 	}
@@ -423,7 +423,7 @@ FStatsTreeElement FStatsHierarchical::EndMeasurements(FStatsTreeElement Measurem
 		DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC();
 	}
 	uint32 TimerEndCycles = STATS_HIERARCHICAL_TIMER_FUNC();
-	Entries.Reset();
+	Entries.Reset(); //-V586
 	bEnabled = false;
 
 	uint32 TimerDelta = TimerEndCycles - TimerStartCycles;

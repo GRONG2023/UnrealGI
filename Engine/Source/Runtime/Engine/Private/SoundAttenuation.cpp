@@ -1,10 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 #include "Sound/SoundAttenuation.h"
-#include "EngineDefines.h"
+
 #include "AudioDevice.h"
 #include "UObject/AnimPhysObjectVersion.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
 
 /*-----------------------------------------------------------------------------
 	USoundAttenuation implementation.
@@ -13,10 +13,10 @@
 #if WITH_EDITORONLY_DATA
 void FSoundAttenuationSettings::PostSerialize(const FArchive& Ar)
 {
-	if (Ar.UE4Ver() < VER_UE4_ATTENUATION_SHAPES)
+	if (Ar.UEVer() < VER_UE4_ATTENUATION_SHAPES)
 	{
 		FalloffDistance = RadiusMax_DEPRECATED - RadiusMin_DEPRECATED;
-
+		const float MaxDistance = FAudioDevice::GetMaxWorldDistance();
 		switch(DistanceType_DEPRECATED)
 		{
 		case SOUNDDISTANCE_Normal:
@@ -26,17 +26,17 @@ void FSoundAttenuationSettings::PostSerialize(const FArchive& Ar)
 
 		case SOUNDDISTANCE_InfiniteXYPlane:
 			AttenuationShape = EAttenuationShape::Box;
-			AttenuationShapeExtents = FVector(WORLD_MAX, WORLD_MAX, RadiusMin_DEPRECATED);
+			AttenuationShapeExtents = FVector(MaxDistance, MaxDistance, RadiusMin_DEPRECATED);
 			break;
 
 		case SOUNDDISTANCE_InfiniteXZPlane:
 			AttenuationShape = EAttenuationShape::Box;
-			AttenuationShapeExtents = FVector(WORLD_MAX, RadiusMin_DEPRECATED, WORLD_MAX);
+			AttenuationShapeExtents = FVector(MaxDistance, RadiusMin_DEPRECATED, MaxDistance);
 			break;
 
 		case SOUNDDISTANCE_InfiniteYZPlane:
 			AttenuationShape = EAttenuationShape::Box;
-			AttenuationShapeExtents = FVector(RadiusMin_DEPRECATED, WORLD_MAX, WORLD_MAX);
+			AttenuationShapeExtents = FVector(RadiusMin_DEPRECATED, MaxDistance, MaxDistance);
 			break;
 		}
 	}
@@ -56,6 +56,14 @@ void FSoundAttenuationSettings::PostSerialize(const FArchive& Ar)
 		if (ReverbPluginSettings_DEPRECATED)
 		{
 			PluginSettings.ReverbPluginSettingsArray.Add(ReverbPluginSettings_DEPRECATED);
+		}
+	}
+
+	if (Ar.IsLoading() && Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::AudioAttenuationNonSpatializedRadiusBlend)
+	{
+		if (OmniRadius_DEPRECATED)
+		{
+			NonSpatializedRadiusStart = OmniRadius_DEPRECATED;
 		}
 	}
 }
@@ -91,7 +99,9 @@ bool FSoundAttenuationSettings::operator==(const FSoundAttenuationSettings& Othe
 			&& bSpatialize			    == Other.bSpatialize
 			&& dBAttenuationAtMax	    == Other.dBAttenuationAtMax
 			&& FalloffMode				== Other.FalloffMode
-			&& OmniRadius				== Other.OmniRadius
+			&& NonSpatializedRadiusStart == Other.NonSpatializedRadiusStart
+			&& NonSpatializedRadiusEnd == Other.NonSpatializedRadiusEnd
+			&& NonSpatializedRadiusMode == Other.NonSpatializedRadiusMode
 			&& bApplyNormalizationToStereoSounds == Other.bApplyNormalizationToStereoSounds
 			&& StereoSpread				== Other.StereoSpread
 			&& DistanceAlgorithm	    == Other.DistanceAlgorithm
@@ -109,6 +119,7 @@ bool FSoundAttenuationSettings::operator==(const FSoundAttenuationSettings& Othe
 			&& bEnableLogFrequencyScaling == Other.bEnableLogFrequencyScaling
 			&& bEnableSubmixSends 		== Other.bEnableSubmixSends
 			&& bEnableListenerFocus 	== Other.bEnableListenerFocus
+			&& bEnableSendToAudioLink	== Other.bEnableSendToAudioLink
 			&& FocusAzimuth				== Other.FocusAzimuth
 			&& NonFocusAzimuth			== Other.NonFocusAzimuth
 			&& FocusDistanceScale		== Other.FocusDistanceScale
@@ -123,6 +134,8 @@ bool FSoundAttenuationSettings::operator==(const FSoundAttenuationSettings& Othe
 			&& PluginSettings.OcclusionPluginSettingsArray	== Other.PluginSettings.OcclusionPluginSettingsArray
 			&& bEnableReverbSend		== Other.bEnableReverbSend
 			&& PluginSettings.ReverbPluginSettingsArray		== Other.PluginSettings.ReverbPluginSettingsArray
+			&& PluginSettings.SourceDataOverridePluginSettingsArray == Other.PluginSettings.SourceDataOverridePluginSettingsArray
+			&& AudioLinkSettingsOverride == Other.AudioLinkSettingsOverride
 			&& ReverbWetLevelMin		== Other.ReverbWetLevelMin
 			&& ReverbWetLevelMax		== Other.ReverbWetLevelMax
 			&& ReverbDistanceMin		== Other.ReverbDistanceMin
@@ -141,3 +154,200 @@ USoundAttenuation::USoundAttenuation(const FObjectInitializer& ObjectInitializer
 	: Super(ObjectInitializer)
 {
 }
+
+FAttenuationSubmixSendSettings::FAttenuationSubmixSendSettings()
+{
+	// These were the defaults in the previous attenuation settings.
+	MinSendLevel = 0.0f;
+	MaxSendLevel = 1.0f;
+	MinSendDistance = 400.0f;
+	MaxSendDistance = 6000.0f;
+	SendLevel = 0.2f;
+	SendLevelControlMethod = ESendLevelControlMethod::Linear;
+}
+
+#define LOCTEXT_NAMESPACE "AudioParameterInterface"
+#define AUDIO_PARAMETER_INTERFACE_NAMESPACE "UE.Attenuation"
+namespace Audio
+{
+	namespace AttenuationInterface
+	{
+		const FName Name = AUDIO_PARAMETER_INTERFACE_NAMESPACE;
+
+		namespace Inputs
+		{
+			const FName Distance = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Distance");
+		} // namespace Inputs
+
+		Audio::FParameterInterfacePtr GetInterface()
+		{
+			struct FInterface : public Audio::FParameterInterface
+			{
+				FInterface()
+					: FParameterInterface(AttenuationInterface::Name, { 1, 0 })
+				{
+					Inputs =
+					{
+						{
+							FText(),
+							NSLOCTEXT("AudioGeneratorInterface_Attenuation", "DistanceDescription", "Distance between listener and sound location in game units."),
+							FName(),
+							{ Inputs::Distance, 0.0f }
+						}
+					};
+				}
+			};
+
+			static FParameterInterfacePtr InterfacePtr;
+			if (!InterfacePtr.IsValid())
+			{
+				InterfacePtr = MakeShared<FInterface>();
+			}
+
+			return InterfacePtr;
+		}
+	} // namespace AttenuationInterface
+#undef AUDIO_PARAMETER_INTERFACE_NAMESPACE
+
+#define AUDIO_PARAMETER_INTERFACE_NAMESPACE "UE.Spatialization"
+	namespace SpatializationInterface
+	{
+		const FName Name = AUDIO_PARAMETER_INTERFACE_NAMESPACE;
+
+		namespace Inputs
+		{
+			const FName Azimuth = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Azimuth");
+			const FName Elevation = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Elevation");
+		} // namespace Inputs
+
+		Audio::FParameterInterfacePtr GetInterface()
+		{
+			struct FInterface : public Audio::FParameterInterface
+			{
+				FInterface()
+					: FParameterInterface(SpatializationInterface::Name, { 1, 0 })
+				{
+					Inputs =
+					{
+						{
+							FText(),
+							NSLOCTEXT("Spatialization", "AzimuthDescription", "Horizontal angle between listener forward and sound location in degrees."),
+							FName(),
+							{ Inputs::Azimuth, 0.0f }
+						},
+						{
+							FText(),
+							NSLOCTEXT("Spatialization", "ElevationDescription", "Vertical angle between listener forward and sound location in degrees."),
+							FName(),
+							{ Inputs::Elevation, 0.0f }
+						}
+					};
+				}
+			};
+
+			static FParameterInterfacePtr InterfacePtr;
+			if (!InterfacePtr.IsValid())
+			{
+				InterfacePtr = MakeShared<FInterface>();
+			}
+
+			return InterfacePtr;
+		}
+	} // namespace SpatializationInterface
+#undef AUDIO_PARAMETER_INTERFACE_NAMESPACE
+
+#define AUDIO_PARAMETER_INTERFACE_NAMESPACE "UE.Source.Orientation"
+	namespace SourceOrientationInterface
+	{
+		const FName Name = AUDIO_PARAMETER_INTERFACE_NAMESPACE;
+
+		namespace Inputs
+		{
+			const FName Azimuth = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Azimuth");
+			const FName Elevation = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Elevation");
+		} // namespace Inputs
+
+		Audio::FParameterInterfacePtr GetInterface()
+		{
+			struct FInterface : public Audio::FParameterInterface
+			{
+				FInterface()
+					: FParameterInterface(SourceOrientationInterface::Name, { 1, 0 })
+				{
+					Inputs =
+					{
+						{
+							FText(),
+							NSLOCTEXT("SourceOrientation", "AzimuthDescription", "Horizontal angle between emitter forward and listener location in degrees."),
+							FName(),
+							{ Inputs::Azimuth, 0.0f }
+						},
+						{
+							FText(),
+							NSLOCTEXT("SourceOrientation", "ElevationDescription", "Vertical angle between emitter forward and listener location in degrees."),
+							FName(),
+							{ Inputs::Elevation, 0.0f }
+						}
+					};
+				}
+			};
+
+			static FParameterInterfacePtr InterfacePtr;
+			if (!InterfacePtr.IsValid())
+			{
+				InterfacePtr = MakeShared<FInterface>();
+			}
+
+			return InterfacePtr;
+		}
+	} // namespace SourceOrientationInterface
+#undef AUDIO_PARAMETER_INTERFACE_NAMESPACE
+
+#define AUDIO_PARAMETER_INTERFACE_NAMESPACE "UE.Listener.Orientation"
+	namespace ListenerOrientationInterface
+	{
+		const FName Name = AUDIO_PARAMETER_INTERFACE_NAMESPACE;
+
+		namespace Inputs
+		{
+			const FName Azimuth = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Azimuth");
+			const FName Elevation = AUDIO_PARAMETER_INTERFACE_MEMBER_DEFINE("Elevation");
+		} // namespace Inputs
+
+		Audio::FParameterInterfacePtr GetInterface()
+		{
+			struct FInterface : public Audio::FParameterInterface
+			{
+				FInterface()
+					: FParameterInterface(ListenerOrientationInterface::Name, { 1, 0 })
+				{
+					Inputs =
+					{
+						{
+							FText(),
+							NSLOCTEXT("ListenerOrientation", "AzimuthDescription", "Horizontal viewing angle of the current listener in world."),
+							FName(),
+							{ Inputs::Azimuth, 0.0f }
+						},
+						{
+							FText(),
+							NSLOCTEXT("ListenerOrientation", "ElevationDescription", "Vertical viewing angle of the current listener in world."),
+							FName(),
+							{ Inputs::Elevation, 0.0f }
+						}
+					};
+				}
+			};
+
+			static FParameterInterfacePtr InterfacePtr;
+			if (!InterfacePtr.IsValid())
+			{
+				InterfacePtr = MakeShared<FInterface>();
+			}
+
+			return InterfacePtr;
+		}
+	} // namespace ListenerOrientationInterface
+#undef AUDIO_PARAMETER_INTERFACE_NAMESPACE
+} // namespace Audio
+#undef LOCTEXT_NAMESPACE

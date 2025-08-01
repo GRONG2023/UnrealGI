@@ -3,11 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "EngineGlobals.h"
+#include "GameplayTagContainer.h"
+#include "GameplayTagsManager.h"
+#include "HAL/Platform.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "GameplayTagContainer.h"
-#include "EngineGlobals.h"
-#include "GameplayTagsManager.h"
+#include "UObject/NameTypes.h"
 
 /**
  * The public interface to this module, generally you should access the manager directly instead
@@ -45,18 +48,6 @@ public:
 
 	/** Delegate that gets called after the settings have changed in the editor */
 	static GAMEPLAYTAGS_API FSimpleMulticastDelegate OnTagSettingsChanged;
-
-	UE_DEPRECATED(4.15, "Call FGameplayTag::RequestGameplayTag or RequestGameplayTag on the manager instead")
-	FORCEINLINE_DEBUGGABLE static FGameplayTag RequestGameplayTag(FName InTagName, bool ErrorIfNotFound=true)
-	{
-		return UGameplayTagsManager::Get().RequestGameplayTag(InTagName, ErrorIfNotFound);
-	}
-
-	UE_DEPRECATED(4.15, "Call UGameplayTagsManager::Get instead")
-	FORCEINLINE_DEBUGGABLE static UGameplayTagsManager& GetGameplayTagsManager()
-	{
-		return UGameplayTagsManager::Get();
-	}
 
 };
 

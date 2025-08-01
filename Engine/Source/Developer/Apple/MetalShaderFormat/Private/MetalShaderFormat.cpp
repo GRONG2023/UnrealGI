@@ -7,17 +7,19 @@
 #include "Interfaces/IShaderFormatModule.h"
 #include "ShaderCore.h"
 #include "ShaderCodeArchive.h"
+#include "ShaderPreprocessTypes.h"
 #include "hlslcc.h"
 #include "MetalShaderResources.h"
 #include "HAL/FileManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Serialization/Archive.h"
 #include "Misc/ConfigCacheIni.h"
 #include "MetalBackend.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "FileUtilities/ZipArchiveWriter.h"
-#include "MetalDerivedData.h"
+#include "MetalShaderCompiler.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 DEFINE_LOG_CATEGORY(LogMetalCompilerSetup)
 DEFINE_LOG_CATEGORY(LogMetalShaderCompiler)
@@ -27,24 +29,20 @@ DEFINE_LOG_CATEGORY(LogMetalShaderCompiler)
 // Set this define to get additional logging information about Metal toolchain setup.
 #define CHECK_METAL_COMPILER_TOOLCHAIN_SETUP 0
 
+extern bool PreprocessMetalShader(const FShaderCompilerInput& Input, const FShaderCompilerEnvironment& Environment, FShaderPreprocessOutput& PreprocessOutput);
+extern void CompileMetalShader(const FShaderCompilerInput& Input, const FShaderPreprocessOutput& InPreprocessOutput, FShaderCompilerOutput& Output);
+extern void OutputMetalDebugData(const FShaderCompilerInput& Input, const FShaderPreprocessOutput& PreprocessOutput, const FShaderCompilerOutput& Output);
+
 extern bool StripShader_Metal(TArray<uint8>& Code, class FString const& DebugPath, bool const bNative);
-extern uint64 AppendShader_Metal(class FName const& Format, class FString const& ArchivePath, const FSHAHash& Hash, TArray<uint8>& Code);
+extern uint64 AppendShader_Metal(class FString const& ArchivePath, const FSHAHash& Hash, TArray<uint8>& Code);
 extern bool FinalizeLibrary_Metal(class FName const& Format, class FString const& ArchivePath, class FString const& LibraryPath, TSet<uint64> const& Shaders, class FString const& DebugOutputDir);
+
+/** Version for shader format, this becomes part of the DDC key. */
+static const FGuid UE_SHADER_METAL_VER = FGuid("282D7BF5-C5F8-47B7-B065-E165D60FC17B");
 
 class FMetalShaderFormat : public IShaderFormat
 {
 public:
-	enum
-	{
-		HEADER_VERSION = 71,
-	};
-	
-	struct FVersion
-	{
-		uint16 XcodeVersion;
-		uint16 HLSLCCMinor		: 8;
-		uint16 Format			: 8;
-	};
 	FMetalShaderFormat()
 	{
 		FMetalCompilerToolchain::CreateAndInit();
@@ -55,50 +53,136 @@ public:
 	}
 	virtual uint32 GetVersion(FName Format) const override final
 	{
-		return GetMetalFormatVersion(Format);
+		// If there's no compiler on this machine, this is irrelevant so just return 0
+		if (!FMetalCompilerToolchain::Get()->IsCompilerAvailable())
+		{
+			return 0;
+		}
+
+		bool bUseFullMetalVersion = false;
+		EShaderPlatform ShaderPlatform = FMetalCompilerToolchain::MetalShaderFormatToLegacyShaderPlatform(Format);
+
+		if (FMetalCompilerToolchain::IsMobile(ShaderPlatform))
+		{
+			GConfig->GetBool(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("UseFullMetalVersionInShaderVersion"), bUseFullMetalVersion, GEngineIni);
+		}
+		else
+		{
+			GConfig->GetBool(TEXT("/Script/MacTargetPlatform.MacTargetSettings"), TEXT("UseFullMetalVersionInShaderVersion"), bUseFullMetalVersion, GEngineIni);
+		}
+
+		FMetalCompilerToolchain::PackedVersion MetalVersionNumber = FMetalCompilerToolchain::Get()->GetCompilerVersion(ShaderPlatform);
+		uint16 HashValue = MetalVersionNumber.Major;
+
+		if (bUseFullMetalVersion)
+		{
+			// Use entire Metal version if .ini settings instruct us to do so (e.g. p4 dev build)
+			HashValue ^= MetalVersionNumber.Minor;
+			HashValue ^= MetalVersionNumber.Patch;
+		}
+		else
+		{
+			// Only use Metal major version (e.g. Installed build)
+			// Since Metal minor/patch version changes every Xcode minor version, we don't want users to rebuild shaders for every minor version update
+		}
+
+		uint32 Result = GetTypeHash(HashValue);
+
+		Result = HashCombine(Result, GetTypeHash(HLSLCC_VersionMinor));
+		Result = HashCombine(Result, GetTypeHash(UE_SHADER_METAL_VER));
+
+		return Result;
 	}
+
 	virtual void GetSupportedFormats(TArray<FName>& OutFormats) const override final
 	{
 		OutFormats.Add(NAME_SF_METAL);
 		OutFormats.Add(NAME_SF_METAL_MRT);
 		OutFormats.Add(NAME_SF_METAL_TVOS);
 		OutFormats.Add(NAME_SF_METAL_MRT_TVOS);
-		OutFormats.Add(NAME_SF_METAL_SM5_NOTESS);
 		OutFormats.Add(NAME_SF_METAL_SM5);
+		OutFormats.Add(NAME_SF_METAL_SM6);
+		OutFormats.Add(NAME_SF_METAL_SIM);
 		OutFormats.Add(NAME_SF_METAL_MACES3_1);
 		OutFormats.Add(NAME_SF_METAL_MRT_MAC);
 	}
-	virtual void CompileShader(FName Format, const struct FShaderCompilerInput& Input, struct FShaderCompilerOutput& Output,const FString& WorkingDirectory) const override final
+
+	void CheckShaderFormat(FName Format) const
 	{
-		check(Format == NAME_SF_METAL || Format == NAME_SF_METAL_MRT || Format == NAME_SF_METAL_TVOS || Format == NAME_SF_METAL_MRT_TVOS || Format == NAME_SF_METAL_SM5_NOTESS || Format == NAME_SF_METAL_SM5 || Format == NAME_SF_METAL_MACES3_1 || Format == NAME_SF_METAL_MRT_MAC);
-		CompileShader_Metal(Input, Output, WorkingDirectory);
+		check(Format == NAME_SF_METAL
+			|| Format == NAME_SF_METAL_MRT
+			|| Format == NAME_SF_METAL_TVOS
+			|| Format == NAME_SF_METAL_MRT_TVOS
+			|| Format == NAME_SF_METAL_SM5
+			|| Format == NAME_SF_METAL_SM6
+			|| Format == NAME_SF_METAL_SIM
+			|| Format == NAME_SF_METAL_MACES3_1
+			|| Format == NAME_SF_METAL_MRT_MAC);
 	}
+
+	virtual bool PreprocessShader(
+		const FShaderCompilerInput& Input,
+		const FShaderCompilerEnvironment& Environment,
+		FShaderPreprocessOutput& PreprocessOutput) const override final
+	{
+		CheckShaderFormat(Input.ShaderFormat);
+		return PreprocessMetalShader(Input, Environment, PreprocessOutput);
+	}
+
+	virtual void CompilePreprocessedShader(
+		const FShaderCompilerInput& Input,
+		const FShaderPreprocessOutput& PreprocessOutput,
+		FShaderCompilerOutput& Output,
+		const FString& WorkingDirectory) const override final
+	{
+		CheckShaderFormat(Input.ShaderFormat);
+		CompileMetalShader(Input, PreprocessOutput, Output);
+	}
+
+	virtual void OutputDebugData(
+		const FShaderCompilerInput& Input,
+		const FShaderPreprocessOutput& PreprocessOutput,
+		const FShaderCompilerOutput& Output) const override final
+	{
+		OutputMetalDebugData(Input, PreprocessOutput, Output);
+	}
+
 	virtual bool CanStripShaderCode(bool const bNativeFormat) const override final
 	{
 		return CanCompileBinaryShaders() && bNativeFormat;
 	}
+
 	virtual bool StripShaderCode( TArray<uint8>& Code, FString const& DebugOutputDir, bool const bNative ) const override final
 	{
 		return StripShader_Metal(Code, DebugOutputDir, bNative);
     }
+
 	virtual bool SupportsShaderArchives() const override 
 	{ 
 		return CanCompileBinaryShaders();
 	}
-    virtual bool CreateShaderArchive(FString const& LibraryName,
-		FName Format,
+
+	virtual bool CreateShaderArchive(FString const& LibraryName,
+		FName ShaderFormatAndShaderPlatformName,
 		const FString& WorkingDirectory,
 		const FString& OutputDir,
 		const FString& DebugOutputDir,
 		const FSerializedShaderArchive& InSerializedShaders,
 		const TArray<TArray<uint8>>& ShaderCode,
 		TArray<FString>* OutputFiles) const override final
-    {
+	{
 		const int32 NumShadersPerLibrary = 10000;
 		check(LibraryName.Len() > 0);
-		check(Format == NAME_SF_METAL || Format == NAME_SF_METAL_MRT || Format == NAME_SF_METAL_TVOS || Format == NAME_SF_METAL_MRT_TVOS || Format == NAME_SF_METAL_SM5_NOTESS || Format == NAME_SF_METAL_SM5 || Format == NAME_SF_METAL_MACES3_1 || Format == NAME_SF_METAL_MRT_MAC);
 
-		const FString ArchivePath = (WorkingDirectory / Format.GetPlainNameString());
+		TArray<FString> Components;
+		FString ShaderPlatform = ShaderFormatAndShaderPlatformName.ToString();
+		ShaderPlatform.ParseIntoArray(Components, TEXT("-"));
+		check(Components.Num() == 2);
+		FName ShaderFormatName(Components[0]);
+
+		check(ShaderFormatName == NAME_SF_METAL || ShaderFormatName == NAME_SF_METAL_MRT || ShaderFormatName == NAME_SF_METAL_TVOS || ShaderFormatName == NAME_SF_METAL_MRT_TVOS || ShaderFormatName == NAME_SF_METAL_SM5 || ShaderFormatName == NAME_SF_METAL_SM6 || ShaderFormatName == NAME_SF_METAL_SIM || ShaderFormatName == NAME_SF_METAL_MACES3_1 || ShaderFormatName == NAME_SF_METAL_MRT_MAC);
+
+		const FString ArchivePath = (WorkingDirectory / ShaderFormatAndShaderPlatformName.GetPlainNameString());
 		IFileManager::Get().DeleteDirectory(*ArchivePath, false, true);
 		IFileManager::Get().MakeDirectory(*ArchivePath);
 
@@ -115,7 +199,7 @@ public:
 			SerializedShaders.DecompressShader(ShaderIndex, ShaderCode, TempShaderCode);
 			StripShader_Metal(TempShaderCode, DebugOutputDir, true);
 
-			uint64 ShaderId = AppendShader_Metal(Format, ArchivePath, SerializedShaders.ShaderHashes[ShaderIndex], TempShaderCode);
+			uint64 ShaderId = AppendShader_Metal(ArchivePath, SerializedShaders.ShaderHashes[ShaderIndex], TempShaderCode);
 			uint32 LibraryIndex = ShaderIndex / NumShadersPerLibrary;
 
 			if (ShaderId)
@@ -137,7 +221,8 @@ public:
 		SerializedShaders.Finalize();
 
 		bool bOK = false;
-		FString LibraryPlatformName = FString::Printf(TEXT("%s_%s"), *LibraryName, *Format.GetPlainNameString());
+		FString LibraryPlatformName = FString::Printf(TEXT("%s_%s"), *LibraryName, *ShaderFormatAndShaderPlatformName.GetPlainNameString());
+		LibraryPlatformName.ToLowerInline();
 		volatile int32 CompiledLibraries = 0;
 		TArray<FGraphEventRef> Tasks;
 
@@ -152,62 +237,62 @@ public:
 			}
 
 			// Enqueue the library compilation as a task so we can go wide
-			FGraphEventRef CompletionFence = FFunctionGraphTask::CreateAndDispatchWhenReady([Format, ArchivePath, LibraryPath, PartialShaders, DebugOutputDir, &CompiledLibraries]()
-			{
-				if (FinalizeLibrary_Metal(Format, ArchivePath, LibraryPath, PartialShaders, DebugOutputDir))
+			FGraphEventRef CompletionFence = FFunctionGraphTask::CreateAndDispatchWhenReady([ShaderFormatName, ArchivePath, LibraryPath, PartialShaders, DebugOutputDir, &CompiledLibraries]()
 				{
-					FPlatformAtomics::InterlockedIncrement(&CompiledLibraries);
-				}
-			}, TStatId(), NULL, ENamedThreads::AnyThread);
+					if (FinalizeLibrary_Metal(ShaderFormatName, ArchivePath, LibraryPath, PartialShaders, DebugOutputDir))
+					{
+						FPlatformAtomics::InterlockedIncrement(&CompiledLibraries);
+					}
+				}, TStatId(), NULL, ENamedThreads::AnyThread);
 
 			Tasks.Add(CompletionFence);
 		}
 
 #if WITH_ENGINE
-		FGraphEventRef DebugDataCompletionFence = FFunctionGraphTask::CreateAndDispatchWhenReady([Format, OutputDir, LibraryPlatformName, DebugOutputDir]()
-		{
-			//TODO add a check in here - this will only work if we have shader archiving with debug info set.
-
-			//We want to archive all the metal shader source files so that they can be unarchived into a debug location
-			//This allows the debugging of optimised metal shaders within the xcode tool set
-			//Currently using the 'tar' system tool to create a compressed tape archive
-
-			//Place the archive in the same position as the .metallib file
-			FString CompressedDir = (OutputDir / TEXT("../MetaData/ShaderDebug/"));
-			IFileManager::Get().MakeDirectory(*CompressedDir, true);
-
-			FString CompressedPath = (CompressedDir / LibraryPlatformName) + TEXT(".zip");
-
-			IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
-			IFileHandle* ZipFile = PlatformFile.OpenWrite(*CompressedPath);
-			if (ZipFile)
+		FGraphEventRef DebugDataCompletionFence = FFunctionGraphTask::CreateAndDispatchWhenReady([ShaderFormatAndShaderPlatformName, OutputDir, LibraryPlatformName, DebugOutputDir]()
 			{
-				FZipArchiveWriter* ZipWriter = new FZipArchiveWriter(ZipFile);
+				//TODO add a check in here - this will only work if we have shader archiving with debug info set.
 
-				//Find the metal source files
-				TArray<FString> FilesToArchive;
-				IFileManager::Get().FindFilesRecursive(FilesToArchive, *DebugOutputDir, TEXT("*.metal"), true, false, false);
+				//We want to archive all the metal shader source files so that they can be unarchived into a debug location
+				//This allows the debugging of optimised metal shaders within the xcode tool set
+				//Currently using the 'tar' system tool to create a compressed tape archive
 
-				//Write the local file names into the target file
-				const FString DebugDir = DebugOutputDir / *Format.GetPlainNameString();
+				//Place the archive in the same position as the .metallib file
+				FString CompressedDir = (OutputDir / TEXT("../MetaData/ShaderDebug/"));
+				IFileManager::Get().MakeDirectory(*CompressedDir, true);
 
-				for (FString FileName : FilesToArchive)
+				FString CompressedPath = (CompressedDir / LibraryPlatformName) + TEXT(".zip");
+
+				IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+				IFileHandle* ZipFile = PlatformFile.OpenWrite(*CompressedPath);
+				if (ZipFile)
 				{
-					TArray<uint8> FileData;
-					FFileHelper::LoadFileToArray(FileData, *FileName);
-					FPaths::MakePathRelativeTo(FileName, *DebugDir);
+					FZipArchiveWriter* ZipWriter = new FZipArchiveWriter(ZipFile);
 
-					ZipWriter->AddFile(FileName, FileData, FDateTime::Now());
+					//Find the metal source files
+					TArray<FString> FilesToArchive;
+					IFileManager::Get().FindFilesRecursive(FilesToArchive, *DebugOutputDir, TEXT("*.metal"), true, false, false);
+
+					//Write the local file names into the target file
+					const FString DebugDir = DebugOutputDir / *ShaderFormatAndShaderPlatformName.GetPlainNameString();
+
+					for (FString FileName : FilesToArchive)
+					{
+						TArray<uint8> FileData;
+						FFileHelper::LoadFileToArray(FileData, *FileName);
+						FPaths::MakePathRelativeTo(FileName, *DebugDir);
+
+						ZipWriter->AddFile(FileName, FileData, FDateTime::Now());
+					}
+
+					delete ZipWriter;
+					ZipWriter = nullptr;
 				}
-
-				delete ZipWriter;
-				ZipWriter = nullptr;
-			}
-			else
-			{
-				UE_LOG(LogShaders, Error, TEXT("Failed to create Metal debug .zip output file \"%s\". Debug .zip export will be disabled."), *CompressedPath);
-			}
-		}, TStatId(), NULL, ENamedThreads::AnyThread);
+				else
+				{
+					UE_LOG(LogShaders, Error, TEXT("Failed to create Metal debug .zip output file \"%s\". Debug .zip export will be disabled."), *CompressedPath);
+				}
+			}, TStatId(), NULL, ENamedThreads::AnyThread);
 		Tasks.Add(DebugDataCompletionFence);
 #endif // WITH_ENGINE
 
@@ -220,11 +305,12 @@ public:
 		if (CompiledLibraries == SubLibraries.Num())
 		{
 			FString BinaryShaderFile = (OutputDir / LibraryPlatformName) + FMetalCompilerToolchain::MetalMapExtension;
+			BinaryShaderFile.ToLowerInline();
 			FArchive* BinaryShaderAr = IFileManager::Get().CreateFileWriter(*BinaryShaderFile);
 			if (BinaryShaderAr != NULL)
 			{
 				FMetalShaderLibraryHeader Header;
-				Header.Format = Format.GetPlainNameString();
+				Header.Format = ShaderFormatName.GetPlainNameString();
 				Header.NumLibraries = SubLibraries.Num();
 				Header.NumShadersPerLibrary = NumShadersPerLibrary;
 
@@ -247,8 +333,97 @@ public:
 		return bOK;
 
 		//Map.Format = Format.GetPlainNameString();
-    }
+	}
 
+	virtual void ModifyShaderCompilerInput(FShaderCompilerInput& Input) const override
+	{
+		// Work out which standard we need, this is dependent on the shader platform.
+		// TODO: Read from toolchain class
+		const bool bIsMobile = FMetalCompilerToolchain::Get()->IsMobile((EShaderPlatform)Input.Target.Platform);
+		if (bIsMobile)
+		{
+			Input.Environment.SetDefine(TEXT("IOS"), 1);
+		}
+		else
+		{
+			Input.Environment.SetDefine(TEXT("MAC"), 1);
+		}
+
+		Input.Environment.SetDefine(TEXT("COMPILER_METAL"), 1);
+
+		if (Input.ShaderFormat == NAME_SF_METAL || Input.ShaderFormat == NAME_SF_METAL_TVOS)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_PROFILE"), 1);
+		}
+		else if (Input.ShaderFormat == NAME_SF_METAL_SIM)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_PROFILE"), 1);
+		}
+		else if (Input.ShaderFormat == NAME_SF_METAL_MRT || Input.ShaderFormat == NAME_SF_METAL_MRT_TVOS)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_MRT_PROFILE"), 1);
+		}
+		else if (Input.ShaderFormat == NAME_SF_METAL_MACES3_1)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_PROFILE"), 1);
+		}
+		else if (Input.ShaderFormat == NAME_SF_METAL_SM5)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_SM5_PROFILE"), 1);
+			Input.Environment.SetDefine(TEXT("USING_VERTEX_SHADER_LAYER"), 1);
+		}
+		else if (Input.ShaderFormat == NAME_SF_METAL_SM6)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_SM6_PROFILE"), 1);
+			Input.Environment.SetDefine(TEXT("USING_VERTEX_SHADER_LAYER"), 1);
+		}
+		else if (Input.ShaderFormat == NAME_SF_METAL_MRT_MAC)
+		{
+			Input.Environment.SetDefine(TEXT("METAL_MRT_PROFILE"), 1);
+		}
+
+		Input.Environment.SetDefine(TEXT("COMPILER_HLSLCC"), 2);
+#if UE_METAL_USE_METAL_SHADER_CONVERTER
+		const bool bUseMetalShaderConverter = Input.Target.GetPlatform() == EShaderPlatform::SP_METAL_SM6
+		&& RHIGetBindlessSupport(EShaderPlatform::SP_METAL_SM6) != ERHIBindlessSupport::Unsupported;
+		
+		if (bUseMetalShaderConverter)
+		{
+			Input.Environment.SetDefine(TEXT("COMPILER_METAL_SHADER_CONVERTER"), 1);
+		}
+#endif
+		
+#if !UE_METAL_USE_METAL_SHADER_CONVERTER
+		if (Input.Environment.FullPrecisionInPS || (IsValidRef(Input.SharedEnvironment) && Input.SharedEnvironment->FullPrecisionInPS))
+		{
+			Input.Environment.SetDefine(TEXT("FORCE_FLOATS"), (uint32)1);
+		}
+#else
+		// We can use 16bits types with Msc (since we do not use the frontend).
+		if (Input.Environment.CompilerFlags.Contains(CFLAG_AllowRealTypes))
+		{
+			Input.Environment.SetDefine(TEXT("PLATFORM_SUPPORTS_REAL_TYPES"), 1);
+		}
+#endif
+		if (Input.Environment.CompilerFlags.Contains(CFLAG_AvoidFlowControl)
+			|| Input.Environment.CompilerFlags.Contains(CFLAG_PreferFlowControl))
+		{
+			Input.Environment.SetDefine(TEXT("COMPILER_SUPPORTS_ATTRIBUTES"), (uint32)0);
+		}
+		else
+		{
+			Input.Environment.SetDefine(TEXT("COMPILER_SUPPORTS_ATTRIBUTES"), (uint32)1);
+		}
+
+		bool bUsesInlineRayTracing = Input.Environment.CompilerFlags.Contains(CFLAG_InlineRayTracing);
+		if (bUsesInlineRayTracing)
+		{
+			Input.Environment.SetDefine(TEXT("PLATFORM_SUPPORTS_INLINE_RAY_TRACING"), 1);
+		}
+
+		Input.Environment.SetDefine(TEXT("COMPILER_SUPPORTS_DUAL_SOURCE_BLENDING_SLOT_DECORATION"), (uint32)1);
+	}
+	
 	virtual bool CanCompileBinaryShaders() const override final
 	{
 #if PLATFORM_MAC
@@ -262,76 +437,6 @@ public:
 		return TEXT("Metal");
 	}
 };
-
-uint32 GetMetalFormatVersion(FName Format)
-{
-	static_assert(sizeof(FMetalShaderFormat::FVersion) == sizeof(uint32), "Out of bits!");
-	union
-	{
-		FMetalShaderFormat::FVersion Version;
-		uint32 Raw;
-	} Version;
-
-	// If there's no compiler on this machine, this is irrelevant so just return 0
-	if (!FMetalCompilerToolchain::Get()->IsCompilerAvailable())
-	{
-		return 0;
-	}
-	
-	// Include the Xcode version when the .ini settings instruct us to do so.
-	bool bAddXcodeVersionInShaderVersion = false;
-	EShaderPlatform ShaderPlatform = FMetalCompilerToolchain::MetalShaderFormatToLegacyShaderPlatform(Format);
-
-	if(FMetalCompilerToolchain::IsMobile(ShaderPlatform))
-	{
-		GConfig->GetBool(TEXT("/Script/IOSRuntimeSettings.IOSRuntimeSettings"), TEXT("XcodeVersionInShaderVersion"), bAddXcodeVersionInShaderVersion, GEngineIni);
-	}
-	else
-	{
-		GConfig->GetBool(TEXT("/Script/MacTargetPlatform.MacTargetSettings"), TEXT("XcodeVersionInShaderVersion"), bAddXcodeVersionInShaderVersion, GEngineIni);
-	}
-
-	// We are going to use the LLVM target version instead of the Xcode build, since standalone metal toolchains do not require xcode
-	FMetalCompilerToolchain::PackedVersion TargetVersion = FMetalCompilerToolchain::Get()->GetTargetVersion(ShaderPlatform);
-
-	const FString& CompilerVersionString = FMetalCompilerToolchain::Get()->GetCompilerVersionString(ShaderPlatform);
-	union HashMe
-	{
-		struct
-		{
-			uint16 top;
-			uint16 bottom;
-		};
-		uint32 Value;
-	};
-	HashMe V;
-	V.Value = GetTypeHash(CompilerVersionString);
-	uint16 HashValue = V.top ^ V.bottom;
-	
-	if (!FApp::IsEngineInstalled() && bAddXcodeVersionInShaderVersion)
-	{
-		// For local development we'll mix in the LLVM target version.
-		HashValue ^= TargetVersion.Major;
-		HashValue ^= TargetVersion.Minor;
-		HashValue ^= TargetVersion.Patch;
-	}
-	else
-	{
-		// In the other case (ie, shipping editor binary distributions)
-		// We will only mix the hash of the version string
-	}
-
-	Version.Version.XcodeVersion = HashValue;
-	Version.Version.Format = FMetalShaderFormat::HEADER_VERSION;
-	Version.Version.HLSLCCMinor = HLSLCC_VersionMinor;
-	
-	// Check that we didn't overwrite any bits
-	check(Version.Version.XcodeVersion == HashValue);
-	check(Version.Version.Format == FMetalShaderFormat::HEADER_VERSION);
-	check(Version.Version.HLSLCCMinor == HLSLCC_VersionMinor);
-	
-	return Version.Raw;
-}
 
 /**
  * Module for Metal shaders
@@ -365,7 +470,7 @@ public:
 	}
 };
 
-IMPLEMENT_MODULE( FMetalShaderFormatModule, MetalShaderFormat);
+IMPLEMENT_MODULE(FMetalShaderFormatModule, MetalShaderFormat);
 
 static FMetalCompilerToolchain::EMetalToolchainStatus ParseCompilerVersionAndTarget(const FString& OutputOfMetalDashV, FString& VersionString, FMetalCompilerToolchain::PackedVersion& PackedVersionNumber, FMetalCompilerToolchain::PackedVersion& PackedTargetNumber)
 {
@@ -379,23 +484,44 @@ static FMetalCompilerToolchain::EMetalToolchainStatus ParseCompilerVersionAndTar
 
 	TArray<FString> Lines;
 	OutputOfMetalDashV.ParseIntoArrayLines(Lines);
+	int32 VersionLineIndex = 0;
 	{
-		VersionString = Lines[0];
-		FString& Version = Lines[0];
+		for (int32 Index = 0; Index < Lines.Num(); ++Index)
+		{
+			if (Lines[Index].StartsWith(TEXT("Apple ")) && Lines[Index].Contains(TEXT(" version ")) && Lines[Index].EndsWith(TEXT(")")))
+			{
+				VersionLineIndex = Index;
+				break;
+			}
+		}
+
+		VersionString = Lines[VersionLineIndex];
+		FString& Version = Lines[VersionLineIndex];
 		check(!Version.IsEmpty());
 
-		int32 Major = 0, Minor = 0, Patch = 0;
+		int32 Major = 0, Minor = 0;
 		int32 NumResults = 0;
 #if !PLATFORM_WINDOWS
 		char AppleToolName[PATH_MAX] = { '\0' };
-		NumResults = sscanf(TCHAR_TO_ANSI(*Version), "Apple %s version %d.%d.%d", AppleToolName, &Major, &Minor, &Patch);
+		char SupplementaryVersionName[PATH_MAX] = { '\0' };
+		NumResults = sscanf(TCHAR_TO_ANSI(*Version), "Apple %s version %d.%d (metalfe-%s)", AppleToolName, &Major, &Minor, SupplementaryVersionName);
 #else
 		TCHAR AppleToolName[WINDOWS_MAX_PATH] = { '\0' };
-		NumResults = swscanf_s(*Version, TEXT("Apple %ls version %d.%d.%d"), AppleToolName, WINDOWS_MAX_PATH, &Major, &Minor, &Patch);
+		TCHAR SupplementaryVersionName[WINDOWS_MAX_PATH] = { '\0' };
+		NumResults = swscanf_s(*Version, TEXT("Apple %ls version %d.%d (metalfe-%ls)"), AppleToolName, WINDOWS_MAX_PATH, &Major, &Minor, SupplementaryVersionName, WINDOWS_MAX_PATH);
 #endif
+		if (NumResults != 4)
+		{
+			UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Metal version string format unrecoginzed"));
+			UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Expecting: Apple LLVM version 902.11 (metalfe-902.11.1)"));
+			UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Obtained: %s"), *Version);
+		}
+		
 		PackedVersionNumber.Major = Major;
 		PackedVersionNumber.Minor = Minor;
-		PackedVersionNumber.Patch = Patch;
+		// The version name in brackets is too irregular to extract a useful patch version
+		// Sometimes (metalfe-31001.667.2), sometimes (metalfe-31001.643.2.1), sometimes (metalfe-31001.362-windows)
+		PackedVersionNumber.Patch = 0;
 	}
 
 	if (PackedVersionNumber.Version == 0)
@@ -404,7 +530,7 @@ static FMetalCompilerToolchain::EMetalToolchainStatus ParseCompilerVersionAndTar
 	}
 
 	{
-		FString& FormatVersion = Lines[1];
+		FString& FormatVersion = Lines[VersionLineIndex + 1];
 		int32 Major = 0, Minor = 0, Patch = 0;
 		int32 NumResults = 0;
 #if !PLATFORM_WINDOWS
@@ -432,7 +558,18 @@ static FMetalCompilerToolchain::EMetalToolchainStatus ParseLibraryToolpath(const
 	TArray<FString> Lines;
 	OutputOfMetalSearchDirs.ParseIntoArrayLines(Lines);
 	{
-		FString& LibraryLine = Lines[1];
+		int32 LibrariesLineIndex = 0;
+		
+		for (int32 Index = 0; Index < Lines.Num(); ++Index)
+		{
+			if (Lines[Index].StartsWith(TEXT("libraries: =")))
+			{
+				LibrariesLineIndex = Index;
+				break;
+			}
+		}
+
+		FString& LibraryLine = Lines[LibrariesLineIndex];
 
 		LibraryPath = LibraryLine.RightChop(LibraryPrefix.Len());
 
@@ -460,10 +597,12 @@ FString FMetalCompilerToolchain::MetalObjectExtension(TEXT(".air"));
 FString FMetalCompilerToolchain::MetalFrontendBinary(TEXT("metal.exe"));
 FString FMetalCompilerToolchain::MetalArBinary(TEXT("metal-ar.exe"));
 FString FMetalCompilerToolchain::MetalLibraryBinary(TEXT("metallib.exe"));
+FString FMetalCompilerToolchain::AirPackBinary(TEXT("air-pack.exe"));
 #else
 FString FMetalCompilerToolchain::MetalFrontendBinary(TEXT("metal"));
 FString FMetalCompilerToolchain::MetalArBinary(TEXT("metal-ar"));
 FString FMetalCompilerToolchain::MetalLibraryBinary(TEXT("metallib"));
+FString FMetalCompilerToolchain::AirPackBinary(TEXT("air-pack"));
 #endif
 
 FString FMetalCompilerToolchain::MetalMapExtension(TEXT(".metalmap"));
@@ -497,7 +636,8 @@ EShaderPlatform FMetalCompilerToolchain::MetalShaderFormatToLegacyShaderPlatform
 	if (ShaderFormat == NAME_SF_METAL_MRT_TVOS)		return SP_METAL_MRT_TVOS;
 	if (ShaderFormat == NAME_SF_METAL_MRT_MAC)		return SP_METAL_MRT_MAC;
 	if (ShaderFormat == NAME_SF_METAL_SM5)			return SP_METAL_SM5;
-	if (ShaderFormat == NAME_SF_METAL_SM5_NOTESS)	return SP_METAL_SM5_NOTESS;
+    if (ShaderFormat == NAME_SF_METAL_SM6)          return SP_METAL_SM6;
+    if (ShaderFormat == NAME_SF_METAL_SIM)          return SP_METAL_SIM;
 	if (ShaderFormat == NAME_SF_METAL_MACES3_1)		return SP_METAL_MACES3_1;
 
 	return SP_NumPlatforms;
@@ -633,6 +773,10 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::FetchCom
 		// But the underlying (windows) implementation of CreateProc puts everything into one pipe, which is written to StdOut.
 		bool bResult = this->ExecMetalFrontend(AppleSDKMac, TEXT("-v --target=air64-apple-darwin18.7.0"), &ReturnCode, &StdOut, &StdOut);
 		check(bResult);
+		if (ReturnCode > 0)
+		{
+			return EMetalToolchainStatus::CouldNotParseCompilerVersion;
+		}
 		
 		Result = ParseCompilerVersionAndTarget(StdOut, this->MetalCompilerVersionString[AppleSDKMac], this->MetalCompilerVersion[AppleSDKMac], this->MetalTargetVersion[AppleSDKMac]);
 
@@ -648,6 +792,10 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::FetchCom
 		// metal -v writes its output to stderr
 		bool bResult = this->ExecMetalFrontend(AppleSDKMobile, TEXT("-v --target=air64-apple-darwin18.7.0"), &ReturnCode, &StdOut, &StdOut);
 		check(bResult);
+		if (ReturnCode > 0)
+		{
+			return EMetalToolchainStatus::CouldNotParseCompilerVersion;
+		}
 		
 		Result = ParseCompilerVersionAndTarget(StdOut, this->MetalCompilerVersionString[AppleSDKMobile], this->MetalCompilerVersion[AppleSDKMobile], this->MetalTargetVersion[AppleSDKMobile]);
 	}
@@ -700,7 +848,7 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::DoMacNat
 			MetalFrontendBinaryCommand[AppleSDKMac] = ToolchainBase / TEXT("macos") / TEXT("bin") / MetalFrontendBinary;
 			MetalFrontendBinaryCommand[AppleSDKMobile] = ToolchainBase / TEXT("ios") / TEXT("bin") / MetalFrontendBinary;
 
-			const bool bIsFrontendPresent = FPaths::FileExists(*MetalFrontendBinaryCommand[AppleSDKMac]) && FPaths::FileExists(*MetalFrontendBinaryCommand[AppleSDKMobile]);
+			const bool bIsFrontendPresent = FPaths::FileExists(MetalFrontendBinaryCommand[AppleSDKMac]) && FPaths::FileExists(MetalFrontendBinaryCommand[AppleSDKMobile]);
 			if (!bIsFrontendPresent)
 			{
 				UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Missing Metal frontend in %s."), *ToolchainBase);
@@ -713,10 +861,16 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::DoMacNat
 			MetalLibBinaryCommand[AppleSDKMac] = ToolchainBase / TEXT("macos") / TEXT("bin") / MetalLibraryBinary;
 			MetalLibBinaryCommand[AppleSDKMobile] = ToolchainBase / TEXT("ios") / TEXT("bin") / MetalLibraryBinary;
 
-			if (!FPaths::FileExists(*MetalArBinaryCommand[AppleSDKMac]) ||
-				!FPaths::FileExists(*MetalArBinaryCommand[AppleSDKMobile]) ||
-				!FPaths::FileExists(*MetalLibBinaryCommand[AppleSDKMac]) ||
-				!FPaths::FileExists(*MetalLibBinaryCommand[AppleSDKMobile]))
+			AirPackBinaryCommand[AppleSDKMac] = ToolchainBase / TEXT("macos") / TEXT("bin") / AirPackBinary;
+            AirPackBinaryCommand[AppleSDKMobile] = ToolchainBase / TEXT("ios") / TEXT("bin") / AirPackBinary;
+
+			if (!FPaths::FileExists(MetalArBinaryCommand[AppleSDKMac]) ||
+				!FPaths::FileExists(MetalArBinaryCommand[AppleSDKMobile]) ||
+				!FPaths::FileExists(MetalLibBinaryCommand[AppleSDKMac]) ||
+				!FPaths::FileExists(MetalLibBinaryCommand[AppleSDKMobile]) ||
+				!FPaths::FileExists(MetalLibBinaryCommand[AppleSDKMobile]) ||
+                !FPaths::FileExists(AirPackBinaryCommand[AppleSDKMac]) ||
+                !FPaths::FileExists(AirPackBinaryCommand[AppleSDKMobile]))
 			{
 				UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Missing toolchain binaries in %s."), *ToolchainBase);
 				return EMetalToolchainStatus::ToolchainNotFound;
@@ -730,11 +884,19 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::DoMacNat
 
 	int32 ReturnCode = 0;
 	FString StdOut, StdErr;
-	bool bSuccess = this->ExecGenericCommand(*XcrunPath, *FString::Printf(TEXT("-sdk %s --find %s"), *this->MetalMacSDK, *this->MetalFrontendBinary), &ReturnCode, &StdOut, &StdErr);
+	bool bSuccess = this->ExecGenericCommand(*XcrunPath, *FString::Printf(TEXT("--sdk %s --find %s"), *this->MetalMacSDK, *this->MetalFrontendBinary), &ReturnCode, &StdOut, &StdErr);
 	bSuccess |= FPaths::FileExists(StdOut);
-	
 	if(!bSuccess || ReturnCode > 0)
 	{
+		UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Missing Mac Metal toolchain (macos SDK not found)."));
+		return EMetalToolchainStatus::ToolchainNotFound;
+	}
+	
+	bSuccess = this->ExecGenericCommand(*XcrunPath, *FString::Printf(TEXT("--sdk %s --find %s"), *this->MetalMobileSDK, *this->MetalFrontendBinary), &ReturnCode, &StdOut, &StdErr);
+	bSuccess |= FPaths::FileExists(StdOut);
+	if(!bSuccess || ReturnCode > 0)
+	{
+		UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Missing Mobile Metal toolchain (iphoneos SDK not found)."));
 		return EMetalToolchainStatus::ToolchainNotFound;
 	}
 
@@ -762,7 +924,7 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::DoWindow
 	MetalFrontendBinaryCommand[AppleSDKMac] = ToolchainBase / TEXT("macos") / TEXT("bin") / MetalFrontendBinary;
 	MetalFrontendBinaryCommand[AppleSDKMobile] = ToolchainBase / TEXT("ios") / TEXT("bin") / MetalFrontendBinary;
 
-	bool bUseLocalMetalToolchain = FPaths::FileExists(*MetalFrontendBinaryCommand[AppleSDKMac]) && FPaths::FileExists(*MetalFrontendBinaryCommand[AppleSDKMobile]);
+	bool bUseLocalMetalToolchain = FPaths::FileExists(MetalFrontendBinaryCommand[AppleSDKMac]) && FPaths::FileExists(MetalFrontendBinaryCommand[AppleSDKMobile]);
 	if (!bUseLocalMetalToolchain)
 	{
 #if CHECK_METAL_COMPILER_TOOLCHAIN_SETUP
@@ -778,10 +940,15 @@ FMetalCompilerToolchain::EMetalToolchainStatus FMetalCompilerToolchain::DoWindow
 	MetalLibBinaryCommand[AppleSDKMac] = ToolchainBase / TEXT("macos") / TEXT("bin") / MetalLibraryBinary;
 	MetalLibBinaryCommand[AppleSDKMobile] = ToolchainBase / TEXT("ios") / TEXT("bin") / MetalLibraryBinary;
 
-	if (!FPaths::FileExists(*MetalArBinaryCommand[AppleSDKMac]) ||
-		!FPaths::FileExists(*MetalArBinaryCommand[AppleSDKMobile]) ||
-		!FPaths::FileExists(*MetalLibBinaryCommand[AppleSDKMac]) ||
-		!FPaths::FileExists(*MetalLibBinaryCommand[AppleSDKMobile]))
+	AirPackBinaryCommand[AppleSDKMac] = ToolchainBase / TEXT("macos") / TEXT("bin") / AirPackBinary;
+    AirPackBinaryCommand[AppleSDKMobile] = ToolchainBase / TEXT("ios") / TEXT("bin") / AirPackBinary;
+    
+	if (!FPaths::FileExists(MetalArBinaryCommand[AppleSDKMac]) ||
+		!FPaths::FileExists(MetalArBinaryCommand[AppleSDKMobile]) ||
+		!FPaths::FileExists(MetalLibBinaryCommand[AppleSDKMac]) ||
+		!FPaths::FileExists(MetalLibBinaryCommand[AppleSDKMobile]) ||
+        !FPaths::FileExists(AirPackBinaryCommand[AppleSDKMac]) ||
+        !FPaths::FileExists(AirPackBinaryCommand[AppleSDKMobile]))
 	{
 #if CHECK_METAL_COMPILER_TOOLCHAIN_SETUP
 		UE_LOG(LogMetalCompilerSetup, Warning, TEXT("Missing toolchain binaries."))
@@ -822,6 +989,20 @@ bool FMetalCompilerToolchain::ExecMetalLib(EAppleSDKType SDK, const TCHAR* Param
 	else
 #endif
 	return ExecGenericCommand(*this->MetalLibBinaryCommand[SDK], Parameters, OutReturnCode, OutStdOut, OutStdErr);
+}
+
+bool FMetalCompilerToolchain::ExecAirPack(EAppleSDKType SDK, const TCHAR* Parameters, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr) const
+{
+    check(this->bToolchainBinariesPresent);
+#if PLATFORM_MAC
+    if (this->AirPackBinaryCommand[SDK].IsEmpty())
+    {
+        FString BuiltParams = FString::Printf(TEXT("--sdk %s %s %s"), *SDKToString(SDK), *this->AirPackBinary, Parameters);
+        return ExecGenericCommand(*XcrunPath, *BuiltParams, OutReturnCode, OutStdOut, OutStdErr);
+    }
+    else
+#endif
+    return ExecGenericCommand(*this->AirPackBinaryCommand[SDK], Parameters, OutReturnCode, OutStdOut, OutStdErr);
 }
 
 bool FMetalCompilerToolchain::ExecMetalAr(EAppleSDKType SDK, const TCHAR* ScriptFile, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr) const
@@ -907,7 +1088,7 @@ bool FMetalCompilerToolchain::CompileMetalShader(FMetalShaderBytecodeJob& Job, F
 	FString IncludeArgs = Job.IncludeDir.Len() ? FString::Printf(TEXT("-I %s"), *Job.IncludeDir) : TEXT("");
 	{
 		// Invoke the metal frontend.
-		FString MetalParams = FString::Printf(TEXT("%s %s %s %s -Wno-null-character -fbracket-depth=1024 %s %s %s %s -o %s"), *Job.MinOSVersion, *Job.DebugInfo, *Job.MathMode, TEXT("-c"), *Job.Standard, *Job.Defines, *IncludeArgs, *LocalInputMetalFilePath, *LocalOutputMetalAIRFilePath);
+		FString MetalParams = FString::Printf(TEXT("%s %s %s %s -Wno-null-character -fbracket-depth=1024 %s %s %s %s %s -o %s"), *Job.MinOSVersion, *Job.PreserveInvariance, *Job.DebugInfo, *Job.MathMode, TEXT("-c"), *Job.Standard, *Job.Defines, *IncludeArgs, *LocalInputMetalFilePath, *LocalOutputMetalAIRFilePath);
 		bool bSuccess = this->ExecMetalFrontend(SDK, *MetalParams, &Job.ReturnCode, &Job.Results, &Job.Errors);
 
 		if (!bSuccess || (Job.ReturnCode != 0))

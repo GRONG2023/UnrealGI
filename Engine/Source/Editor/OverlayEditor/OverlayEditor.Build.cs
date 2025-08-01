@@ -16,6 +16,7 @@ namespace UnrealBuildTool.Rules
 
             PrivateDependencyModuleNames.AddRange(
                 new string[] {
+					"EditorFramework",
 					"UnrealEd",
                     "Engine",
                 }
@@ -24,20 +25,6 @@ namespace UnrealBuildTool.Rules
 			DynamicallyLoadedModuleNames.AddRange(
 				new string[] {
 					"AssetTools",
-				}
-			);
-			
-            PublicIncludePaths.AddRange(
-                new string[]
-                {
-                    "Editor/OverlayEditor/Public",
-                }
-            );
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Editor/OverlayEditor/Private",
-					"Editor/OverlayEditor/Private/Factories",
 				}
 			);
 

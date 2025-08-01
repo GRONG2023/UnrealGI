@@ -2,25 +2,35 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
-#include "Toolkits/IToolkitHost.h"
 #include "BlueprintEditorModule.h"
-#include "IDetailCustomization.h"
-#include "IDetailCustomNodeBuilder.h"
-#include "IDetailsView.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "EditorUndoClient.h"
-
-#include "Editor/UnrealEd/Public/Kismet2/EnumEditorUtils.h"
+#include "Engine/UserDefinedEnum.h"
+#include "HAL/Platform.h"
+#include "IDetailCustomNodeBuilder.h"
+#include "IDetailCustomization.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Kismet2/EnumEditorUtils.h"
+#include "Math/Color.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Toolkits/IToolkit.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 class FDetailWidgetRow;
-class FUserDefinedEnumIndexLayout;
-class FUserDefinedEnumLayout;
-class IDetailChildrenBuilder;
-class IDetailLayoutBuilder;
-class SEditableTextBox;
 class FEditableTextUserDefinedEnum;
 class FEditableTextUserDefinedEnumTooltip;
+class FSpawnTabArgs;
+class FToolBarBuilder;
+class IDetailChildrenBuilder;
+class IDetailLayoutBuilder;
+class SDockTab;
 
 class KISMET_API FUserDefinedEnumEditor : public IUserDefinedEnumEditor
 {
@@ -59,6 +69,15 @@ public:
 
 protected:
 	TSharedRef<SDockTab> SpawnEnumeratorsTab(const FSpawnTabArgs& Args);
+
+private:
+	void FillToolbar(FToolBarBuilder& ToolbarBuilder);
+
+	/** Handles new enum element request */
+	FReply OnAddNewEnumerator();
+
+private:
+	TWeakObjectPtr<UUserDefinedEnum> TargetEnum;
 };
 
 /** Details customization for functions and graphs selected in the MyBlueprint panel */
@@ -89,9 +108,6 @@ public:
 	virtual void PostRedo(bool bSuccess) override { PostUndo(bSuccess); }
 
 private:
-	/** Handles new enum element request */
-	FReply OnAddNewEnumerator();
-
 	/** Handles the optional bitmask flags attribute */
 	ECheckBoxState OnGetBitmaskFlagsAttributeState() const;
 	void OnBitmaskFlagsAttributeStateChanged(ECheckBoxState InNewState);
@@ -157,12 +173,6 @@ private:
 	virtual bool InitiallyCollapsed() const override { return false; }
 
 private:
-	/** Moves the enumerator up in the list */
-	FReply OnMoveEnumeratorUp();
-	
-	/** Moves the enumerator down in the list */
-	FReply OnMoveEnumeratorDown();
-
 	/** Deletes the enumerator */
 	void OnEnumeratorRemove();
 

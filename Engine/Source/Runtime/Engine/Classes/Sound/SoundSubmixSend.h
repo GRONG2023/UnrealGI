@@ -30,7 +30,7 @@ enum class EAudioSpectrumBandPresetType: uint8
 };
 
 USTRUCT(BlueprintType)
-struct ENGINE_API FSoundSubmixSpectralAnalysisBandSettings
+struct FSoundSubmixSpectralAnalysisBandSettings
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -78,23 +78,13 @@ enum class ESendLevelControlMethod : uint8
 	Manual,
 };
 
-UENUM(BlueprintType)
-enum class ESubmixSendStage : uint8
-{
-	// Whether to do the send pre distance attenuation
-	PostDistanceAttenuation,
-
-	// Whether to do the send post distance attenuation
-	PreDistanceAttenuation,
-};
-
-// Class used to send audio to submixes from USoundBase
+// Common set of settings that are uses as submix sends.
 USTRUCT(BlueprintType)
-struct ENGINE_API FSoundSubmixSendInfo
+struct FSoundSubmixSendInfoBase
 {
 	GENERATED_USTRUCT_BODY()
 
-	FSoundSubmixSendInfo();
+	ENGINE_API FSoundSubmixSendInfoBase();
 
 	/*
 		Manual: Use Send Level only
@@ -103,18 +93,18 @@ struct ENGINE_API FSoundSubmixSendInfo
 	*/
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
 	ESendLevelControlMethod SendLevelControlMethod;
-
-	/** Defines at what mix stage the send should happen.*/
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
-	ESubmixSendStage SendStage;
-
+	
 	// The submix to send the audio to
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
-	USoundSubmixBase* SoundSubmix;
+	TObjectPtr<USoundSubmixBase> SoundSubmix;
 
 	// The amount of audio to send
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend, meta = (DisplayName = "Manual Send Level"))
 	float SendLevel;
+
+	// Whether to disable the 0-1 clamp for manual SendLevel control
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
+	bool DisableManualSendClamp;
 
 	// The amount to send to master when sound is located at a distance equal to value specified in the min send distance.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
@@ -135,4 +125,24 @@ struct ENGINE_API FSoundSubmixSendInfo
 	// The custom reverb send curve to use for distance-based send level.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
 	FRuntimeFloatCurve CustomSendLevelCurve;
+};
+
+UENUM(BlueprintType)
+enum class ESubmixSendStage : uint8
+{
+	// Whether to do the send pre distance attenuation
+	PostDistanceAttenuation,
+
+	// Whether to do the send post distance attenuation
+	PreDistanceAttenuation,
+};
+
+USTRUCT(BlueprintType)
+struct FSoundSubmixSendInfo : public FSoundSubmixSendInfoBase
+{
+	GENERATED_BODY();
+
+	/** Defines at what mix stage the send should happen.*/
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = SubmixSend)
+	ESubmixSendStage SendStage = ESubmixSendStage::PostDistanceAttenuation;
 };

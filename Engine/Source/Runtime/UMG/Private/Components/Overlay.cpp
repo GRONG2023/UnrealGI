@@ -3,6 +3,8 @@
 #include "Components/Overlay.h"
 #include "Components/OverlaySlot.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Overlay)
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
@@ -12,7 +14,7 @@ UOverlay::UOverlay(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bIsVariable = false;
-	Visibility = ESlateVisibility::SelfHitTestInvisible;
+	SetVisibilityInternal(ESlateVisibility::SelfHitTestInvisible);
 }
 
 void UOverlay::ReleaseSlateResources(bool bReleaseChildren)
@@ -54,6 +56,18 @@ void UOverlay::OnSlotRemoved(UPanelSlot* InSlot)
 	}
 }
 
+bool UOverlay::ReplaceOverlayChildAt(int32 Index, UWidget* Content)
+{
+	if (!Slots.IsValidIndex(Index) || Content == nullptr)
+	{
+		return false;
+	}
+
+	UOverlaySlot* OverlaySlot = CastChecked<UOverlaySlot>(Slots[Index]);
+	OverlaySlot->ReplaceContent(Content);
+	return true;
+}
+
 TSharedRef<SWidget> UOverlay::RebuildWidget()
 {
 	MyOverlay = SNew(SOverlay);
@@ -82,3 +96,4 @@ const FText UOverlay::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

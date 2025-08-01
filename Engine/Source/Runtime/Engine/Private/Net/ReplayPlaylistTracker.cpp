@@ -4,6 +4,7 @@
 #include "Engine/DemoNetDriver.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "Net/UnrealNetwork.h"
 
 FReplayPlaylistTracker::FReplayPlaylistTracker(const FReplayPlaylistParams& Params, UGameInstance* InGameInstance) :
 	bIsStartingReplay(false),
@@ -34,7 +35,7 @@ FReplayPlaylistTracker::FReplayPlaylistTracker(const FReplayPlaylistParams& Para
 		if (Replay.Len() == 0)
 		{
 			UE_LOG(LogDemo, Log, TEXT("FReplayPlaylistTracker: Removed invalid replay %s"), *Params.Playlist[i]);
-			Playlist.RemoveAt(i, 1, false);
+			Playlist.RemoveAt(i, 1, EAllowShrinking::No);
 		}
 	}
 
@@ -50,14 +51,14 @@ void FReplayPlaylistTracker::Reset()
 	{
 		DemoNetDriver.Reset();
 
-		FNetworkReplayDelegates::OnReplayStartFailure.Remove(OnDemoFailedToStartHandle);
+		FNetworkReplayDelegates::OnReplayPlaybackFailure.Remove(OnDemoPlaybackFailedHandle);
 		FNetworkReplayDelegates::OnReplayPlaybackComplete.Remove(OnDemoPlaybackFinishedHandle);
 		FNetworkReplayDelegates::OnReplayRecordingComplete.Remove(OnDemoStoppedHandle);
 
 		LocalDemoNetDriver->SetPlayingPlaylist(nullptr);
 	}
 
-	OnDemoFailedToStartHandle.Reset();
+	OnDemoPlaybackFailedHandle.Reset();
 	OnDemoPlaybackFinishedHandle.Reset();
 	OnDemoStoppedHandle.Reset();
 
@@ -93,7 +94,7 @@ bool FReplayPlaylistTracker::Start()
 			{
 				DemoNetDriver = LocalDemoNetDriver;
 
-				OnDemoFailedToStartHandle = FNetworkReplayDelegates::OnReplayStartFailure.AddSP(AsShared(), &ThisClass::OnDemoFailedToStart);
+				OnDemoPlaybackFailedHandle = FNetworkReplayDelegates::OnReplayPlaybackFailure.AddSP(AsShared(), &ThisClass::OnDemoPlaybackFailed);
 				OnDemoPlaybackFinishedHandle = FNetworkReplayDelegates::OnReplayPlaybackComplete.AddSP(AsShared() , &ThisClass::OnDemoPlaybackFinished);
 				OnDemoStoppedHandle = FNetworkReplayDelegates::OnReplayRecordingComplete.AddSP(AsShared(), &ThisClass::OnDemoStopped);
 
@@ -122,7 +123,7 @@ bool FReplayPlaylistTracker::Restart()
 	return Start();
 }
 
-void FReplayPlaylistTracker::OnDemoFailedToStart(UWorld* InWorld, EDemoPlayFailure::Type FailureType)
+void FReplayPlaylistTracker::OnDemoPlaybackFailed(UWorld* InWorld, const UE::Net::TNetResult<EReplayResult>& Result)
 {
 	UWorld* World = WorldOverride.Get();
 	World = World ? World : GameInstance->GetWorld();

@@ -3,11 +3,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -21,7 +22,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="File">File to check</param>
 		/// <returns>True if the file is part of the working set, false otherwise</returns>
-		bool Contains(FileItem File);
+		abstract bool Contains(FileItem File);
 	}
 
 	/// <summary>
@@ -90,11 +91,12 @@ namespace UnrealBuildTool
 	class GitSourceFileWorkingSet : ISourceFileWorkingSet
 	{
 		DirectoryReference RootDir;
-		Process BackgroundProcess;
+		Process? BackgroundProcess;
 		HashSet<FileReference> Files;
 		List<DirectoryReference> Directories;
 		List<string> ErrorOutput;
-		GitSourceFileWorkingSet Inner;
+		GitSourceFileWorkingSet? Inner;
+		ILogger Logger;
 
 		/// <summary>
 		/// Constructor
@@ -102,15 +104,17 @@ namespace UnrealBuildTool
 		/// <param name="GitPath">Path to the Git executable</param>
 		/// <param name="RootDir">Root directory to run queries from (typically the directory containing the .git folder, to ensure all subfolders can be searched)</param>
 		/// <param name="Inner">An inner working set. This allows supporting multiple Git repositories (one containing the engine, another containing the project, for example)</param>
-		public GitSourceFileWorkingSet(string GitPath, DirectoryReference RootDir, GitSourceFileWorkingSet Inner)
+		/// <param name="Logger">Logger for output</param>
+		public GitSourceFileWorkingSet(string GitPath, DirectoryReference RootDir, GitSourceFileWorkingSet? Inner, ILogger Logger)
 		{
 			this.RootDir = RootDir;
-			this.Files = new HashSet<FileReference>();
-			this.Directories = new List<DirectoryReference>();
-			this.ErrorOutput = new List<string>();
+			Files = new HashSet<FileReference>();
+			Directories = new List<DirectoryReference>();
+			ErrorOutput = new List<string>();
 			this.Inner = Inner;
+			this.Logger = Logger;
 
-			Log.WriteLine(LogEventType.Console, "Using 'git status' to determine working set for adaptive non-unity build ({0}).", RootDir);
+			Logger.LogInformation("Using 'git status' to determine working set for adaptive non-unity build ({RootDir}).", RootDir);
 
 			BackgroundProcess = new Process();
 			BackgroundProcess.StartInfo.FileName = GitPath;
@@ -162,13 +166,13 @@ namespace UnrealBuildTool
 		{
 			if (BackgroundProcess != null)
 			{
-				if(!BackgroundProcess.WaitForExit(500))
+				if (!BackgroundProcess.WaitForExit(500))
 				{
-					Log.WriteLine(LogEventType.Console, "Waiting for 'git status' command to complete");
+					Logger.LogInformation("Waiting for 'git status' command to complete");
 				}
-				if(!BackgroundProcess.WaitForExit(15000))
+				if (!BackgroundProcess.WaitForExit(15000))
 				{
-					Log.WriteLine(LogEventType.Console, "Terminating git child process due to timeout");
+					Logger.LogInformation("Terminating git child process due to timeout");
 					try
 					{
 						BackgroundProcess.Kill();
@@ -190,7 +194,7 @@ namespace UnrealBuildTool
 		{
 			TerminateBackgroundProcess();
 
-			if(Inner != null)
+			if (Inner != null)
 			{
 				Inner.Dispose();
 			}
@@ -204,11 +208,11 @@ namespace UnrealBuildTool
 		public bool Contains(FileItem File)
 		{
 			WaitForBackgroundProcess();
-			if(Files.Contains(File.Location) || Directories.Any(x => File.Location.IsUnderDirectory(x)))
+			if (Files.Contains(File.Location) || Directories.Any(x => File.Location.IsUnderDirectory(x)))
 			{
 				return true;
 			}
-			if(Inner != null && Inner.Contains(File))
+			if (Inner != null && Inner.Contains(File))
 			{
 				return true;
 			}
@@ -300,7 +304,7 @@ namespace UnrealBuildTool
 		/// Sets the path to use for the repository. Interpreted relative to the Unreal Engine root directory (the folder above the Engine folder) -- if relative.
 		/// </summary>
 		[XmlConfigFile]
-		public static string RepositoryPath = null;
+		public static string? RepositoryPath = null;
 
 		/// <summary>
 		/// Sets the path to use for the Git executable. Defaults to "git" (assuming it is in the PATH).
@@ -313,8 +317,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="RootDir">The root directory</param>
 		/// <param name="ProjectDirs">The project directories</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>Working set instance for the given directory</returns>
-		public static ISourceFileWorkingSet Create(DirectoryReference RootDir, IEnumerable<DirectoryReference> ProjectDirs)
+		public static ISourceFileWorkingSet Create(DirectoryReference RootDir, IEnumerable<DirectoryReference> ProjectDirs, ILogger Logger)
 		{
 			if (Provider == ProviderType.None || ProjectFileGenerator.bGenerateProjectFiles)
 			{
@@ -322,14 +327,14 @@ namespace UnrealBuildTool
 			}
 			else if (Provider == ProviderType.Git)
 			{
-				GitSourceFileWorkingSet WorkingSet;
+				ISourceFileWorkingSet? WorkingSet;
 				if (!String.IsNullOrEmpty(RepositoryPath))
 				{
-					WorkingSet = new GitSourceFileWorkingSet(GitPath, DirectoryReference.Combine(RootDir, RepositoryPath), null);
+					WorkingSet = new GitSourceFileWorkingSet(GitPath, DirectoryReference.Combine(RootDir, RepositoryPath), null, Logger);
 				}
-				else if(!TryCreateGitWorkingSet(RootDir, ProjectDirs, out WorkingSet))
+				else if (!TryCreateGitWorkingSet(RootDir, ProjectDirs, Logger, out WorkingSet))
 				{
-					WorkingSet = new GitSourceFileWorkingSet(GitPath, RootDir, null);
+					WorkingSet = new GitSourceFileWorkingSet(GitPath, RootDir, null, Logger);
 				}
 				return WorkingSet;
 			}
@@ -339,47 +344,62 @@ namespace UnrealBuildTool
 			}
 			else
 			{
-				GitSourceFileWorkingSet WorkingSet;
-				if(TryCreateGitWorkingSet(RootDir, ProjectDirs, out WorkingSet))
+				ISourceFileWorkingSet? WorkingSet;
+				if (TryCreateGitWorkingSet(RootDir, ProjectDirs, Logger, out WorkingSet))
 				{
 					return WorkingSet;
 				}
-				else
+				else if (TryCreatePerforceWorkingSet(RootDir, ProjectDirs, Logger, out WorkingSet))
 				{
-					return new PerforceSourceFileWorkingSet();
+					return WorkingSet;
 				}
 			}
+			return new EmptySourceFileWorkingSet();
 		}
 
-		static bool TryCreateGitWorkingSet(DirectoryReference RootDir, IEnumerable<DirectoryReference> ProjectDirs, out GitSourceFileWorkingSet OutWorkingSet)
+		static bool TryCreateGitWorkingSet(DirectoryReference RootDir, IEnumerable<DirectoryReference> ProjectDirs, ILogger Logger, [NotNullWhen(true)] out ISourceFileWorkingSet? OutWorkingSet)
 		{
-			GitSourceFileWorkingSet WorkingSet  = null;
+			GitSourceFileWorkingSet? WorkingSet = null;
 
 			// Create the working set for the engine directory
-			if (DirectoryReference.Exists(DirectoryReference.Combine(RootDir, ".git")))
+			if (DirectoryReference.Exists(DirectoryReference.Combine(RootDir, ".git")) || FileReference.Exists(FileReference.Combine(RootDir, ".git")))
 			{
-				WorkingSet = new GitSourceFileWorkingSet(GitPath, RootDir, WorkingSet);
+				WorkingSet = new GitSourceFileWorkingSet(GitPath, RootDir, WorkingSet, Logger);
 			}
 
 			// Try to create a working set for the project directory
-			foreach(DirectoryReference ProjectDir in ProjectDirs)
+			foreach (DirectoryReference ProjectDir in ProjectDirs)
 			{
-				if(WorkingSet == null || !ProjectDir.IsUnderDirectory(RootDir))
+				if (WorkingSet == null || !ProjectDir.IsUnderDirectory(RootDir))
 				{
-					if (DirectoryReference.Exists(DirectoryReference.Combine(ProjectDir, ".git")))
+					if (DirectoryReference.Exists(DirectoryReference.Combine(ProjectDir, ".git")) || FileReference.Exists(FileReference.Combine(ProjectDir, ".git")))
 					{
-						WorkingSet = new GitSourceFileWorkingSet(GitPath, ProjectDir, WorkingSet);
+						WorkingSet = new GitSourceFileWorkingSet(GitPath, ProjectDir, WorkingSet, Logger);
 					}
-					else if (DirectoryReference.Exists(DirectoryReference.Combine(ProjectDir.ParentDirectory, ".git")))
+					else if (DirectoryReference.Exists(DirectoryReference.Combine(ProjectDir.ParentDirectory!, ".git")) || FileReference.Exists(FileReference.Combine(ProjectDir.ParentDirectory!, ".git")))
 					{
-						WorkingSet = new GitSourceFileWorkingSet(GitPath, ProjectDir.ParentDirectory, WorkingSet);
+						WorkingSet = new GitSourceFileWorkingSet(GitPath, ProjectDir.ParentDirectory!, WorkingSet, Logger);
 					}
 				}
 			}
 
 			// Set the output value
 			OutWorkingSet = WorkingSet;
-			return WorkingSet != null;
+			return OutWorkingSet != null;
+		}
+
+		static bool TryCreatePerforceWorkingSet(DirectoryReference RootDir, IEnumerable<DirectoryReference> ProjectDirs, ILogger Logger, [NotNullWhen(true)] out ISourceFileWorkingSet? OutWorkingSet)
+		{
+			PerforceSourceFileWorkingSet? WorkingSet = null;
+			// If an installed engine, or the root directory contains any read-only files assume this is a perforce working set
+			if (Unreal.IsEngineInstalled() || DirectoryReference.EnumerateFiles(RootDir).Any(x => x.ToFileInfo().Attributes.HasFlag(FileAttributes.ReadOnly)))
+			{
+				WorkingSet = new PerforceSourceFileWorkingSet();
+			}
+
+			// Set the output value
+			OutWorkingSet = WorkingSet;
+			return OutWorkingSet != null;
 		}
 	}
 }

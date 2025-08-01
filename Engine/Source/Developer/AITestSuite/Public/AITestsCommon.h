@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
 #include "Misc/AutomationTest.h"
 #include "TestLogger.h"
@@ -28,7 +29,7 @@ private:
 
 namespace FAITestHelpers
 {
-	UWorld* GetWorld();
+	AITESTSUITE_API UWorld* GetWorld();
 	static const float TickInterval = 1.f / 30;
 
 	void UpdateFrameCounter();
@@ -48,9 +49,9 @@ protected:
 	{}
 
 	template<typename ClassToSpawn>
-	ClassToSpawn* NewAutoDestroyObject()
+	ClassToSpawn* NewAutoDestroyObject(UObject* Outer = GetTransientPackage())
 	{
-		ClassToSpawn* ObjectInstance = NewObject<ClassToSpawn>();
+		ClassToSpawn* ObjectInstance = NewObject<ClassToSpawn>(Outer);
 		ObjectInstance->AddToRoot();
 		SpawnedObjects.Add(ObjectInstance);
 		return ObjectInstance;
@@ -71,6 +72,8 @@ public:
 	virtual bool SetUp() { return true; }
 	/** @return true to indicate that the test is done. */
 	virtual bool Update() { return false; } 
+	/** lets the Test instance test the results. Use AITEST_*_LATENT macros */
+	virtual void VerifyLatentResults() {}
 	/** @return false to indicate an issue with test execution. Will signal to automation framework this test instance failed. */
 	virtual bool InstantTest() { return false;}
 	// it's essential that overriding functions call the super-implementation. Otherwise the check in ~FAITestBase will fail.
@@ -79,6 +82,7 @@ public:
 
 DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITestCommand_SetUpTest, FAITestBase*, AITest);
 DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITestCommand_PerformTest, FAITestBase*, AITest);
+DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITestCommand_VerifyTestResults, FAITestBase*, AITest);
 DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITestCommand_TearDownTest, FAITestBase*, AITest);
 
 // @note that TestClass needs to derive from FAITestBase
@@ -93,6 +97,8 @@ DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITest
 		ADD_LATENT_AUTOMATION_COMMAND(FAITestCommand_SetUpTest(TestInstance)); \
 		/* run latent command to update */ \
 		ADD_LATENT_AUTOMATION_COMMAND(FAITestCommand_PerformTest(TestInstance)); \
+		/* let the Test instance verify the results, calls VerifyLatentResults */ \
+		ADD_LATENT_AUTOMATION_COMMAND(FAITestCommand_VerifyTestResults(TestInstance)); \
 		/* run latent command to tear down */ \
 		ADD_LATENT_AUTOMATION_COMMAND(FAITestCommand_TearDownTest(TestInstance)); \
 		return true; \
@@ -111,9 +117,9 @@ DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITest
 		{ \
 			/* call the instant-test code */ \
 			bSuccess = TestInstance->InstantTest(); \
-			/* tear down */ \
-			TestInstance->TearDown(); \
 		}\
+		/* tear down */ \
+		TestInstance->TearDown(); \
 		delete TestInstance; \
 		return bSuccess; \
 	} 
@@ -153,15 +159,15 @@ DEFINE_EXPORTED_LATENT_AUTOMATION_COMMAND_ONE_PARAMETER(AITESTSUITE_API, FAITest
 //----------------------------------------------------------------------//
 // Specific test types
 //----------------------------------------------------------------------//
-template<class TComponent>
+template<class FReal>
 struct FAITest_SimpleComponentBasedTest : public FAITestBase
 {
 	FTestLogger<int32> Logger;
-	TComponent* Component;
+	FReal* Component;
 
 	FAITest_SimpleComponentBasedTest()
 	{
-		Component = NewAutoDestroyObject<TComponent>();
+		Component = NewAutoDestroyObject<FReal>();
 	}
 
 	virtual void SetTestRunner(FAutomationTestBase& AutomationTestInstance) override
@@ -170,7 +176,7 @@ struct FAITest_SimpleComponentBasedTest : public FAITestBase
 		Logger.TestRunner = TestRunner;
 	}
 
-	virtual ~FAITest_SimpleComponentBasedTest()
+	virtual ~FAITest_SimpleComponentBasedTest() override
 	{
 		GetTestRunner().TestTrue(TEXT("Not all expected values has been logged"), Logger.ExpectedValues.Num() == 0 || Logger.ExpectedValues.Num() == Logger.LoggedValues.Num());
 	}
@@ -194,69 +200,68 @@ struct FAITest_SimpleComponentBasedTest : public FAITestBase
 // fails making sure the rest of the test relying on given condition being 
 // true doesn't crash
 //----------------------------------------------------------------------//
-#define AITEST_TRUE(What, Value)\
-	if (!GetTestRunner().TestTrue(What, Value))\
+#define __AITEST_IMPL(What, Value, Test, RetVal)\
+	if (!GetTestRunner().Test(What, Value))\
 	{\
-		return false;\
+		return RetVal;\
 	}
-
-#define AITEST_FALSE(What, Value)\
-	if (!GetTestRunner().TestFalse(What, Value))\
-	{\
-		return false;\
-	}
-
-#define AITEST_NULL(What, Pointer)\
-	if (!GetTestRunner().TestNull(What, Pointer))\
-	{\
-		return false;\
-	}
-
-#define AITEST_NOT_NULL(What, Pointer)\
-	if (!GetTestRunner().TestNotNull(What, Pointer))\
-	{\
-		return false;\
-	}
+	
+#define AITEST_TRUE(What, Value) __AITEST_IMPL(What, Value, TestTrue, false)
+#define AITEST_FALSE(What, Value) __AITEST_IMPL(What, Value, TestFalse, false)
+#define AITEST_NULL(What, Pointer) __AITEST_IMPL(What, Pointer, TestNull, false)
+#define AITEST_NOT_NULL(What, Pointer) \
+	__AITEST_IMPL(What, Pointer, TestNotNull, false) \
+	CA_ASSUME(Pointer)
 
 namespace FTestHelpers
 {
 	template<typename T1, typename T2>
 	inline bool TestEqual(const FString& Description, T1 Expression, T2 Expected, FAutomationTestBase& This)
 	{
-		This.TestEqual(*Description, Expression, Expected);
-		return Expression == Expected;
+		return This.TestEqual(*Description, Expression, Expected);
 	}
 
 	template<typename T1, typename T2>
 	inline bool TestEqual(const FString& Description, T1* Expression, T2* Expected, FAutomationTestBase& This)
 	{
-		This.TestEqual(*Description, reinterpret_cast<uint64>(Expression), reinterpret_cast<uint64>(Expected));
-		return Expression == Expected;
+		return This.TestEqual(*Description, reinterpret_cast<uint64>(Expression), reinterpret_cast<uint64>(Expected));
 	}
 
 	template<typename T1, typename T2>
 	inline bool TestNotEqual(const FString& Description, T1 Expression, T2 Expected, FAutomationTestBase& This)
 	{
-		This.TestNotEqual(*Description, Expression, Expected);
-		return Expression != Expected;
+		return This.TestNotEqual(*Description, Expression, Expected);
 	}
 
 	template<typename T1, typename T2>
 	inline bool TestNotEqual(const FString& Description, T1* Expression, T2* Expected, FAutomationTestBase& This)
 	{
-		This.TestNotEqual(*Description, reinterpret_cast<uint64>(Expression), reinterpret_cast<uint64>(Expected));
-		return Expression != Expected;
+		return This.TestNotEqual(*Description, reinterpret_cast<uint64>(Expression), reinterpret_cast<uint64>(Expected));
 	}
 }
 
-#define AITEST_EQUAL(What, Actual, Expected)\
-	if (!FTestHelpers::TestEqual(What, Actual, Expected, GetTestRunner()))\
+#define __AITEST_HELPER_IMPL(What, Actual, Expected, Test, RetVal)\
+	if (!FTestHelpers::Test(What, Actual, Expected, GetTestRunner()))\
 	{\
-		return false;\
+		return RetVal;\
 	}
 
-#define AITEST_NOT_EQUAL(What, Actual, Expected)\
-	if (!FTestHelpers::TestNotEqual(What, Actual, Expected, GetTestRunner()))\
-	{\
-		return false;\
-	}
+#define AITEST_EQUAL(What, Actual, Expected) __AITEST_HELPER_IMPL(What, Actual, Expected, TestEqual, false)
+#define AITEST_NOT_EQUAL(What, Actual, Expected) __AITEST_HELPER_IMPL(What, Actual, Expected, TestNotEqual, false)
+
+
+//----------------------------------------------------------------------//
+// state testing macros, valid in FTestAIBase (and subclasses') methods. 
+// Using these macros makes sure the test function fails if the assertion
+// fails making sure the rest of the test relying on given condition being 
+// true doesn't crash. Note that these macros are intended to be put in 
+// a void-returning function where latent test's results can be verified. 
+// Update function is not a good place for testing results since its return
+// value controls whether the test will continue.
+//----------------------------------------------------------------------//
+#define AITEST_TRUE_LATENT(What, Value) __AITEST_IMPL(What, Value, TestTrue, )
+#define AITEST_FALSE_LATENT(What, Value) __AITEST_IMPL(What, Value, TestFalse, )
+#define AITEST_NULL_LATENT(What, Pointer) __AITEST_IMPL(What, Pointer, TestNull, )
+#define AITEST_NOT_NULL_LATENT(What, Pointer) __AITEST_IMPL(What, Pointer, TestNotNull, )
+#define AITEST_EQUAL_LATENT(What, Actual, Expected) __AITEST_HELPER_IMPL(What, Actual, Expected, TestEqual, )
+#define AITEST_NOT_EQUAL_LATENT(What, Actual, Expected) __AITEST_HELPER_IMPL(What, Actual, Expected, TestNotEqual, )

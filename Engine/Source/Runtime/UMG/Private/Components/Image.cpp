@@ -11,6 +11,12 @@
 #include "Engine/AssetManager.h"
 #include "Engine/StreamableManager.h"
 
+#if WITH_EDITOR
+#include "TextureCompiler.h"
+#endif
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Image)
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
@@ -22,19 +28,6 @@ UImage::UImage(const FObjectInitializer& ObjectInitializer)
 {
 }
 
-#if WITH_EDITORONLY_DATA
-void UImage::PostLoad()
-{
-	Super::PostLoad();
-
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS && Image_DEPRECATED != nullptr )
-	{
-		Brush = Image_DEPRECATED->Brush;
-		Image_DEPRECATED = nullptr;
-	}
-}
-#endif
-
 void UImage::ReleaseSlateResources(bool bReleaseChildren)
 {
 	Super::ReleaseSlateResources(bReleaseChildren);
@@ -44,9 +37,10 @@ void UImage::ReleaseSlateResources(bool bReleaseChildren)
 
 TSharedRef<SWidget> UImage::RebuildWidget()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyImage = SNew(SImage)
 			.FlipForRightToLeftFlowDirection(bFlipForRightToLeftFlowDirection);
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	return MyImage.ToSharedRef();
 }
 
@@ -54,17 +48,20 @@ void UImage::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TAttribute<FSlateColor> ColorAndOpacityBinding = PROPERTY_BINDING(FSlateColor, ColorAndOpacity);
 	TAttribute<const FSlateBrush*> ImageBinding = OPTIONAL_BINDING_CONVERT(FSlateBrush, Brush, const FSlateBrush*, ConvertImage);
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	if (MyImage.IsValid())
 	{
 		MyImage->SetImage(ImageBinding);
+		MyImage->InvalidateImage();
 		MyImage->SetColorAndOpacity(ColorAndOpacityBinding);
 		MyImage->SetOnMouseButtonDown(BIND_UOBJECT_DELEGATE(FPointerEventHandler, HandleMouseButtonDown));
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UImage::SetColorAndOpacity(FLinearColor InColorAndOpacity)
 {
 	ColorAndOpacity = InColorAndOpacity;
@@ -72,6 +69,12 @@ void UImage::SetColorAndOpacity(FLinearColor InColorAndOpacity)
 	{
 		MyImage->SetColorAndOpacity(ColorAndOpacity);
 	}
+}
+
+
+const FLinearColor& UImage::GetColorAndOpacity() const
+{
+	return ColorAndOpacity;
 }
 
 void UImage::SetOpacity(float InOpacity)
@@ -86,7 +89,7 @@ void UImage::SetOpacity(float InOpacity)
 const FSlateBrush* UImage::ConvertImage(TAttribute<FSlateBrush> InImageAsset) const
 {
 	UImage* MutableThis = const_cast<UImage*>( this );
-	MutableThis->Brush = InImageAsset.Get();
+	MutableThis->UImage::SetBrush(InImageAsset.Get());
 
 	return &Brush;
 }
@@ -96,36 +99,45 @@ void UImage::SetBrush(const FSlateBrush& InBrush)
 	if(Brush != InBrush)
 	{
 		Brush = InBrush;
-
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
+
+const FSlateBrush& UImage::GetBrush() const
+{
+	return Brush;
+
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UImage::SetBrushSize(FVector2D DesiredSize)
 {
-	if(Brush.ImageSize != DesiredSize)
-	{
-		Brush.ImageSize = DesiredSize;
+	SetDesiredSizeOverride(DesiredSize);
+}
 
-		if (MyImage.IsValid())
-		{
-			MyImage->SetImage(&Brush);
-		}
+void UImage::SetDesiredSizeOverride(FVector2D DesiredSize)
+{
+	if (MyImage.IsValid())
+	{
+		MyImage->SetDesiredSizeOverride(DesiredSize);
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UImage::SetBrushTintColor(FSlateColor TintColor)
 {
 	if(Brush.TintColor != TintColor)
 	{
 		Brush.TintColor = TintColor;
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
@@ -135,10 +147,11 @@ void UImage::SetBrushResourceObject(UObject* ResourceObject)
 	if (Brush.GetResourceObject() != ResourceObject)
 	{
 		Brush.SetResourceObject(ResourceObject);
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
@@ -148,11 +161,13 @@ void UImage::SetBrushFromAsset(USlateBrushAsset* Asset)
 	if(!Asset || Brush != Asset->Brush)
 	{
 		CancelImageStreaming();
-		Brush = Asset ? Asset->Brush : FSlateBrush();
-
-		if (MyImage.IsValid())
+		if (Asset)
 		{
-			MyImage->SetImage(&Brush);
+			UImage::SetBrush(Asset->Brush);
+		}
+		else
+		{
+			UImage::SetBrush(FSlateBrush());
 		}
 	}
 }
@@ -164,6 +179,7 @@ void UImage::SetBrushFromTexture(UTexture2D* Texture, bool bMatchSize)
 	if(Brush.GetResourceObject() != Texture)
 	{
 		Brush.SetResourceObject(Texture);
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 
 		if (Texture) // Since this texture is used as UI, don't allow it affected by budget.
 		{
@@ -175,6 +191,9 @@ void UImage::SetBrushFromTexture(UTexture2D* Texture, bool bMatchSize)
 		{
 			if (Texture)
 			{
+#if WITH_EDITOR
+				FTextureCompilingManager::Get().FinishCompilation({ Texture });
+#endif
 				Brush.ImageSize.X = Texture->GetSizeX();
 				Brush.ImageSize.Y = Texture->GetSizeY();
 			}
@@ -186,7 +205,7 @@ void UImage::SetBrushFromTexture(UTexture2D* Texture, bool bMatchSize)
 
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
@@ -197,6 +216,7 @@ void UImage::SetBrushFromAtlasInterface(TScriptInterface<ISlateTextureAtlasInter
 	{
 		CancelImageStreaming();
 		Brush.SetResourceObject(AtlasRegion.GetObject());
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 
 		if (bMatchSize)
 		{
@@ -213,7 +233,7 @@ void UImage::SetBrushFromAtlasInterface(TScriptInterface<ISlateTextureAtlasInter
 
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
@@ -224,6 +244,7 @@ void UImage::SetBrushFromTextureDynamic(UTexture2DDynamic* Texture, bool bMatchS
 	{
 		CancelImageStreaming();
 		Brush.SetResourceObject(Texture);
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 
 		if (bMatchSize && Texture)
 		{
@@ -233,7 +254,7 @@ void UImage::SetBrushFromTextureDynamic(UTexture2DDynamic* Texture, bool bMatchS
 
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
@@ -244,15 +265,36 @@ void UImage::SetBrushFromMaterial(UMaterialInterface* Material)
 	{
 		CancelImageStreaming();
 		Brush.SetResourceObject(Material);
+		BroadcastFieldValueChanged(FFieldNotificationClassDescriptor::Brush);
 
 		//TODO UMG Check if the material can be used with the UI
 
 		if (MyImage.IsValid())
 		{
-			MyImage->SetImage(&Brush);
+			MyImage->InvalidateImage();
 		}
 	}
 }
+
+void UImage::SetFlipForRightToLeftFlowDirection(bool InbFlipForRightToLeftFlowDirection)
+{
+	if (bFlipForRightToLeftFlowDirection != InbFlipForRightToLeftFlowDirection)
+	{
+		bFlipForRightToLeftFlowDirection = InbFlipForRightToLeftFlowDirection;
+
+		if (MyImage.IsValid())
+		{
+			MyImage->FlipForRightToLeftFlowDirection(InbFlipForRightToLeftFlowDirection);
+		}
+	}
+}
+
+bool UImage::ShouldFlipForRightToLeftFlowDirection() const
+{
+	return bFlipForRightToLeftFlowDirection;
+
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UImage::CancelImageStreaming()
 {
@@ -346,6 +388,7 @@ void UImage::SetBrushFromSoftMaterial(TSoftObjectPtr<UMaterialInterface> SoftMat
 	);
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 UMaterialInstanceDynamic* UImage::GetDynamicMaterial()
 {
 	UMaterialInterface* Material = NULL;
@@ -360,14 +403,13 @@ UMaterialInstanceDynamic* UImage::GetDynamicMaterial()
 		if ( !DynamicMaterial )
 		{
 			DynamicMaterial = UMaterialInstanceDynamic::Create(Material, this);
-			Brush.SetResourceObject(DynamicMaterial);
+			SetBrushResourceObject(DynamicMaterial);
 
 			if ( MyImage.IsValid() )
 			{
-				MyImage->SetImage(&Brush);
+				MyImage->InvalidateImage();
 			}
 		}
-		
 		return DynamicMaterial;
 	}
 
@@ -375,6 +417,7 @@ UMaterialInstanceDynamic* UImage::GetDynamicMaterial()
 
 	return NULL;
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 FReply UImage::HandleMouseButtonDown(const FGeometry& Geometry, const FPointerEvent& MouseEvent)
 {
@@ -406,3 +449,4 @@ const FText UImage::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

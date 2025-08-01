@@ -2,23 +2,46 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "PackagesDialog.h"
-#include "Layout/Visibility.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Styling/SlateTypes.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "ISourceControlProvider.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "HAL/PlatformCrt.h"
 #include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "ISourceControlState.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
 #include "Misc/PackageName.h"
+#include "PackagesDialog.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
 #include "UObject/Package.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/SListView.h"
+#include "Widgets/Views/STableRow.h"
 
+class ITableRow;
 class SCheckBox;
+class SHorizontalBox;
+class STableViewBase;
+class SWidget;
+class UObject;
+struct FGeometry;
+struct FKeyEvent;
 
 /**
  * Represents a button that will dynamically be added to the package dialog window
@@ -26,11 +49,12 @@ class SCheckBox;
 class FPackageButton : public TSharedFromThis<FPackageButton>
 {
 public:
-	FPackageButton(FPackagesDialogModule* InModule, EDialogReturnType InType, const FText& InName, const FText& InToolTip, TAttribute<bool> InDisabled = false)
+	FPackageButton(FPackagesDialogModule* InModule, EDialogReturnType InType, EDialogButtonStyle InStyle, const FText& InName, const FText& InToolTip, TAttribute<bool> InDisabled = false)
 		: Module(InModule)
 		, Name(InName)
 		, ToolTip(InToolTip)
 		, Type(InType)
+		, Style(InStyle)
 		, Clicked(false)
 		, Disabled(InDisabled)
 	{ }
@@ -76,9 +100,16 @@ public:
 	/**
 	 * Gets the type of the button
 	 *
-	 * @return the tupe of the button
+	 * @return the type of the button
 	 */
 	EDialogReturnType GetType() const { return Type; }
+
+	/**
+	 * Gets the style of the button
+	 *
+	 * @return the style of the button
+	 */
+	EDialogButtonStyle GetStyle() const { return Style; }
 
 	/**
 	 * Sets if the button should be disabled
@@ -106,6 +137,7 @@ private:
 	FText Name;						// Name of the button
 	FText ToolTip;					// Tool tip for this button
 	EDialogReturnType Type;			// Button type
+	EDialogButtonStyle Style;		// Button style
 	bool Clicked;					// Stores if the button was clicked to close the dialog
 	TAttribute<bool> Disabled;		// Stores if the button is disabled or not
 };
@@ -116,7 +148,7 @@ private:
 class FPackageItem : public TSharedFromThis<FPackageItem>
 {
 public:
-	FPackageItem(UPackage* InPackage, const FString& InAssetName, const FString& InFileName, const FString& InOwnerName, ECheckBoxState InState, bool InDisabled = false, FString InIconName=TEXT("SavePackages.SCC_DlgNoIcon"), FString InIconToolTip=TEXT(""))
+	FPackageItem(UPackage* InPackage, const FString& InAssetName, const FString& InFileName, const FString& InOwnerName, ECheckBoxState InState, bool InDisabled = false, FString InIconName=TEXT(""), FString InIconToolTip=TEXT(""))
 		: Package(InPackage)
 		, AssetName(InAssetName)
 		, PackageName(FPackageName::ObjectPathToPackageName(InPackage->GetName()))
@@ -285,21 +317,21 @@ public:
 	/**
 	 * Gets the type name and color of the package item
 	 *
-	 * @param OutName	FString into which the type name will be placed, or an empty string if type cannot be obtained
+	 * @param OutName	FText into which the type name will be placed, or an empty string if type cannot be obtained
 	 * @param OutColor	FColor into which the type color will be placed
 	 *
 	 * @return Whether the details were successfully fetched.
 	 */
-	bool GetTypeNameAndColor(FString& OutName, FColor& OutColor) const;
+	bool GetTypeNameAndColor(FText& OutName, FColor& OutColor) const;
 
 	/**
 	 * Gets just the type name of the package item
 	 *
 	 * @return Type name of the package item, or an empty string
 	 */
-	FString GetTypeName() const
+	FText GetTypeName() const
 	{
-		FString OutName;
+		FText OutName;
 		FColor OutColor;
 		GetTypeNameAndColor(OutName, OutColor);
 		return OutName;

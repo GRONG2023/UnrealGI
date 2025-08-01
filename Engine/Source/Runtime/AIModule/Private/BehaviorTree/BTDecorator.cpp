@@ -2,7 +2,10 @@
 
 #include "BehaviorTree/BTDecorator.h"
 #include "BehaviorTree/BTCompositeNode.h"
+#include "GameFramework/Actor.h"
 #include "VisualLogger/VisualLogger.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator)
 
 UBTDecorator::UBTDecorator(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -97,37 +100,22 @@ void UBTDecorator::ConditionalFlowAbort(UBehaviorTreeComponent& OwnerComp, EBTDe
 
 	uint8* NodeMemory = OwnerComp.GetNodeMemory((UBTNode*)this, InstanceIdx);
 
-	const bool bIsExecutingBranch = OwnerComp.IsExecutingBranch(this, GetChildIndex());
 	const bool bPass = WrappedCanExecute(OwnerComp, NodeMemory);
-	const bool bAbortPending = OwnerComp.IsAbortPending();
 	const bool bAlwaysRequestWhenPassing = (RequestMode == EBTDecoratorAbortRequest::ConditionPassing);
 
-	const bool bLogRestart = (bIsExecutingBranch != bPass) || (bIsExecutingBranch && bPass && (bAlwaysRequestWhenPassing || bAbortPending));
-	UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("%s, ConditionalFlowAbort(%s) pass:%d executingBranch:%d abortPending:%d => %s"),
+	UE_VLOG(OwnerComp.GetOwner(), LogBehaviorTree, Verbose, TEXT("%s, ConditionalFlowAbort(%s) pass:%s"),
 		*UBehaviorTreeTypes::DescribeNodeHelper(this),
-		bAlwaysRequestWhenPassing ? TEXT("always when passing") : TEXT("on change"),
-		bPass ? 1 : 0,
-		bIsExecutingBranch ? 1 : 0,
-		bAbortPending ? 1 : 0,
-		bLogRestart ? TEXT("restart") : TEXT("skip"));
+		bAlwaysRequestWhenPassing ? TEXT("always when passing") : TEXT("on change"), 
+		*LexToString(bPass));
 
-	if (bIsExecutingBranch != bPass)
+
+	if (!bPass)
 	{
-		OwnerComp.RequestExecution(this);
+		OwnerComp.RequestBranchDeactivation(*this);
 	}
-	else if (!bIsExecutingBranch && !bPass && GetParentNode() && GetParentNode()->Children.IsValidIndex(GetChildIndex()))
+	else
 	{
-		// this condition here is to remove all active observers _BELOW_ this node
-		// because if this condition failed we no longer want to react to child-conditions
-		// value changes anyway since their nodes execution will be blocked by this condition 
-		// during tree search
-		const UBTCompositeNode* BranchRoot = GetParentNode()->Children[GetChildIndex()].ChildComposite;
-		OwnerComp.RequestUnregisterAuxNodesInBranch(BranchRoot);
-	}
-	else if (bIsExecutingBranch && bPass && (bAlwaysRequestWhenPassing || bAbortPending))
-	{
-		// force result Aborted to restart from this decorator
-		OwnerComp.RequestExecution(GetParentNode(), InstanceIdx, this, GetChildIndex(), EBTNodeResult::Aborted);
+		OwnerComp.RequestBranchActivation(*this, bAlwaysRequestWhenPassing);
 	}
 }
 
@@ -214,10 +202,4 @@ void UBTDecorator::UpdateFlowAbortMode()
 #endif
 }
 
-//----------------------------------------------------------------------//
-// DEPRECATED
-//----------------------------------------------------------------------//
-void UBTDecorator::InitializeDecorator(uint8 InChildIndex)
-{
-	InitializeParentLink(InChildIndex);
-}
+

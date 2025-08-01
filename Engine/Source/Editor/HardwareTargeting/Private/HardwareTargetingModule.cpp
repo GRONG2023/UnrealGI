@@ -1,23 +1,37 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "HardwareTargetingModule.h"
-#include "HAL/FileManager.h"
-#include "Modules/ModuleManager.h"
-#include "UObject/UnrealType.h"
-#include "GameMapsSettings.h"
-#include "GameFramework/InputSettings.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Textures/SlateIcon.h"
-#include "EditorStyleSet.h"
-#include "ISettingsModule.h"
-#include "Widgets/SWidget.h"
-#include "SDecoratedEnumCombo.h"
 
+#include "Containers/EnumAsByte.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "Engine/RendererSettings.h"
-#include "Widgets/SToolTip.h"
+#include "GameFramework/InputSettings.h"
+#include "GameMapsSettings.h"
+#include "HAL/FileManager.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
 #include "IDocumentation.h"
+#include "ISettingsModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/DateTime.h"
+#include "Modules/ModuleManager.h"
+#include "SEnumCombo.h"
+#include "SceneUtils.h"
 #include "Settings/EditorProjectSettings.h"
 #include "SlateSettings.h"
+#include "Templates/Tuple.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SToolTip.h"
 
 #define LOCTEXT_NAMESPACE "HardwareTargeting"
 
@@ -84,7 +98,7 @@ struct FMetaSettingGatherer
 			const FString Filename = Pair.Key->GetDefaultConfigFilename();
 			const FDateTime BeforeTime = IFileManager::Get().GetTimeStamp(*Filename);
 
-			Pair.Key->UpdateDefaultConfigFile();
+			Pair.Key->TryUpdateDefaultConfigFile();
 
 			const FDateTime AfterTime = IFileManager::Get().GetTimeStamp(*Filename);
 			bSuccess = BeforeTime != AfterTime && bSuccess;
@@ -109,11 +123,13 @@ FText FMetaSettingGatherer::ValueToString(EAntiAliasingMethod Value)
 	case AAM_None:
 		return LOCTEXT("AA_None", "None");
 	case AAM_FXAA:
-		return LOCTEXT("AA_FXAA", "FXAA");
+		return LOCTEXT("AA_FXAA", "Fast Approximate Anti-Aliasing (FXAA)");
 	case AAM_TemporalAA:
-		return LOCTEXT("AA_TemporalAA", "Temporal AA");
+		return LOCTEXT("AA_TemporalAA", "Temporal Anti-Aliasing (TAA)");
 	case AAM_MSAA:
-		return LOCTEXT("AA_MSAA", "MSAA");
+		return LOCTEXT("AA_MSAA", "Multisample Anti-Aliasing (MSAA)");
+	case AAM_TSR:
+		return LOCTEXT("AAM_TSR", "Temporal Super-Resolution (TSR)");
 	default:
 		return FText::AsNumber((int32)Value);
 	}
@@ -148,8 +164,8 @@ public:
 	// IHardwareTargetingModule interface
 	virtual void ApplyHardwareTargetingSettings() override;
 	virtual TArray<FModifiedDefaultConfig> GetPendingSettingsChanges() override;
-	virtual TSharedRef<SWidget> MakeHardwareClassTargetCombo(FOnHardwareClassChanged OnChanged, TAttribute<EHardwareClass::Type> SelectedEnum, EOrientation Orientation) override;
-	virtual TSharedRef<SWidget> MakeGraphicsPresetTargetCombo(FOnGraphicsPresetChanged OnChanged, TAttribute<EGraphicsPreset::Type> SelectedEnum, EOrientation Orientation) override;
+	virtual TSharedRef<SWidget> MakeHardwareClassTargetCombo(FOnHardwareClassChanged OnChanged, TAttribute<EHardwareClass> SelectedEnum) override;
+	virtual TSharedRef<SWidget> MakeGraphicsPresetTargetCombo(FOnGraphicsPresetChanged OnChanged, TAttribute<EGraphicsPreset> SelectedEnum) override;
 	// End of IHardwareTargetingModule interface
 
 private:
@@ -239,7 +255,7 @@ void FHardwareTargetingModule::GatherSettings(FMetaSettingGatherer& Builder)
 		// DOF and AA work on mobile but are expensive, keeping them off by default
 		//@TODO: DOF setting doesn't exist yet
 		// UE_META_SETTING_ENTRY(Builder, URendererSettings, bDefaultFeatureDepthOfField, bHighEndPC);
-		UE_META_SETTING_ENTRY(Builder, URendererSettings, DefaultFeatureAntiAliasing, bHighEndPC ? AAM_TemporalAA : AAM_None);
+		UE_META_SETTING_ENTRY(Builder, URendererSettings, DefaultFeatureAntiAliasing, bHighEndPC ? AAM_TSR : AAM_None);
 	}
 
 	{
@@ -272,43 +288,36 @@ void FHardwareTargetingModule::ApplyHardwareTargetingSettings()
 		{
 			Settings->AppliedTargetedHardwareClass = Settings->TargetedHardwareClass;
 			Settings->AppliedDefaultGraphicsPerformance = Settings->DefaultGraphicsPerformance;
-			Settings->UpdateDefaultConfigFile();
+			Settings->TryUpdateDefaultConfigFile();
 		}
 	}
 }
 
-TSharedRef<SWidget> FHardwareTargetingModule::MakeHardwareClassTargetCombo(FOnHardwareClassChanged OnChanged, TAttribute<EHardwareClass::Type> SelectedEnum, EOrientation Orientation)
+TSharedRef<SWidget> FHardwareTargetingModule::MakeHardwareClassTargetCombo(FOnHardwareClassChanged OnChanged, TAttribute<EHardwareClass> SelectedEnum)
 {
-	TArray<SDecoratedEnumCombo<EHardwareClass::Type>::FComboOption> HardwareClassInfo;
-	HardwareClassInfo.Add(SDecoratedEnumCombo<EHardwareClass::Type>::FComboOption(
-		EHardwareClass::Unspecified, FSlateIcon(FEditorStyle::GetStyleSetName(), "HardwareTargeting.HardwareUnspecified"), LOCTEXT("UnspecifiedCaption", "Unspecified"), false));
-	HardwareClassInfo.Add(SDecoratedEnumCombo<EHardwareClass::Type>::FComboOption(
-		EHardwareClass::Desktop, FSlateIcon(FEditorStyle::GetStyleSetName(), "HardwareTargeting.DesktopPlatform"), LOCTEXT("DesktopCaption", "Desktop / Console")));
-	HardwareClassInfo.Add(SDecoratedEnumCombo<EHardwareClass::Type>::FComboOption(
-		EHardwareClass::Mobile, FSlateIcon(FEditorStyle::GetStyleSetName(), "HardwareTargeting.MobilePlatform"), LOCTEXT("MobileCaption", "Mobile / Tablet")));
+	const UEnum* HardwareClassEnum = StaticEnum<EHardwareClass>();
 
-	return SNew(SDecoratedEnumCombo<EHardwareClass::Type>, MoveTemp(HardwareClassInfo))
-		.SelectedEnum(SelectedEnum)
-		.OnEnumChanged(OnChanged)
-		.Orientation(Orientation)
-		.ToolTip(IDocumentation::Get()->CreateToolTip(LOCTEXT("HardwareClassTooltip", "Choose the overall class of hardware to target (desktop/console or mobile/tablet)."), NULL, TEXT("Shared/Editor/Settings/TargetHardware"), TEXT("HardwareClass")));
+	return
+		SNew(SEnumComboBox, HardwareClassEnum)
+		.ContentPadding(FMargin(4.0f, 0.0f))
+		.ToolTip(IDocumentation::Get()->CreateToolTip(LOCTEXT("HardwareClassTooltip", "Choose the overall class of hardware to target (desktop/console or mobile/tablet)."), NULL, TEXT("Shared/Editor/Settings/TargetHardware"), TEXT("HardwareClass")))
+		.OnEnumSelectionChanged_Lambda([OnChanged](int32 NewSelection, ESelectInfo::Type) { OnChanged.ExecuteIfBound(static_cast<EHardwareClass>(NewSelection)); })
+		.CurrentValue_Lambda([SelectedEnum]() { return static_cast<int32>(SelectedEnum.Get()); });
+
+
+		
 }
 
-TSharedRef<SWidget> FHardwareTargetingModule::MakeGraphicsPresetTargetCombo(FOnGraphicsPresetChanged OnChanged, TAttribute<EGraphicsPreset::Type> SelectedEnum, EOrientation Orientation)
+TSharedRef<SWidget> FHardwareTargetingModule::MakeGraphicsPresetTargetCombo(FOnGraphicsPresetChanged OnChanged, TAttribute<EGraphicsPreset> SelectedEnum)
 {
-	TArray<SDecoratedEnumCombo<EGraphicsPreset::Type>::FComboOption> GraphicsPresetInfo;
-	GraphicsPresetInfo.Add(SDecoratedEnumCombo<EGraphicsPreset::Type>::FComboOption(
-		EGraphicsPreset::Unspecified, FSlateIcon(FEditorStyle::GetStyleSetName(), "HardwareTargeting.GraphicsUnspecified"), LOCTEXT("UnspecifiedCaption", "Unspecified"), false));
-	GraphicsPresetInfo.Add(SDecoratedEnumCombo<EGraphicsPreset::Type>::FComboOption(
-		EGraphicsPreset::Maximum, FSlateIcon(FEditorStyle::GetStyleSetName(), "HardwareTargeting.MaximumQuality"), LOCTEXT("MaximumCaption", "Maximum Quality")));
-	GraphicsPresetInfo.Add(SDecoratedEnumCombo<EGraphicsPreset::Type>::FComboOption(
-		EGraphicsPreset::Scalable, FSlateIcon(FEditorStyle::GetStyleSetName(), "HardwareTargeting.ScalableQuality"), LOCTEXT("ScalableCaption", "Scalable 3D or 2D")));
-
-	return SNew(SDecoratedEnumCombo<EGraphicsPreset::Type>, MoveTemp(GraphicsPresetInfo))
-		.SelectedEnum(SelectedEnum)
-		.OnEnumChanged(OnChanged)
-		.Orientation(Orientation)
-		.ToolTip(IDocumentation::Get()->CreateToolTip(LOCTEXT("GraphicsPresetTooltip", "Choose the graphical level to target (high-end only or scalable from low-end on up)."), NULL, TEXT("Shared/Editor/Settings/TargetHardware"), TEXT("GraphicalLevel")));
+	const UEnum* GraphicsPresetEnum = StaticEnum<EGraphicsPreset>();
+	
+	return
+		SNew(SEnumComboBox, GraphicsPresetEnum)
+		.ContentPadding(FMargin(4.0f, 0.0f))
+		.ToolTip(IDocumentation::Get()->CreateToolTip(LOCTEXT("GraphicsPresetTooltip", "Choose the graphical level to target (high-end only or scalable from low-end on up)."), NULL, TEXT("Shared/Editor/Settings/TargetHardware"), TEXT("GraphicalLevel")))
+		.OnEnumSelectionChanged_Lambda([OnChanged](int32 NewSelection, ESelectInfo::Type) { OnChanged.ExecuteIfBound(static_cast<EGraphicsPreset>(NewSelection)); })
+		.CurrentValue_Lambda([SelectedEnum]() { return static_cast<int32>(SelectedEnum.Get()); });
 }
 
 IHardwareTargetingModule& IHardwareTargetingModule::Get()

@@ -23,7 +23,7 @@
 
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformProcess.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
@@ -147,6 +147,10 @@ class SRenderMovieSceneSettings : public SCompoundWidget, public FGCObject
 	{
 		Collector.AddReferencedObject(MovieSceneCapture);
 	}
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SRenderMovieSceneSettings");
+	}
 
 private:
 
@@ -205,7 +209,7 @@ private:
 	TSharedPtr<IDetailsView> DetailView;
 	TSharedPtr<STextBlock> ErrorText;
 	FOnStartCapture OnStartCapture;
-	UMovieSceneCapture* MovieSceneCapture;
+	TObjectPtr<UMovieSceneCapture> MovieSceneCapture;
 };
 
 DECLARE_DELEGATE_OneParam(FOnCaptureFinished, bool /*bCancelled*/);
@@ -251,9 +255,8 @@ public:
 
 		ChildSlot
 		[
-			SNew(SBorder)
+			SNew(SBox)
 			.Padding(FMargin(15.0f))
-			.BorderImage(FCoreStyle::Get().GetBrush("NotificationList.ItemBackground"))
 			[
 				SNew(SVerticalBox)
 
@@ -437,8 +440,8 @@ void FInEditorCapture::Start()
 	FAudioDeviceHandle AudioDevice = GEngine->GetMainAudioDevice();
 	if (AudioDevice)
 	{
-		TransientMasterVolume = AudioDevice->GetTransientMasterVolume();
-		AudioDevice->SetTransientMasterVolume(0.0f);
+		TransientPrimaryVolume = AudioDevice->GetTransientPrimaryVolume();
+		AudioDevice->SetTransientPrimaryVolume(0.0f);
 	}
 
 	TSharedRef<SWindow> CustomWindow = SNew(SWindow)
@@ -554,7 +557,7 @@ void FInEditorCapture::OnPIEViewportStarted()
 		}
 	}
 
-	UE_LOG(LogTemp, Warning, TEXT("Recieved PIE Creation callback but failed to find PIE World or missing FSlatePlayInEditorInfo for world."));
+	UE_LOG(LogTemp, Warning, TEXT("Received PIE Creation callback but failed to find PIE World or missing FSlatePlayInEditorInfo for world."));
 }
 
 void FInEditorCapture::Shutdown()
@@ -601,7 +604,7 @@ void FInEditorCapture::Shutdown()
 	FAudioDeviceHandle AudioDevice = GEngine->GetMainAudioDevice();
 	if (AudioDevice)
 	{
-		AudioDevice->SetTransientMasterVolume(TransientMasterVolume);
+		AudioDevice->SetTransientPrimaryVolume(TransientPrimaryVolume);
 	}
 
 	CaptureObject->Close();

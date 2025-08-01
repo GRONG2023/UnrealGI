@@ -2,6 +2,8 @@
 
 #include "GeometryCollection/RecordedTransformTrack.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(RecordedTransformTrack)
+
 DEFINE_LOG_CATEGORY_STATIC(LogGeometryCollectionCache, Log, All);
 
 TAutoConsoleVariable<int32> CVarLogCacheReduction(TEXT("p.gc.logcachereduction"), 0, TEXT("Logs amount of data removed from a cache after processing"));
@@ -61,8 +63,8 @@ FRecordedTransformTrack FRecordedTransformTrack::ProcessRawRecordedData(const FR
 				if (CurrFrame.DisabledFlags[ParticleIndex] || CurrFrame.Transforms[ParticleIndex].Equals(PrevFrame.Transforms[ParticleIndex]))
 				{
 					++NumRemovedParticles;
-					CurrFrame.Transforms.RemoveAt(ParticleIndex, 1, false);
-					CurrFrame.TransformIndices.RemoveAt(ParticleIndex, 1, false);
+					CurrFrame.Transforms.RemoveAt(ParticleIndex, 1, EAllowShrinking::No);
+					CurrFrame.TransformIndices.RemoveAt(ParticleIndex, 1, EAllowShrinking::No);
 				}
 			}
 
@@ -96,8 +98,8 @@ FRecordedTransformTrack FRecordedTransformTrack::ProcessRawRecordedData(const FR
 		UScriptStruct* RecordedTrackStructType = FRecordedTransformTrack::StaticStruct();
 		RecordedTrackStructType->SerializeTaggedProperties(AfterAr, (uint8*)&RecordedData, RecordedTrackStructType, nullptr);
 
-		const int32 ArchiveBeforeSize = BeforeAr.GetNum();
-		const int32 ArchiveAfterSize = AfterAr.GetNum();
+		const int32 ArchiveBeforeSize = static_cast<int32>(BeforeAr.GetNum());
+		const int32 ArchiveAfterSize = static_cast<int32>(AfterAr.GetNum());
 
 		// Dump data reduction stats.
 		FNumberFormattingOptions Opts;

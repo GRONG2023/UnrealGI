@@ -6,16 +6,42 @@
 
 #pragma once
 
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Serialization/MemoryLayout.h"
+#include "HAL/Platform.h"
+#include "Misc/AssertionMacros.h"
 #include "RHI.h"
+#include "RHICommandList.h"
+#include "RHIDefinitions.h"
+#include "Serialization/Archive.h"
+#include "Serialization/MemoryLayout.h"
 
+class FPointerTableBase;
+class FRHIComputeShader;
+class FRHITexture;
+class FRHIUnorderedAccessView;
 class FShaderParameterMap;
 class FShaderParametersMetadata;
+struct FRWBuffer;
+struct FRWBufferStructured;
 struct FShaderCompilerEnvironment;
 
-RENDERCORE_API void CacheUniformBufferIncludes(TMap<const TCHAR*, struct FCachedUniformBufferDeclaration>& Cache, EShaderPlatform Platform);
+enum class EShaderParameterType : uint8;
+DECLARE_INTRINSIC_TYPE_LAYOUT(EShaderParameterType);
 
+enum class EShaderCodeResourceBindingType : uint8;
+DECLARE_INTRINSIC_TYPE_LAYOUT(EShaderCodeResourceBindingType);
+
+#if WITH_EDITOR
+namespace UE::ShaderParameters
+{
+	/** Creates a shader code declaration of this struct for the given shader platform. */
+	RENDERCORE_API FString CreateUniformBufferShaderDeclaration(const TCHAR* Name, const FShaderParametersMetadata& UniformBufferStruct);
+
+	RENDERCORE_API void AddUniformBufferIncludesToEnvironment(FShaderCompilerEnvironment& OutEnvironment, const TSet<const TCHAR*, TStringPointerSetKeyFuncs_DEPRECATED<const TCHAR*>>& InUniformBufferNames);
+}
+#endif
 
 enum EShaderParameterFlags
 {
@@ -38,7 +64,7 @@ public:
 
 	RENDERCORE_API void Bind(const FShaderParameterMap& ParameterMap,const TCHAR* ParameterName, EShaderParameterFlags Flags = SPF_Optional);
 	friend RENDERCORE_API FArchive& operator<<(FArchive& Ar,FShaderParameter& P);
-	bool IsBound() const { return NumBytes > 0; }
+	FORCEINLINE bool IsBound() const { return NumBytes > 0; }
 	
 	inline bool IsInitialized() const 
 	{ 
@@ -61,30 +87,26 @@ class FShaderResourceParameter
 {
 	DECLARE_EXPORTED_TYPE_LAYOUT(FShaderResourceParameter, RENDERCORE_API, NonVirtual);
 public:
-	FShaderResourceParameter()
-	:	BaseIndex(0)
-	,	NumResources(0) 
-	{}
+	FShaderResourceParameter() = default;
 
 	RENDERCORE_API void Bind(const FShaderParameterMap& ParameterMap,const TCHAR* ParameterName,EShaderParameterFlags Flags = SPF_Optional);
 	friend RENDERCORE_API FArchive& operator<<(FArchive& Ar,FShaderResourceParameter& P);
-	bool IsBound() const { return NumResources > 0; }
 
-	inline bool IsInitialized() const 
-	{ 
-		return true;
-	}
+	inline bool IsBound() const { return NumResources > 0; }
+	inline bool IsInitialized() const { return true; }
 
-	uint32 GetBaseIndex() const { return BaseIndex; }
-	uint32 GetNumResources() const { return NumResources; }
+	inline uint32 GetBaseIndex() const { return BaseIndex; }
+	inline uint32 GetNumResources() const { return NumResources; }
+	inline EShaderParameterType GetType() const { return Type; }
 
 private:
-	LAYOUT_FIELD(uint16, BaseIndex);
-	LAYOUT_FIELD(uint16, NumResources);
+	LAYOUT_FIELD_INITIALIZED(uint16, BaseIndex, 0);
+	LAYOUT_FIELD_INITIALIZED(uint8, NumResources, 0);
+	LAYOUT_FIELD_INITIALIZED(EShaderParameterType, Type, {});
 };
 
 /** A class that binds either a UAV or SRV of a resource. */
-class FRWShaderParameter
+class UE_DEPRECATED(5.3, "Individual shader parameters should be used instead of FRWShaderParameter.") FRWShaderParameter
 {
 	DECLARE_EXPORTED_TYPE_LAYOUT(FRWShaderParameter, RENDERCORE_API, NonVirtual);
 public:
@@ -101,12 +123,12 @@ public:
 		checkf(!(SRVParameter.GetNumResources() && UAVParameter.GetNumResources()),TEXT("Shader binds SRV and UAV of the same resource: %s"),BaseName);
 	}
 
-	bool IsBound() const
+	FORCEINLINE bool IsBound() const
 	{
 		return SRVParameter.IsBound() || UAVParameter.IsBound();
 	}
 
-	bool IsUAVBound() const
+	FORCEINLINE bool IsUAVBound() const
 	{
 		return UAVParameter.IsBound();
 	}
@@ -131,15 +153,15 @@ public:
 	inline void SetTexture(TRHICmdList& RHICmdList, const TShaderRHIRef& Shader, FRHITexture* Texture, FRHIUnorderedAccessView* UAV) const;
 
 	template<typename TRHICmdList>
+	inline void SetUAV(TRHICmdList& RHICmdList, FRHIComputeShader* ComputeShader, FRHIUnorderedAccessView* UAV) const;
+
+	template<typename TRHICmdList>
 	inline void UnsetUAV(TRHICmdList& RHICmdList, FRHIComputeShader* ComputeShader) const;
 
 private:
 	LAYOUT_FIELD(FShaderResourceParameter, SRVParameter);
 	LAYOUT_FIELD(FShaderResourceParameter, UAVParameter);
 };
-
-/** Creates a shader code declaration of this struct for the given shader platform. */
-extern RENDERCORE_API void CreateUniformBufferShaderDeclaration(const TCHAR* Name,const FShaderParametersMetadata& UniformBufferStruct, EShaderPlatform Platform, FString& OutDeclaration);
 
 class FShaderUniformBufferParameter
 {
@@ -149,7 +171,9 @@ public:
 	:	BaseIndex(0xffff)
 	{}
 
+#if WITH_EDITOR
 	static RENDERCORE_API void ModifyCompilationEnvironment(const TCHAR* ParameterName,const FShaderParametersMetadata& Struct,EShaderPlatform Platform,FShaderCompilerEnvironment& OutEnvironment);
+#endif // WITH_EDITOR
 
 	RENDERCORE_API void Bind(const FShaderParameterMap& ParameterMap,const TCHAR* ParameterName,EShaderParameterFlags Flags = SPF_Optional);
 
@@ -159,7 +183,7 @@ public:
 		return Ar;
 	}
 
-	bool IsBound() const { return BaseIndex != 0xffff; }
+	FORCEINLINE bool IsBound() const { return BaseIndex != 0xffff; }
 
 	void Serialize(FArchive& Ar)
 	{
@@ -181,10 +205,12 @@ template<typename TBufferStruct>
 class TShaderUniformBufferParameter : public FShaderUniformBufferParameter
 {
 public:
+#if WITH_EDITOR
 	static void ModifyCompilationEnvironment(const TCHAR* ParameterName,EShaderPlatform Platform, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		FShaderUniformBufferParameter::ModifyCompilationEnvironment(ParameterName,TBufferStruct::StaticStruct,Platform,OutEnvironment);
 	}
+#endif // WITH_EDITOR
 
 	friend FArchive& operator<<(FArchive& Ar,TShaderUniformBufferParameter& P)
 	{

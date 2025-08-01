@@ -1,7 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "EnvironmentQuery/EnvQueryTraceHelpers.h"
+#include "Engine/HitResult.h"
 #include "NavigationData.h"
+#include "NavFilters/NavigationQueryFilter.h"
+#include "Algo/RemoveIf.h"
 
 template<>
 void FEQSHelpers::FBatchTrace::DoSingleSourceMultiDestinations<EEnvTraceShape::Line>(const FVector& Source, TArray<FNavLocation>& Points)
@@ -16,7 +19,7 @@ void FEQSHelpers::FBatchTrace::DoSingleSourceMultiDestinations<EEnvTraceShape::L
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -34,7 +37,7 @@ void FEQSHelpers::FBatchTrace::DoSingleSourceMultiDestinations<EEnvTraceShape::B
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -52,7 +55,7 @@ void FEQSHelpers::FBatchTrace::DoSingleSourceMultiDestinations<EEnvTraceShape::S
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -70,7 +73,7 @@ void FEQSHelpers::FBatchTrace::DoSingleSourceMultiDestinations<EEnvTraceShape::C
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -165,7 +168,7 @@ void FEQSHelpers::FBatchTrace::DoProject<EEnvTraceShape::Line>(TArray<FNavLocati
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 
 		if (TraceHits.IsValidIndex(Idx))
@@ -188,7 +191,7 @@ void FEQSHelpers::FBatchTrace::DoProject<EEnvTraceShape::Box>(TArray<FNavLocatio
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 
 		if (TraceHits.IsValidIndex(Idx))
@@ -211,7 +214,7 @@ void FEQSHelpers::FBatchTrace::DoProject<EEnvTraceShape::Sphere>(TArray<FNavLoca
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 
 		if (TraceHits.IsValidIndex(Idx))
@@ -234,7 +237,7 @@ void FEQSHelpers::FBatchTrace::DoProject<EEnvTraceShape::Capsule>(TArray<FNavLoc
 		}
 		else if (TraceMode == ETraceMode::Discard)
 		{
-			Points.RemoveAt(Idx, 1, false);
+			Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 		}
 
 		if (TraceHits.IsValidIndex(Idx))
@@ -285,14 +288,12 @@ void FEQSHelpers::RunRaycastsOnNavHitOnlyWalls(const ANavigationData& NavData, c
 	{
 		check(NavData.GetWorld());
 
-		ECollisionChannel TraceCollisionChannel = UEngineTypes::ConvertToCollisionChannel(TraceData.TraceChannel);
 		FVector TraceExtent(TraceData.ExtentX, TraceData.ExtentY, TraceData.ExtentZ);
 
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(EnvQueryTrace), TraceData.bTraceComplex);
 		TraceParams.AddIgnoredActors(IgnoredActors);
 
-		FBatchTrace TraceHelper(NavData.GetWorld(), TraceCollisionChannel, TraceParams, TraceExtent, TraceMode);
-		FVector HitPos(FVector::ZeroVector);
+		FBatchTrace TraceHelper(NavData.GetWorld(), TraceData, TraceParams, TraceExtent, TraceMode);
 
 		switch (TraceData.TraceShape)
 		{
@@ -316,6 +317,38 @@ void FEQSHelpers::RunRaycastsOnNavHitOnlyWalls(const ANavigationData& NavData, c
 			break;
 		}
 	}
+}
+
+bool FEQSHelpers::FBatchTrace::RunLineTrace(const FVector& StartPos, const FVector& EndPos, FVector& HitPos) const
+{
+	FHitResult OutHit;
+	const bool bHit = World->LineTraceSingleByChannel(OutHit, StartPos, EndPos, Channel, QueryParams, ResponseParams);
+	HitPos = OutHit.Location;
+	return bHit;
+}
+
+bool FEQSHelpers::FBatchTrace::RunSphereTrace(const FVector& StartPos, const FVector& EndPos, FVector& HitPos) const
+{
+	FHitResult OutHit;
+	const bool bHit = World->SweepSingleByChannel(OutHit, StartPos, EndPos, FQuat::Identity, Channel, FCollisionShape::MakeSphere(FloatCastChecked<float>(Extent.X, UE::LWC::DefaultFloatPrecision)), QueryParams, ResponseParams);
+	HitPos = OutHit.Location;
+	return bHit;
+}
+
+bool FEQSHelpers::FBatchTrace::RunCapsuleTrace(const FVector& StartPos, const FVector& EndPos, FVector& HitPos) const
+{
+	FHitResult OutHit;
+	const bool bHit = World->SweepSingleByChannel(OutHit, StartPos, EndPos, FQuat::Identity, Channel, FCollisionShape::MakeCapsule(FloatCastChecked<float>(Extent.X, UE::LWC::DefaultFloatPrecision), FloatCastChecked<float>(Extent.Z, 1./16.)), QueryParams, ResponseParams);
+	HitPos = OutHit.Location;
+	return bHit;
+}
+
+bool FEQSHelpers::FBatchTrace::RunBoxTrace(const FVector& StartPos, const FVector& EndPos, FVector& HitPos) const
+{
+	FHitResult OutHit;
+	const bool bHit = World->SweepSingleByChannel(OutHit, StartPos, EndPos, FQuat((EndPos - StartPos).Rotation()), Channel, FCollisionShape::MakeBox(Extent), QueryParams, ResponseParams);
+	HitPos = OutHit.Location;
+	return bHit;
 }
 
 void FEQSHelpers::RunNavRaycasts(const ANavigationData& NavData, const UObject& Querier, const FEnvTraceData& TraceData, const FVector& SourcePt, TArray<FNavLocation>& Points, const ETraceMode TraceMode /*= ETraceMode::Keep*/)
@@ -343,7 +376,7 @@ void FEQSHelpers::RunNavRaycasts(const ANavigationData& NavData, const UObject& 
 		{
 			if (!RaycastWorkload[Idx].bDidHit)
 			{
-				Points.RemoveAt(Idx, 1, false);
+				Points.RemoveAt(Idx, 1, EAllowShrinking::No);
 			}
 		}
 	}
@@ -381,22 +414,27 @@ void FEQSHelpers::RunNavProjection(const ANavigationData& NavData, const UObject
 			Points[Idx] = Workload[Idx].OutLocation;
 			Points[Idx].Location.Z += TraceData.PostProjectionVerticalOffset;
 		}
-		else if (TraceMode == ETraceMode::Discard)
+	}
+
+	if (TraceMode == ETraceMode::Discard)
+	{
+		const FNavLocation* PointsBegin = Points.GetData();
+		int32 NewNum = Algo::StableRemoveIf(Points, [&Workload, PointsBegin](FNavLocation& Point)
 		{
-			Points.RemoveAt(Idx, 1, false);
-		}
+			return !Workload[IntCastChecked<int32>(&Point - PointsBegin)].bResult;
+		});
+		Points.SetNum(NewNum, EAllowShrinking::No);
 	}
 }
 
 void FEQSHelpers::RunPhysRaycasts(UWorld* World, const FEnvTraceData& TraceData, const FVector& SourcePt, TArray<FNavLocation>& Points, const TArray<AActor*>& IgnoredActors, const ETraceMode TraceMode)
 {
-	ECollisionChannel TraceCollisionChannel = UEngineTypes::ConvertToCollisionChannel(TraceData.TraceChannel);
 	FVector TraceExtent(TraceData.ExtentX, TraceData.ExtentY, TraceData.ExtentZ);
 
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(EnvQueryTrace), TraceData.bTraceComplex);
 	TraceParams.AddIgnoredActors(IgnoredActors);
 
-	FBatchTrace BatchOb(World, TraceCollisionChannel, TraceParams, TraceExtent, TraceMode);
+	FBatchTrace BatchOb(World, TraceData, TraceParams, TraceExtent, TraceMode);
 
 	switch (TraceData.TraceShape)
 	{
@@ -423,12 +461,11 @@ void FEQSHelpers::RunPhysRaycasts(UWorld* World, const FEnvTraceData& TraceData,
 
 void FEQSHelpers::RunPhysProjection(UWorld* World, const FEnvTraceData& TraceData, TArray<FNavLocation>& Points, const ETraceMode TraceMode)
 {
-	ECollisionChannel TraceCollisionChannel = UEngineTypes::ConvertToCollisionChannel(TraceData.TraceChannel);
 	FVector TraceExtent(TraceData.ExtentX, TraceData.ExtentY, TraceData.ExtentZ);
 
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(EnvQueryTrace), TraceData.bTraceComplex);
 
-	FBatchTrace BatchOb(World, TraceCollisionChannel, TraceParams, TraceExtent, TraceMode);
+	FBatchTrace BatchOb(World, TraceData, TraceParams, TraceExtent, TraceMode);
 
 	switch (TraceData.TraceShape)
 	{
@@ -455,12 +492,11 @@ void FEQSHelpers::RunPhysProjection(UWorld* World, const FEnvTraceData& TraceDat
 
 void FEQSHelpers::RunPhysProjection(UWorld* World, const FEnvTraceData& TraceData, TArray<FNavLocation>& Points, TArray<uint8>& TraceHits)
 {
-	ECollisionChannel TraceCollisionChannel = UEngineTypes::ConvertToCollisionChannel(TraceData.TraceChannel);
 	FVector TraceExtent(TraceData.ExtentX, TraceData.ExtentY, TraceData.ExtentZ);
 
 	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(EnvQueryTrace), TraceData.bTraceComplex);
 
-	FBatchTrace BatchOb(World, TraceCollisionChannel, TraceParams, TraceExtent, ETraceMode::Keep);
+	FBatchTrace BatchOb(World, TraceData, TraceParams, TraceExtent, ETraceMode::Keep);
 	BatchOb.TraceHits.AddZeroed(Points.Num());
 
 	switch (TraceData.TraceShape)

@@ -11,13 +11,13 @@ class IWebBrowserSingleton;
 /**
  * WebBrowser initialization settings, can be used to override default init behaviors.
  */
-struct WEBBROWSER_API FWebBrowserInitSettings
+struct FWebBrowserInitSettings
 {
 public:
 	/**
 	 * Default constructor. Initializes all members with default behavior values.
 	 */
-	FWebBrowserInitSettings();
+	WEBBROWSER_API FWebBrowserInitSettings();
 
 	// The string which is appended to the browser's user-agent value.
 	FString ProductVersion;
@@ -63,4 +63,12 @@ public:
 	 * @return The Web Browser Singleton
 	 */
 	virtual IWebBrowserSingleton* GetSingleton() = 0;
+
+
+	/**
+	 * Check whether the web module loaded its requirements successfully
+	 *
+	 * @return True if the module load worked
+	 */
+	virtual bool IsWebModuleAvailable() const = 0;
 };

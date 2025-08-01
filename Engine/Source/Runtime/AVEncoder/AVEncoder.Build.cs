@@ -4,6 +4,8 @@ using UnrealBuildTool;
 using System.IO;
 using System;
 
+[SupportedPlatforms("Linux")]
+[SupportedPlatformGroups("Windows")]
 public class AVEncoder : ModuleRules
 {
 	public AVEncoder(ReadOnlyTargetRules Target) : base(Target)
@@ -16,16 +18,9 @@ public class AVEncoder : ModuleRules
 
 		// PrecompileForTargets = PrecompileTargetsType.None;
 
-		PublicIncludePaths.AddRange(new string[] {
-			// ... add public include paths required here ...
-		});
-
-		PrivateIncludePaths.AddRange(new string[] {
-			// ... add other private include paths required here ...
-		});
-
 		PrivateDependencyModuleNames.AddRange(new string[] {
-			"Engine"
+			"Engine",
+			"SignalProcessing"
 		});
 
 		PublicDependencyModuleNames.AddRange(new string[] {
@@ -36,21 +31,9 @@ public class AVEncoder : ModuleRules
 			// ... add other public dependencies that you statically link with here ...
 		});
 
-		DynamicallyLoadedModuleNames.AddRange(new string[] {
-			// ... add any modules that your module loads dynamically here ...
-		});
-
-		string EngineSourceDirectory = Path.GetFullPath(Target.RelativeEnginePath);
-
 		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Windows) || Target.IsInPlatformGroup(UnrealPlatformGroup.Unix))
 		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAftermath");
-			PrivateIncludePathModuleNames.Add("VulkanRHI");
-
-			PrivateIncludePaths.Add(Path.Combine(EngineSourceDirectory, "Source/Runtime/VulkanRHI/Private"));
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "Vulkan");
-
-			PublicIncludePaths.Add(Path.Combine(EngineSourceDirectory, "Source/ThirdParty/Vulkan/Include"));
+			PublicIncludePathModuleNames.Add("Vulkan");
 		}
 
 		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Windows))
@@ -60,18 +43,11 @@ public class AVEncoder : ModuleRules
 				"D3D12RHI"
 			});
 
-			if (Target.Platform != UnrealTargetPlatform.XboxOne)
-			{
-				PublicSystemLibraries.AddRange(new string[] {
-					"DXGI.lib",
-					"d3d11.lib",
-					"d3d12.lib"
-				});
-				
-				PublicDelayLoadDLLs.Add("mfplat.dll");
-				PublicDelayLoadDLLs.Add("mfuuid.dll");
-				PublicDelayLoadDLLs.Add("Mfreadwrite.dll");
-			}
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "DX11", "DX12");
+			
+			PublicDelayLoadDLLs.Add("mfplat.dll");
+			PublicDelayLoadDLLs.Add("mfuuid.dll");
+			PublicDelayLoadDLLs.Add("Mfreadwrite.dll");
 		}
 	}
 }

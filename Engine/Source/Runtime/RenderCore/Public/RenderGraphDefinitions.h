@@ -2,10 +2,9 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "RHI.h"
-#include "RendererInterface.h"
 #include "ProfilingDebugging/RealtimeGPUProfiler.h"
+#include "RenderGraphAllocator.h"
+#include "RenderGraphFwd.h"
 
 /** DEFINES */
 
@@ -22,6 +21,21 @@
 /** Whether render graph debugging is enabled and we are compiling with the engine. */
 #define RDG_ENABLE_DEBUG_WITH_ENGINE (RDG_ENABLE_DEBUG && WITH_ENGINE)
 
+/** Whether render graph insight tracing is enabled. */
+#define RDG_ENABLE_TRACE UE_TRACE_ENABLED && !IS_PROGRAM && !UE_BUILD_SHIPPING
+
+#if RDG_ENABLE_TRACE
+	#define IF_RDG_ENABLE_TRACE(Op) Op
+#else
+	#define IF_RDG_ENABLE_TRACE(Op)
+#endif
+
+/** Allows to dump all RDG resources of a frame. */
+#define RDG_DUMP_RESOURCES (WITH_DUMPGPU)
+
+/** Allows to dump RDG resource after each draw call. */
+#define RDG_DUMP_RESOURCES_AT_EACH_DRAW (RDG_DUMP_RESOURCES)
+
 /** The type of GPU events the render graph system supports.
  *  RDG_EVENTS == 0 means there is no string processing at all.
  *  RDG_EVENTS == 1 means the format component of the event name is stored as a const TCHAR*.
@@ -33,17 +47,23 @@
 
 /** Whether render graph GPU events are enabled. */
 #if WITH_PROFILEGPU
-	#define RDG_EVENTS RDG_EVENTS_STRING_COPY
+	#if UE_BUILD_TEST || UE_BUILD_SHIPPING
+		#define RDG_EVENTS RDG_EVENTS_STRING_REF
+	#else
+		#define RDG_EVENTS RDG_EVENTS_STRING_COPY
+	#endif
+#elif RHI_WANT_BREADCRUMB_EVENTS
+	#define RDG_EVENTS RDG_EVENTS_STRING_REF
 #else
 	#define RDG_EVENTS RDG_EVENTS_NONE
 #endif
 
-#define RDG_GPU_SCOPES (RDG_EVENTS || HAS_GPU_STATS)
+#define RDG_GPU_DEBUG_SCOPES (RDG_EVENTS || HAS_GPU_STATS)
 
-#if RDG_GPU_SCOPES
-	#define IF_RDG_GPU_SCOPES(Op) Op
+#if RDG_GPU_DEBUG_SCOPES
+	#define IF_RDG_GPU_DEBUG_SCOPES(Op) Op
 #else
-	#define IF_RDG_GPU_SCOPES(Op)
+	#define IF_RDG_GPU_DEBUG_SCOPES(Op)
 #endif
 
 #define RDG_CPU_SCOPES (CSV_PROFILER)
@@ -54,10 +74,27 @@
 	#define IF_RDG_CPU_SCOPES(Op)
 #endif
 
+#define RDG_CMDLIST_STATS (STATS || ENABLE_STATNAMEDEVENTS)
+
+#if RDG_CMDLIST_STATS
+	#define IF_RDG_CMDLIST_STATS(Op) Op
+#else
+	#define IF_RDG_CMDLIST_STATS(Op)
+#endif
+
 /** ENUMS */
 
+enum class ERDGBuilderFlags
+{
+	None = 0,
+
+	/** Allows the builder to parallelize execution of passes. Without this flag, all passes execute on the render thread. */
+	AllowParallelExecute = 1 << 0
+};
+ENUM_CLASS_FLAGS(ERDGBuilderFlags);
+
 /** Flags to annotate a pass with when calling AddPass. */
-enum class ERDGPassFlags : uint8
+enum class ERDGPassFlags : uint16
 {
 	/** Pass doesn't have any inputs or outputs tracked by the graph. This may only be used by the parameterless AddPass function. */
 	None = 0,
@@ -80,20 +117,16 @@ enum class ERDGPassFlags : uint8
 	/** Render pass begin / end is skipped and left to the user. Only valid when combined with 'Raster'. Disables render pass merging for the pass. */
 	SkipRenderPass = 1 << 5,
 
-	/** Pass accesses raw RHI resources which may be registered with the graph, but all resources are kept in their current state. This flag prevents
-	 *  the graph from scheduling split barriers across the pass. Any splitting is deferred until after the pass executes. The resource may not change
-	 *  state within the pass execution. Affects barrier performance. May not be combined with Async Compute.
-	 */
-	UntrackedAccess = 1 << 6,
+	/** Pass will never have its render pass merged with other passes. */
+	NeverMerge = 1 << 6,
+
+	/** Pass will never run off the render thread. */
+	NeverParallel = 1 << 7,
+
+	ParallelTranslate = 1 << 8,
 
 	/** Pass uses copy commands but writes to a staging resource. */
-	Readback = Copy | NeverCull,
-
-	/** Mask of flags denoting the kinds of RHI commands submitted to a pass. */
-	CommandMask = Raster | Compute | AsyncCompute | Copy,
-
-	/** Mask of flags which can used by a pass flag scope. */
-	ScopeMask = NeverCull | UntrackedAccess
+	Readback = Copy | NeverCull
 };
 ENUM_CLASS_FLAGS(ERDGPassFlags);
 
@@ -103,7 +136,19 @@ enum class ERDGBufferFlags : uint8
 	None = 0,
 
 	/** Tag the buffer to survive through frame, that is important for multi GPU alternate frame rendering. */
-	MultiFrame = 1 << 0
+	MultiFrame = 1 << 0,
+
+	/** The buffer is ignored by RDG tracking and will never be transitioned. Use the flag when registering a buffer with no writable GPU flags.
+	 *  Write access is not allowed for the duration of the graph. This flag is intended as an optimization to cull out tracking of read-only
+	 *  buffers that are used frequently throughout the graph. Note that it's the user's responsibility to ensure the resource is in the correct
+	 *  readable state for use with RDG passes, as RDG does not know the exact state of the resource.
+	 */
+	SkipTracking = 1 << 1,
+
+	/** When set, RDG will perform its first barrier without splitting. Practically, this means the resource is left in its initial state
+	 *  until the first pass it's used within the graph. Without this flag, the resource is split-transitioned at the start of the graph.
+	 */
+	ForceImmediateFirstBarrier = 1 << 2,
 };
 ENUM_CLASS_FLAGS(ERDGBufferFlags);
 
@@ -115,8 +160,20 @@ enum class ERDGTextureFlags : uint8
 	/** Tag the texture to survive through frame, that is important for multi GPU alternate frame rendering. */
 	MultiFrame = 1 << 0,
 
+	/** The buffer is ignored by RDG tracking and will never be transitioned. Use the flag when registering a buffer with no writable GPU flags.
+	 *  Write access is not allowed for the duration of the graph. This flag is intended as an optimization to cull out tracking of read-only
+	 *  buffers that are used frequently throughout the graph. Note that it's the user's responsibility to ensure the resource is in the correct
+	 *  readable state for use with RDG passes, as RDG does not know the exact state of the resource.
+	 */
+	SkipTracking = 1 << 1,
+	
+	/** When set, RDG will perform its first barrier without splitting. Practically, this means the resource is left in its initial state
+	 *  until the first pass it's used within the graph. Without this flag, the resource is split-transitioned at the start of the graph.
+	 */
+	ForceImmediateFirstBarrier = 1 << 2,
+
 	/** Prevents metadata decompression on this texture. */
-	MaintainCompression = 1 << 1
+	MaintainCompression = 1 << 3,
 };
 ENUM_CLASS_FLAGS(ERDGTextureFlags);
 
@@ -131,7 +188,7 @@ enum class ERDGUnorderedAccessViewFlags : uint8
 ENUM_CLASS_FLAGS(ERDGUnorderedAccessViewFlags);
 
 /** The set of concrete parent resource types. */
-enum class ERDGParentResourceType : uint8
+enum class ERDGViewableResourceType : uint8
 {
 	Texture,
 	Buffer,
@@ -148,47 +205,78 @@ enum class ERDGViewType : uint8
 	MAX
 };
 
-/** Returns the equivalent parent resource type for a view type. */
-inline ERDGParentResourceType GetParentResourceType(ERDGViewType ViewType)
+inline ERDGViewableResourceType GetParentType(ERDGViewType ViewType)
 {
 	switch (ViewType)
 	{
 	case ERDGViewType::TextureUAV:
 	case ERDGViewType::TextureSRV:
-		return ERDGParentResourceType::Texture;
+		return ERDGViewableResourceType::Texture;
 	case ERDGViewType::BufferUAV:
 	case ERDGViewType::BufferSRV:
-		return ERDGParentResourceType::Buffer;
+		return ERDGViewableResourceType::Buffer;
+	}
+	checkNoEntry();
+	return ERDGViewableResourceType::MAX;
+}
+
+enum class ERDGResourceExtractionFlags : uint8
+{
+	None = 0,
+
+	// Allows the resource to remain transient. Only use this flag if you intend to register the resource back
+	// into the graph and release the reference. This should not be used if the resource is cached for a long
+	// period of time.
+	AllowTransient = 1,
+};
+ENUM_CLASS_FLAGS(ERDGResourceExtractionFlags);
+
+enum class ERDGInitialDataFlags : uint8
+{
+	/** Specifies the default behavior, which is to make a copy of the initial data for replay when
+	 *  the graph is executed. The user does not need to preserve lifetime of the data pointer.
+	 */
+	None = 0,
+
+	/** Specifies that the user will maintain ownership of the data until the graph is executed. The
+	 *  upload pass will only use a reference to store the data. Use caution with this flag since graph
+	 *  execution is deferred! Useful to avoid the copy if the initial data lifetime is guaranteed to
+	 *  outlive the graph.
+	 */
+	 NoCopy = 1 << 0
+};
+ENUM_CLASS_FLAGS(ERDGInitialDataFlags)
+
+enum class ERDGPooledBufferAlignment : uint8
+{
+	// The buffer size is not aligned.
+	None,
+
+	// The buffer size is aligned up to the next page size.
+	Page,
+
+	// The buffer size is aligned up to the next power of two.
+	PowerOfTwo
+};
+
+/** Returns the equivalent parent resource type for a view type. */
+inline ERDGViewableResourceType GetViewableResourceType(ERDGViewType ViewType)
+{
+	switch (ViewType)
+	{
+	case ERDGViewType::TextureUAV:
+	case ERDGViewType::TextureSRV:
+		return ERDGViewableResourceType::Texture;
+	case ERDGViewType::BufferUAV:
+	case ERDGViewType::BufferSRV:
+		return ERDGViewableResourceType::Buffer;
 	default:
 		checkNoEntry();
-		return ERDGParentResourceType::MAX;
+		return ERDGViewableResourceType::MAX;
 	}
 }
 
-/** Used to specify a texture metadata plane when creating a view. */
-enum class ERDGTextureMetaDataAccess : uint8
-{
-	/** The primary plane is used with default compression behavior. */
-	None = 0,
-
-	/** The primary plane is used without decompressing it. */
-	CompressedSurface,
-
-	/** The depth plane is used with default compression behavior. */
-	Depth,
-
-	/** The stencil plane is used with default compression behavior. */
-	Stencil,
-
-	/** The HTile plane is used. */
-	HTile,
-
-	/** the FMask plane is used. */
-	FMask,
-
-	/** the CMask plane is used. */
-	CMask
-};
+using ERDGTextureMetaDataAccess = ERHITextureMetaDataAccess;
 
 /** Returns the associated FRHITransitionInfo plane index. */
 inline int32 GetResourceTransitionPlaneForMetadataAccess(ERDGTextureMetaDataAccess Metadata)
@@ -206,94 +294,11 @@ inline int32 GetResourceTransitionPlaneForMetadataAccess(ERDGTextureMetaDataAcce
 	}
 }
 
-/** Simple C++ object allocator which tracks and destructs objects allocated using the MemStack allocator. */
-class FRDGAllocator final
-{
-public:
-	FRDGAllocator()
-		: MemStack(0)
-	{
-		TrackedAllocs.Reserve(16);
-	}
-
-	~FRDGAllocator()
-	{
-		checkSlow(MemStack.IsEmpty());
-	}
-
-	/** Allocates raw memory. */
-	FORCEINLINE void* Alloc(uint32 SizeInBytes, uint32 AlignInBytes)
-	{
-		return MemStack.Alloc(SizeInBytes, AlignInBytes);
-	}
-
-	/** Allocates POD memory without destructor tracking. */
-	template <typename PODType>
-	FORCEINLINE PODType* AllocPOD()
-	{
-		return reinterpret_cast<PODType*>(Alloc(sizeof(PODType), alignof(PODType)));
-	}
-
-	/** Allocates a C++ object with destructor tracking. */
-	template <typename ObjectType, typename... TArgs>
-	FORCEINLINE ObjectType* AllocObject(TArgs&&... Args)
-	{
-		TTrackedAlloc<ObjectType>* TrackedAlloc = new(MemStack) TTrackedAlloc<ObjectType>(Forward<TArgs&&>(Args)...);
-		check(TrackedAlloc);
-		TrackedAllocs.Add(TrackedAlloc);
-		return TrackedAlloc->Get();
-	}
-
-	/** Allocates a C++ object with no destructor tracking (dangerous!). */
-	template <typename ObjectType, typename... TArgs>
-	FORCEINLINE ObjectType* AllocNoDestruct(TArgs&&... Args)
-	{
-		return new (MemStack) ObjectType(Forward<TArgs&&>(Args)...);
-	}
-
-	/** Releases all allocations. */
-	void ReleaseAll()
-	{
-		for (int32 Index = TrackedAllocs.Num() - 1; Index >= 0; --Index)
-		{
-			TrackedAllocs[Index]->~FTrackedAlloc();
-		}
-		TrackedAllocs.Empty();
-		MemStack.Flush();
-	}
-
-	FORCEINLINE int32 GetByteCount() const
-	{
-		return MemStack.GetByteCount();
-	}
-
-private:
-	class FTrackedAlloc
-	{
-	public:
-		virtual ~FTrackedAlloc() = default;
-	};
-
-	template <typename ObjectType>
-	class TTrackedAlloc : public FTrackedAlloc
-	{
-	public:
-		template <typename... TArgs>
-		FORCEINLINE TTrackedAlloc(TArgs&&... Args) : Object(Forward<TArgs&&>(Args)...) {}
-
-		FORCEINLINE ObjectType* Get() { return &Object; }
-
-	private:
-		ObjectType Object;
-	};
-
-	FMemStackBase MemStack;
-	TArray<FTrackedAlloc*, SceneRenderingAllocator> TrackedAllocs;
-};
-
 /** HANDLE UTILITIES */
 
 /** Handle helper class for internal tracking of RDG types. */
+// Disable false positive buffer overrun warning during pgo linking step
+PRAGMA_DISABLE_BUFFER_OVERRUN_WARNING
 template <typename LocalObjectType, typename LocalIndexType>
 class TRDGHandle
 {
@@ -307,19 +312,49 @@ public:
 
 	explicit inline TRDGHandle(int32 InIndex)
 	{
-		check(InIndex >= 0 && InIndex < kNullIndex);
-		Index = InIndex;
+		check(InIndex >= 0 && InIndex <= kNullIndex);
+		Index = (IndexType)InIndex;
 	}
 
 	FORCEINLINE IndexType GetIndex() const { check(IsValid()); return Index; }
+	FORCEINLINE IndexType GetIndexUnchecked() const { return Index; }
 	FORCEINLINE bool IsNull()  const { return Index == kNullIndex; }
 	FORCEINLINE bool IsValid() const { return Index != kNullIndex; }
+	FORCEINLINE operator bool() const { return IsValid(); }
 	FORCEINLINE bool operator==(TRDGHandle Other) const { return Index == Other.Index; }
 	FORCEINLINE bool operator!=(TRDGHandle Other) const { return Index != Other.Index; }
 	FORCEINLINE bool operator<=(TRDGHandle Other) const { check(IsValid() && Other.IsValid()); return Index <= Other.Index; }
 	FORCEINLINE bool operator>=(TRDGHandle Other) const { check(IsValid() && Other.IsValid()); return Index >= Other.Index; }
 	FORCEINLINE bool operator< (TRDGHandle Other) const { check(IsValid() && Other.IsValid()); return Index <  Other.Index; }
 	FORCEINLINE bool operator> (TRDGHandle Other) const { check(IsValid() && Other.IsValid()); return Index >  Other.Index; }
+
+	FORCEINLINE TRDGHandle& operator+=(int32 Increment)
+	{
+		check(int64(Index + Increment) <= int64(kNullIndex));
+		Index += (IndexType)Increment;
+		return *this;
+	}
+
+	FORCEINLINE TRDGHandle& operator-=(int32 Decrement)
+	{
+		check(int64(Index - Decrement) > 0);
+		Index -= (IndexType)Decrement;
+		return *this;
+	}
+
+	FORCEINLINE TRDGHandle operator-(int32 Subtract) const
+	{
+		TRDGHandle Handle = *this;
+		Handle -= Subtract;
+		return Handle;
+	}
+
+	FORCEINLINE TRDGHandle operator+(int32 Add) const
+	{
+		TRDGHandle Handle = *this;
+		Handle += Add;
+		return Handle;
+	}
 
 	FORCEINLINE TRDGHandle& operator++()
 	{
@@ -335,25 +370,57 @@ public:
 		return *this;
 	}
 
+	// Returns the min of two pass handles. Returns null if both are null; returns the valid handle if one is null.
+	FORCEINLINE static TRDGHandle Min(TRDGHandle A, TRDGHandle B)
+	{
+		// If either index is null is will fail the comparison.
+		return A.Index < B.Index ? A : B;
+	}
+
+	// Returns the max of two pass handles. Returns null if both are null; returns the valid handle if one is null.
+	FORCEINLINE static TRDGHandle Max(TRDGHandle A, TRDGHandle B)
+	{
+		// If either index is null, it will wrap around to 0 and fail the comparison.
+		return (IndexType)(A.Index + 1) > (IndexType)(B.Index + 1) ? A : B;
+	}
+
 private:
 	static const IndexType kNullIndex = TNumericLimits<IndexType>::Max();
 	IndexType Index = kNullIndex;
+
+	friend FORCEINLINE uint32 GetTypeHash(TRDGHandle Handle)
+	{
+		return Handle.GetIndex();
+	}
+};
+PRAGMA_ENABLE_BUFFER_OVERRUN_WARNING
+
+enum class ERDGHandleRegistryDestructPolicy
+{
+	Registry,
+	Allocator,
+	Never
 };
 
-template <typename ObjectType, typename IndexType>
-FORCEINLINE uint32 GetTypeHash(TRDGHandle<ObjectType, IndexType> Handle)
-{
-	return Handle.GetIndex();
-}
-
 /** Helper handle registry class for internal tracking of RDG types. */
-template <typename LocalHandleType>
+template <typename LocalHandleType, ERDGHandleRegistryDestructPolicy DestructPolicy = ERDGHandleRegistryDestructPolicy::Registry>
 class TRDGHandleRegistry
 {
 public:
 	using HandleType = LocalHandleType;
 	using ObjectType = typename HandleType::ObjectType;
 	using IndexType = typename HandleType::IndexType;
+
+	TRDGHandleRegistry() = default;
+	TRDGHandleRegistry(const TRDGHandleRegistry&) = delete;
+	TRDGHandleRegistry(TRDGHandleRegistry&&) = default;
+	TRDGHandleRegistry& operator=(TRDGHandleRegistry&&) = default;
+	TRDGHandleRegistry& operator=(const TRDGHandleRegistry&) = delete;
+
+	~TRDGHandleRegistry()
+	{
+		Clear();
+	}
 
 	void Insert(ObjectType* Object)
 	{
@@ -365,14 +432,47 @@ public:
 	DerivedType* Allocate(FRDGAllocator& Allocator, TArgs&&... Args)
 	{
 		static_assert(TIsDerivedFrom<DerivedType, ObjectType>::Value, "You must specify a type that derives from ObjectType");
-		DerivedType* Object = Allocator.AllocObject<DerivedType>(Forward<TArgs>(Args)...);
+		DerivedType* Object;
+		if (DestructPolicy == ERDGHandleRegistryDestructPolicy::Allocator)
+		{
+			Object = Allocator.Alloc<DerivedType>(Forward<TArgs>(Args)...);
+		}
+		else
+		{
+			Object = Allocator.AllocNoDestruct<DerivedType>(Forward<TArgs>(Args)...);
+		}
 		Insert(Object);
 		return Object;
 	}
 
 	void Clear()
 	{
+		if (DestructPolicy == ERDGHandleRegistryDestructPolicy::Registry)
+		{
+			for (int32 Index = Array.Num() - 1; Index >= 0; --Index)
+			{
+				Array[Index]->~ObjectType();
+			}
+		}
 		Array.Empty();
+	}
+
+	template <typename FunctionType>
+	void Enumerate(FunctionType Function)
+	{
+		for (ObjectType* Object : Array)
+		{
+			Function(Object);
+		}
+	}
+
+	template <typename FunctionType>
+	void Enumerate(FunctionType Function) const
+	{
+		for (const ObjectType* Object : Array)
+		{
+			Function(Object);
+		}
 	}
 
 	FORCEINLINE const ObjectType* Get(HandleType Handle) const
@@ -416,20 +516,16 @@ public:
 	}
 
 private:
-	TArray<ObjectType*, SceneRenderingAllocator> Array;
+	TArray<ObjectType*, FRDGArrayAllocator> Array;
 };
 
 /** Specialization of bit array with compile-time type checking for handles and a pre-configured allocator. */
 template <typename HandleType>
-class TRDGHandleBitArray : public TBitArray<SceneRenderingBitArrayAllocator>
+class TRDGHandleBitArray : public TBitArray<FRDGBitArrayAllocator>
 {
-	using Base = TBitArray<SceneRenderingBitArrayAllocator>;
+	using Base = TBitArray<FRDGBitArrayAllocator>;
 public:
-	TRDGHandleBitArray() = default;
-
-	explicit TRDGHandleBitArray(bool bValue, int32 InNumBits)
-		: Base(bValue, InNumBits)
-	{}
+	using Base::Base;
 
 	FORCEINLINE FBitReference operator[](HandleType Handle)
 	{
@@ -486,13 +582,111 @@ private:
 template <typename ObjectType, typename IndexType>
 const TRDGHandle<ObjectType, IndexType> TRDGHandle<ObjectType, IndexType>::Null;
 
-/** FORWARD DECLARATIONS */
+struct FRDGTextureDesc : public FRHITextureDesc
+{
+	static FRDGTextureDesc Create2D(
+		FIntPoint           Size
+		, EPixelFormat        Format
+		, FClearValueBinding  ClearValue
+		, ETextureCreateFlags Flags
+		, uint8               NumMips = 1
+		, uint8               NumSamples = 1
+		, uint32              ExtData = 0
+	)
+	{
+		const uint16 Depth = 1;
+		const uint16 ArraySize = 1;
+		return FRDGTextureDesc(ETextureDimension::Texture2D, Flags, Format, ClearValue, { Size.X, Size.Y }, Depth, ArraySize, NumMips, NumSamples, ExtData);
+	}
 
-struct FRDGTextureDesc;
+	static FRDGTextureDesc Create2DArray(
+		FIntPoint           Size
+		, EPixelFormat        Format
+		, FClearValueBinding  ClearValue
+		, ETextureCreateFlags Flags
+		, uint16              ArraySize
+		, uint8               NumMips = 1
+		, uint8               NumSamples = 1
+		, uint32              ExtData = 0
+	)
+	{
+		const uint16 Depth = 1;
+		return FRDGTextureDesc(ETextureDimension::Texture2DArray, Flags, Format, ClearValue, { Size.X, Size.Y }, Depth, ArraySize, NumMips, NumSamples, ExtData);
+	}
+
+	static FRDGTextureDesc Create3D(
+		FIntVector          Size
+		, EPixelFormat        Format
+		, FClearValueBinding  ClearValue
+		, ETextureCreateFlags Flags
+		, uint8               NumMips = 1
+		, uint32              ExtData = 0
+	)
+	{
+		const uint16 ArraySize = 1;
+		const uint8 LocalNumSamples = 1;
+
+		checkf(Size.Z <= TNumericLimits<decltype(FRDGTextureDesc::Depth)>::Max(), TEXT("Depth parameter (Size.Z) exceeds valid range"));
+
+		return FRDGTextureDesc(ETextureDimension::Texture3D, Flags, Format, ClearValue, { Size.X, Size.Y }, (uint16)Size.Z, ArraySize, NumMips, LocalNumSamples, ExtData);
+	}
+
+	static FRDGTextureDesc CreateCube(
+		uint32              Size
+		, EPixelFormat        Format
+		, FClearValueBinding  ClearValue
+		, ETextureCreateFlags Flags
+		, uint8               NumMips = 1
+		, uint8               NumSamples = 1
+		, uint32              ExtData = 0
+	)
+	{
+		checkf(Size <= (uint32)TNumericLimits<int32>::Max(), TEXT("Size parameter exceeds valid range"));
+
+		const uint16 Depth = 1;
+		const uint16 ArraySize = 1;
+		return FRDGTextureDesc(ETextureDimension::TextureCube, Flags, Format, ClearValue, { (int32)Size, (int32)Size }, Depth, ArraySize, NumMips, NumSamples, ExtData);
+	}
+
+	static FRDGTextureDesc CreateCubeArray(
+		uint32              Size
+		, EPixelFormat        Format
+		, FClearValueBinding  ClearValue
+		, ETextureCreateFlags Flags
+		, uint16              ArraySize
+		, uint8               NumMips = 1
+		, uint8               NumSamples = 1
+		, uint32              ExtData = 0
+	)
+	{
+		checkf(Size <= (uint32)TNumericLimits<int32>::Max(), TEXT("Size parameter exceeds valid range"));
+
+		const uint16 Depth = 1;
+		return FRDGTextureDesc(ETextureDimension::TextureCubeArray, Flags, Format, ClearValue, { (int32)Size, (int32)Size }, Depth, ArraySize, NumMips, NumSamples, ExtData);
+	}
+
+	FRDGTextureDesc() = default;
+	FRDGTextureDesc(
+		ETextureDimension   InDimension
+		, ETextureCreateFlags InFlags
+		, EPixelFormat        InFormat
+		, FClearValueBinding  InClearValue
+		, FIntPoint           InExtent
+		, uint16              InDepth
+		, uint16              InArraySize
+		, uint8               InNumMips
+		, uint8               InNumSamples
+		, uint32              InExtData
+	)
+		: FRHITextureDesc(InDimension, InFlags, InFormat, InClearValue, InExtent, InDepth, InArraySize, InNumMips, InNumSamples, InExtData)
+	{
+	}
+};
+
+/** FORWARD DECLARATIONS */
 
 class FRDGBlackboard;
 
-class FRDGPassFlagsScopeGuard;
 class FRDGAsyncComputeBudgetScopeGuard;
 class FRDGEventScopeGuard;
 class FRDGGPUStatScopeGuard;
@@ -503,68 +697,48 @@ class FRDGBarrierBatch;
 class FRDGBarrierBatchBegin;
 class FRDGBarrierBatchEnd;
 class FRDGBarrierValidation;
-class FRDGBuilder;
 class FRDGEventName;
 class FRDGUserValidation;
-class FRenderGraphResourcePool;
 
-class FRDGResource;
-using FRDGResourceRef = FRDGResource*;
+class FRDGViewableResource;
 
-class FRDGParentResource;
-using FRDGParentResourceRef = FRDGParentResource*;
-
-class FRDGShaderResourceView;
-using FRDGShaderResourceViewRef = FRDGShaderResourceView*;
-
-class FRDGUnorderedAccessView;
-using FRDGUnorderedAccessViewRef = FRDGUnorderedAccessView*;
-
-class FRDGTextureSRV;
-using FRDGTextureSRVRef = FRDGTextureSRV*;
-
-class FRDGTextureUAV;
-using FRDGTextureUAVRef = FRDGTextureUAV*;
-
-class FRDGBufferSRV;
-using FRDGBufferSRVRef = FRDGBufferSRV*;
-
-class FRDGBufferUAV;
-using FRDGBufferUAVRef = FRDGBufferUAV*;
-
-class FRDGPass;
-using FRDGPassRef = const FRDGPass*;
 using FRDGPassHandle = TRDGHandle<FRDGPass, uint16>;
 using FRDGPassRegistry = TRDGHandleRegistry<FRDGPassHandle>;
-using FRDGPassHandleArray = TArray<FRDGPassHandle, TInlineAllocator<4, SceneRenderingAllocator>>;
+using FRDGPassHandleArray = TArray<FRDGPassHandle, TInlineAllocator<4, FRDGArrayAllocator>>;
 using FRDGPassBitArray = TRDGHandleBitArray<FRDGPassHandle>;
 
-class FRDGUniformBuffer;
-using FRDGUniformBufferRef = FRDGUniformBuffer*;
 using FRDGUniformBufferHandle = TRDGHandle<FRDGUniformBuffer, uint16>;
 using FRDGUniformBufferRegistry = TRDGHandleRegistry<FRDGUniformBufferHandle>;
 using FRDGUniformBufferBitArray = TRDGHandleBitArray<FRDGUniformBufferHandle>;
 
-class FRDGView;
-using FRDGViewRef = FRDGView*;
 using FRDGViewHandle = TRDGHandle<FRDGView, uint16>;
-using FRDGViewRegistry = TRDGHandleRegistry<FRDGViewHandle>;
+using FRDGViewRegistry = TRDGHandleRegistry<FRDGViewHandle, ERDGHandleRegistryDestructPolicy::Never>;
 using FRDGViewUniqueFilter = TRDGHandleUniqueFilter<FRDGViewHandle>;
+using FRDGViewBitArray = TRDGHandleBitArray<FRDGViewHandle>;
 
-class FRDGTexture;
-using FRDGTextureRef = FRDGTexture*;
 using FRDGTextureHandle = TRDGHandle<FRDGTexture, uint16>;
-using FRDGTextureRegistry = TRDGHandleRegistry<FRDGTextureHandle>;
+using FRDGTextureRegistry = TRDGHandleRegistry<FRDGTextureHandle, ERDGHandleRegistryDestructPolicy::Never>;
 using FRDGTextureBitArray = TRDGHandleBitArray<FRDGTextureHandle>;
 
-class FRDGBuffer;
-using FRDGBufferRef = FRDGBuffer*;
 using FRDGBufferHandle = TRDGHandle<FRDGBuffer, uint16>;
-using FRDGBufferRegistry = TRDGHandleRegistry<FRDGBufferHandle>;
+using FRDGBufferRegistry = TRDGHandleRegistry<FRDGBufferHandle, ERDGHandleRegistryDestructPolicy::Registry>;
 using FRDGBufferBitArray = TRDGHandleBitArray<FRDGBufferHandle>;
 
-template <typename TUniformStruct> class TRDGUniformBuffer;
-template <typename TUniformStruct> using TRDGUniformBufferRef = TRDGUniformBuffer<TUniformStruct>*;
+class FRDGBufferPool;
+class FRDGTransientRenderTarget;
 
-template <typename InElementType, typename InAllocatorType = FDefaultAllocator>
-using TRDGTextureSubresourceArray = TArray<InElementType, TInlineAllocator<1, InAllocatorType>>;
+using FRDGPassHandlesByPipeline = TRHIPipelineArray<FRDGPassHandle>;
+using FRDGPassesByPipeline = TRHIPipelineArray<FRDGPass*>;
+
+class FRDGTrace;
+class FRDGResourceDumpContext;
+
+using FRDGBufferNumElementsCallback = TFunction<uint32()>;
+using FRDGBufferInitialDataCallback = TFunction<const void*()>;
+using FRDGBufferInitialDataSizeCallback = TFunction<uint64()>;
+template <typename ArrayType, 
+	typename ArrayTypeNoRef = std::remove_reference_t<ArrayType>,
+	typename = typename TEnableIf<TIsTArray_V<ArrayTypeNoRef>>::Type> using TRDGBufferArrayCallback = TFunction<const ArrayType&()>;
+using FRDGBufferInitialDataFreeCallback = TFunction<void(const void* InData)>;
+using FRDGBufferInitialDataFillCallback = TFunction<void(void* InData, uint32 InDataSize)>;
+using FRDGDispatchGroupCountCallback = TFunction<FIntVector()>;

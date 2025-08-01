@@ -3,6 +3,7 @@
 #include "Windows/D3D/SlateD3DRenderer.h"
 #include "Windows/D3D/SlateD3DTextureManager.h"
 #include "Windows/D3D/SlateD3DRenderingPolicy.h"
+#include "Windows/D3D/SlateD3DFindBestDevice.h"
 #include "Rendering/ElementBatcher.h"
 #include "Fonts/FontCache.h"
 #include "Widgets/SWindow.h"
@@ -71,7 +72,7 @@ void LogSlateD3DRendererFailure(const FString& Description, HRESULT Hr)
 	if (Hr == DXGI_ERROR_DEVICE_REMOVED && IsValidRef(GD3DDevice))
 	{
 		HRESULT ReasonHr = GD3DDevice->GetDeviceRemovedReason();
-		UE_LOG(LogStandaloneRenderer, Warning, TEXT("%s Reason: %s [%X]"), *Description, *GetReadableResult(ReasonHr), ReasonHr);
+		UE_LOG(LogStandaloneRenderer, Warning, TEXT("%s Reason: %s [0x%08X]"), *Description, *GetReadableResult(ReasonHr), ReasonHr);
 	}
 }
 
@@ -83,20 +84,30 @@ public:
 	{
 	}
 
-	virtual FIntPoint GetAtlasSize(const bool InIsGrayscale) const override
+	virtual FIntPoint GetAtlasSize(ESlateFontAtlasContentType InContentType) const override
 	{
-		return InIsGrayscale
-			? FIntPoint(GrayscaleTextureSize, GrayscaleTextureSize)
-			: FIntPoint(ColorTextureSize, ColorTextureSize);
+		switch (InContentType)
+		{
+			case ESlateFontAtlasContentType::Alpha:
+				return FIntPoint(GrayscaleTextureSize, GrayscaleTextureSize);
+			case ESlateFontAtlasContentType::Color:
+				return FIntPoint(ColorTextureSize, ColorTextureSize);
+			case ESlateFontAtlasContentType::Msdf:
+				return FIntPoint(SdfTextureSize, SdfTextureSize);
+			default:
+				checkNoEntry();
+				// Default to Color
+				return FIntPoint(ColorTextureSize, ColorTextureSize);
+		}
 	}
 
-	virtual TSharedRef<FSlateFontAtlas> CreateFontAtlas(const bool InIsGrayscale) const override
+	virtual TSharedRef<FSlateFontAtlas> CreateFontAtlas(ESlateFontAtlasContentType InContentType) const override
 	{
-		const FIntPoint AtlasSize = GetAtlasSize(InIsGrayscale);
-		return MakeShareable(new FSlateFontAtlasD3D(AtlasSize.X, AtlasSize.Y, InIsGrayscale));
+		const FIntPoint AtlasSize = GetAtlasSize(InContentType);
+		return MakeShareable(new FSlateFontAtlasD3D(AtlasSize.X, AtlasSize.Y, InContentType));
 	}
 
-	virtual TSharedPtr<ISlateFontTexture> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, const bool InIsGrayscale, const TArray<uint8>& InRawData) const override
+	virtual TSharedPtr<ISlateFontTexture> CreateNonAtlasedTexture(const uint32 InWidth, const uint32 InHeight, ESlateFontAtlasContentType InContentType, const TArray<uint8>& InRawData) const override
 	{
 		return nullptr;
 	}
@@ -106,6 +117,7 @@ private:
 	/** Size of each font texture, width and height */
 	static const uint32 GrayscaleTextureSize = 1024;
 	static const uint32 ColorTextureSize = 512;
+	static const uint32 SdfTextureSize = 1024;
 };
 
 TSharedRef<FSlateFontServices> CreateD3DFontServices()
@@ -184,34 +196,35 @@ bool FSlateD3DRenderer::CreateDevice()
 
 	if( !IsValidRef( GD3DDevice ) || !IsValidRef( GD3DDeviceContext ) )
 	{
-		// Init D3D
-		uint32 DeviceCreationFlags = D3D11_CREATE_DEVICE_SINGLETHREADED;
-		D3D_DRIVER_TYPE DriverType = D3D_DRIVER_TYPE_HARDWARE;
-
-		if( FParse::Param( FCommandLine::Get(), TEXT("d3ddebug") ) )
+		UE::StandaloneRenderer::D3D::FFindBestDevice BestDeviceFinder;
+		if (BestDeviceFinder.IsValid())
 		{
-			DeviceCreationFlags |= D3D11_CREATE_DEVICE_DEBUG;
-		}
-
-		const D3D_FEATURE_LEVEL FeatureLevels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3 };
-		D3D_FEATURE_LEVEL CreatedFeatureLevel;
-		HRESULT Hr = D3D11CreateDevice( NULL, DriverType, NULL, DeviceCreationFlags, FeatureLevels, sizeof(FeatureLevels)/sizeof(D3D_FEATURE_LEVEL), D3D11_SDK_VERSION, GD3DDevice.GetInitReference(), &CreatedFeatureLevel, GD3DDeviceContext.GetInitReference() );
-		
-		if (FAILED(Hr))
-		{
-			bResult = false;
-			LogSlateD3DRendererFailure(TEXT("FSlateD3DRenderer::CreateDevice() - D3D11CreateDevice"), Hr);
-			GEncounteredCriticalD3DDeviceError = true;
+			bResult = BestDeviceFinder.CreateDevice(GD3DDevice.GetInitReference(), GD3DDeviceContext.GetInitReference());
+			if (!bResult)
+			{
+				GEncounteredCriticalD3DDeviceError = true;
+			}
 		}
 	}
 
 	return bResult;
 }
 
-FSlateDrawBuffer& FSlateD3DRenderer::GetDrawBuffer()
+FSlateDrawBuffer& FSlateD3DRenderer::AcquireDrawBuffer()
 {
+	ensureMsgf(!DrawBuffer.IsLocked(), TEXT("The DrawBuffer is already locked. Make sure to call ReleaseDrawBuffer to release the DrawBuffer"));
+	DrawBuffer.Lock();
+
+	// Clear out the buffer each time its accessed
 	DrawBuffer.ClearBuffer();
+
 	return DrawBuffer;
+}
+
+void FSlateD3DRenderer::ReleaseDrawBuffer(FSlateDrawBuffer& InWindowDrawBuffer)
+{
+	ensureMsgf(&DrawBuffer == &InWindowDrawBuffer, TEXT("It release a DrawBuffer that is not a member of the SlateD3DRenderer"));
+	InWindowDrawBuffer.Unlock();
 }
 
 void FSlateD3DRenderer::LoadStyleResources( const ISlateStyle& Style )
@@ -228,6 +241,14 @@ FSlateUpdatableTexture* FSlateD3DRenderer::CreateUpdatableTexture(uint32 Width, 
 	NewTexture->Init(DXGI_FORMAT_B8G8R8A8_UNORM, NULL, true, true);
 	return NewTexture;
 }
+
+FSlateUpdatableTexture* FSlateD3DRenderer::CreateSharedHandleTexture(void* SharedHandle)
+{
+	FSlateD3DTexture* NewTexture = new FSlateD3DTexture();
+	NewTexture->Init(SharedHandle);
+	return NewTexture;
+}
+
 
 void FSlateD3DRenderer::ReleaseUpdatableTexture(FSlateUpdatableTexture* Texture)
 {
@@ -347,7 +368,18 @@ void FSlateD3DRenderer::Private_CreateViewport( TSharedRef<SWindow> InWindow, co
 
 	CreateBackBufferResources(Viewport.D3DSwapChain, Viewport.BackBufferTexture, Viewport.RenderTargetView);
 
-	Viewport.ProjectionMatrix = CreateProjectionMatrixD3D(Width, Height);
+	if (Width > 0 && Height > 0)
+	{
+		Viewport.ProjectionMatrix = CreateProjectionMatrixD3D(Width, Height);
+	}
+	else
+	{
+		Viewport.ProjectionMatrix.SetIdentity();
+	}
+
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+	ensure(!Viewport.ProjectionMatrix.ContainsNaN());
+#endif
 
 	WindowToViewportMap.Add(&InWindow.Get(), Viewport);
 }
@@ -383,14 +415,19 @@ bool FSlateD3DRenderer::GenerateDynamicImageResource(FName ResourceName, uint32 
 	return Result != nullptr;
 }
 
-FSlateResourceHandle FSlateD3DRenderer::GetResourceHandle( const FSlateBrush& Brush )
+bool FSlateD3DRenderer::GenerateDynamicImageResource(FName ResourceName, FSlateTextureDataRef TextureData)
+{
+	return GenerateDynamicImageResource(ResourceName, TextureData->GetWidth(), TextureData->GetHeight(), TextureData->GetRawBytes());
+}
+
+FSlateResourceHandle FSlateD3DRenderer::GetResourceHandle(const FSlateBrush& Brush, FVector2f LocalSize, float DrawScale)
 {
 	if (!TextureManager.IsValid())
 	{
 		return FSlateResourceHandle();
 	}
 
-	return TextureManager->GetResourceHandle(Brush);
+	return TextureManager->GetResourceHandle(Brush, LocalSize, DrawScale);
 }
 
 void FSlateD3DRenderer::RemoveDynamicBrushResource( TSharedPtr<FSlateDynamicImageBrush> BrushToRemove )
@@ -413,7 +450,19 @@ void FSlateD3DRenderer::Private_ResizeViewport( const TSharedRef<SWindow> InWind
 		Viewport->ViewportInfo.Width = Width;
 		Viewport->ViewportInfo.Height = Height;
 		Viewport->bFullscreen = bFullscreen;
-		Viewport->ProjectionMatrix = CreateProjectionMatrixD3D( Width, Height );
+
+		if (Width > 0 && Height > 0)
+		{
+			Viewport->ProjectionMatrix = CreateProjectionMatrixD3D( Width, Height );
+		}
+		else
+		{
+			Viewport->ProjectionMatrix.SetIdentity();
+		}
+
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+		ensure(!Viewport->ProjectionMatrix.ContainsNaN());
+#endif
 
 		DXGI_SWAP_CHAIN_DESC Desc;
 		HRESULT Hr = Viewport->D3DSwapChain->GetDesc( &Desc );
@@ -513,8 +562,6 @@ bool FSlateD3DRenderer::HasLostDevice() const
 
 void FSlateD3DRenderer::DrawWindows(FSlateDrawBuffer& InWindowDrawBuffer)
 {
-	FMemMark MemMark(FMemStack::Get());
-
 	if (HasLostDevice())
 	{
 		return;
@@ -537,11 +584,14 @@ void FSlateD3DRenderer::DrawWindows(FSlateDrawBuffer& InWindowDrawBuffer)
 
 			SWindow* WindowToDraw = ElementList.GetRenderWindow();
 
+			TextureManager->UpdateCache();
+
 			// Add all elements for this window to the element batcher
 			ElementBatcher->AddElements(ElementList);
 
 			// Update the font cache with new text before elements are batched
 			FontCache->UpdateCache();
+	
 
 			FVector2D WindowSize = WindowToDraw->GetSizeInScreen();
 
@@ -595,6 +645,7 @@ void FSlateD3DRenderer::DrawWindows(FSlateDrawBuffer& InWindowDrawBuffer)
 
 	// flush the cache if needed
 	FontCache->ConditionalFlushCache();
+	TextureManager->ConditionalFlushCache();
 
 	// Safely release the references now that we are finished rendering with the dynamic brushes
 	DynamicBrushesToRemove.Empty();

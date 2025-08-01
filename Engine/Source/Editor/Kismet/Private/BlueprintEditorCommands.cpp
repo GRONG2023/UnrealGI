@@ -2,28 +2,52 @@
 
 
 #include "BlueprintEditorCommands.h"
+
+#include "BlueprintEventNodeSpawner.h"
+#include "BlueprintFunctionNodeSpawner.h"
+#include "BlueprintNodeBinder.h"
+#include "BlueprintNodeSpawner.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
+#include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
-#include "Engine/Blueprint.h"
 #include "EdGraph/EdGraphSchema.h"
-#include "UObject/UnrealType.h"
-#include "Engine/LevelScriptActor.h"
-#include "UObject/UObjectHash.h"
-#include "Engine/Selection.h"
-#include "Editor.h"
 #include "EdGraphSchema_K2.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/LevelScriptActor.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "GenericPlatform/GenericApplication.h"
+#include "HAL/PlatformCrt.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Text.h"
 #include "K2Node_Literal.h"
 #include "K2Node_MacroInstance.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "BlueprintNodeBinder.h"
-#include "BlueprintNodeSpawner.h"
-#include "BlueprintFunctionNodeSpawner.h"
-#include "UObject/UObjectIterator.h"
-#include "BlueprintEventNodeSpawner.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Logging/LogVerbosity.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Misc/PackageName.h"
+#include "Misc/Parse.h"
+#include "Selection.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Textures/SlateIcon.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "BlueprintEditorCommands"
 
 /** UI_COMMAND takes long for the compile to optimize */
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION_SHIP
 void FBlueprintEditorCommands::RegisterCommands()
 {
 	// Edit commands
@@ -57,6 +81,7 @@ void FBlueprintEditorCommands::RegisterCommands()
 	UI_COMMAND( DisableAllBreakpoints, "Disable All Breakpoints", "Disable all breakpoints", EUserInterfaceActionType::Button, FInputChord() );
 	UI_COMMAND( ClearAllBreakpoints, "Delete All Breakpoints", "Delete all breakpoints", EUserInterfaceActionType::Button, FInputChord(EModifierKey::Control | EModifierKey::Shift, EKeys::F9) );
 	UI_COMMAND(	ClearAllWatches, "Delete All Watches", "Delete all watches", EUserInterfaceActionType::Button, FInputChord() );
+	UI_COMMAND( OpenBlueprintDebugger, "Blueprint Debugger", "Open the Blueprint Debugger tab.", EUserInterfaceActionType::Button, FInputChord() );
 
 	// New documents
 	UI_COMMAND( AddNewVariable, "Variable", "Adds a new variable to this blueprint.", EUserInterfaceActionType::Button, FInputChord() );
@@ -69,7 +94,6 @@ void FBlueprintEditorCommands::RegisterCommands()
 
 	// Development commands
 	UI_COMMAND( SaveIntermediateBuildProducts, "Save Intermediate Build Products", "Should the compiler save intermediate build products for debugging.", EUserInterfaceActionType::ToggleButton, FInputChord() );
-	UI_COMMAND(GenerateNativeCode, "Generate Native Code", "Generate C++ code from the blueprint", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(GenerateSearchIndex, "Generate Search Index", "Generate the search index for this blueprint.", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(DumpCachedIndexData, "Dump Cached Index Data", "Dump the cached index data for this blueprint.", EUserInterfaceActionType::Button, FInputChord());
 	UI_COMMAND(ShowActionMenuItemSignatures, "Show Action Menu Item Signatures", "If enabled, tooltips on action menu items will show the associated action's signature id (can be used to setup custom favorites menus).", EUserInterfaceActionType::ToggleButton, FInputChord());
@@ -81,7 +105,7 @@ void FBlueprintEditorCommands::RegisterCommands()
 	UI_COMMAND( ToggleHideUnrelatedNodes, "Hide Unrelated", "Toggles automatically hiding nodes which are unrelated to the selected nodes.", EUserInterfaceActionType::ToggleButton, FInputChord() );
 }
 
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION_SHIP
 
 namespace NodeSpawnInfoHelpers
 {
@@ -312,8 +336,10 @@ void FBlueprintSpawnNodeCommands::RegisterCommands()
 			continue;
 		}
 
+		UE_CLOG(FPackageName::IsShortPackageName(ClassName), LogClass, Warning, TEXT("Short class name found when parsing ini: [%s] %s"), *ConfigSection, *SettingName);
+
 		FString CommandLabel;
-		UClass* FoundClass = FindObject<UClass>(ANY_PACKAGE, *ClassName, true);
+		UClass* FoundClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::ExactClass, ELogVerbosity::Warning, TEXT("looking for SpawnNodes"));
 		TSharedPtr< FNodeSpawnInfo > InfoPtr;
 
 		if(FoundClass && FoundClass->IsChildOf(UEdGraphNode::StaticClass()))
@@ -330,34 +356,23 @@ void FBlueprintSpawnNodeCommands::RegisterCommands()
 
 			InfoPtr = MakeShareable( new FEdGraphNodeSpawnInfo( FoundClass ) );
 		}
-		else if(UFunction* FoundFunction = FindObject<UFunction>(ANY_PACKAGE, *ClassName, true))
+		else if(UFunction* FoundFunction = FindFirstObject<UFunction>(*ClassName, EFindFirstObjectOptions::ExactClass, ELogVerbosity::Warning, TEXT("looking for SpawnNodes (function)")))
 		{
 			// The class name matches that of a function, so setup a spawn info that can generate function graph actions
 			InfoPtr = MakeShareable( new FFunctionNodeSpawnInfo((UFunction*)FoundFunction));
 
 			CommandLabel = FoundFunction->GetName();
 		}
-		else
+		else if(UEdGraph* FoundGraph = FindFirstObject<UEdGraph>(*ClassName, EFindFirstObjectOptions::ExactClass, ELogVerbosity::Warning, TEXT("looking for SpawnNodes (macro)")))
 		{
-			// Check for a macro graph that matches the passed in class name
-			for (TObjectIterator<UBlueprint> BlueprintIt; BlueprintIt; ++BlueprintIt)
+			// If the name matches that of a macro graph, set up a spawn info that can generate macro graph actions
+			if (const UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraph(FoundGraph))
 			{
-				UBlueprint* MacroBP = *BlueprintIt;
-				if(MacroBP->BlueprintType == BPTYPE_MacroLibrary)
+				if (Blueprint->BlueprintType == BPTYPE_MacroLibrary)
 				{
-					// getting 'top-level' of the macros
-					for (TArray<UEdGraph*>::TIterator GraphIt(MacroBP->MacroGraphs); GraphIt; ++GraphIt)
-					{
-						UEdGraph* MacroGraph = *GraphIt;
-						// The class name matches that of a macro, so setup a spawn info that can generate macro graph actions
-						if(MacroGraph->GetName() == ClassName)
-						{
-							CommandLabel = MacroGraph->GetName();
+					CommandLabel = FoundGraph->GetName();
 
-							InfoPtr = MakeShareable( new FMacroNodeSpawnInfo(MacroGraph));
-						}
-
-					}
+					InfoPtr = MakeShareable(new FMacroNodeSpawnInfo(FoundGraph));
 				}
 			}
 		}
@@ -393,7 +408,7 @@ void FBlueprintSpawnNodeCommands::RegisterCommands()
 			FText CommandLabelText = FText::FromString( CommandLabel );
 			FText Description = FText::Format( NSLOCTEXT("BlueprintEditor", "NodeSpawnDescription", "Hold down the bound keys and left click in the graph panel to spawn a {0} node."), CommandLabelText );
 
-			FUICommandInfo::MakeCommandInfo( this->AsShared(), CommandInfo, FName(*NodeSpawns[x]), CommandLabelText, Description, FSlateIcon(FEditorStyle::GetStyleSetName(), *FString::Printf(TEXT("%s.%s"), *this->GetContextName().ToString(), *NodeSpawns[x])), EUserInterfaceActionType::Button, Chord );
+			FUICommandInfo::MakeCommandInfo( this->AsShared(), CommandInfo, FName(*NodeSpawns[x]), CommandLabelText, Description, FSlateIcon(FAppStyle::GetAppStyleSetName(), *FString::Printf(TEXT("%s.%s"), *this->GetContextName().ToString(), *NodeSpawns[x])), EUserInterfaceActionType::Button, Chord );
 
 			InfoPtr->CommandInfo = CommandInfo;
 
@@ -402,7 +417,7 @@ void FBlueprintSpawnNodeCommands::RegisterCommands()
 	}
 
 	TSharedPtr<FNodeSpawnInfo> AddActorRefAction = MakeShareable(new FActorRefSpawnInfo);
-	UI_COMMAND(AddActorRefAction->CommandInfo, "Add Selected Actor Reference(s)", "Spawns node(s) which reference the currently selected actor(s) in the level.", EUserInterfaceActionType::Button, FInputChord(EKeys::R));
+	UI_COMMAND(AddActorRefAction->CommandInfo, "Add Selected Actor Reference(s)", "Spawns node(s) which reference the currently selected actor(s) in the level.", EUserInterfaceActionType::Button, FInputChord(EModifierKey::Control, EKeys::R));
 	NodeCommands.Add(AddActorRefAction);
 }
 

@@ -1,13 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/CurveTable.h"
-#include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/Csv/CsvParser.h"
 #include "HAL/IConsoleManager.h"
+#include "Stats/Stats.h"
+#include "UObject/AssetRegistryTagsContext.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
 
 #include "EditorFramework/AssetImportData.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CurveTable)
 
 DEFINE_LOG_CATEGORY(LogCurveTable);
 
@@ -28,13 +31,12 @@ namespace
 		FScopedCurveTableChange(UCurveTable* InTable)
 			: Table(InTable)
 		{
-			FScopeLock Lock(&CriticalSection);
+			CriticalSection.Lock();
 			int32& Count = ScopeCount.FindOrAdd(Table);
 			++Count;
 		}
 		~FScopedCurveTableChange()
 		{
-			FScopeLock Lock(&CriticalSection);
 			int32& Count = ScopeCount.FindChecked(Table);
 			--Count;
 			if (Count == 0)
@@ -42,12 +44,16 @@ namespace
 				Table->OnCurveTableChanged().Broadcast();
 				ScopeCount.Remove(Table);
 			}
+
+			CriticalSection.Unlock();
 		}
 
 	private:
 		UCurveTable* Table;
 
 		static TMap<UCurveTable*, int32> ScopeCount;
+
+	public:
 		static FCriticalSection CriticalSection;
 	};
 
@@ -55,6 +61,11 @@ namespace
 	FCriticalSection FScopedCurveTableChange::CriticalSection;
 
 #define CURVETABLE_CHANGE_SCOPE()	FScopedCurveTableChange ActiveScope(this);
+}
+
+FCriticalSection& UCurveTable::GetCurveTableChangeCriticalSection()
+{
+	return FScopedCurveTableChange::CriticalSection;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -69,7 +80,7 @@ FName UCurveTable::MakeValidName(const FString& InString)
 	FString InvalidChars(INVALID_NAME_CHARACTERS);
 
 	FString FixedString;
-	TArray<TCHAR>& FixedCharArray = FixedString.GetCharArray();
+	TArray<TCHAR, FString::AllocatorType>& FixedCharArray = FixedString.GetCharArray();
 
 	// Iterate over input string characters
 	for (int32 CharIdx=0; CharIdx<InString.Len(); CharIdx++)
@@ -111,7 +122,11 @@ void UCurveTable::Serialize(FArchive& Ar)
 		}
 
 		bool bCouldConvertToSimpleCurves = bUpgradingCurveTable;
-		RowMap.Reserve(NumRows);
+
+		// copy any previous curves to free after replacing.
+		TMap<FName, FRealCurve*> TempMap(RowMap);
+
+		RowMap.Empty(NumRows);
 		for (int32 RowIdx = 0; RowIdx < NumRows; RowIdx++)
 		{
 			// Load row name
@@ -176,6 +191,11 @@ void UCurveTable::Serialize(FArchive& Ar)
 				Curve.Value = NewCurve;
 			}
 		}
+
+		for (TPair<FName, FRealCurve*>& Curve : TempMap)
+		{
+			delete Curve.Value;
+		}
 	}
 	else if (Ar.IsSaving())
 	{
@@ -207,7 +227,7 @@ void UCurveTable::Serialize(FArchive& Ar)
 				FRichCurve* Curve = (FRichCurve*)RowIt.Value();
 				if (Ar.IsCooking() && Ar.IsPersistent() && !Ar.IsObjectReferenceCollector() && !Ar.ShouldSkipBulkData() && CVar_CurveTable_RemoveRedundantKeys > 0)
 				{
-					Curve->RemoveRedundantKeys(0.f);
+					Curve->RemoveRedundantAutoTangentKeys(0.f);
 				}
 				FRichCurve::StaticStruct()->SerializeTaggedProperties(Ar, (uint8*)Curve, FRichCurve::StaticStruct(), nullptr);
 			}
@@ -254,12 +274,19 @@ void UCurveTable::FinishDestroy()
 #if WITH_EDITORONLY_DATA
 void UCurveTable::GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS;
+	Super::GetAssetRegistryTags(OutTags);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS;
+}
+
+void UCurveTable::GetAssetRegistryTags(FAssetRegistryTagsContext Context) const
+{
 	if (AssetImportData)
 	{
-		OutTags.Add(FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden));
+		Context.AddTag(FAssetRegistryTag(SourceFileTagName(), AssetImportData->GetSourceData().ToJson(), FAssetRegistryTag::TT_Hidden));
 	}
 
-	Super::GetAssetRegistryTags(OutTags);
+	Super::GetAssetRegistryTags(Context);
 }
 
 void UCurveTable::PostInitProperties()
@@ -468,7 +495,7 @@ void WriteTableAsJSON_Internal(const TMap<FName, T*>& RowMap, const TSharedRef< 
 		auto LongIt(Curves[LongestCurveIndex]->GetKeyIterator());
 		for (auto It(Curves[CurvesIdx]->GetKeyIterator()); It; ++It)
 		{
-			JsonWriter->WriteValue(FString::Printf(TEXT("%d"), (int32)LongIt->Time), It->Value);
+			JsonWriter->WriteValue(FString::SanitizeFloat(LongIt->Time, 0), It->Value);
 			++LongIt;
 		}
 		JsonWriter->WriteObjectEnd();
@@ -522,6 +549,16 @@ void UCurveTable::EmptyTable()
 	UCurveTable::InvalidateAllCachedCurves();
 }
 
+void UCurveTable::RemoveRow(FName RowName)
+{
+	FRealCurve* Curve = nullptr;
+	RowMap.RemoveAndCopyValue(RowName, Curve);
+	if (Curve != nullptr)
+	{
+		delete Curve;
+	}
+}
+
 FRichCurve& UCurveTable::AddRichCurve(FName RowName)
 {
 	check(CurveTableMode != ECurveTableMode::SimpleCurves);
@@ -560,6 +597,30 @@ FSimpleCurve& UCurveTable::AddSimpleCurve(FName RowName)
 	return *Result;
 }
 
+void UCurveTable::RenameRow(FName& CurveName, FName& NewCurveName)
+{
+	if (CurveName != NewCurveName && !RowMap.Contains(NewCurveName))
+	{
+		if (FRealCurve** Curve = RowMap.Find(CurveName))
+		{
+			RowMap.Add(NewCurveName, *Curve);
+			RowMap.Remove(CurveName);
+		}
+	}
+}
+
+void UCurveTable::DeleteRow(FName& CurveName)
+{
+	if (RowMap.Contains(CurveName))
+	{
+		FRealCurve** Curve = RowMap.Find(CurveName);
+		RowMap.Remove(CurveName);
+		if (Curve != nullptr && *Curve != nullptr)
+		{
+			delete *Curve;
+		}
+	}	
+}
 
 /** */
 void GetCurveValues(const TArray<const TCHAR*>& Cells, TArray<float>& Values)
@@ -729,6 +790,8 @@ void CopyRowsToTable(const TMap<FName, CurveType*>& SourceRows, TMap<FName, FRea
 
 TArray<FString> UCurveTable::CreateTableFromOtherTable(const UCurveTable* InTable)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UCurveTable::CreateTableFromOtherTable);
+
 	CURVETABLE_CHANGE_SCOPE();
 
 	// Array used to store problems about table creation
@@ -759,7 +822,8 @@ TArray<FString> UCurveTable::CreateTableFromOtherTable(const UCurveTable* InTabl
 
 	CurveTableMode = InTable->CurveTableMode;
 
-	OnCurveTableChanged().Broadcast();
+	// This is already called when getting out of scope because of CURVETABLE_CHANGE_SCOPE() above.
+	// OnCurveTableChanged().Broadcast();
 
 	return OutProblems;
 }
@@ -955,6 +1019,7 @@ void UCurveTable::MakeTransactional()
 void UCurveTable::OnCurveChanged(const TArray<FRichCurveEditInfo>& ChangedCurveEditInfos)
 {
 	CURVETABLE_CHANGE_SCOPE();
+	OnCurveTableChanged().Broadcast();
 }
 
 bool UCurveTable::IsValidCurve(FRichCurveEditInfo CurveInfo)
@@ -1069,3 +1134,4 @@ void FCurveTableRowHandle::PostSerialize(const FArchive& Ar)
 		Ar.MarkSearchableName(CurveTable, RowName);
 	}
 }
+

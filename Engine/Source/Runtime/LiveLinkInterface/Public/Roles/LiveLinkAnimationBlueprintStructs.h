@@ -2,13 +2,23 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "ILiveLinkSource.h"
 #include "LiveLinkTypes.h"
-#include "Misc/Timecode.h"
+#include "Math/Transform.h"
 #include "Misc/FrameRate.h"
+#include "Misc/Timecode.h"
 #include "Roles/LiveLinkAnimationTypes.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+
 #include "LiveLinkAnimationBlueprintStructs.generated.h"
+
+class FString;
 
 USTRUCT(BlueprintType)
 struct FSubjectMetadata
@@ -80,33 +90,33 @@ private:
 };
 
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FLiveLinkTransform
+struct FLiveLinkTransform
 {
 	GENERATED_USTRUCT_BODY()
 
-	FLiveLinkTransform();
+	LIVELINKINTERFACE_API FLiveLinkTransform();
 
 	virtual ~FLiveLinkTransform() = default;
 
-	void GetName(FName& Name) const;
+	LIVELINKINTERFACE_API void GetName(FName& Name) const;
 
-	void GetTransformParentSpace(FTransform& OutTransform) const;
+	LIVELINKINTERFACE_API void GetTransformParentSpace(FTransform& OutTransform) const;
 
-	void GetTransformRootSpace(FTransform& OutTransform) const;
+	LIVELINKINTERFACE_API void GetTransformRootSpace(FTransform& OutTransform) const;
 
-	bool HasParent() const;
+	LIVELINKINTERFACE_API bool HasParent() const;
 
-	void GetParent(FLiveLinkTransform& OutParentTransform) const;
+	LIVELINKINTERFACE_API void GetParent(FLiveLinkTransform& OutParentTransform) const;
 
-	int32 GetChildCount() const;
+	LIVELINKINTERFACE_API int32 GetChildCount() const;
 
-	void GetChildren(TArray<FLiveLinkTransform>& OutChildTransforms) const;
+	LIVELINKINTERFACE_API void GetChildren(TArray<FLiveLinkTransform>& OutChildTransforms) const;
 
-	void SetCachedFrame(TSharedPtr<FCachedSubjectFrame> InCachedFrame);
+	LIVELINKINTERFACE_API void SetCachedFrame(TSharedPtr<FCachedSubjectFrame> InCachedFrame);
 
-	void SetTransformIndex(const int32 InTransformIndex);
+	LIVELINKINTERFACE_API void SetTransformIndex(const int32 InTransformIndex);
 
-	int32 GetTransformIndex() const;
+	LIVELINKINTERFACE_API int32 GetTransformIndex() const;
 
 private:
 	TSharedPtr<FCachedSubjectFrame> CachedFrame;
@@ -114,7 +124,7 @@ private:
 };
 
 USTRUCT(BlueprintType)
-struct LIVELINKINTERFACE_API FSubjectFrameHandle : public FLiveLinkBaseBlueprintData
+struct FSubjectFrameHandle : public FLiveLinkBaseBlueprintData
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -122,27 +132,27 @@ struct LIVELINKINTERFACE_API FSubjectFrameHandle : public FLiveLinkBaseBlueprint
 
 	virtual ~FSubjectFrameHandle() = default;
 
-	void GetCurves(TMap<FName, float>& OutCurves) const;
+	LIVELINKINTERFACE_API void GetCurves(TMap<FName, float>& OutCurves) const;
 
-	bool GetCurveValueByName(FName CurveName, float& CurveValue) const;
+	LIVELINKINTERFACE_API bool GetCurveValueByName(FName CurveName, float& CurveValue) const;
 
-	void GetSubjectMetadata(FSubjectMetadata& OutMetadata) const;
+	LIVELINKINTERFACE_API void GetSubjectMetadata(FSubjectMetadata& OutMetadata) const;
 
-	int32 GetNumberOfTransforms() const;
+	LIVELINKINTERFACE_API int32 GetNumberOfTransforms() const;
 
-	void GetTransformNames(TArray<FName>& OutTransformNames) const;
+	LIVELINKINTERFACE_API void GetTransformNames(TArray<FName>& OutTransformNames) const;
 
-	void GetRootTransform(FLiveLinkTransform& OutLiveLinkTransform) const;
+	LIVELINKINTERFACE_API void GetRootTransform(FLiveLinkTransform& OutLiveLinkTransform) const;
 
-	void GetTransformByIndex(int32 InTransformIndex, FLiveLinkTransform& OutLiveLinkTransform) const;
+	LIVELINKINTERFACE_API void GetTransformByIndex(int32 InTransformIndex, FLiveLinkTransform& OutLiveLinkTransform) const;
 
-	void GetTransformByName(FName InTransformName, FLiveLinkTransform& OutLiveLinkTransform) const;
+	LIVELINKINTERFACE_API void GetTransformByName(FName InTransformName, FLiveLinkTransform& OutLiveLinkTransform) const;
 
-	void SetCachedFrame(TSharedPtr<FCachedSubjectFrame> InCachedFrame);
+	LIVELINKINTERFACE_API void SetCachedFrame(TSharedPtr<FCachedSubjectFrame> InCachedFrame);
 
-	const FLiveLinkSkeletonStaticData* GetSourceSkeletonStaticData() const;
+	LIVELINKINTERFACE_API const FLiveLinkSkeletonStaticData* GetSourceSkeletonStaticData() const;
 
-	const FLiveLinkAnimationFrameData* GetSourceAnimationFrameData() const;
+	LIVELINKINTERFACE_API const FLiveLinkAnimationFrameData* GetSourceAnimationFrameData() const;
 
 private:
 	TSharedPtr<FCachedSubjectFrame> CachedFrame;

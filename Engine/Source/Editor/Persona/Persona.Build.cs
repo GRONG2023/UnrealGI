@@ -6,12 +6,10 @@ public class Persona : ModuleRules
 {
     public Persona(ReadOnlyTargetRules Target) : base(Target)
     {
-        PrivateIncludePaths.Add("Editor/Persona/Private");  // For PCH includes (because they don't work with relative paths, yet)
-        PrivateIncludePaths.Add("Editor/Persona/Private/AnimTimeline");
-
         PublicIncludePathModuleNames.AddRange(
             new string[] {
-                "SkeletonEditor",
+				"Engine",
+				"SkeletonEditor",
                 "AnimationEditor",
                 "AdvancedPreviewScene",
             }
@@ -20,6 +18,7 @@ public class Persona : ModuleRules
         PublicDependencyModuleNames.AddRange(
             new string[] {
                 "AdvancedPreviewScene",
+                "AnimationEditMode",
             }
         );
 
@@ -28,26 +27,30 @@ public class Persona : ModuleRules
                 "AssetRegistry", 
                 "MainFrame",
                 "DesktopPlatform",
-                "ContentBrowser",
                 "AssetTools",
                 "MeshReductionInterface",
                 "SequenceRecorder",
                 "AnimationBlueprintEditor",
+                "EditorInteractiveToolsFramework",
 			}
-        );
+		);
 
         PrivateDependencyModuleNames.AddRange(
             new string[] {
                 "AppFramework",
-                "Core", 
+                "AnimationModifiers",
+                "AnimationBlueprintLibrary",
+				"AudioEditor",
+				"Core", 
                 "CoreUObject", 
 				"ApplicationCore",
                 "Slate", 
                 "SlateCore",
 				"ContentBrowserData",
                 "EditorStyle",
-                "Engine", 
-                "UnrealEd", 
+                "Engine",
+				"EditorFramework",
+				"UnrealEd", 
                 "GraphEditor", 
                 "InputCore",
                 "Kismet", 
@@ -63,7 +66,6 @@ public class Persona : ModuleRules
                 "ClothingSystemRuntimeInterface",
                 "ClothingSystemRuntimeCommon",
                 "AnimGraphRuntime",
-                "UnrealEd",
                 "CommonMenuExtensions",
                 "PinnedCommandList",
                 "RenderCore",
@@ -73,13 +75,17 @@ public class Persona : ModuleRules
 				"SequencerWidgets",
 				"TimeManagement",
                 "Sequencer",
-			}
+				"StatusBar",
+				"ToolWidgets",
+				"InteractiveToolsFramework",
+				"ContentBrowser",
+	            "SkeletalMeshDescription",
+            }
         );
 
         DynamicallyLoadedModuleNames.AddRange(
             new string[] {
-                "ContentBrowser",
-                "Documentation",
+	            "Documentation",
                 "MainFrame",
                 "DesktopPlatform",
                 "SkeletonEditor",

@@ -5,6 +5,11 @@
 #include "CoreMinimal.h"
 #include "Containers/Map.h"
 
+namespace Insights
+{
+	class IFilterExecutor;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Search behavior flags
 enum class ETimingEventSearchFlags : int32
@@ -56,6 +61,12 @@ public:
 	// Predicate called when we get a match
 	typedef TFunctionRef<void(double /*StartTime*/, double /*EndTime*/, uint32 /*Depth*/)> EventMatchedPredicate;
 
+	enum class ESearchDirection : uint32
+	{
+		Forward = 0,
+		Backward = 1,
+	};
+
 	FTimingEventSearchParameters(double InStartTime, double InEndTime, ETimingEventSearchFlags Flags, EventFilterPredicate InEventFilter = NoFilter, EventMatchedPredicate InEventMatched = NoMatch)
 		: EventFilter(InEventFilter)
 		, EventMatched(InEventMatched)
@@ -88,6 +99,10 @@ public:
 
 	// Search behavior flags
 	ETimingEventSearchFlags Flags;
+
+	TSharedPtr<Insights::IFilterExecutor> FilterExecutor;
+
+	ESearchDirection SearchDirection = ESearchDirection::Forward;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

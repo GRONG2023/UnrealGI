@@ -1,11 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AIGraph.h"
-#include "UObject/UObjectHash.h"
-#include "EdGraph/EdGraphSchema.h"
-#include "AIGraphTypes.h"
-#include "AIGraphNode.h"
+
 #include "AIGraphModule.h"
+#include "AIGraphNode.h"
+#include "AIGraphTypes.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "EdGraph/EdGraphPin.h"
+#include "EdGraph/EdGraphSchema.h"
+#include "HAL/PlatformMath.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Serialization/Archive.h"
+#include "Templates/Casts.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectHash.h"
 
 UAIGraph::UAIGraph(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
@@ -80,6 +93,15 @@ void UpdateAIGraphNodeErrorMessage(UAIGraphNode& Node)
 	if (Node.NodeInstance)
 	{
 		Node.ErrorMessage = FGraphNodeClassHelper::GetDeprecationMessage(Node.NodeInstance->GetClass());
+
+		// Only check for node-specific errors if the node is not deprecated
+		if (Node.ErrorMessage.IsEmpty())
+		{
+			Node.UpdateErrorMessage();
+
+			// For node-specific validation we don't want to spam the log with errors
+			return;
+		}
 	}
 	else
 	{
@@ -128,7 +150,9 @@ void UAIGraph::Serialize(FArchive& Ar)
 	// Overridden to flags up errors in the behavior tree while cooking.
 	Super::Serialize(Ar);
 
-	if (Ar.IsSaving() || Ar.IsCooking())
+	// Execute UpdateDeprecatedClasses only when saving to persistent storage,
+	// otherwise node instances might not be fully created (i.e. transaction buffer while loading the asset).
+	if ((Ar.IsSaving() && Ar.IsPersistent()) || Ar.IsCooking())
 	{
 		// Logging of errors happens in UpdateDeprecatedClasses
 		UpdateDeprecatedClasses();
@@ -146,9 +170,9 @@ void UAIGraph::UpdateClassData()
 
 			for (int32 SubIdx = 0; SubIdx < Node->SubNodes.Num(); SubIdx++)
 			{
-				if (Node->SubNodes[SubIdx])
+				if (UAIGraphNode* SubNode = Node->SubNodes[SubIdx])
 				{
-					Node->UpdateNodeClassData();
+					SubNode->UpdateNodeClassData();
 				}
 			}
 		}

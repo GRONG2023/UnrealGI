@@ -1,9 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SProjectLauncherCookByTheBookSettings.h"
+#include "Widgets/Cook/SProjectLauncherCookByTheBookSettings.h"
 
 #include "DesktopPlatformModule.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/Application/SlateApplication.h"
 #include "SlateOptMacros.h"
 #include "Widgets/Images/SImage.h"
@@ -80,7 +80,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 		.MaxHeight(256.0f)
 		[
 			SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				.Padding(8.0f)
 				[
 					SNew(SVerticalBox)
@@ -109,7 +109,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 		.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 			.Padding(8.0f)
 			[
 				SNew(SVerticalBox)
@@ -197,7 +197,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 		.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 		[
 			SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				.Padding(8.0f)
 				[
 					SNew(SVerticalBox)
@@ -223,7 +223,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								SNew(SCheckBox)
 									.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxIsChecked, EShowMapsChoices::ShowAllMaps)
 									.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxCheckStateChanged, EShowMapsChoices::ShowAllMaps)
-									.Style(FEditorStyle::Get(), "RadioButton")
+									.Style(FAppStyle::Get(), "RadioButton")
 									[
 										SNew(STextBlock)
 											.Text(LOCTEXT("AllMapsCheckBoxText", "Show all"))
@@ -238,7 +238,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 									SNew(SCheckBox)
 										.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxIsChecked, EShowMapsChoices::ShowCookedMaps)
 										.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxCheckStateChanged, EShowMapsChoices::ShowCookedMaps)
-										.Style(FEditorStyle::Get(), "RadioButton")
+										.Style(FAppStyle::Get(), "RadioButton")
 										[
 											SNew(STextBlock)
 												.Text(LOCTEXT("CookedMapsCheckBoxText", "Show cooked"))
@@ -253,7 +253,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 									SNew(SCheckBox)
 										.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxIsChecked, EShowMapsChoices::ShowMissingMaps)
 										.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxCheckStateChanged, EShowMapsChoices::ShowMissingMaps)
-										.Style(FEditorStyle::Get(), "RadioButton")
+										.Style(FAppStyle::Get(), "RadioButton")
 										[
 											SNew(STextBlock)
 												.Text(LOCTEXT("MissingMapsCheckBoxText", "Show missing"))
@@ -292,7 +292,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								.AutoWidth()
 								[
 									SNew(SImage)
-										.Image(FEditorStyle::GetBrush(TEXT("Icons.Warning")))
+										.Image(FAppStyle::GetBrush(TEXT("Icons.Warning")))
 								]
 
 							+ SHorizontalBox::Slot()
@@ -372,7 +372,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 							.AutoHeight()
 							.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 							[
-								// unreal pak check box
+								// CreateReleaseVersion check box
 								SNew(SCheckBox)
 									.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleCreateReleaseVersionCheckBoxIsChecked)
 									.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleCreateReleaseVersionCheckBoxCheckStateChanged)
@@ -403,7 +403,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								.FillWidth(1.0)
 								.Padding(0.0, 0.0, 0.0, 3.0)
 								[
-									// repository path text box
+									// CreateReleaseVersion textbox
 									SNew(SEditableTextBox)
 										.ToolTipText(LOCTEXT("CreateReleaseVersionTextBoxTooltip", "Name of the new release to create."))
 										.Text(this, &SProjectLauncherCookByTheBookSettings::HandleCreateReleaseVersionNameTextBlockText)
@@ -430,11 +430,40 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 									.FillWidth(1.0)
 									.Padding(0.0, 0.0, 0.0, 3.0)
 									[
-										// repository path text box
+										// BasedOnReleaseVersion textbox
 										SNew(SEditableTextBox)
 											.ToolTipText(LOCTEXT("NextReleaseVersionTextBoxTooltip", "Release version to base the next release / DLC / patch on."))
 											.Text(this, &SProjectLauncherCookByTheBookSettings::HandleBasedOnReleaseVersionNameTextBlockText)
 											.OnTextCommitted(this, &SProjectLauncherCookByTheBookSettings::HandleBasedOnReleaseVersionNameCommitted)
+									]
+							]
+
+						+ SVerticalBox::Slot()
+							.AutoHeight()
+							.Padding(0.0f, 8.0f, 0.0f, 0.0f)
+							[
+								SNew(SProjectLauncherFormLabel)
+									.ToolTipText(LOCTEXT("OriginalReleaseVersionTextBoxToolTip", "The original release version which this DLC / Patch / Next release is based on."))
+									.LabelText(LOCTEXT("OriginalReleaseVersionTextBoxLabel", "Original release version of this application."))
+									.Visibility(this, &SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionVisibility)
+							]
+
+						+ SVerticalBox::Slot()
+							.AutoHeight()
+							.Padding(0.0, 4.0, 0.0, 0.0)
+							[
+								SNew(SHorizontalBox)
+
+								+ SHorizontalBox::Slot()
+									.FillWidth(1.0)
+									.Padding(0.0, 0.0, 0.0, 3.0)
+									[
+										// original release version text box
+										SNew(SEditableTextBox)
+											.ToolTipText(LOCTEXT("OriginalReleaseVersionTextBoxTooltip", "The original release version"))
+											.Text(this, &SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionNameTextBlockText)
+											.OnTextCommitted(this, &SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionNameCommitted)
+											.Visibility(this, &SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionVisibility)
 									]
 							]
 
@@ -446,7 +475,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 							.AutoHeight()
 							.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 							[
-								// unreal pak check box
+								// Generate patch checkbox
 								SNew(SCheckBox)
 									.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleGeneratePatchCheckBoxIsChecked)
 									.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleGeneratePatchCheckBoxCheckStateChanged)
@@ -467,7 +496,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 							.AutoHeight()
 							.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 							[
-								// unreal pak check box
+								// BuildDLC checkbox
 								SNew(SCheckBox)
 									.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleBuildDLCCheckBoxIsChecked)
 									.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleBuildDLCCheckBoxCheckStateChanged)
@@ -510,7 +539,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 							.AutoHeight()
 							.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 							[
-								// unreal pak check box
+								// Include engine content checkbox
 								SNew(SCheckBox)
 									.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleDLCIncludeEngineContentCheckBoxIsChecked)
 									.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleDLCIncludeEngineContentCheckBoxCheckStateChanged)
@@ -543,7 +572,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						[
-							// incremental cook check box
+							// incremental cook checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleIncrementalCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleIncrementalCheckBoxCheckStateChanged)
@@ -556,46 +585,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// disabled for now until this system is live
-					/*+ SVerticalBox::Slot()
-						.AutoHeight()
-						[
-							// incremental cook check box
-							SNew(SCheckBox)
-							.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleSharedCookedBuildCheckBoxIsChecked)
-							.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleSharedCookedBuildCheckBoxCheckStateChanged)
-							.Padding(FMargin(4.0f, 0.0f))
-							.ToolTipText(LOCTEXT("SharedCookedBuildCheckBoxToolTip", "Experimental: Use a build from the network to cook from."))
-							.Content()
-							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("SharedCookedBuildCheckBoxText", "Iteratively cook from a pre packaged build located on the network"))
-							]
-						]*/
-
-					+ SVerticalBox::Slot()
-						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
-						.AutoHeight()
-						[
-							SNew(SHorizontalBox)
-
-							+ SHorizontalBox::Slot()
-								.FillWidth(1.0)
-								.Padding(0.0, 0.0, 0.0, 3.0)
-								[
-									// repository path text box
-									SNew(SEditableTextBox)
-										.ToolTipText(LOCTEXT("NextReleaseVersionTextBoxTooltip", "Release version to base the next release / DLC / patch on."))
-										.Text(this, &SProjectLauncherCookByTheBookSettings::HandleBasedOnReleaseVersionNameTextBlockText)
-										.OnTextCommitted(this, &SProjectLauncherCookByTheBookSettings::HandleBasedOnReleaseVersionNameCommitted)
-								]
-						]
-
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
-							// stage base release pak files check box
+							// stage base release pak files checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleStageBaseReleasePaksCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleStageBaseReleasePaksCheckBoxCheckStateChanged)
@@ -608,12 +602,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// generate patch params
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
-							// unreal pak check box
+							// Compress content checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleCompressedCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleCompressedCheckBoxCheckStateChanged)
@@ -626,11 +619,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// generate new patch level params
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
+							// generate new patch level checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleAddPatchLevelCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleAddPatchLevelCheckBoxCheckStateChanged)
@@ -643,12 +636,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// generate dlc options
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
-							// incremental cook check box
+							// Unversioned cooked content checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleUnversionedCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleUnversionedCheckBoxCheckStateChanged)
@@ -661,32 +653,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// multiprocess cooking options
-					+ SVerticalBox::Slot()
-						.AutoHeight()
-						.Padding(0.0f, 8.0f, 0.0f, 0.0f)
-						[
-							SNew(SProjectLauncherFormLabel)
-								.LabelText(LOCTEXT("MultiProcessCookerTextBoxLabel", "Num cookers to spawn:"))
-						]
-
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
-							// cooker command line options
-							SNew(SEditableTextBox)
-								.ToolTipText(LOCTEXT("MultiProcessCookerTextBoxTooltip", "The number of cookers to spawn when we do a cook by the book."))
-								.Text(this, &SProjectLauncherCookByTheBookSettings::HandleMultiProcessCookerTextBlockText)
-								.OnTextCommitted(this, &SProjectLauncherCookByTheBookSettings::HandleMultiProcessCookerCommitted)
-						]
-
-					// unreal pak check box
-					+ SVerticalBox::Slot()
-						.AutoHeight()
-						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
-						[
-							// unreal pak check box
+							// Create .pak files checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleUnrealPakCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleUnrealPakCheckBoxCheckStateChanged)
@@ -703,6 +674,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						.AutoHeight()
 						[
+							// Encrypt Ini Files checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleEncryptIniFilesCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleEncryptIniFilesCheckBoxCheckStateChanged)
@@ -715,12 +687,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// generate chunks check box
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
-						
+							// generate chunks checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleGenerateChunksCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleGenerateChunksCheckBoxCheckStateChanged)
@@ -733,12 +704,11 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 								]
 						]
 
-					// don't include editor content
 					+ SVerticalBox::Slot()
 						.AutoHeight()
 						.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 						[
-
+							// don't include editor content checkbox
 							SNew(SCheckBox)
 								.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleDontIncludeEditorContentCheckBoxIsChecked)
 								.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleDontIncludeEditorContentCheckBoxCheckStateChanged)
@@ -767,7 +737,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeComplexWidget()
 										.AutoHeight()
 										.Padding(0.0f, 4.0f, 0.0f, 0.0f)
 										[
-											// unreal pak check box
+											// HTTPChunkInstalls checkbox
 											SNew(SCheckBox)
 												.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleHttpChunkInstallCheckBoxIsChecked)
 												.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleHttpChunkInstallCheckBoxCheckStateChanged)
@@ -896,7 +866,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 		.MaxHeight(256.0f)
 		[
 			SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				.Padding(8.0f)
 				[
 					SNew(SVerticalBox)
@@ -925,7 +895,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 		.Padding(0.0f, 8.0f, 0.0f, 0.0f)
 		[
 			SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				.Padding(8.0f)
 				[
 					SNew(SVerticalBox)
@@ -951,7 +921,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 									SNew(SCheckBox)
 										.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxIsChecked, EShowMapsChoices::ShowAllMaps)
 										.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxCheckStateChanged, EShowMapsChoices::ShowAllMaps)
-										.Style(FEditorStyle::Get(), "RadioButton")
+										.Style(FAppStyle::Get(), "RadioButton")
 										[
 											SNew(STextBlock)
 												.Text(LOCTEXT("AllMapsCheckBoxText", "Show all"))
@@ -966,7 +936,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 									SNew(SCheckBox)
 										.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxIsChecked, EShowMapsChoices::ShowCookedMaps)
 										.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxCheckStateChanged, EShowMapsChoices::ShowCookedMaps)
-										.Style(FEditorStyle::Get(), "RadioButton")
+										.Style(FAppStyle::Get(), "RadioButton")
 										[
 											SNew(STextBlock)
 												.Text(LOCTEXT("CookedMapsCheckBoxText", "Show cooked"))
@@ -981,7 +951,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 									SNew(SCheckBox)
 										.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxIsChecked, EShowMapsChoices::ShowMissingMaps)
 										.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleShowCheckBoxCheckStateChanged, EShowMapsChoices::ShowMissingMaps)
-										.Style(FEditorStyle::Get(), "RadioButton")
+										.Style(FAppStyle::Get(), "RadioButton")
 										[
 											SNew(STextBlock)
 												.Text(LOCTEXT("MissingMapsCheckBoxText", "Show missing"))
@@ -1020,7 +990,7 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 							.AutoWidth()
 							[
 								SNew(SImage)
-									.Image(FEditorStyle::GetBrush(TEXT("Icons.Warning")))
+									.Image(FAppStyle::GetBrush(TEXT("Icons.Warning")))
 							]
 
 							+ SHorizontalBox::Slot()
@@ -1109,23 +1079,6 @@ TSharedRef<SWidget> SProjectLauncherCookByTheBookSettings::MakeSimpleWidget()
 										.Text(LOCTEXT("IncrementalCheckBoxText", "Iterative cooking: Only cook content modified from previous cook"))
 								]
 						]
-
-					// disabled for now until this system is live
-					/*+ SVerticalBox::Slot()
-						.AutoHeight()
-						[
-							// incremental cook check box
-							SNew(SCheckBox)
-							.IsChecked(this, &SProjectLauncherCookByTheBookSettings::HandleSharedCookedBuildCheckBoxIsChecked)
-							.OnCheckStateChanged(this, &SProjectLauncherCookByTheBookSettings::HandleSharedCookedBuildCheckBoxCheckStateChanged)
-							.Padding(FMargin(4.0f, 0.0f))
-							.ToolTipText(LOCTEXT("SharedCookedBuildCheckBoxToolTip", "Experimental: Use a build from the network to cook from."))
-							.Content()
-							[
-								SNew(STextBlock)
-								.Text(LOCTEXT("SharedCookedBuildCheckBoxText", "Iteratively cook from a pre packaged build located on the network"))
-							]
-						]*/
 
 					+ SVerticalBox::Slot()
 						.AutoHeight()
@@ -1645,42 +1598,6 @@ void SProjectLauncherCookByTheBookSettings::HandleCookerOptionsCommitted(const F
 }
 
 
-FText SProjectLauncherCookByTheBookSettings::HandleMultiProcessCookerTextBlockText() const
-{
-	ILauncherProfilePtr SelectedProfile = Model->GetSelectedProfile();
-
-	FText result;
-
-	if (SelectedProfile.IsValid())
-	{
-		result = FText::FromString(FString::FromInt(SelectedProfile->GetNumCookersToSpawn()));
-	}
-
-	return result;
-}
-
-
-void SProjectLauncherCookByTheBookSettings::HandleMultiProcessCookerCommitted(const FText& NewText, ETextCommit::Type CommitType)
-{
-	ILauncherProfilePtr SelectedProfile = Model->GetSelectedProfile();
-
-	if (SelectedProfile.IsValid())
-	{
-		int32 NumCookersToSpawn = FCString::Atoi(*NewText.ToString());
-		switch (CommitType)
-		{
-		case ETextCommit::Default:
-		case ETextCommit::OnCleared:
-			NumCookersToSpawn = 0;
-			break;
-		default:
-			break;
-		}
-		SelectedProfile->SetNumCookersToSpawn(NumCookersToSpawn);
-	}
-}
-
-
 void SProjectLauncherCookByTheBookSettings::HandleUnrealPakCheckBoxCheckStateChanged(ECheckBoxState NewState)
 {
 	ILauncherProfilePtr SelectedProfile = Model->GetSelectedProfile();
@@ -1867,6 +1784,56 @@ void SProjectLauncherCookByTheBookSettings::HandleBasedOnReleaseVersionNameCommi
 		SelectedProfile->SetBasedOnReleaseVersionName(NewText.ToString());
 	}
 
+}
+
+
+FText SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionNameTextBlockText() const
+{
+	const ILauncherProfilePtr SelectedProfile = Model->GetSelectedProfile();
+
+	FText result;
+
+	if (SelectedProfile.IsValid())
+	{
+		result = FText::FromString(SelectedProfile->GetOriginalReleaseVersionName());
+	}
+
+	return result;
+}
+
+
+void SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionNameCommitted(const FText& NewText, ETextCommit::Type CommitType)
+{
+	ILauncherProfilePtr SelectedProfile = Model->GetSelectedProfile();
+
+	if (SelectedProfile.IsValid())
+	{
+		SelectedProfile->SetOriginalReleaseVersionName(NewText.ToString());
+	}
+}
+
+
+EVisibility SProjectLauncherCookByTheBookSettings::HandleOriginalReleaseVersionVisibility() const
+{
+	const ILauncherProfilePtr SelectedProfile = Model->GetSelectedProfile();
+	const TArray<FString>& SelectedCookedPlatformNames = SelectedProfile->GetCookedPlatforms();
+	const TArray<ITargetPlatform*>& Platforms = GetTargetPlatformManager()->GetTargetPlatforms();
+
+	for (const FString& SelectedCookedPlatform : SelectedCookedPlatformNames)
+	{
+		for (const ITargetPlatform* Platform : Platforms)
+		{
+			if (SelectedCookedPlatform == Platform->PlatformName())
+			{
+				if (Platform->RequiresOriginalReleaseVersionForPatch())
+				{
+					return EVisibility::Visible;
+				}
+			}
+		}
+	}
+
+	return EVisibility::Collapsed;
 }
 
 

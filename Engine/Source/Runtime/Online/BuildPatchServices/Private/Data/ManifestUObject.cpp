@@ -8,6 +8,9 @@
 #include "Algo/Transform.h"
 #include "Data/ManifestData.h"
 #include "BuildPatchManifest.h"
+#include "Misc/Compression.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ManifestUObject)
 
 DECLARE_LOG_CATEGORY_EXTERN(LogManifestUObject, Log, All);
 DEFINE_LOG_CATEGORY(LogManifestUObject);
@@ -519,7 +522,8 @@ bool FManifestUObject::LoadInternal(FArchive& Ar, FBuildPatchAppManifest& AppMan
 
 	// Make sure we use the correct serialization version, this is now fixed and must never use a newer version,
 	// because the property tag has changed in structure meaning older clients would not read correctly.
-	Ar.SetUE4Ver(VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG - 1);
+	FPackageFileVersion Version = FPackageFileVersion::CreateUE4Version(VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG - 1);
+	Ar.SetUEVer(Version);
 
 	if (Ar.IsLoading())
 	{
@@ -601,7 +605,8 @@ bool FManifestUObject::SaveInternal(FArchive& Ar, const FBuildPatchAppManifest& 
 
 	// Make sure we use the correct serialization version, this is now fixed and must never use a newer version,
 	// because the property tag has changed in structure meaning older clients would not read correctly.
-	Ar.SetUE4Ver(VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG - 1);
+	FPackageFileVersion Version = FPackageFileVersion::CreateUE4Version(VER_UE4_STRUCT_GUID_IN_PROPERTY_TAG - 1);
+	Ar.SetUEVer(Version);
 
 	if (Ar.IsLoading())
 	{
@@ -659,3 +664,4 @@ bool FManifestUObject::SaveInternal(FArchive& Ar, const FBuildPatchAppManifest& 
 
 #endif // !BUILDPATCHSERVICES_NOUOBJECT
 }
+

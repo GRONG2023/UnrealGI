@@ -6,7 +6,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Textures/SlateIcon.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "IMergeActorsModule.h"
 #include "SMergeActorsToolbar.h"
 #include "WorkspaceMenuStructure.h"
@@ -14,6 +14,7 @@
 #include "MeshUtilities.h"
 #include "MeshMergingTool/MeshMergingTool.h"
 #include "MeshProxyTool/MeshProxyTool.h"
+#include "MeshApproximationTool/MeshApproximationTool.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "IMeshReductionManagerModule.h"
 #include "MeshInstancingTool/MeshInstancingTool.h"
@@ -51,6 +52,10 @@ public:
 	 */
 	virtual bool UnregisterMergeActorsTool(IMergeActorsTool* Tool) override;
 
+	/**
+	 * Get list of registered tools
+	 */
+	virtual void GetRegisteredMergeActorsTools(TArray<IMergeActorsTool*>& OutTools) override;
 
 private:
 
@@ -103,8 +108,8 @@ void FMergeActorsModule::StartupModule()
 	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(MergeActorsTabName, FOnSpawnTab::CreateRaw(this, &FMergeActorsModule::CreateMergeActorsTab))
 		.SetDisplayName(NSLOCTEXT("MergeActorsModule", "TabTitle", "Merge Actors"))
 		.SetTooltipText(NSLOCTEXT("MergeActorsModule", "TooltipText", "Open the Merge Actors tab."))
-		.SetGroup(WorkspaceMenu::GetMenuStructure().GetDeveloperToolsMiscCategory())
-		.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "MergeActors.TabIcon"));
+		.SetGroup(WorkspaceMenu::GetMenuStructure().GetToolsCategory())
+		.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "MergeActors.TabIcon"));
 
 	// Register built-in merging tools straight away
 	ensure(RegisterMergeActorsTool(MakeUnique<FMeshMergingTool>()));
@@ -127,6 +132,8 @@ void FMergeActorsModule::StartupModule()
 	}
 
 	ensure(RegisterMergeActorsTool(MakeUnique<FMeshInstancingTool>()));
+
+	ensure(RegisterMergeActorsTool(MakeUnique<FMeshApproximationTool>()));
 }
 
 
@@ -179,5 +186,14 @@ bool FMergeActorsModule::UnregisterMergeActorsTool(IMergeActorsTool* Tool)
 	return false;
 }
 
+void FMergeActorsModule::GetRegisteredMergeActorsTools(TArray<IMergeActorsTool*>& OutTools)
+{
+	OutTools.Empty();
+	for (const auto& MergeActorTool : MergeActorsTools)
+	{
+		check(MergeActorTool.Get() != nullptr);
+		OutTools.Add(MergeActorTool.Get());
+	}
+}
 
 #undef LOCTEXT_NAMESPACE

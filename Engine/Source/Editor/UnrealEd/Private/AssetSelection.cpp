@@ -2,6 +2,8 @@
 
 #include "AssetSelection.h"
 #include "Engine/Level.h"
+#include "Model.h"
+#include "UObject/ScriptInterface.h"
 #include "UObject/UnrealType.h"
 #include "GameFramework/Actor.h"
 #include "ActorFactories/ActorFactory.h"
@@ -20,7 +22,7 @@
 #include "Kismet2/ComponentEditorUtils.h"
 #include "Engine/Selection.h"
 #include "Editor.h"
-#include "Matinee/MatineeActor.h"
+#include "EditorModeManager.h"
 #include "ScopedTransaction.h"
 
 #include "LevelUtils.h"
@@ -30,11 +32,12 @@
 #include "DragAndDrop/AssetDragDropOp.h"
 #include "DragAndDrop/CollectionDragDropOp.h"
 
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
 #include "SnappingUtils.h"
 #include "ActorEditorUtils.h"
+#include "LevelEditorSubsystem.h"
 #include "LevelEditorViewport.h"
 #include "LandscapeProxy.h"
 #include "Landscape.h"
@@ -51,7 +54,11 @@
 #include "ISourceControlModule.h"
 #include "ISourceControlProvider.h"
 #include "Misc/MessageDialog.h"
-
+#include "Subsystems/PlacementSubsystem.h"
+#include "Elements/Framework/EngineElementsLibrary.h"
+#include "Elements/Framework/TypedElementRegistry.h"
+#include "Elements/Framework/TypedElementSelectionSet.h"
+#include "Elements/Interfaces/TypedElementObjectInterface.h"
 
 namespace AssetSelectionUtils
 {
@@ -292,11 +299,6 @@ namespace AssetSelectionUtils
 						ActorInfo.bHaveEmitter = true;
 					}
 
-					if ( CurrentActor->IsA( AMatineeActor::StaticClass() ) )
-					{
-						ActorInfo.bHaveMatinee = true;
-					}
-
 					if ( CurrentActor->IsTemporarilyHiddenInEditor() )
 					{
 						ActorInfo.bHaveHidden = true;
@@ -313,6 +315,11 @@ namespace AssetSelectionUtils
 					{
 						// Just count the total number of actors with counterparts
 						++ActorInfo.NumSimulationChanges;
+					}
+
+					if (!CurrentActor->GetBrowseToAssetOverride().IsEmpty())
+					{
+						ActorInfo.bHaveBrowseOverride = true;
 					}
 				}
 
@@ -451,21 +458,20 @@ namespace ActorPlacementUtils
 			// Don't prompt user for checks in unattended mode
 			return true;
 		}
-		if (InLevel && GetDefault<ULevelEditorMiscSettings>()->bPromptWhenAddingToLevelBeforeCheckout && SourceControlHelpers::IsAvailable())
+		if (InLevel && InLevel->GetPromptWhenAddingToLevelBeforeCheckout() && SourceControlHelpers::IsAvailable())
 		{
 			FString FileName = SourceControlHelpers::PackageFilename(InLevel->GetPathName());
 			// Query file state also checks the source control status
 			FSourceControlStatePtr SCState = ISourceControlModule::Get().GetProvider().GetState(FileName, EStateCacheUsage::Use);
-			if (!InLevel->bLevelOkayForPlacementWhileCheckedIn && !(SCState->IsCheckedOut() || SCState->IsAdded() || SCState->CanAdd() || SCState->IsUnknown()))
+			if (!(SCState->IsCheckedOut() || SCState->IsAdded() || SCState->CanAdd() || SCState->IsUnknown()))
 			{
-				FText Title = NSLOCTEXT("UnrealEd", "LevelCheckout_Title", "Level Checkout Warning");
-				if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, NSLOCTEXT("UnrealEd","LevelNotCheckedOutMsg", "This actor will be placed in a level that is in source control but not currently checked out. Continue?"), &Title))
+				if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, NSLOCTEXT("UnrealEd","LevelNotCheckedOutMsg", "This actor will be placed in a level that is in revision control but not currently checked out. Continue?"), NSLOCTEXT("UnrealEd", "LevelCheckout_Title", "Level Checkout Warning")))
 				{
 					return false;
 				}
 				else
 				{
-					InLevel->bLevelOkayForPlacementWhileCheckedIn = true;
+					InLevel->bPromptWhenAddingToLevelBeforeCheckout = false;
 				}
 			}
 		}
@@ -484,7 +490,7 @@ namespace ActorPlacementUtils
 				return true;
 			}
 		}
-		if (InLevel && GetDefault<ULevelEditorMiscSettings>()->bPromptWhenAddingToLevelOutsideBounds)
+		if (InLevel && InLevel->GetPromptWhenAddingToLevelOutsideBounds())
 		{
 			FBox CurrentLevelBounds(ForceInit);
 			if (InLevel->LevelBoundsActor.IsValid())
@@ -503,19 +509,20 @@ namespace ActorPlacementUtils
 			{
 				return true;
 			}
-			FVector ExpandedScale = FVector(1.0f + (GetDefault<ULevelEditorMiscSettings>()->PercentageThresholdForPrompt / 100.0f));
-			FTransform ExpandedScaleTransform = FTransform::Identity;
-			ExpandedScaleTransform.SetScale3D(ExpandedScale);
-			CurrentLevelBounds.TransformBy(ExpandedScaleTransform);
+			CurrentLevelBounds = CurrentLevelBounds.ExpandBy(BoundsExtent * (GetDefault<ULevelEditorMiscSettings>()->PercentageThresholdForPrompt / 100.0f));
 			for (int32 ActorTransformIndex = 0; ActorTransformIndex < InActorTransforms.Num(); ++ActorTransformIndex)
 			{
 				FTransform ActorTransform = InActorTransforms[ActorTransformIndex];
 				if (!CurrentLevelBounds.IsInsideOrOn(ActorTransform.GetLocation()))
 				{
-					FText Title = NSLOCTEXT("UnrealEd", "ActorPlacement_Title", "Actor Placement Warning");
-					if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, NSLOCTEXT("UnrealEd", "LevelBoundsMsg", "The actor will be placed outside the bounds of the current level. Continue?"), &Title))
+					if (EAppReturnType::Ok != FMessageDialog::Open(EAppMsgType::OkCancel, NSLOCTEXT("UnrealEd", "LevelBoundsMsg", "The actor will be placed outside the bounds of the current level. Continue?"), NSLOCTEXT("UnrealEd", "ActorPlacement_Title", "Actor Placement Warning")))
 					{
 						return false;
+					}
+					else
+					{
+						InLevel->bPromptWhenAddingToLevelOutsideBounds = false;
+						break;
 					}
 				}
 			}
@@ -524,24 +531,62 @@ namespace ActorPlacementUtils
 	}
 }
 
-/**
-* Creates an actor using the specified factory.  
-*
-* Does nothing if ActorClass is NULL.
-*/
-static AActor* PrivateAddActor( UObject* Asset, UActorFactory* Factory, bool SelectActor = true, EObjectFlags ObjectFlags = RF_Transactional, const FName Name = NAME_None )
+namespace AssetSelectionLocals {
+
+UTypedElementSelectionSet* GetEditorSelectionSet()
 {
-	if (!Factory)
+	if (!GEditor)
 	{
 		return nullptr;
+	}
+	
+	if (ULevelEditorSubsystem* LevelEditorSubsystem = GEditor->GetEditorSubsystem<ULevelEditorSubsystem>())
+	{
+		if (FEditorModeTools* ModeManager = LevelEditorSubsystem->GetLevelEditorModeManager())
+		{
+			return ModeManager->GetEditorSelectionSet();
+		}
 	}
 
-	AActor* Actor = NULL;
-	AActor* NewActorTemplate = Factory->GetDefaultActor( Asset );
-	if ( !NewActorTemplate )
+	return nullptr;
+}
+
+void ForEachObjectInHandles(TArray<FTypedElementHandle> Handles, TFunctionRef<void(UObject&)> Func)
+{
+	for (FTypedElementHandle Handle : Handles)
 	{
-		return nullptr;
+		TTypedElement<ITypedElementObjectInterface> ObjectInterface = UTypedElementRegistry::GetInstance()->GetElement<ITypedElementObjectInterface>(Handle);
+		if (!ObjectInterface)
+		{
+			continue;
+		}
+
+		UObject* Object = ObjectInterface.GetObject();
+		if (!Object)
+		{
+			continue;
+		}
+
+		Func(*Object);
 	}
+}
+
+/**
+ * Creates an object using the specified factory.
+ */
+TArray<FTypedElementHandle> PlaceAssetUsingFactory(UObject* Asset, TScriptInterface<IAssetFactoryInterface> Factory, bool bSelectResult = true, EObjectFlags ObjectFlags = RF_Transactional, const FName Name = NAME_None)
+{
+	TArray<FTypedElementHandle> PlacedItems;
+	if (!Factory)
+	{
+		return PlacedItems;
+	}
+
+	// Whereas going throught UPlacementSubsystem does not require the factory to be an actor factory,
+	// other legacy paths require actor factories. These two pointers, when non-null, can be used for 
+	// those paths.
+	UActorFactory* ActorFactory = Cast<UActorFactory>(Factory.GetObject());
+	AActor* NewActorTemplate = ActorFactory ? ActorFactory->GetDefaultActor(Asset) : nullptr;
 
 	UWorld* OldWorld = nullptr;
 
@@ -552,20 +597,23 @@ static AActor* PrivateAddActor( UObject* Asset, UActorFactory* Factory, bool Sel
 	}
 
 	// For Brushes/Volumes, use the default brush as the template rather than the factory default actor
-	if (NewActorTemplate->IsA(ABrush::StaticClass()) && GWorld->GetDefaultBrush() != nullptr)
+	if (NewActorTemplate && NewActorTemplate->IsA(ABrush::StaticClass()) && GWorld->GetDefaultBrush() != nullptr)
 	{
 		NewActorTemplate = GWorld->GetDefaultBrush();
 	}
 
+	// TODO: FSnappedPositioningData should probably not require the use of an actor factory
 	const FSnappedPositioningData PositioningData = FSnappedPositioningData(GCurrentLevelEditingViewportClient, GEditor->ClickLocation, GEditor->ClickPlane)
-		.UseFactory(Factory)
-		.UsePlacementExtent(NewActorTemplate->GetPlacementExtent());
+		.UseFactory(ActorFactory)
+		.UsePlacementExtent(NewActorTemplate ? NewActorTemplate->GetPlacementExtent() : FVector3d::Zero());
 
 	FTransform ActorTransform = FActorPositioning::GetSnappedSurfaceAlignedTransform(PositioningData);
 
-	if (GetDefault<ULevelEditorViewportSettings>()->SnapToSurface.bEnabled)
+	if (NewActorTemplate && GetDefault<ULevelEditorViewportSettings>()->SnapToSurface.bEnabled)
 	{
 		// HACK: If we are aligning rotation to surfaces, we have to factor in the inverse of the actor's rotation and translation so that the resulting transform after SpawnActor is correct.
+		
+		// TODO: Do this for non-actor placeable objects
 
 		if (auto* RootComponent = NewActorTemplate->GetRootComponent())
 		{
@@ -579,55 +627,95 @@ static AActor* PrivateAddActor( UObject* Asset, UActorFactory* Factory, bool Sel
 
 	// Do not fade snapping indicators over time if the viewport is not realtime
 	bool bClearImmediately = !GCurrentLevelEditingViewportClient || !GCurrentLevelEditingViewportClient->IsRealtime();
-	FSnappingUtils::ClearSnappingHelpers( bClearImmediately );
+	FSnappingUtils::ClearSnappingHelpers(bClearImmediately);
 
 	ULevel* DesiredLevel = GWorld->GetCurrentLevel();
 
-	// If DesireLevel is part of a LevelPartition find the proper DesiredLevel by asking the Partition
-	if (const ILevelPartitionInterface* LevelPartition = DesiredLevel->GetLevelPartition())
-	{
-		if (ULevel* SubLevel = LevelPartition->GetSubLevel(ActorTransform.GetLocation()))
-		{
-			DesiredLevel = SubLevel;
-		}
-	}
-
-	bool bSpawnActor = true;
+	bool bShouldSpawnObject = true;
 
 	if ((ObjectFlags & RF_Transactional) != 0)
 	{
 		TArray<FTransform> SpawningActorTransforms;
 		SpawningActorTransforms.Add(ActorTransform);
-		bSpawnActor = ActorPlacementUtils::IsLevelValidForActorPlacement(DesiredLevel, SpawningActorTransforms);
+		// TODO: At the moment, the conditions for placing non-actor items in a level are the same as actor items, but
+		// we should probably rename this function so it is not actor-specific.
+		bShouldSpawnObject = ActorPlacementUtils::IsLevelValidForActorPlacement(DesiredLevel, SpawningActorTransforms);
 	}
 
-	if(bSpawnActor)
+	if (bShouldSpawnObject)
 	{
-		FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "CreateActor", "Create Actor"), (ObjectFlags & RF_Transactional) != 0 );
-		
-		// Create the actor.
-		FActorSpawnParameters SpawnParams;
-		SpawnParams.ObjectFlags = ObjectFlags;
-		SpawnParams.Name = Name;
-		Actor = Factory->CreateActor(Asset, DesiredLevel, ActorTransform, SpawnParams);
-		if (Actor)
-		{
-			if ( SelectActor )
-			{
-				GEditor->SelectNone( false, true );
-				GEditor->SelectActor( Actor, true, true );
-			}
+		FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "PlaceObject", "Place Object"), (ObjectFlags & RF_Transactional) != 0);
 
-			Actor->InvalidateLightingCache();
-			Actor->PostEditChange();
+		// Create the object.
+		UPlacementSubsystem* PlacementSubsystem = GEditor->GetEditorSubsystem<UPlacementSubsystem>();
+		if (PlacementSubsystem)
+		{
+			FAssetPlacementInfo PlacementInfo;
+			PlacementInfo.AssetToPlace = FAssetData(Asset);
+			PlacementInfo.PreferredLevel = DesiredLevel;
+			PlacementInfo.NameOverride = Name;
+			PlacementInfo.FinalizedTransform = ActorTransform;
+			PlacementInfo.FactoryOverride = Factory;
+
+			FPlacementOptions PlacementOptions;
+			PlacementOptions.bIsCreatingPreviewElements = FLevelEditorViewportClient::IsDroppingPreviewActor();
+
+			PlacedItems = PlacementSubsystem->PlaceAsset(PlacementInfo, PlacementOptions);
+
+			ForEachObjectInHandles(PlacedItems, [ObjectFlags](UObject& PlacedObject)
+			{
+				PlacedObject.SetFlags(ObjectFlags);
+			});
 		}
 
-		GEditor->RedrawLevelEditingViewports();
+		// If we fail to place using the placement subsystem above for some reason, we keep this legacy path that 
+		// tries using an actor factory directly. We don't bother adding a fallback for non-actor factories, as
+		// those got introduced after the existence of the placement subsystem, and should rely on it.
+		if (!PlacedItems.Num() && ActorFactory)
+		{
+			FActorSpawnParameters SpawnParams;
+			SpawnParams.ObjectFlags = ObjectFlags;
+			SpawnParams.Name = Name;
+
+			if (AActor* PlacedActor = ActorFactory->CreateActor(Asset, DesiredLevel, ActorTransform, SpawnParams))
+			{
+				FTypedElementHandle Handle = UEngineElementsLibrary::AcquireEditorActorElementHandle(PlacedActor);
+				if (ensure(Handle))
+				{
+					PlacedItems.Add(Handle);
+				}
+			}
+		}
 	}
 
-	if ( Actor )
+	if (PlacedItems.Num())
 	{
-		Actor->MarkPackageDirty();
+		if (bSelectResult)
+		{
+			// TODO: It would be nice not to use this old form of selection clearing, but it has the benefit
+			// of clearing up legacy bsp selection as well...
+			GEditor->SelectNone(false, true);
+
+			UTypedElementSelectionSet* SelectionSet = GetEditorSelectionSet();
+			if (ensure(SelectionSet))
+			{
+				FTypedElementSelectionOptions SelectionOptions;
+				SelectionSet->SelectElements(PlacedItems, SelectionOptions);
+			}
+		}
+
+		ForEachObjectInHandles(PlacedItems, [](UObject& PlacedObject)
+		{
+			if (AActor* Actor = Cast<AActor>(&PlacedObject))
+			{
+				Actor->InvalidateLightingCache();
+			}
+
+			PlacedObject.PostEditChange();
+			PlacedObject.MarkPackageDirty();
+		});
+
+		GEditor->RedrawLevelEditingViewports();
 		ULevel::LevelDirtiedEvent.Broadcast();
 	}
 
@@ -637,8 +725,31 @@ static AActor* PrivateAddActor( UObject* Asset, UActorFactory* Factory, bool Sel
 		RestoreEditorWorld(OldWorld);
 	}
 
-	return Actor;
+	return PlacedItems;
 }
+
+/**
+ * Helper to pull out a single actor from an array of typed element handles. Used to convert
+ * output in some legacy paths.
+ */
+AActor* GetActorFromTypedElementHandles(const TArray<FTypedElementHandle>& Handles)
+{
+	for (const FTypedElementHandle& Handle : Handles)
+	{
+		TTypedElement<ITypedElementObjectInterface> ObjectInterface = UTypedElementRegistry::GetInstance()->GetElement<ITypedElementObjectInterface>(Handle);
+		if (!ObjectInterface)
+		{
+			continue;
+		}
+
+		if (AActor* Actor = ObjectInterface.GetObjectAs<AActor>())
+		{
+			return Actor;
+		}
+	}
+	return nullptr;
+}
+}//end namespace AssetSelectionLocals
 
 
 namespace AssetUtil
@@ -648,7 +759,7 @@ namespace AssetUtil
 		return ExtractAssetDataFromDrag(DragDropEvent.GetOperation());
 	}
 
-	TArray<FAssetData> ExtractAssetDataFromDrag(const TSharedPtr<FDragDropOperation>& Operation)
+	TArray<FAssetData> ExtractAssetDataFromDrag(const TSharedPtr<const FDragDropOperation>& Operation)
 	{
 		TArray<FAssetData> DroppedAssetData;
 
@@ -659,8 +770,8 @@ namespace AssetUtil
 
 		if (Operation->IsOfType<FExternalDragOperation>())
 		{
-			TSharedPtr<FExternalDragOperation> DragDropOp = StaticCastSharedPtr<FExternalDragOperation>(Operation);
-			if ( DragDropOp->HasText() )
+			TSharedPtr<const FExternalDragOperation> DragDropOp = StaticCastSharedPtr<const FExternalDragOperation>(Operation);
+			if (DragDropOp->HasText())
 			{
 				TArray<FString> DroppedAssetStrings;
 				const TCHAR AssetDelimiter[] = { AssetMarshalDefs::AssetDelimiter, TEXT('\0') };
@@ -671,9 +782,9 @@ namespace AssetUtil
 
 				for (const FString& DroppedAssetString : DroppedAssetStrings)
 				{
-					if (DroppedAssetString.Len() < NAME_SIZE && FName::IsValidXName(DroppedAssetString, INVALID_OBJECTNAME_CHARACTERS INVALID_LONGPACKAGE_CHARACTERS))
+					if (DroppedAssetString.Len() < NAME_SIZE && FName::IsValidXName(DroppedAssetString, INVALID_OBJECTPATH_CHARACTERS))
 					{
-						FAssetData AssetData = AssetRegistry.GetAssetByObjectPath(FName(*DroppedAssetString));
+						FAssetData AssetData = AssetRegistry.GetAssetByObjectPath(FSoftObjectPath(DroppedAssetString));
 						if (AssetData.IsValid())
 						{
 							DroppedAssetData.Add(AssetData);
@@ -684,13 +795,13 @@ namespace AssetUtil
 		}
 		else if (Operation->IsOfType<FCollectionDragDropOp>())
 		{
-			TSharedPtr<FCollectionDragDropOp> DragDropOp = StaticCastSharedPtr<FCollectionDragDropOp>( Operation );
-			DroppedAssetData.Append( DragDropOp->GetAssets() );
+			TSharedPtr<const FCollectionDragDropOp> DragDropOp = StaticCastSharedPtr<const FCollectionDragDropOp>(Operation);
+			DroppedAssetData.Append(DragDropOp->GetAssets());
 		}
 		else if (Operation->IsOfType<FAssetDragDropOp>())
 		{
-			TSharedPtr<FAssetDragDropOp> DragDropOp = StaticCastSharedPtr<FAssetDragDropOp>( Operation );
-			DroppedAssetData.Append( DragDropOp->GetAssets() );
+			TSharedPtr<const FAssetDragDropOp> DragDropOp = StaticCastSharedPtr<const FAssetDragDropOp>(Operation);
+			DroppedAssetData.Append(DragDropOp->GetAssets());
 		}
 
 		return DroppedAssetData;
@@ -759,14 +870,15 @@ void FActorFactoryAssetProxy::GenerateActorFactoryMenuItems( const FAssetData& A
 UActorFactory* FActorFactoryAssetProxy::GetFactoryForAsset( const FAssetData& AssetData, bool bRequireValidObject/*=false*/ )
 {
 	UObject* Asset = NULL;
+	UClass* AssetClass = AssetData.GetClass();
 	
 	if ( AssetData.IsAssetLoaded() )
 	{
 		Asset = AssetData.GetAsset();
 	}
-	else if ( !bRequireValidObject )
+	else if ( !bRequireValidObject && AssetClass )
 	{
-		Asset = AssetData.GetClass()->GetDefaultObject();
+		Asset = AssetClass->GetDefaultObject();
 	}
 
 	return FActorFactoryAssetProxy::GetFactoryForAssetObject( Asset );
@@ -800,50 +912,29 @@ UActorFactory* FActorFactoryAssetProxy::GetFactoryForAssetObject( UObject* Asset
 	return Result;
 }
 
-AActor* FActorFactoryAssetProxy::AddActorForAsset( UObject* AssetObj, bool SelectActor, EObjectFlags ObjectFlags, UActorFactory* FactoryToUse /*= NULL*/, const FName Name )
+AActor* FActorFactoryAssetProxy::AddActorForAsset( UObject* AssetObj, bool bSelectActor, EObjectFlags ObjectFlags, 
+	UActorFactory* FactoryToUse /*= NULL*/, const FName Name )
 {
-	AActor* Result = NULL;
+	UE::AssetPlacementUtil::FExtraPlaceAssetOptions Options;
+	Options.bSelectOutput = bSelectActor;
+	Options.ObjectFlags = ObjectFlags;
+	Options.FactoryToUse = FactoryToUse;
+	Options.Name = Name;
 
-	const FAssetData AssetData( AssetObj );
-	FText UnusedErrorMessage;
-	if ( AssetObj != NULL )
-	{
-		// If a specific factory has been provided, verify its validity and then use it to create the actor
-		if ( FactoryToUse )
-		{
-			if ( FactoryToUse->CanCreateActorFrom( AssetData, UnusedErrorMessage ) )
-			{
-				Result = PrivateAddActor( AssetObj, FactoryToUse, SelectActor, ObjectFlags, Name );
-			}
-		}
-		// If no specific factory has been provided, find the highest priority one that is valid for the asset and use
-		// it to create the actor
-		else
-		{
-			const TArray<UActorFactory*>& ActorFactories = GEditor->ActorFactories;
-			for ( int32 FactoryIdx = 0; FactoryIdx < ActorFactories.Num(); FactoryIdx++ )
-			{
-				UActorFactory* ActorFactory = ActorFactories[FactoryIdx];
+	TArray<FTypedElementHandle> PlacedItems = UE::AssetPlacementUtil::PlaceAssetInCurrentLevel(AssetObj, Options);
 
-				// Check if the actor can be created using this factory, making sure to check for an asset to be assigned from the selector
-				if ( ActorFactory->CanCreateActorFrom( AssetData, UnusedErrorMessage ) )
-				{
-					Result = PrivateAddActor(AssetObj, ActorFactory, SelectActor, ObjectFlags, Name);
-					if ( Result != NULL )
-					{
-						break;
-					}
-				}
-			}
-		}
-	}
+	AActor* Actor = AssetSelectionLocals::GetActorFromTypedElementHandles(PlacedItems);
 
+	ensureMsgf(Actor || PlacedItems.Num() == 0, TEXT("FActorFactoryAssetProxy::AddActorForAsset produced an object, "
+		"but not an actor. Use UE::AssetFactoryUtils::AddObjectForAssetToCurrentLevel instead to use the result."));
 
-	return Result;
+	return Actor;
 }
 
 AActor* FActorFactoryAssetProxy::AddActorFromSelection( UClass* ActorClass, const FVector* ActorLocation, bool SelectActor, EObjectFlags ObjectFlags, UActorFactory* ActorFactory, const FName Name )
 {
+	using namespace AssetSelectionLocals;
+
 	check( ActorClass != NULL );
 
 	if( !ActorFactory )
@@ -862,7 +953,11 @@ AActor* FActorFactoryAssetProxy::AddActorFromSelection( UClass* ActorClass, cons
 		if( TargetObject && ActorFactory->CanCreateActorFrom( FAssetData(TargetObject), ErrorMessage ) )
 		{
 			// Attempt to add the actor
-			Result = PrivateAddActor( TargetObject, ActorFactory, SelectActor, ObjectFlags );
+			TArray<FTypedElementHandle> PlacedItems = PlaceAssetUsingFactory(TargetObject, ActorFactory, SelectActor, ObjectFlags);
+			Result = GetActorFromTypedElementHandles(PlacedItems);
+
+			ensureMsgf(Result || PlacedItems.Num() == 0, TEXT("FActorFactoryAssetProxy::AddActorFromSelection produced a "
+				"result, but not an actor."));
 		}
 	}
 
@@ -968,8 +1063,30 @@ bool FActorFactoryAssetProxy::ApplyMaterialToActor( AActor* TargetActor, UMateri
 }
 
 
-// EOF
+// AssetPlacementUtil
 
+TArray<FTypedElementHandle> UE::AssetPlacementUtil::PlaceAssetInCurrentLevel(UObject* AssetObj, const FExtraPlaceAssetOptions& ExtraParms)
+{
+	using namespace AssetSelectionLocals;
 
+	if (!AssetObj)
+	{
+		return TArray<FTypedElementHandle>();
+	}
 
+	const FAssetData AssetData(AssetObj, FAssetData::ECreationFlags::AllowBlueprintClass);
 
+	if (!ExtraParms.FactoryToUse)
+	{
+		UPlacementSubsystem* PlacementSubsystem = GEditor->GetEditorSubsystem<UPlacementSubsystem>();
+		TScriptInterface<IAssetFactoryInterface> AssetFactory = PlacementSubsystem->FindAssetFactoryFromAssetData(AssetData);
+		return PlaceAssetUsingFactory(AssetObj, AssetFactory, ExtraParms.bSelectOutput, ExtraParms.ObjectFlags, ExtraParms.Name);
+	}
+
+	if (!ExtraParms.FactoryToUse->CanPlaceElementsFromAssetData(AssetData))
+	{
+		return TArray<FTypedElementHandle>();
+	}
+
+	return PlaceAssetUsingFactory(AssetObj, ExtraParms.FactoryToUse, ExtraParms.bSelectOutput, ExtraParms.ObjectFlags, ExtraParms.Name);
+}

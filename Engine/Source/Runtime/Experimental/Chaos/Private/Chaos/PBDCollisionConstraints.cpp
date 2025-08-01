@@ -2,44 +2,38 @@
 
 #include "Chaos/PBDCollisionConstraints.h"
 
-#include "Chaos/Capsule.h"
+#include "Chaos/CastingUtilities.h"
 #include "Chaos/ChaosPerfTest.h"
-#include "Chaos/ChaosDebugDraw.h"
-#include "Chaos/PBDCollisionConstraintsContact.h"
-#include "Chaos/CollisionResolutionUtil.h"
+#include "Chaos/ContactModification.h"
+#include "Chaos/MidPhaseModification.h"
+#include "Chaos/CCDModification.h"
 #include "Chaos/CollisionResolution.h"
-#include "Chaos/Collision/CollisionContext.h"
+#include "Chaos/Collision/CollisionPruning.h"
+#include "Chaos/Collision/PBDCollisionContainerSolver.h"
+#include "Chaos/Collision/PBDCollisionContainerSolverJacobi.h"
+#include "Chaos/Collision/PBDCollisionContainerSolverSimd.h"
 #include "Chaos/Defines.h"
+#include "Chaos/Evolution/SolverBodyContainer.h"
+#include "Chaos/Evolution/ABTestingConstraintContainerSolver.h"
 #include "Chaos/GeometryQueries.h"
-#include "Chaos/ImplicitObjectUnion.h"
-#include "Chaos/ImplicitObjectScaled.h"
-#include "Chaos/SpatialAccelerationCollection.h"
-#include "Chaos/Levelset.h"
-#include "Chaos/Pair.h"
+#include "Chaos/Island/IslandManager.h"
 #include "Chaos/PBDCollisionConstraintsContact.h"
 #include "Chaos/PBDRigidsSOAs.h"
-#include "Chaos/Sphere.h"
-#include "Chaos/Transform.h"
-#include "Chaos/CastingUtilities.h"
+#include "Chaos/PhysicsMaterialUtilities.h"
+#include "Chaos/SpatialAccelerationCollection.h"
 #include "ChaosLog.h"
 #include "ChaosStats.h"
-#include "Containers/Queue.h"
 #include "ProfilingDebugging/ScopedTimers.h"
-#include "Algo/Sort.h"
-
-#if INTEL_ISPC
-#include "PBDCollisionConstraints.ispc.generated.h"
-#endif
 
 //PRAGMA_DISABLE_OPTIMIZATION
 
 namespace Chaos
 {
-	extern int32 UseLevelsetCollision;
-
-	namespace Collisions
+	namespace CVars
 	{
-		extern int32 Chaos_Collision_UseAccumulatedImpulseClipSolve;
+		extern bool bChaos_PBDCollisionSolver_UseJacobiPairSolver2;
+		
+		extern bool bChaosSolverPersistentGraph;
 	}
 
 	int32 CollisionParticlesBVHDepth = 4;
@@ -60,6 +54,9 @@ namespace Chaos
 	FRealSingle CollisionAngularFrictionOverride = -1.0f;
 	FAutoConsoleVariableRef CVarCollisionAngularFrictionOverride(TEXT("p.CollisionAngularFriction"), CollisionAngularFrictionOverride, TEXT("Collision angular friction for all contacts if >= 0"));
 
+	FRealSingle CollisionBaseFrictionImpulseOverride = -1.0f;
+	FAutoConsoleVariableRef CVarCollisionBaseFrictionImpulseOverride(TEXT("p.CollisionBaseFrictionImpulse"), CollisionBaseFrictionImpulseOverride, TEXT("Collision base friction position impulse for all contacts if >= 0"));
+
 	CHAOS_API int32 EnableCollisions = 1;
 	FAutoConsoleVariableRef CVarEnableCollisions(TEXT("p.EnableCollisions"), EnableCollisions, TEXT("Enable/Disable collisions on the Chaos solver."));
 	
@@ -78,16 +75,252 @@ namespace Chaos
 	int32 CollisionCanNeverDisableContacts = 0;
 	FAutoConsoleVariableRef CVarCollisionCanNeverDisableContacts(TEXT("p.CollisionCanNeverDisableContacts"), CollisionCanNeverDisableContacts, TEXT("Collision culling will never be able to permanently disable contacts"));
 
-#if INTEL_ISPC
-	bool bChaos_Collision_ISPC_Enabled = false;
-	FAutoConsoleVariableRef CVarChaosCollisionISPCEnabled(TEXT("p.Chaos.Collision.ISPC"), bChaos_Collision_ISPC_Enabled, TEXT("Whether to use ISPC optimizations in the Collision Solver"));
+	bool CollisionsAllowParticleTracking = true;
+	FAutoConsoleVariableRef CVarCollisionsAllowParticleTracking(TEXT("p.Chaos.Collision.AllowParticleTracking"), CollisionsAllowParticleTracking, TEXT("Allow particles to track their collisions constraints when their DoBufferCollisions flag is enable [def:true]"));
+
+	//	Which edge pruning features to enable (for particle swith EdgeSmoothing enabled)
+	bool bCollisionsEnableEdgeCollisionPruning = true;
+	bool bCollisionsEnableMeshCollisionPruning = true;
+	bool bCollisionsEnableSubSurfaceCollisionPruning = false;
+	FAutoConsoleVariableRef CVarCollisionsEnableEdgeCollisionPruning(TEXT("p.Chaos.Collision.EnableEdgeCollisionPruning"), bCollisionsEnableEdgeCollisionPruning, TEXT(""));
+	FAutoConsoleVariableRef CVarCollisionsEnableMeshCollisionPruning(TEXT("p.Chaos.Collision.EnableMeshCollisionPruning"), bCollisionsEnableMeshCollisionPruning, TEXT(""));
+	FAutoConsoleVariableRef CVarCollisionsEnableSubSurfaceCollisionPruning(TEXT("p.Chaos.Collision.EnableSubSurfaceCollisionPruning"), bCollisionsEnableSubSurfaceCollisionPruning, TEXT(""));
+
+	bool DebugDrawProbeDetection = false;
+	FAutoConsoleVariableRef CVarDebugDrawProbeDetection(TEXT("p.Chaos.Collision.DebugDrawProbeDetection"), DebugDrawProbeDetection, TEXT("Draw probe constraint detection."));
+
+#if CHAOS_DEBUG_DRAW
+	namespace CVars
+	{
+		extern DebugDraw::FChaosDebugDrawSettings ChaosSolverDebugDebugDrawSettings;
+	}
 #endif
-
-
+	
 	DECLARE_CYCLE_STAT(TEXT("Collisions::Reset"), STAT_Collisions_Reset, STATGROUP_ChaosCollision);
-	DECLARE_CYCLE_STAT(TEXT("Collisions::UpdatePointConstraints"), STAT_Collisions_UpdatePointConstraints, STATGROUP_ChaosCollision);
-	DECLARE_CYCLE_STAT(TEXT("Collisions::Apply"), STAT_Collisions_Apply, STATGROUP_ChaosCollision);
-	DECLARE_CYCLE_STAT(TEXT("Collisions::ApplyPushOut"), STAT_Collisions_ApplyPushOut, STATGROUP_ChaosCollision);
+	DECLARE_CYCLE_STAT(TEXT("Collisions::BeginDetect"), STAT_Collisions_BeginDetect, STATGROUP_ChaosCollision);
+	DECLARE_CYCLE_STAT(TEXT("Collisions::EndDetect"), STAT_Collisions_EndDetect, STATGROUP_ChaosCollision);
+	DECLARE_CYCLE_STAT(TEXT("Collisions::Sort"), STAT_Collisions_Sort, STATGROUP_ChaosCollision);
+	DECLARE_CYCLE_STAT(TEXT("Collisions::DetectProbeCollisions"), STAT_Collisions_DetectProbeCollisions, STATGROUP_ChaosCollision);
+
+#if CHAOS_ABTEST_CONSTRAINTSOLVER_ENABLED
+	namespace CVars
+	{
+		bool bCollisionsEnableSolverABTest = false;
+		FAutoConsoleVariableRef CVarCollisionsEnableSolverABTest(TEXT("p.Chaos.Collision.ABTestSolver"), bCollisionsEnableSolverABTest, TEXT(""));
+	}
+
+	// An AB Testing collision solver for use while developing the Simd version
+	using FABTestingCollisionContainerSolver = Private::TABTestingConstraintContainerSolver<FPBDCollisionContainerSolver, Private::FPBDCollisionContainerSolverSimd>;
+
+	// Simd AB testing callback
+	void ABTestSimdCollisionSolver(
+		FABTestingCollisionContainerSolver::ESolverPhase Phase,
+		const FPBDCollisionContainerSolver& SolverA,
+		const Private::FPBDCollisionContainerSolverSimd& SolverB,
+		const FSolverBodyContainer& SolverBodyContainerA,
+		const FSolverBodyContainer& SolverBodyContainerB)
+	{
+		for (int32 ConstraintIndex = 0; ConstraintIndex < SolverA.GetNumConstraints(); ++ConstraintIndex)
+		{
+			const Private::FPBDCollisionSolver& ConstraintSolverA = SolverA.GetConstraintSolver(ConstraintIndex);
+			const FSolverBody& Body0 = ConstraintSolverA.SolverBody0().SolverBody();
+			const FSolverBody& Body1 = ConstraintSolverA.SolverBody1().SolverBody();
+
+			const Private::FPBDCollisionContainerSolverSimd::FConstraintSolverId ConstraintSolverBId = SolverB.GetConstraintSolverId(ConstraintIndex);
+			const Private::TPBDCollisionSolverSimd<4>& ConstraintSolverB = SolverB.GetConstraintSolver(ConstraintSolverBId.SolverIndex);
+			const int32 LaneIndexB = ConstraintSolverBId.LaneIndex;
+
+			if (ConstraintSolverA.NumManifoldPoints() != ConstraintSolverB.NumManifoldPoints().GetValue(LaneIndexB))
+			{
+				UE_LOG(LogChaos, Warning, TEXT("ManifoldPoint count mismatch"));
+				return;
+			}
+
+			for (int32 ManifoldPointIndex = 0; ManifoldPointIndex < ConstraintSolverA.NumManifoldPoints(); ++ManifoldPointIndex)
+			{
+				const Private::FPBDCollisionSolverManifoldPoint& ManifoldPointSolverA = ConstraintSolverA.GetManifoldPoint(ManifoldPointIndex);
+				const Private::TPBDCollisionSolverManifoldPointsSimd<4>& ManifoldPointSolverB = ConstraintSolverB.GetManifoldPoint(ManifoldPointIndex, SolverB.GetManifoldPointBuffer());
+				bool bIsError = false;
+
+				if (ManifoldPointSolverA.ContactNormal != ManifoldPointSolverB.SimdContactNormal.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("ContactNormal mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.ContactTangentU != ManifoldPointSolverB.SimdContactTangentU.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("ContactTangentU mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.ContactTangentV != ManifoldPointSolverB.SimdContactTangentV.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("ContactTangentV mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.RelativeContactPoints[0] != ManifoldPointSolverB.SimdRelativeContactPoint0.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("RelativeContactPoints mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.RelativeContactPoints[1] != ManifoldPointSolverB.SimdRelativeContactPoint1.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("RelativeContactPoints mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.ContactMassNormal != ManifoldPointSolverB.SimdContactMassNormal.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("ContactMassNormal mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.ContactMassTangentU != ManifoldPointSolverB.SimdContactMassTangentU.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("ContactMassTangentU mismatch"));
+					bIsError = true;
+				}
+				if (ManifoldPointSolverA.ContactMassTangentV != ManifoldPointSolverB.SimdContactMassTangentV.GetValue(LaneIndexB))
+				{
+					UE_LOG(LogChaos, Warning, TEXT("ContactMassTangentV mismatch"));
+					bIsError = true;
+				}
+				if (Body0.IsDynamic())
+				{
+					if (ManifoldPointSolverA.ContactTangentUAngular0 != ManifoldPointSolverB.SimdContactTangentUAngular0.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("ContactTangentUAngular0 mismatch"));
+						bIsError = true;
+					}
+					if (ManifoldPointSolverA.ContactTangentVAngular0 != ManifoldPointSolverB.SimdContactTangentVAngular0.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("ContactTangentVAngular0 mismatch"));
+						bIsError = true;
+					}
+				}
+				if (Body1.IsDynamic())
+				{
+					if (ManifoldPointSolverA.ContactTangentUAngular1 != ManifoldPointSolverB.SimdContactTangentUAngular1.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("ContactTangentUAngular1 mismatch"));
+						bIsError = true;
+					}
+					if (ManifoldPointSolverA.ContactTangentVAngular1 != ManifoldPointSolverB.SimdContactTangentVAngular1.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("ContactTangentVAngular1 mismatch"));
+						bIsError = true;
+					}
+				}
+
+				if (Phase == FABTestingCollisionContainerSolver::ESolverPhase::PostApplyPositionConstraints)
+				{
+					if (ManifoldPointSolverA.NetPushOutNormal != ManifoldPointSolverB.SimdNetPushOutNormal.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("NetPushOutNormal mismatch"));
+						bIsError = true;
+					}
+					if (ManifoldPointSolverA.NetPushOutTangentU != ManifoldPointSolverB.SimdNetPushOutTangentU.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("NetPushOutTangentU mismatch"));
+						bIsError = true;
+					}
+					if (ManifoldPointSolverA.NetPushOutTangentV != ManifoldPointSolverB.SimdNetPushOutTangentV.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("NetPushOutTangentV mismatch"));
+						bIsError = true;
+					}
+				}
+
+				if (Phase == FABTestingCollisionContainerSolver::ESolverPhase::PostApplyVelocityConstraints)
+				{
+					if (ManifoldPointSolverA.NetImpulseNormal != ManifoldPointSolverB.SimdNetImpulseNormal.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("NetImpulseNormal mismatch"));
+						bIsError = true;
+					}
+					if (ManifoldPointSolverA.NetImpulseTangentU != ManifoldPointSolverB.SimdNetImpulseTangentU.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("NetImpulseTangentU mismatch"));
+						bIsError = true;
+					}
+					if (ManifoldPointSolverA.NetImpulseTangentV != ManifoldPointSolverB.SimdNetImpulseTangentV.GetValue(LaneIndexB))
+					{
+						UE_LOG(LogChaos, Warning, TEXT("NetImpulseTangentV mismatch"));
+						bIsError = true;
+					}
+				}
+
+				if (bIsError)
+				{
+					UE_LOG(LogChaos, Warning, TEXT("SimdCollisionSolver mismatch"));
+				}
+			}
+		}
+
+		if (SolverBodyContainerA.Num() != SolverBodyContainerB.Num())
+		{
+			UE_LOG(LogChaos, Warning, TEXT("Body count mismatch"));
+			return;
+		}
+
+		for (int BodyIndex = 0; BodyIndex < SolverBodyContainerA.Num(); ++BodyIndex)
+		{
+			const FSolverBody& BodyA = SolverBodyContainerA.GetSolverBody(BodyIndex);
+			const FSolverBody& BodyB = SolverBodyContainerB.GetSolverBody(BodyIndex);
+			bool bIsError = false;
+
+			if (BodyA.P() != BodyB.P())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("Position mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.Q() != BodyB.Q())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("Rotation mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.DP() != BodyB.DP())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("PositionDelta mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.DQ() != BodyB.DQ())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("RotationDelta mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.V() != BodyB.V())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("Velocity mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.W() != BodyB.W())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("AngVel mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.InvM() != BodyB.InvM())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("InvM mismatch"));
+				bIsError = true;
+			}
+
+			if (BodyA.InvI() != BodyB.InvI())
+			{
+				UE_LOG(LogChaos, Warning, TEXT("InvI mismatch"));
+				bIsError = true;
+			}
+
+			if (bIsError)
+			{
+				UE_LOG(LogChaos, Warning, TEXT("SimdCollisionSolver mismatch"));
+			}
+		}
+	}
+#endif
 
 	//
 	// Collision Constraint Container
@@ -98,35 +331,77 @@ namespace Chaos
 		TArrayCollectionArray<bool>& Collided,
 		const TArrayCollectionArray<TSerializablePtr<FChaosPhysicsMaterial>>& InPhysicsMaterials,
 		const TArrayCollectionArray<TUniquePtr<FChaosPhysicsMaterial>>& InPerParticlePhysicsMaterials,
-		const int32 InApplyPairIterations /*= 1*/,
-		const int32 InApplyPushOutPairIterations /*= 1*/,
-		const FReal InRestitutionThreshold /*= (FReal)0*/)
-		: bInAppendOperation(false)
+		const THandleArray<FChaosPhysicsMaterial>* const InSimMaterials,
+		const int32 NumCollisionsPerBlock,
+		const FReal InRestitutionThreshold)
+		: FPBDConstraintContainer(FConstraintContainerHandle::StaticType())
 		, Particles(InParticles)
+		, ConstraintAllocator(NumCollisionsPerBlock)
 		, NumActivePointConstraints(0)
-		, NumActiveSweptPointConstraints(0)
 		, MCollided(Collided)
 		, MPhysicsMaterials(InPhysicsMaterials)
 		, MPerParticlePhysicsMaterials(InPerParticlePhysicsMaterials)
-		, MApplyPairIterations(InApplyPairIterations)
-		, MApplyPushOutPairIterations(InApplyPushOutPairIterations)
+		, SimMaterials(InSimMaterials)
 		, RestitutionThreshold(InRestitutionThreshold)	// @todo(chaos): expose as property
-		, bUseCCD(false)
 		, bEnableCollisions(true)
 		, bEnableRestitution(true)
 		, bHandlesEnabled(true)
+		, bEnableEdgePruning(true)
+		, bIsDeterministic(false)
 		, bCanDisableContacts(true)
-		, SolverType(EConstraintSolverType::GbfPbd)
-		, LifespanCounter(0)
-		, PostApplyCallback(nullptr)
-		, PostApplyPushOutCallback(nullptr)
+		, CollisionSolverType(Private::ECollisionSolverType::GaussSeidel)
+		, GravityDirection(FVec3(0,0,-1))
+		, GravitySize(980)
+		, SolverSettings()
 	{
-#if INTEL_ISPC
-		if (bRealTypeCompatibleWithISPC && bChaos_Collision_ISPC_Enabled)
+		// Unfortunately, but the collision it creates need to know what container they belong to,
+		// but otherwise the allocator doesn't really need to know about the container...
+		ConstraintAllocator.SetCollisionContainer(this);
+	}
+
+	FPBDCollisionConstraints::~FPBDCollisionConstraints()
+	{
+	}
+
+	TUniquePtr<FConstraintContainerSolver> FPBDCollisionConstraints::CreateSceneSolver(const int32 Priority)
+	{
+		// RBAN always uses Gauss Seidel solver for now
+		return MakeUnique<FPBDCollisionContainerSolver>(*this, Priority);
+	}
+
+	TUniquePtr<FConstraintContainerSolver> FPBDCollisionConstraints::CreateGroupSolver(const int32 Priority)
+	{
+		switch (CollisionSolverType)
 		{
-			check(sizeof(FCollisionContact) == ispc::SizeofFCollisionContact());
-		}
+		case Private::ECollisionSolverType::GaussSeidel:
+			return MakeUnique<FPBDCollisionContainerSolver>(*this, Priority);
+
+		case Private::ECollisionSolverType::GaussSeidelSimd:
+#if CHAOS_ABTEST_CONSTRAINTSOLVER_ENABLED
+			if (CVars::bCollisionsEnableSolverABTest)
+			{
+				// Create an AB testing collision solver for simd testing
+				return MakeUnique<FABTestingCollisionContainerSolver>(
+					MakeUnique<FPBDCollisionContainerSolver>(*this, Priority),
+					MakeUnique<Private::FPBDCollisionContainerSolverSimd>(*this, Priority),
+					Priority,
+					&ABTestSimdCollisionSolver);
+			}
 #endif
+			return MakeUnique<Private::FPBDCollisionContainerSolverSimd>(*this, Priority);
+
+		case Private::ECollisionSolverType::PartialJacobi:
+			return MakeUnique<Private::FPBDCollisionContainerSolverJacobi>(*this, Priority);
+		}
+
+		check(false);
+		return nullptr;
+	}
+
+	void FPBDCollisionConstraints::SetIsDeterministic(const bool bInIsDeterministic)
+	{
+		bIsDeterministic = bInIsDeterministic;
+		ConstraintAllocator.SetIsDeterministic(bInIsDeterministic);
 	}
 
 	void FPBDCollisionConstraints::DisableHandles()
@@ -135,653 +410,365 @@ namespace Chaos
 		bHandlesEnabled = false;
 	}
 
-
-	void FPBDCollisionConstraints::SetPostApplyCallback(const FRigidBodyContactConstraintsPostApplyCallback& Callback)
+	FPBDCollisionConstraints::FHandles FPBDCollisionConstraints::GetConstraintHandles() const
 	{
-		PostApplyCallback = Callback;
+		return ConstraintAllocator.GetConstraints();
 	}
 
-	void FPBDCollisionConstraints::ClearPostApplyCallback()
+	FPBDCollisionConstraints::FConstHandles FPBDCollisionConstraints::GetConstConstraintHandles() const
 	{
-		PostApplyCallback = nullptr;
+		return ConstraintAllocator.GetConstConstraints();
 	}
 
-	void FPBDCollisionConstraints::SetPostApplyPushOutCallback(const FRigidBodyContactConstraintsPostApplyPushOutCallback& Callback)
+	void UpdateSoftCollisionSettings(const FChaosPhysicsMaterial* PhysicsMaterial, const FGeometryParticleHandle* Particle, FReal& InOutThickess)
 	{
-		PostApplyPushOutCallback = Callback;
-	}
-	
-	void FPBDCollisionConstraints::ClearPostApplyPushOutCallback()
-	{
-		PostApplyPushOutCallback = nullptr;
-	}
-
-	const FChaosPhysicsMaterial* GetPhysicsMaterial(const TGeometryParticleHandle<FReal, 3>* Particle, const FImplicitObject* Geom, const TArrayCollectionArray<TSerializablePtr<FChaosPhysicsMaterial>>& PhysicsMaterials, const TArrayCollectionArray<TUniquePtr<FChaosPhysicsMaterial>>& PerParticlePhysicsMaterials)
-	{
-		// Use the per-particle material if it exists
-		const FChaosPhysicsMaterial* UniquePhysicsMaterial = Particle->AuxilaryValue(PerParticlePhysicsMaterials).Get();
-		if (UniquePhysicsMaterial != nullptr)
+		if ((PhysicsMaterial->SoftCollisionMode != EChaosPhysicsMaterialSoftCollisionMode::None) && (PhysicsMaterial->SoftCollisionThickness > 0))
 		{
-			return UniquePhysicsMaterial;
-		}
-		const FChaosPhysicsMaterial* PhysicsMaterial = Particle->AuxilaryValue(PhysicsMaterials).Get();
-		if (PhysicsMaterial != nullptr)
-		{
-			return PhysicsMaterial;
-		}
-
-		// If no particle material, see if the shape has one
-		// @todo(chaos): handle materials for meshes etc
-		for (const TUniquePtr<FPerShapeData>& ShapeData : Particle->ShapesArray())
-		{
-			const FImplicitObject* OuterShapeGeom = ShapeData->GetGeometry().Get();
-			const FImplicitObject* InnerShapeGeom = Utilities::ImplicitChildHelper(OuterShapeGeom);
-			if (Geom == OuterShapeGeom || Geom == InnerShapeGeom)
+			FReal MaterialThickness = FReal(0);
+			if (PhysicsMaterial->SoftCollisionMode == EChaosPhysicsMaterialSoftCollisionMode::AbsoluteThickness)
 			{
-				if (ShapeData->GetMaterials().Num() > 0)
-				{
-					return ShapeData->GetMaterials()[0].Get();
-				}
-				else
-				{
-					// This shape doesn't have a material assigned
-					return nullptr;
-				}
+				MaterialThickness = PhysicsMaterial->SoftCollisionThickness;
 			}
-		}
+			else if ((Particle != nullptr) && Particle->HasBounds())
+			{
+				MaterialThickness = FMath::Clamp(PhysicsMaterial->SoftCollisionThickness, 0.0f, 0.5f) * Particle->LocalBounds().Extents().GetAbsMin();
+			}
 
-		// The geometry used for this particle does not belong to the particle.
-		// This can happen in the case of fracture.
-		return nullptr;
+			InOutThickess = FMath::Max(InOutThickess, MaterialThickness);
+		}
 	}
 
-	void FPBDCollisionConstraints::UpdateConstraintMaterialProperties(FCollisionConstraintBase& Constraint)
+	void FPBDCollisionConstraints::UpdateConstraintMaterialProperties(FPBDCollisionConstraint& Constraint)
 	{
-		const FChaosPhysicsMaterial* PhysicsMaterial0 = GetPhysicsMaterial(Constraint.Particle[0], Constraint.Manifold.Implicit[0], MPhysicsMaterials, MPerParticlePhysicsMaterials);
-		const FChaosPhysicsMaterial* PhysicsMaterial1 = GetPhysicsMaterial(Constraint.Particle[1], Constraint.Manifold.Implicit[1], MPhysicsMaterials, MPerParticlePhysicsMaterials);
+		// We only support one material shared by all manifold points for now, even when our 
+		// 4 manifold points are on different triangles of a mesh for example
+		int32 ShapeFaceIndex = INDEX_NONE;
+		if (Constraint.NumManifoldPoints() > 0)
+		{
+			ShapeFaceIndex = Constraint.GetManifoldPoint(0).ContactPoint.FaceIndex;
+		}
 
-		FCollisionContact& Contact = Constraint.Manifold;
+		// This is a bit dodgy - we pass the FaceIndex to both material requests, knowing that at most one of the shapes will use it
+		const FChaosPhysicsMaterial* PhysicsMaterial0 = Private::GetPhysicsMaterial(Constraint.Particle[0], Constraint.GetShape0(), ShapeFaceIndex, &MPhysicsMaterials, &MPerParticlePhysicsMaterials, SimMaterials);
+		const FChaosPhysicsMaterial* PhysicsMaterial1 = Private::GetPhysicsMaterial(Constraint.Particle[1], Constraint.GetShape1(), ShapeFaceIndex, &MPhysicsMaterials, &MPerParticlePhysicsMaterials, SimMaterials);
+
+		FReal MaterialRestitution = 0;
+		FReal MaterialRestitutionThreshold = 0;
+		FReal MaterialStaticFriction = 0;
+		FReal MaterialDynamicFriction = 0;
+		FReal MaterialSoftThickness = 0;
+		FReal MaterialSoftDivisor = 0;
+		FReal MaterialBaseFrictionImpulse = 0;
+
 		if (PhysicsMaterial0 && PhysicsMaterial1)
 		{
 			const FChaosPhysicsMaterial::ECombineMode RestitutionCombineMode = FChaosPhysicsMaterial::ChooseCombineMode(PhysicsMaterial0->RestitutionCombineMode,PhysicsMaterial1->RestitutionCombineMode);
-			Contact.Restitution = FChaosPhysicsMaterial::CombineHelper(PhysicsMaterial0->Restitution, PhysicsMaterial1->Restitution, RestitutionCombineMode);
+			MaterialRestitution = FChaosPhysicsMaterial::CombineHelper(PhysicsMaterial0->Restitution, PhysicsMaterial1->Restitution, RestitutionCombineMode);
 
 			const FChaosPhysicsMaterial::ECombineMode FrictionCombineMode = FChaosPhysicsMaterial::ChooseCombineMode(PhysicsMaterial0->FrictionCombineMode,PhysicsMaterial1->FrictionCombineMode);
-			Contact.Friction = FChaosPhysicsMaterial::CombineHelper(PhysicsMaterial0->Friction,PhysicsMaterial1->Friction, FrictionCombineMode);
+			MaterialDynamicFriction = FChaosPhysicsMaterial::CombineHelper(PhysicsMaterial0->Friction,PhysicsMaterial1->Friction, FrictionCombineMode);
 			const FReal StaticFriction0 = FMath::Max(PhysicsMaterial0->Friction, PhysicsMaterial0->StaticFriction);
 			const FReal StaticFriction1 = FMath::Max(PhysicsMaterial1->Friction, PhysicsMaterial1->StaticFriction);
-			Contact.AngularFriction = FChaosPhysicsMaterial::CombineHelper(StaticFriction0, StaticFriction1, FrictionCombineMode);
+			MaterialStaticFriction = FChaosPhysicsMaterial::CombineHelper(StaticFriction0, StaticFriction1, FrictionCombineMode);
+
+			// @todo(chaos): could do with a nicer way to deal with collisions between two soft objects with different softness settings
+			UpdateSoftCollisionSettings(PhysicsMaterial0, Constraint.GetParticle0(), MaterialSoftThickness);
+			UpdateSoftCollisionSettings(PhysicsMaterial1, Constraint.GetParticle1(), MaterialSoftThickness);
+
+			// Combine base friction impulse
+			MaterialBaseFrictionImpulse = FChaosPhysicsMaterial::CombineHelper(PhysicsMaterial0->BaseFrictionImpulse, PhysicsMaterial1->BaseFrictionImpulse, FrictionCombineMode);
 		}
 		else if (PhysicsMaterial0)
 		{
 			const FReal StaticFriction0 = FMath::Max(PhysicsMaterial0->Friction, PhysicsMaterial0->StaticFriction);
-			Contact.Restitution = PhysicsMaterial0->Restitution;
-			Contact.Friction = PhysicsMaterial0->Friction;
-			Contact.AngularFriction = StaticFriction0;
+			MaterialRestitution = PhysicsMaterial0->Restitution;
+			MaterialDynamicFriction = PhysicsMaterial0->Friction;
+			MaterialStaticFriction = StaticFriction0;
+			MaterialBaseFrictionImpulse = PhysicsMaterial0->BaseFrictionImpulse;
+			UpdateSoftCollisionSettings(PhysicsMaterial0, Constraint.GetParticle0(), MaterialSoftThickness);
 		}
 		else if (PhysicsMaterial1)
 		{
 			const FReal StaticFriction1 = FMath::Max(PhysicsMaterial1->Friction, PhysicsMaterial1->StaticFriction);
-			Contact.Restitution = PhysicsMaterial1->Restitution;
-			Contact.Friction = PhysicsMaterial1->Friction;
-			Contact.AngularFriction = StaticFriction1;
+			MaterialRestitution = PhysicsMaterial1->Restitution;
+			MaterialDynamicFriction = PhysicsMaterial1->Friction;
+			MaterialStaticFriction = StaticFriction1;
+			MaterialBaseFrictionImpulse = PhysicsMaterial1->BaseFrictionImpulse;
+			UpdateSoftCollisionSettings(PhysicsMaterial1, Constraint.GetParticle1(), MaterialSoftThickness);
 		}
 		else
 		{
-			Contact.Friction = DefaultCollisionFriction;
-			Contact.AngularFriction = DefaultCollisionFriction;
-			Contact.Restitution = DefaultCollisionRestitution;
+			MaterialDynamicFriction = DefaultCollisionFriction;
+			MaterialStaticFriction = DefaultCollisionFriction;
+			MaterialRestitution = DefaultCollisionRestitution;
 		}
 
-		if (!bEnableRestitution)
-		{
-			Contact.Restitution = 0.0f;
-		}
+		MaterialRestitutionThreshold = RestitutionThreshold;
 
 		// Overrides for testing
 		if (CollisionFrictionOverride >= 0)
 		{
-			Contact.Friction = CollisionFrictionOverride;
+			MaterialDynamicFriction = CollisionFrictionOverride;
+			MaterialStaticFriction = CollisionFrictionOverride;
 		}
 		if (CollisionRestitutionOverride >= 0)
 		{
-			Contact.Restitution = CollisionRestitutionOverride;
+			MaterialRestitution = CollisionRestitutionOverride;
+		}
+		if (CollisionRestitutionThresholdOverride >= 0.0f)
+		{
+			MaterialRestitutionThreshold = CollisionRestitutionThresholdOverride;
 		}
 		if (CollisionAngularFrictionOverride >= 0)
 		{
-			Contact.AngularFriction = CollisionAngularFrictionOverride;
+			MaterialStaticFriction = CollisionAngularFrictionOverride;
 		}
-	}
-
-	FPBDCollisionConstraints::FConstraintAppendScope FPBDCollisionConstraints::BeginAppendScope()
-	{
-		check(!bInAppendOperation);
-		return FPBDCollisionConstraints::FConstraintAppendScope(this);
-	}
-
-	void FPBDCollisionConstraints::AddConstraint(const FRigidBodyPointContactConstraint& InConstraint)
-	{
-		check(!bInAppendOperation);
-
-		int32 Idx = Constraints.SinglePointConstraints.Add(InConstraint);
-
-		if (bHandlesEnabled)
+		if (CollisionBaseFrictionImpulseOverride >= 0)
 		{
-			FPBDCollisionConstraintHandle* Handle = HandleAllocator.template AllocHandle<FRigidBodyPointContactConstraint>(this, Idx);
-			Handle->GetContact().Timestamp = -INT_MAX; // force point constraints to be deleted.
-
-			Constraints.SinglePointConstraints[Idx].SetConstraintHandle(Handle);
-
-			check(Handle != nullptr);
-			Handles.Add(Handle);
-
-#if CHAOS_COLLISION_PERSISTENCE_ENABLED
-			check(!Manifolds.Contains(Handle->GetKey()));
-			Manifolds.Add(Handle->GetKey(), Handle);
-#endif
+			MaterialBaseFrictionImpulse = CollisionBaseFrictionImpulseOverride;
 		}
+		if (!bEnableRestitution)
+		{
+			MaterialRestitution = 0.0f;
+		}
+		
+		Constraint.Material.Restitution = FRealSingle(MaterialRestitution);
+		Constraint.Material.RestitutionThreshold = FRealSingle(MaterialRestitutionThreshold);
+		Constraint.Material.StaticFriction = FRealSingle(MaterialStaticFriction);
+		Constraint.Material.DynamicFriction = FRealSingle(MaterialDynamicFriction);
+		Constraint.Material.SoftSeparation = FRealSingle(-MaterialSoftThickness);	// Negate: convert from penetration to separation
+		Constraint.Material.InvMassScale0 = 1;
+		Constraint.Material.InvMassScale1 = 1;
+		Constraint.Material.InvInertiaScale0 = 1;
+		Constraint.Material.InvInertiaScale1 = 1;
+		Constraint.Material.BaseFrictionImpulse = FRealSingle(MaterialBaseFrictionImpulse);
 	}
 
-	void FPBDCollisionConstraints::AddConstraint(const FRigidBodySweptPointContactConstraint& InConstraint)
+	void FPBDCollisionConstraints::BeginFrame()
 	{
-		check(!bInAppendOperation);
-
-		int32 Idx = Constraints.SinglePointSweptConstraints.Add(InConstraint);
-
-		if (bHandlesEnabled)
-		{
-			FPBDCollisionConstraintHandle* Handle = HandleAllocator.template AllocHandle<FRigidBodySweptPointContactConstraint>(this, Idx);
-			Handle->GetContact().Timestamp = -INT_MAX; // force point constraints to be deleted.
-
-			Constraints.SinglePointSweptConstraints[Idx].SetConstraintHandle(Handle);
-
-			if(ensure(Handle != nullptr))
-			{			
-				Handles.Add(Handle);
-
-#if CHAOS_COLLISION_PERSISTENCE_ENABLED
-				check(!Manifolds.Contains(Handle->GetKey()));
-				Manifolds.Add(Handle->GetKey(), Handle);
-#endif
-			}
-		}
-	}
-
-	void FPBDCollisionConstraints::PrepareIteration(FReal dt)
-	{
-		// NOTE: We could set material properties as we add constraints, but the ParticlePairBroadphase
-		// skips the call to AddConstraint and writes directly to the constraint array, so we
-		// need to do it after all constraints are added.
-
-		for (FRigidBodyPointContactConstraint& Contact : Constraints.SinglePointConstraints)
-		{
-			UpdateConstraintMaterialProperties(Contact);
-		}
-
-		for (FRigidBodySweptPointContactConstraint& Contact : Constraints.SinglePointSweptConstraints)
-		{
-			UpdateConstraintMaterialProperties(Contact);
-		}
-	}
-
-	void FPBDCollisionConstraints::UpdatePositionBasedState(const FReal Dt)
-	{
-		check(!bInAppendOperation);
-
-		Reset();
-	
-		LifespanCounter++;
+		ConstraintAllocator.BeginFrame();
 	}
 
 	void FPBDCollisionConstraints::Reset()
 	{
-		check(!bInAppendOperation);
-
 		SCOPE_CYCLE_COUNTER(STAT_Collisions_Reset);
 
-#if CHAOS_COLLISION_PERSISTENCE_ENABLED
-		check(bHandlesEnabled);	// This will need fixing for handle-free mode
-		TArray<FPBDCollisionConstraintHandle*> CopyOfHandles = Handles;
-		int32 LifespanWindow = LifespanCounter - 1;
-		for (FPBDCollisionConstraintHandle* ContactHandle : CopyOfHandles)
+		ConstraintAllocator.Reset();
+	}
+
+	void FPBDCollisionConstraints::BeginDetectCollisions()
+	{
+		SCOPE_CYCLE_COUNTER(STAT_Collisions_BeginDetect);
+
+		ConstraintAllocator.BeginDetectCollisions();
+	}
+
+	void FPBDCollisionConstraints::EndDetectCollisions()
+	{
+		SCOPE_CYCLE_COUNTER(STAT_Collisions_EndDetect);
+
+		// Prune the unused contacts
+		ConstraintAllocator.EndDetectCollisions();
+
+		// Disable any edge collisions that are hidden by face collisions
+		// (for bodies that have the EdgePruning option enabled)
+		PruneEdgeCollisions();
+	}
+
+	void FPBDCollisionConstraints::DetectProbeCollisions(FReal Dt)
+	{
+		SCOPE_CYCLE_COUNTER(STAT_Collisions_DetectProbeCollisions);
+
+		// Do a final narrow-phase update on probe constraints. This is done to avoid
+		// false positive probe hit results, which may occur if the constraint was created
+		// for a contact which no longer is occurring due to resolution of another constraint.
+		for (FPBDCollisionConstraint* Contact : GetConstraints())
 		{
-			if (!bEnableCollisions || ContactHandle->GetContact().Timestamp< LifespanWindow)
+			if ((Contact != nullptr) && Contact->IsProbe())
 			{
-				RemoveConstraint(ContactHandle);
-			}
-		}
-#else
-		for (FPBDCollisionConstraintHandle* Handle : Handles)
-		{
-			HandleAllocator.FreeHandle(Handle);
-		}
-		Constraints.Reset();
-		Handles.Reset();
+				const FGeometryParticleHandle* Particle0 = Contact->GetParticle0();
+				const FGeometryParticleHandle* Particle1 = Contact->GetParticle1();
+				const FRigidTransform3& ShapeWorldTransform0 = Contact->GetShapeRelativeTransform0() * FParticleUtilities::GetActorWorldTransform(FConstGenericParticleHandle(Particle0));
+				const FRigidTransform3& ShapeWorldTransform1 = Contact->GetShapeRelativeTransform1() * FParticleUtilities::GetActorWorldTransform(FConstGenericParticleHandle(Particle1));
+				Contact->SetCullDistance(0.f);
+				Contact->SetShapeWorldTransforms(ShapeWorldTransform0, ShapeWorldTransform1);
+				Collisions::UpdateConstraint(*Contact, ShapeWorldTransform0, ShapeWorldTransform1, Dt);
+
+#if CHAOS_DEBUG_DRAW
+				if (DebugDrawProbeDetection)
+				{
+					DebugDraw::FChaosDebugDrawSettings Settings = CVars::ChaosSolverDebugDebugDrawSettings;
+					Settings.DrawDuration = 1.f;
+					DebugDraw::DrawCollidingShapes(FRigidTransform3(), *Contact, 1.f, 1.f, &Settings);
+				}
 #endif
-
-		bUseCCD = false;
+			}
+		}
 	}
 
-	void FPBDCollisionConstraints::ApplyCollisionModifier(const TArray<ISimCallbackObject*>& CollisionModifiers)
+	void FPBDCollisionConstraints::ApplyMidPhaseModifier(const TArray<ISimCallbackObject*>& MidPhaseModifiers, FReal Dt)
 	{
-		check(!bInAppendOperation);
-		if (Handles.Num())
+		FMidPhaseModifierAccessor ModifierAccessor(GetConstraintAllocator());
+		for(ISimCallbackObject* ModifierCallback : MidPhaseModifiers)
 		{
-			for(ISimCallbackObject* Modifier : CollisionModifiers)
+			ModifierCallback->MidPhaseModification_Internal(ModifierAccessor);
+		}
+	}
+
+	void FPBDCollisionConstraints::ApplyCCDModifier(const TArray<ISimCallbackObject*>& CCDModifiers, FReal Dt)
+	{
+		FCCDModifierAccessor ModifierAccessor(Dt);
+		for (ISimCallbackObject* ModifierCallback : CCDModifiers)
 		{
-			TArray<FPBDCollisionConstraintHandleModification> ModificationResults;
-			ModificationResults.Reserve(Handles.Num());
-				for (FPBDCollisionConstraintHandle* Handle : Handles)
+			ModifierCallback->CCDModification_Internal(ModifierAccessor);
+		}
+	}
+
+	void FPBDCollisionConstraints::ApplyCollisionModifier(const TArray<ISimCallbackObject*>& CollisionModifiers, FReal Dt)
+	{
+		if (GetConstraints().Num() > 0)
+		{
+			// NOTE: at this point, we will not have any nullptrs in the constraint handles
+			TArrayView<FPBDCollisionConstraint* const> ConstraintHandles = GetConstraintHandles();
+			FCollisionContactModifier Modifier(ConstraintHandles, Dt);
+
+			for(ISimCallbackObject* ModifierCallback : CollisionModifiers)
 			{
-				ModificationResults.Emplace(Handle);
+				FScopedTraceSolverCallback ScopedCallback(ModifierCallback);
+				ModifierCallback->ContactModification_Internal(Modifier);
 			}
 
-				Modifier->ContactModification_Internal(TArrayView<FPBDCollisionConstraintHandleModification>(ModificationResults.GetData(), ModificationResults.Num()));
-				
-			for (const FPBDCollisionConstraintHandleModification& Modification : ModificationResults)
+			Modifier.UpdateConstraintManifolds();
+		}
+	}
+
+	void FPBDCollisionConstraints::DisconnectConstraints(const TSet<FGeometryParticleHandle*>& ParticleHandles)
+	{
+		RemoveConstraints(ParticleHandles);
+	}
+
+	void FPBDCollisionConstraints::RemoveConstraints(const TSet<FGeometryParticleHandle*>& ParticleHandles)
+	{
+		for (FGeometryParticleHandle* ParticleHandle : ParticleHandles)
+		{
+			ConstraintAllocator.RemoveParticle(ParticleHandle);
+		}
+	}
+
+	void FPBDCollisionConstraints::AddConstraintsToGraph(Private::FPBDIslandManager& IslandManager)
+	{
+		// Debugging/diagnosing: if we have collisions disabled, remove all collisions from the graph and don't add any more
+		if (!GetCollisionsEnabled())
+		{
+			IslandManager.RemoveContainerConstraints(GetContainerId());
+			return;
+		}
+
+		// Remove expired collisions
+		// @chaos(todo): if graph persistent is disabled we remove all collisions, but in a non-optimal way...
+		TempCollisions.Reset();
+		const bool bRemoveAllAwakeCollisions = !CVars::bChaosSolverPersistentGraph;
+		IslandManager.VisitAwakeConstraints(GetContainerId(),
+			[this, bRemoveAllAwakeCollisions](const Private::FPBDIslandConstraint* IslandConstraint)
 			{
-					if (Modification.GetResult() == ECollisionModifierResult::Disabled)
+				FPBDCollisionConstraintHandle* CollisionHandle = IslandConstraint->GetConstraint()->AsUnsafe<FPBDCollisionConstraintHandle>();
+				if (bRemoveAllAwakeCollisions || !CollisionHandle->IsEnabled() || CollisionHandle->IsProbe() || ConstraintAllocator.IsConstraintExpired(CollisionHandle->GetContact()))
 				{
-					RemoveConstraint(Modification.GetHandle());
+					TempCollisions.Add(CollisionHandle);
 				}
+			});
+
+		// Remove expired constraints
+		for (FPBDCollisionConstraintHandle* CollisionHandle : TempCollisions)
+		{
+			IslandManager.RemoveConstraint(CollisionHandle);
+		}
+
+		// Collect all the new constraints that need to be added to the graph
+		TempCollisions.Reset();
+		for (FPBDCollisionConstraintHandle* ConstraintHandle : ConstraintAllocator.GetConstraints())
+		{
+			FPBDCollisionConstraint& Constraint = ConstraintHandle->GetContact();
+			if (!Constraint.IsInConstraintGraph() && Constraint.IsEnabled() && !Constraint.IsProbe())
+			{
+				TempCollisions.Add(ConstraintHandle);
 			}
 		}
-			
-		}
-	}
 
-	void FPBDCollisionConstraints::RemoveConstraints(const TSet<TGeometryParticleHandle<FReal, 3>*>&  InHandleSet)
-	{
-		check(!bInAppendOperation);
-
-		const TArray<TGeometryParticleHandle<FReal, 3>*> HandleArray = InHandleSet.Array();
-		for (auto ParticleHandle : HandleArray)
+		// Sort new constraints into a predictable order. This isn't strictly required if we don't need
+		// deterministic behaviour, but without sorting we can get fairly different behaviour from run 
+		// to run because the collisions detection order is effectively random on multicore machines.
+		//
+		// @todo(chaos): this is still not good enough for some types of determinism. Specifically if we 
+		// create two set of objects in a different order but with the same physical positions and other 
+		// state, they will behave differently which is undesirable. To fix this we need a sorting 
+		// mechanism that does not rely on properties like Particle IDs, but it would be expensive.
+		//
+		// NOTE: If bIsDeterministic is true, we have already sorted the active constraints list 
+		// (see EndDetectCollisions) so we don't need to do it again here
+		if (!bIsDeterministic)
 		{
-			TArray<FPBDCollisionConstraintHandle*> CopyOfHandles = Handles;
+			SCOPE_CYCLE_COUNTER(STAT_Collisions_Sort);
 
-			for (FPBDCollisionConstraintHandle* ContactHandle : CopyOfHandles)
-			{
-				TVector<TGeometryParticleHandle<FReal, 3>*, 2> ConstraintParticles = ContactHandle->GetConstrainedParticles();
-				if (ConstraintParticles[1] == ParticleHandle || ConstraintParticles[0] == ParticleHandle)
+			TempCollisions.Sort(
+				[](const FPBDCollisionConstraintHandle& L, const FPBDCollisionConstraintHandle& R)
 				{
-					RemoveConstraint(ContactHandle);
-				}
-			}
+					return L.GetContact().GetCollisionSortKey() < R.GetContact().GetCollisionSortKey();
+				});
 		}
+
+		// Add the new constraints to the graph
+		for (FPBDCollisionConstraintHandle* ConstraintHandle : TempCollisions)
+		{
+			IslandManager.AddConstraint(GetContainerId(), ConstraintHandle, ConstraintHandle->GetConstrainedParticles());
+		}
+
+		TempCollisions.Reset();
 	}
 
-	void FPBDCollisionConstraints::RemoveConstraint(FPBDCollisionConstraintHandle* Handle)
-	{
-		check(!bInAppendOperation);
-
-		FConstraintContainerHandleKey KeyToRemove = Handle->GetKey();
-		int32 Idx = Handle->GetConstraintIndex(); // index into specific array
-		typename FCollisionConstraintBase::FType ConstraintType = Handle->GetType();
-
-		if (ConstraintType == FCollisionConstraintBase::FType::SinglePoint)
-		{
-#if CHAOS_COLLISION_PERSISTENCE_ENABLED
-			if (Idx < Constraints.SinglePointConstraints.Num() - 1)
-			{
-				// update the handle
-				FConstraintContainerHandleKey Key = FPBDCollisionConstraintHandle::MakeKey(&Constraints.SinglePointConstraints.Last());
-				Manifolds[Key]->SetConstraintIndex(Idx, ConstraintType);
-			}
-#endif
-			Constraints.SinglePointConstraints.RemoveAtSwap(Idx);
-			if (bHandlesEnabled && (Idx < Constraints.SinglePointConstraints.Num()))
-			{
-				Constraints.SinglePointConstraints[Idx].GetConstraintHandle()->SetConstraintIndex(Idx, FCollisionConstraintBase::FType::SinglePoint);
-			}
-
-		}
-		else if (ConstraintType == FCollisionConstraintBase::FType::SinglePointSwept)
-		{
-#if CHAOS_COLLISION_PERSISTENCE_ENABLED
-			if (Idx < Constraints.SinglePointSweptConstraints.Num() - 1)
-			{
-				// update the handle
-				FConstraintContainerHandleKey Key = FPBDCollisionConstraintHandle::MakeKey(&Constraints.SinglePointSweptConstraints.Last());
-				Manifolds[Key]->SetConstraintIndex(Idx, ConstraintType);
-			}
-#endif
-			Constraints.SinglePointSweptConstraints.RemoveAtSwap(Idx);
-			if (bHandlesEnabled && (Idx < Constraints.SinglePointSweptConstraints.Num()))
-			{
-				Constraints.SinglePointSweptConstraints[Idx].GetConstraintHandle()->SetConstraintIndex(Idx, FCollisionConstraintBase::FType::SinglePointSwept);
-			}
-		}
-		else 
-		{
-			check(false);
-		}
-
-		if (bHandlesEnabled)
-		{
-			// @todo(chaos): Collision Manifold
-			//   Add an index to the handle in the Manifold.Value 
-			//   to prevent the search in Handles when removed.
-#if CHAOS_COLLISION_PERSISTENCE_ENABLED
-			Manifolds.Remove(KeyToRemove);
-#endif
-			Handles.Remove(Handle);
-			check(Handles.Num() == Constraints.SinglePointConstraints.Num() + Constraints.SinglePointSweptConstraints.Num());
-
-			HandleAllocator.FreeHandle(Handle);
-		}
-	}
-
-
-	void FPBDCollisionConstraints::UpdateConstraints(FReal Dt, const TSet<TGeometryParticleHandle<FReal, 3>*>& ParticlesSet)
-	{
-		// Clustering uses update constraints to force a re-evaluation. 
-	}
-
-	// Called once per frame to update persistent constraints (reruns collision detection, or selects the best manifold point)
-	void FPBDCollisionConstraints::UpdateConstraints(FReal Dt)
-	{
-		SCOPE_CYCLE_COUNTER(STAT_Collisions_UpdatePointConstraints);
-
-		// @todo(chaos): parallelism needs to be optional
-
-		//PhysicsParallelFor(Handles.Num(), [&](int32 ConstraintHandleIndex)
-		//{
-		//	FPBDCollisionConstraintHandle* ConstraintHandle = Handles[ConstraintHandleIndex];
-		//	check(ConstraintHandle != nullptr);
-		//	Collisions::Update(MCullDistance, MShapePadding, ConstraintHandle->GetContact());
-
-		//	if (ConstraintHandle->GetContact().GetPhi() < MCullDistance) 
-		//	{
-		//		ConstraintHandle->GetContact().Timestamp = LifespanCounter;
-		//	}
-		//}, bDisableCollisionParallelFor);
-
-		for (FRigidBodyPointContactConstraint& Contact : Constraints.SinglePointConstraints)
-		{
-			Collisions::Update(Contact, Dt);
-			if (Contact.GetPhi() < Contact.GetCullDistance())
-			{
-				Contact.Timestamp = LifespanCounter;
-			}
-		}
-	}
-
-	Collisions::FContactParticleParameters FPBDCollisionConstraints::GetContactParticleParameters(const FReal Dt)
-	{
-		return { 
-			(CollisionRestitutionThresholdOverride >= 0.0f) ? CollisionRestitutionThresholdOverride * Dt : RestitutionThreshold * Dt,
-			CollisionCanAlwaysDisableContacts ? true : (CollisionCanNeverDisableContacts ? false : bCanDisableContacts),
-			&MCollided,
-
-		};
-	}
-
-	Collisions::FContactIterationParameters FPBDCollisionConstraints::GetContactIterationParameters(const FReal Dt, const int32 Iteration, const int32 NumIterations, const int32 NumPairIterations, bool& bNeedsAnotherIteration)
-	{
-		return {
-			Dt, 
-			Iteration, 
-			NumIterations, 
-			NumPairIterations, 
-			SolverType, 
-			&bNeedsAnotherIteration
-		};
-	}
-
-	bool FPBDCollisionConstraints::Apply(const FReal Dt, const int32 Iterations, const int32 NumIterations)
-	{
-		SCOPE_CYCLE_COUNTER(STAT_Collisions_Apply);
-
-		bool bNeedsAnotherIteration = false;
-		if (MApplyPairIterations > 0)
-		{
-			const Collisions::FContactParticleParameters ParticleParameters = GetContactParticleParameters(Dt);
-			const Collisions::FContactIterationParameters IterationParameters = GetContactIterationParameters(Dt, Iterations, NumIterations, MApplyPairIterations, bNeedsAnotherIteration);
-
-			NumActivePointConstraints = 0;
-			for (FRigidBodyPointContactConstraint& Contact : Constraints.SinglePointConstraints)
-			{
-				if (!Contact.GetDisabled())
-				{
-					Collisions::Apply(Contact, IterationParameters, ParticleParameters);
-					++NumActivePointConstraints;
-				}
-			}
-
-			// Swept apply may significantly change particle position, invalidating other constraint's manifolds.
-			// We don't update manifolds on first apply iteration, so make sure we apply swept constraints last.
-			NumActiveSweptPointConstraints = 0;
-			for (FRigidBodySweptPointContactConstraint& Contact : Constraints.SinglePointSweptConstraints)
-			{
-				if (!Contact.GetDisabled())
-				{
-					Collisions::Apply(Contact, IterationParameters, ParticleParameters);
-					++NumActiveSweptPointConstraints;
-				}
-			}
-		}
-
-		if (PostApplyCallback != nullptr)
-		{
-			PostApplyCallback(Dt, Handles);
-		}
-
-		return bNeedsAnotherIteration;
-	}
-
-	bool FPBDCollisionConstraints::ApplyPushOut(const FReal Dt, const int32 Iterations, const int32 NumIterations)
-	{
-		SCOPE_CYCLE_COUNTER(STAT_Collisions_ApplyPushOut);
-
-		TSet<const TGeometryParticleHandle<FReal, 3>*> TempStatic;
-		bool bNeedsAnotherIteration = false;
-		if (MApplyPushOutPairIterations > 0)
-		{
-			const Collisions::FContactParticleParameters ParticleParameters = GetContactParticleParameters(Dt);
-			const Collisions::FContactIterationParameters IterationParameters = GetContactIterationParameters(Dt, Iterations, NumIterations, MApplyPushOutPairIterations, bNeedsAnotherIteration);
-
-			for (FRigidBodyPointContactConstraint& Contact : Constraints.SinglePointConstraints)
-			{
-				if (!Contact.GetDisabled())
-				{
-					Collisions::ApplyPushOut(Contact, TempStatic, IterationParameters, ParticleParameters);
-				}
-			}
-
-			for (FRigidBodySweptPointContactConstraint& Contact : Constraints.SinglePointSweptConstraints)
-			{
-				if (!Contact.GetDisabled())
-				{
-					Collisions::ApplyPushOut(Contact, TempStatic, IterationParameters, ParticleParameters);
-				}
-			}
-		}
-
-		if (PostApplyPushOutCallback != nullptr)
-		{
-			PostApplyPushOutCallback(Dt, Handles, bNeedsAnotherIteration);
-		}
-
-		return bNeedsAnotherIteration;
-	}
-
-	void FPBDCollisionConstraints::SortConstraints()
-	{
-		check(!bInAppendOperation);
-
-		Algo::Sort(Handles, [](const FPBDCollisionConstraintHandle* A, const FPBDCollisionConstraintHandle* B)
-		{
-			if(A->GetType() == B->GetType())
-			{
-				return A->GetContact() < B->GetContact();
-			}
-			else
-			{
-				return A->GetType() < B->GetType();
-			}
-		});
-	}
-
-	bool FPBDCollisionConstraints::Apply(const FReal Dt, const TArray<FPBDCollisionConstraintHandle*>& InConstraintHandles, const int32 Iterations, const int32 NumIterations)
-	{
-		SCOPE_CYCLE_COUNTER(STAT_Collisions_Apply);
-
-		TAtomic<bool> bNeedsAnotherIterationAtomic;
-		bNeedsAnotherIterationAtomic.Store(false);
-		if (MApplyPairIterations > 0)
-		{
-			PhysicsParallelFor(InConstraintHandles.Num(), [&](int32 ConstraintHandleIndex) 
-			{
-				FPBDCollisionConstraintHandle* ConstraintHandle = InConstraintHandles[ConstraintHandleIndex];
-				check(ConstraintHandle != nullptr);
-
-				TVector<const TGeometryParticleHandle<FReal, 3>*, 2> ConstrainedParticles = ConstraintHandle->GetConstrainedParticles();
-				bool bNeedsAnotherIteration = false;
-
-				if (!ConstraintHandle->GetContact().GetDisabled())
-				{
-					const Collisions::FContactParticleParameters ParticleParameters = GetContactParticleParameters(Dt);
-					const Collisions::FContactIterationParameters IterationParameters = GetContactIterationParameters(Dt, Iterations, NumIterations, MApplyPairIterations, bNeedsAnotherIteration);
-					Collisions::Apply(ConstraintHandle->GetContact(), IterationParameters, ParticleParameters);
-
-					if (bNeedsAnotherIteration)
-					{
-						bNeedsAnotherIterationAtomic.Store(true);
-					}
-				}
-
-			}, bDisableCollisionParallelFor);
-		}
-
-		if (PostApplyCallback != nullptr)
-		{
-			PostApplyCallback(Dt, InConstraintHandles);
-		}
-
-		return bNeedsAnotherIterationAtomic.Load();
-	}
-
-
-	bool FPBDCollisionConstraints::ApplyPushOut(const FReal Dt, const TArray<FPBDCollisionConstraintHandle*>& InConstraintHandles, const TSet< const TGeometryParticleHandle<FReal, 3>*>& IsTemporarilyStatic, int32 Iteration, int32 NumIterations)
-	{
-		SCOPE_CYCLE_COUNTER(STAT_Collisions_ApplyPushOut);
-
-		bool bNeedsAnotherIteration = false;
-		if (MApplyPushOutPairIterations > 0)
-		{
-			PhysicsParallelFor(InConstraintHandles.Num(), [&](int32 ConstraintHandleIndex)
-			{
-				FPBDCollisionConstraintHandle* ConstraintHandle = InConstraintHandles[ConstraintHandleIndex];
-				check(ConstraintHandle != nullptr);
-
-				if (!ConstraintHandle->GetContact().GetDisabled())
-				{
-					const Collisions::FContactParticleParameters ParticleParameters = GetContactParticleParameters(Dt);
-					const Collisions::FContactIterationParameters IterationParameters = GetContactIterationParameters(Dt, Iteration, NumIterations, MApplyPushOutPairIterations, bNeedsAnotherIteration);
-					Collisions::ApplyPushOut(ConstraintHandle->GetContact(), IsTemporarilyStatic, IterationParameters, ParticleParameters);
-				}
-
-			}, bDisableCollisionParallelFor);
-		}
-
-		if (PostApplyPushOutCallback != nullptr)
-		{
-			PostApplyPushOutCallback(Dt, InConstraintHandles, bNeedsAnotherIteration);
-		}
-
-		return bNeedsAnotherIteration;
-	}
-
-	const FCollisionConstraintBase& FPBDCollisionConstraints::GetConstraint(int32 Index) const
+	const FPBDCollisionConstraint& FPBDCollisionConstraints::GetConstraint(int32 Index) const
 	{
 		check(Index < NumConstraints());
 		
-		if (Index < Constraints.SinglePointConstraints.Num())
+		return *GetConstraints()[Index];
+	}
+
+	FPBDCollisionConstraint& FPBDCollisionConstraints::GetConstraint(int32 Index)
+	{
+		check(Index < NumConstraints());
+
+		return *GetConstraints()[Index];
+	}
+
+	void FPBDCollisionConstraints::PruneEdgeCollisions()
+	{
+		if (bEnableEdgePruning)
 		{
-			return Constraints.SinglePointConstraints[Index];
+			for (auto& ParticleHandle : Particles.GetNonDisabledDynamicView())
+			{
+				if ((ParticleHandle.CollisionConstraintFlags() & (uint32)ECollisionConstraintFlags::CCF_SmoothEdgeCollisions) != 0)
+				{
+					if (bCollisionsEnableMeshCollisionPruning)
+					{
+						FParticleMeshCollisionPruner MeshPruner(ParticleHandle.Handle());
+						MeshPruner.Prune();
+					}
+
+					if (bCollisionsEnableEdgeCollisionPruning)
+					{
+						FParticleEdgeCollisionPruner EdgePruner(ParticleHandle.Handle());
+						EdgePruner.Prune();
+					}
+
+					if (bCollisionsEnableSubSurfaceCollisionPruning)
+					{
+						const FVec3 UpVector = ParticleHandle.GetR().GetAxisZ();
+						FParticleSubSurfaceCollisionPruner SubSurfacePruner(ParticleHandle.Handle());
+						SubSurfacePruner.Prune(UpVector);
+					}
+				}
+			}
 		}
-		Index -= Constraints.SinglePointConstraints.Num();
-
-		return Constraints.SinglePointSweptConstraints[Index];
-	}
-
-	FPBDCollisionConstraints::FConstraintAppendScope::FConstraintAppendScope(FPBDCollisionConstraints* InOwner)
-		: Owner(InOwner)
-	{
-		check(Owner);
-		Owner->bInAppendOperation = true;
-		Constraints = &(Owner->Constraints);
-
-		NumBeginSingle = Owner->Constraints.SinglePointConstraints.Num();
-		NumBeginSingleSwept = Owner->Constraints.SinglePointSweptConstraints.Num();
-	}
-
-	FPBDCollisionConstraints::FConstraintAppendScope::~FConstraintAppendScope()
-	{
-		FPBDCollisionConstraints::FConstraintHandleAllocator& HandleAlloc = Owner->HandleAllocator;
-		int32 HandlesBeginIndex = Owner->Handles.Num();
-		const int32 TotalAdded = NumAddedSingle + NumAddedSingleSwept;
-
-		Owner->Handles.AddUninitialized(TotalAdded);
-		const int32 NumHandles = Owner->Handles.Num();
-
-		for(int32 HandleIndex = 0; HandleIndex < NumAddedSingle ; ++HandleIndex)
-		{
-			FPBDCollisionConstraintHandle* NewHandle = HandleAlloc.template AllocHandle<FRigidBodyPointContactConstraint>(Owner, NumBeginSingle + HandleIndex);
-			
-			const int32 FullHandleIndex = HandlesBeginIndex + HandleIndex;
-			Owner->Handles[FullHandleIndex] = NewHandle;
-
-			NewHandle->GetContact().Timestamp = -INT_MAX;
-			Constraints->SinglePointConstraints[NumBeginSingle + HandleIndex].SetConstraintHandle(NewHandle);
-		}
-		HandlesBeginIndex += NumAddedSingle;
-
-		for(int32 HandleIndex = 0; HandleIndex < NumAddedSingleSwept; ++HandleIndex)
-		{
-			FPBDCollisionConstraintHandle* NewHandle = HandleAlloc.template AllocHandle<FRigidBodySweptPointContactConstraint>(Owner, NumBeginSingleSwept + HandleIndex);
-
-			const int32 FullHandleIndex = HandlesBeginIndex + HandleIndex;
-			Owner->Handles[FullHandleIndex] = NewHandle;
-
-			NewHandle->GetContact().Timestamp = -INT_MAX;
-			Constraints->SinglePointSweptConstraints[NumBeginSingleSwept + HandleIndex].SetConstraintHandle(NewHandle);
-		}
-		HandlesBeginIndex += NumAddedSingle;
-
-		Owner->bInAppendOperation = false;
-	}
-
-	void FPBDCollisionConstraints::FConstraintAppendScope::ReserveSingle(int32 NumToAdd)
-	{
-		Constraints->SinglePointConstraints.Reserve(Constraints->SinglePointConstraints.Num() + NumToAdd);
-	}
-
-	void FPBDCollisionConstraints::FConstraintAppendScope::ReserveSingleSwept(int32 NumToAdd)
-	{
-		Constraints->SinglePointSweptConstraints.Reserve(Constraints->SinglePointConstraints.Num() + NumToAdd);
-	}
-
-	void FPBDCollisionConstraints::FConstraintAppendScope::Append(TArray<FRigidBodyPointContactConstraint>&& InConstraints)
-	{
-		if(InConstraints.Num() == 0)
-		{
-			return;
-		}
-
-		NumAddedSingle += InConstraints.Num();
-		Constraints->SinglePointConstraints.Append(MoveTemp(InConstraints));
-	}
-
-	void FPBDCollisionConstraints::FConstraintAppendScope::Append(TArray<FRigidBodySweptPointContactConstraint>&& InConstraints)
-	{
-		if(InConstraints.Num() == 0)
-		{
-			return;
-		}
-
-		NumAddedSingleSwept += InConstraints.Num();
-		Constraints->SinglePointSweptConstraints.Append(MoveTemp(InConstraints));
 	}
 
 }

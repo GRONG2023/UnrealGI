@@ -7,27 +7,30 @@
 #include "ProfilingDebugging/MiscTrace.h"
 #include "Common/PagedArray.h"
 
-namespace Trace
+namespace TraceServices
 {
-	class IAnalysisSession;
-	class FThreadProvider;
-	class FBookmarkProvider;
-	class FLogProvider;
-	class FFrameProvider;
-	class FChannelProvider;
-}
+
+class IAnalysisSession;
+class FThreadProvider;
+class FLogProvider;
+class FFrameProvider;
+class FChannelProvider;
+class FScreenshotProvider;
+class FRegionProvider;
 
 class FMiscTraceAnalyzer
-	: public Trace::IAnalyzer
+	: public UE::Trace::IAnalyzer
 {
 public:
-	FMiscTraceAnalyzer(Trace::IAnalysisSession& Session,
-					   Trace::FThreadProvider& ThreadProvider,
-					   Trace::FBookmarkProvider& BookmarkProvider,
-					   Trace::FLogProvider& LogProvider,
-					   Trace::FFrameProvider& FrameProvider, 
-					   Trace::FChannelProvider& ChannelProvider);
+	FMiscTraceAnalyzer(IAnalysisSession& Session,
+					   FThreadProvider& ThreadProvider,
+					   FLogProvider& LogProvider,
+					   FFrameProvider& FrameProvider, 
+					   FChannelProvider& ChannelProvider,
+					   FScreenshotProvider& ScreenshotProvider,
+					   FRegionProvider& RegionProvider);
 	virtual void OnAnalysisBegin(const FOnAnalysisContext& Context) override;
+	virtual void OnAnalysisEnd() override;
 	virtual void OnThreadInfo(const FThreadInfo& ThreadInfo) override;
 	virtual bool OnEvent(uint16 RouteId, EStyle Style, const FOnEventContext& Context) override;
 
@@ -39,8 +42,6 @@ private:
 		RouteId_SetThreadGroup,
 		RouteId_BeginThreadGroupScope,
 		RouteId_EndThreadGroupScope,
-		RouteId_BookmarkSpec,
-		RouteId_Bookmark,
 		RouteId_BeginFrame,
 		RouteId_EndFrame,
 		RouteId_BeginGameFrame,
@@ -49,6 +50,10 @@ private:
 		RouteId_EndRenderFrame,
 		RouteId_ChannelAnnounce,
 		RouteId_ChannelToggle,
+		RouteId_ScreenshotHeader,
+		RouteId_ScreenshotChunk,
+		RouteId_RegionBegin,
+		RouteId_RegionEnd
 	};
 
 	struct FThreadState
@@ -60,13 +65,18 @@ private:
 	void OnChannelAnnounce(const FOnEventContext& Context);
 	void OnChannelToggle(const FOnEventContext& Context);
 
-	Trace::IAnalysisSession& Session;
-	Trace::FThreadProvider& ThreadProvider;
-	Trace::FBookmarkProvider& BookmarkProvider;
-	Trace::FLogProvider& LogProvider;
-	Trace::FFrameProvider& FrameProvider;
-	Trace::FChannelProvider& ChannelProvider;
+	IAnalysisSession& Session;
+	FThreadProvider& ThreadProvider;
+	FLogProvider& LogProvider;
+	FFrameProvider& FrameProvider;
+	FChannelProvider& ChannelProvider;
+	FScreenshotProvider& ScreenshotProvider;
+	FRegionProvider& RegionProvider;
+	
 	TMap<uint32, TSharedRef<FThreadState>> ThreadStateMap;
 	uint64 LastFrameCycle[TraceFrameType_Count] = { 0, 0 };
+	uint64 ScreenshotLogCategoryId = uint64(-1);
 };
 
+
+} // namespace TraceServices

@@ -8,7 +8,9 @@
 #include "VulkanMemory.h"
 #include "Misc/OutputDeviceRedirector.h"
 #include "HAL/PlatformStackWalk.h"
+#include "VulkanContext.h"
 #include "VulkanLLM.h"
+#include "VulkanDescriptorSets.h"
 #include "Containers/SortedMap.h"
 
 #if PLATFORM_WINDOWS
@@ -17,6 +19,10 @@ THIRD_PARTY_INCLUDES_START
 #include <VersionHelpers.h>
 THIRD_PARTY_INCLUDES_END
 #include "Windows/HideWindowsPlatformTypes.h"
+#endif
+
+#if VULKAN_RHI_RAYTRACING
+#include "VulkanRayTracing.h"
 #endif
 
 // This 'frame number' should only be used for the deletion queue
@@ -28,7 +34,6 @@ const uint32 NUM_FRAMES_TO_WAIT_FOR_RESOURCE_DELETE = 2;
 #define UE_VK_MEMORY_KEEP_FREELIST_SORTED					1
 #define UE_VK_MEMORY_JOIN_FREELIST_ON_THE_FLY				(UE_VK_MEMORY_KEEP_FREELIST_SORTED && 1)
 #define UE_VK_MEMORY_KEEP_FREELIST_SORTED_CATCHBUGS			0 // debugging
-#define VULKAN_FREE_ALL_PAGES ((PLATFORM_ANDROID && !PLATFORM_LUMIN) ? 1 : 0)
 
 #define VULKAN_LOG_MEMORY_UELOG 1 //in case of debugging, it is useful to be able to log directly to LowLevelPrintf, as this is easier to diff. Please do not delete this code.
 
@@ -39,64 +44,41 @@ const uint32 NUM_FRAMES_TO_WAIT_FOR_RESOURCE_DELETE = 2;
 #endif
 
 
-DECLARE_STATS_GROUP(TEXT("Vulkan Memory Raw"), STATGROUP_VulkanMemoryRaw, STATCAT_Advanced);
-DECLARE_MEMORY_STAT_EXTERN(TEXT("Dedicated Memory"), STAT_VulkanDedicatedMemory, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 0"), STAT_VulkanMemory0, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 1"), STAT_VulkanMemory1, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 2"), STAT_VulkanMemory2, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 3"), STAT_VulkanMemory3, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 4"), STAT_VulkanMemory4, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 5"), STAT_VulkanMemory5, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool (remaining)"), STAT_VulkanMemoryX, STATGROUP_VulkanMemoryRaw, );
+DECLARE_STATS_GROUP_SORTBYNAME(TEXT("Vulkan Memory Raw"), STATGROUP_VulkanMemoryRaw, STATCAT_Advanced);
+DECLARE_MEMORY_STAT(TEXT("Dedicated Memory"), STAT_VulkanDedicatedMemory, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 0"), STAT_VulkanMemory0, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 1"), STAT_VulkanMemory1, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 2"), STAT_VulkanMemory2, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 3"), STAT_VulkanMemory3, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 4"), STAT_VulkanMemory4, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 5"), STAT_VulkanMemory5, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool (remaining)"), STAT_VulkanMemoryX, STATGROUP_VulkanMemoryRaw);
 
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 0 Reserved"), STAT_VulkanMemory0Reserved, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 1 Reserved"), STAT_VulkanMemory1Reserved, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 2 Reserved"), STAT_VulkanMemory2Reserved, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 3 Reserved"), STAT_VulkanMemory3Reserved, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 4 Reserved"), STAT_VulkanMemory4Reserved, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 5 Reserved"), STAT_VulkanMemory5Reserved, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool (remaining) Reserved"), STAT_VulkanMemoryXReserved, STATGROUP_VulkanMemoryRaw, );
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 0 Reserved"), STAT_VulkanMemory0Reserved, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 1 Reserved"), STAT_VulkanMemory1Reserved, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 2 Reserved"), STAT_VulkanMemory2Reserved, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 3 Reserved"), STAT_VulkanMemory3Reserved, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 4 Reserved"), STAT_VulkanMemory4Reserved, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool 5 Reserved"), STAT_VulkanMemory5Reserved, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("MemoryPool (remaining) Reserved"), STAT_VulkanMemoryXReserved, STATGROUP_VulkanMemoryRaw);
 
-DECLARE_MEMORY_STAT_EXTERN(TEXT("_Total Allocated"), STAT_VulkanMemoryTotal, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("_Reserved"), STAT_VulkanMemoryReserved, STATGROUP_VulkanMemoryRaw, );
+DECLARE_MEMORY_STAT(TEXT("_Total Allocated"), STAT_VulkanMemoryTotal, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("_Reserved"), STAT_VulkanMemoryReserved, STATGROUP_VulkanMemoryRaw);
 
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 0 Budget"), STAT_VulkanMemoryBudget0, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 1 Budget"), STAT_VulkanMemoryBudget1, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 2 Budget"), STAT_VulkanMemoryBudget2, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 3 Budget"), STAT_VulkanMemoryBudget3, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 4 Budget"), STAT_VulkanMemoryBudget4, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool 5 Budget"), STAT_VulkanMemoryBudget5, STATGROUP_VulkanMemoryRaw, );
-DECLARE_MEMORY_STAT_EXTERN(TEXT("MemoryPool (remaining) Budget"), STAT_VulkanMemoryBudgetX, STATGROUP_VulkanMemoryRaw, );
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 0 Budget"), STAT_VulkanMemoryBudget0, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 1 Budget"), STAT_VulkanMemoryBudget1, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 2 Budget"), STAT_VulkanMemoryBudget2, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 3 Budget"), STAT_VulkanMemoryBudget3, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 4 Budget"), STAT_VulkanMemoryBudget4, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 5 Budget"), STAT_VulkanMemoryBudget5, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap (remaining) Budget"), STAT_VulkanMemoryBudgetX, STATGROUP_VulkanMemoryRaw);
 
-
-DEFINE_STAT(STAT_VulkanDedicatedMemory);
-DEFINE_STAT(STAT_VulkanMemory0);
-DEFINE_STAT(STAT_VulkanMemory1);
-DEFINE_STAT(STAT_VulkanMemory2);
-DEFINE_STAT(STAT_VulkanMemory3);
-DEFINE_STAT(STAT_VulkanMemory4);
-DEFINE_STAT(STAT_VulkanMemory5);
-DEFINE_STAT(STAT_VulkanMemoryX);
-
-DEFINE_STAT(STAT_VulkanMemory0Reserved);
-DEFINE_STAT(STAT_VulkanMemory1Reserved);
-DEFINE_STAT(STAT_VulkanMemory2Reserved);
-DEFINE_STAT(STAT_VulkanMemory3Reserved);
-DEFINE_STAT(STAT_VulkanMemory4Reserved);
-DEFINE_STAT(STAT_VulkanMemory5Reserved);
-DEFINE_STAT(STAT_VulkanMemoryXReserved);
-DEFINE_STAT(STAT_VulkanMemoryReserved);
-
-DEFINE_STAT(STAT_VulkanMemoryBudget0);
-DEFINE_STAT(STAT_VulkanMemoryBudget1);
-DEFINE_STAT(STAT_VulkanMemoryBudget2);
-DEFINE_STAT(STAT_VulkanMemoryBudget3);
-DEFINE_STAT(STAT_VulkanMemoryBudget4);
-DEFINE_STAT(STAT_VulkanMemoryBudget5);
-DEFINE_STAT(STAT_VulkanMemoryBudgetX);
-
-
-DEFINE_STAT(STAT_VulkanMemoryTotal);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 0 Usage"), STAT_VulkanMemoryUsage0, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 1 Usage"), STAT_VulkanMemoryUsage1, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 2 Usage"), STAT_VulkanMemoryUsage2, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 3 Usage"), STAT_VulkanMemoryUsage3, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 4 Usage"), STAT_VulkanMemoryUsage4, STATGROUP_VulkanMemoryRaw);
+DECLARE_MEMORY_STAT(TEXT("Memory Heap 5 Usage"), STAT_VulkanMemoryUsage5, STATGROUP_VulkanMemoryRaw);
 
 
 DECLARE_STATS_GROUP(TEXT("Vulkan Memory"), STATGROUP_VulkanMemory, STATCAT_Advanced);
@@ -200,22 +182,6 @@ static FAutoConsoleVariableRef CVarVulkanUseBufferBinning(
 	ECVF_ReadOnly
 );
 
-static int32 GVulkanFreePageForType = VULKAN_FREEPAGE_FOR_TYPE;
-static FAutoConsoleVariableRef CVarVulkanFreePageForType(
-	TEXT("r.Vulkan.FreePageForType"),
-	GVulkanFreePageForType,
-	TEXT("Enable separate free page list for images and buffers."),
-	ECVF_ReadOnly
-);
-
-static int32 GVulkanFreeAllPages = VULKAN_FREE_ALL_PAGES;
-static FAutoConsoleVariableRef CVarVulkanFreeAllPages(
-	TEXT("r.Vulkan.FreeAllPages"),
-	GVulkanFreeAllPages,
-	TEXT("Enable to fully free all pages early. default on android only"),
-	ECVF_ReadOnly
-);
-
 static int32 GVulkanLogEvictStatus = 0;
 static FAutoConsoleVariableRef GVarVulkanLogEvictStatus(
 	TEXT("r.Vulkan.LogEvictStatus"),
@@ -285,14 +251,6 @@ static FAutoConsoleVariableRef CVarVulkanDefragOnce(
 	TEXT("r.Vulkan.DefragOnceDebug"),
 	GVulkanDefragOnce,
 	TEXT("Set to 1 to test defrag"),
-	ECVF_RenderThreadSafe
-);
-
-int32 GVulkanDefragRepeat = 0;
-static FAutoConsoleVariableRef CVarVulkanDefragRepeat (
-	TEXT("r.Vulkan.DefragRepeatDebug"),
-	GVulkanDefragRepeat ,
-	TEXT("Set to 1 to test defrag, repeatedly"),
 	ECVF_RenderThreadSafe
 );
 
@@ -460,12 +418,6 @@ namespace VulkanRHI
 	constexpr uint32 FMemoryManager::PoolSizes[(int32)FMemoryManager::EPoolSizes::SizesCount];
 	constexpr uint32 FMemoryManager::BufferSizes[(int32)FMemoryManager::EPoolSizes::SizesCount + 1];
 
-	static FCriticalSection GResourceLock;
-	static FCriticalSection GStagingLock;
-	static FCriticalSection GDeviceMemLock;
-	static FCriticalSection GFenceLock;
-	static FCriticalSection GResourceHeapLock;
-
 
 	const TCHAR* VulkanAllocationTypeToString(EVulkanAllocationType Type)
 	{
@@ -576,11 +528,14 @@ namespace VulkanRHI
 	}
 
 	FDeviceMemoryManager::FDeviceMemoryManager() :
+		MemoryUpdateTime(0.0),
 		DeviceHandle(VK_NULL_HANDLE),
-		bHasUnifiedMemory(false),
 		Device(nullptr),
 		NumAllocations(0),
-		PeakNumAllocations(0)
+		PeakNumAllocations(0),
+		bHasUnifiedMemory(false),
+		bSupportsMemoryless(false),
+		PrimaryHeapIndex(-1)
 	{
 		FMemory::Memzero(MemoryBudget);
 		FMemory::Memzero(MemoryProperties);
@@ -619,6 +574,13 @@ namespace VulkanRHI
 			SET_DWORD_STAT(STAT_VulkanMemoryBudget4, MemoryBudget.heapBudget[4]);
 			SET_DWORD_STAT(STAT_VulkanMemoryBudget5, MemoryBudget.heapBudget[5]);
 			SET_DWORD_STAT(STAT_VulkanMemoryBudgetX, BudgetX);
+
+			SET_DWORD_STAT(STAT_VulkanMemoryUsage0, MemoryBudget.heapUsage[0]);
+			SET_DWORD_STAT(STAT_VulkanMemoryUsage1, MemoryBudget.heapUsage[1]);
+			SET_DWORD_STAT(STAT_VulkanMemoryUsage2, MemoryBudget.heapUsage[2]);
+			SET_DWORD_STAT(STAT_VulkanMemoryUsage3, MemoryBudget.heapUsage[3]);
+			SET_DWORD_STAT(STAT_VulkanMemoryUsage4, MemoryBudget.heapUsage[4]);
+			SET_DWORD_STAT(STAT_VulkanMemoryUsage5, MemoryBudget.heapUsage[5]);
 		}
 		else
 		{
@@ -638,18 +600,19 @@ namespace VulkanRHI
 		DeviceHandle = Device->GetInstanceHandle();
 		UpdateMemoryProperties();
 
-		uint64 HostHeapSize = 0;
-		PrimaryHostHeap = -1; // Primary
+		PrimaryHeapIndex = -1;
+		uint64 PrimaryHeapSize = 0;
 		uint32 NonLocalHeaps = 0;
 
 		for(uint32 i = 0; i < MemoryProperties.memoryHeapCount; ++i)
 		{
-			if(0 != (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT & MemoryProperties.memoryHeaps[i].flags))
+			
+			if (VKHasAllFlags(MemoryProperties.memoryHeaps[i].flags, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
 			{
-				if(MemoryProperties.memoryHeaps[i].size > HostHeapSize)
+				if(MemoryProperties.memoryHeaps[i].size > PrimaryHeapSize)
 				{
-					PrimaryHostHeap = i;
-					HostHeapSize = MemoryProperties.memoryHeaps[i].size;
+					PrimaryHeapIndex = i;
+					PrimaryHeapSize = MemoryProperties.memoryHeaps[i].size;
 				}
 			}
 			else
@@ -659,75 +622,20 @@ namespace VulkanRHI
 		}
 		if(0 == NonLocalHeaps)
 		{
-			PrimaryHostHeap = -1; // if there are no non-local heaps, disable eviction and defragmentation
+			PrimaryHeapIndex = -1; // if there are no non-local heaps, disable eviction and defragmentation
 		}
 
+		// Update bMemoryless support
+		bSupportsMemoryless = false;
+		for (uint32 i = 0; i < MemoryProperties.memoryTypeCount && !bSupportsMemoryless; ++i)
+		{
+			bSupportsMemoryless = VKHasAllFlags(MemoryProperties.memoryTypes[i].propertyFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT);
+		}
 
 		HeapInfos.AddDefaulted(MemoryProperties.memoryHeapCount);
 
-		for (uint32 Index = 0; Index < MemoryProperties.memoryHeapCount; ++Index)
-		{
-			const bool bIsGPUHeap = ((MemoryProperties.memoryHeaps[Index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-			if (bIsGPUHeap)
-			{
-				// Target using 95% of our budget to account for some fragmentation.
-				HeapInfos[Index].TotalSize = (uint64)((float)HeapInfos[Index].TotalSize * 0.95f);
-			}
-		}
-
-
-		SetupAndPrintMemInfo();
+		PrintMemInfo();
 	}
-
-	static FString GetMemoryPropertyFlagsString(VkMemoryPropertyFlags Flags)
-	{
-		FString String;
-		if ((Flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-		{
-			String += TEXT(" Local");
-		}
-		else
-		{
-			String += TEXT("      ");
-		}
-
-		if ((Flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-		{
-			String += TEXT(" HostVisible");
-		}
-		else
-		{
-			String += TEXT("            ");
-		}
-
-		if ((Flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-		{
-			String += TEXT(" HostCoherent");
-		}
-		else
-		{
-			String += TEXT("             ");
-		}
-
-		if ((Flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-		{
-			String += TEXT(" HostCached");
-		}
-		else
-		{
-			String += TEXT("           ");
-		}
-
-		if ((Flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) == VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
-		{
-			String += TEXT(" Lazy");
-		}
-		else
-		{
-			String += TEXT("     ");
-		}
-		return String;
-	};
 
 	bool MetaTypeCanEvict(EVulkanAllocationMetaType MetaType)
 	{
@@ -740,70 +648,68 @@ namespace VulkanRHI
 
 
 
-	void FDeviceMemoryManager::SetupAndPrintMemInfo()
+	void FDeviceMemoryManager::PrintMemInfo() const
 	{
-		const uint32 MaxAllocations = Device->GetLimits().maxMemoryAllocationCount;
-		VULKAN_LOGMEMORY(TEXT("%d Device Memory Heaps; Max memory allocations %d"), MemoryProperties.memoryHeapCount, MaxAllocations);
-		for (uint32 Index = 0; Index < MemoryProperties.memoryHeapCount; ++Index)
-		{
-			bool bIsGPUHeap = ((MemoryProperties.memoryHeaps[Index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
-			VULKAN_LOGMEMORY(TEXT("%2d: Flags 0x%x Size %llu (%.2f MB) %s"),
-				Index,
-				MemoryProperties.memoryHeaps[Index].flags,
-				MemoryProperties.memoryHeaps[Index].size,
-				(float)((double)MemoryProperties.memoryHeaps[Index].size / 1024.0 / 1024.0),
-				bIsGPUHeap ? TEXT("GPU") : TEXT(""));
-			HeapInfos[Index].TotalSize = MemoryProperties.memoryHeaps[Index].size;
-		}
+		auto ToMB = [](uint64 ByteSize) { return (float)ByteSize / (1024.f * 1024.f); };
+		auto ToPct = [](uint64 Used, uint64 Total) { return 100.f * (float)Used / (float)Total; };
 
-		VULKAN_LOGMEMORY(TEXT("%d Device Memory Types (%sunified)"), MemoryProperties.memoryTypeCount, bHasUnifiedMemory ? TEXT("") : TEXT("Not "));
+		const uint32 MaxAllocations = Device->GetLimits().maxMemoryAllocationCount;
+		VULKAN_LOGMEMORY(TEXT("Max memory allocations %u."), MaxAllocations);
+
+		VULKAN_LOGMEMORY(TEXT("%d Device Memory Heaps:"), MemoryProperties.memoryHeapCount);
 		for (uint32 HeapIndex = 0; HeapIndex < MemoryProperties.memoryHeapCount; ++HeapIndex)
 		{
-			for (uint32 Index = 0; Index < MemoryProperties.memoryTypeCount; ++Index)
+			const bool bIsGPUHeap = VKHasAllFlags(MemoryProperties.memoryHeaps[HeapIndex].flags, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
+			const VkDeviceSize UsedMemory = (HeapIndex < (uint32)HeapInfos.Num()) ? HeapInfos[HeapIndex].UsedSize : 0;
+
+			VULKAN_LOGMEMORY(TEXT(" %2d: Flags 0x%x - Size %llu (%.2f MB) - Used %llu (%.2f%%)%s%s"),
+				HeapIndex,
+				MemoryProperties.memoryHeaps[HeapIndex].flags,
+				MemoryProperties.memoryHeaps[HeapIndex].size,
+				ToMB(MemoryProperties.memoryHeaps[HeapIndex].size),
+				UsedMemory,
+				ToPct(UsedMemory, MemoryProperties.memoryHeaps[HeapIndex].size),
+				bIsGPUHeap ? TEXT(" - DeviceLocal") : TEXT(""),
+				(PrimaryHeapIndex == (int32)HeapIndex) ? TEXT(" - PrimaryHeap") : TEXT(""));
+		}
+
+		VULKAN_LOGMEMORY(TEXT("%d Device Memory Types (%sunified):"), MemoryProperties.memoryTypeCount, bHasUnifiedMemory ? TEXT("") : TEXT("Not "));
+		for (uint32 HeapIndex = 0; HeapIndex < MemoryProperties.memoryHeapCount; ++HeapIndex)
+		{
+			for (uint32 TypeIndex = 0; TypeIndex < MemoryProperties.memoryTypeCount; ++TypeIndex)
 			{
-				if(HeapIndex == MemoryProperties.memoryTypes[Index].heapIndex)
+				if(HeapIndex == MemoryProperties.memoryTypes[TypeIndex].heapIndex)
 				{
-					VULKAN_LOGMEMORY(TEXT("%2d: Flags 0x%05x Heap %2d %s"),
-						Index,
-						MemoryProperties.memoryTypes[Index].propertyFlags,
-						MemoryProperties.memoryTypes[Index].heapIndex,
-						*GetMemoryPropertyFlagsString(MemoryProperties.memoryTypes[Index].propertyFlags));
+					const VkMemoryPropertyFlags MemoryPropertyFlags = MemoryProperties.memoryTypes[TypeIndex].propertyFlags;
+					VULKAN_LOGMEMORY(TEXT(" %2d: Flags 0x%05x - Heap %2d - %s"),
+						TypeIndex, MemoryPropertyFlags, HeapIndex,
+						MemoryPropertyFlags ? VK_FLAGS_TO_STRING(VkMemoryPropertyFlags, MemoryPropertyFlags) : TEXT(""));
 				}
 			}
 		}
-		uint64 HostAllocated, HostLimit;
-		GetHostMemoryStatus(&HostAllocated, &HostLimit);
-		double AllocatedPercentage = 100.0 * HostAllocated / HostLimit;
-		VULKAN_LOGMEMORY(TEXT("Host Allocation Percentage %6.2f%% -      %8.2fMB / %8.3fMB"), AllocatedPercentage, HostAllocated / (1024.f * 1024.f), HostLimit / (1024.f * 1024.f));
+
 		if(Device->GetOptionalExtensions().HasMemoryBudget)
 		{
-			UpdateMemoryProperties();
-			VULKAN_LOGMEMORY(TEXT("Memory Budget"));
+			VULKAN_LOGMEMORY(TEXT("Memory Budget Extension:"));
 			VULKAN_LOGMEMORY(TEXT("\t         | Usage                     | Budget          | Size            |"));
-			VULKAN_LOGMEMORY(TEXT("\t---------|---------------------------------------------------------------|"));
-			for(uint32 Heap = 0; Heap < VK_MAX_MEMORY_HEAPS; ++Heap)
+			VULKAN_LOGMEMORY(TEXT("\t---------|------------------------------------------------------------------|"));
+			for(uint32 HeapIndex = 0; HeapIndex < VK_MAX_MEMORY_HEAPS; ++HeapIndex)
 			{
-				VkDeviceSize Budget = MemoryBudget.heapBudget[Heap];
-				VkDeviceSize Usage = MemoryBudget.heapUsage[Heap];
+				const VkDeviceSize Budget = MemoryBudget.heapBudget[HeapIndex];
+				const VkDeviceSize Usage = MemoryBudget.heapUsage[HeapIndex];
 				if(0 != Budget || 0 != Usage)
 				{
-					VkDeviceSize Size = MemoryProperties.memoryHeaps[Heap].size;
-					double UsagePercentage = 100.0 * Usage  / Size;
-					VULKAN_LOGMEMORY(TEXT("\t HEAP %02d | %6.2f%% / %13.3fmb | %13.3fmb | %13.3fmb |"), Heap,
-						UsagePercentage,
-						Usage / (1024.0 * 1024.0),
-						Budget / (1024.0 * 1024.0),
-						Size / (1024.0 * 1024.0));
+					const VkDeviceSize Size = MemoryProperties.memoryHeaps[HeapIndex].size;
+					VULKAN_LOGMEMORY(TEXT("\t HEAP %02d | %6.2f%% / %13.2f MB | %13.2f MB | %13.2f MB |"),
+						HeapIndex, ToPct(Usage, Size), ToMB(Usage), ToMB(Budget), ToMB(Size));
 				}
 			}
-			VULKAN_LOGMEMORY(TEXT("\t---------|---------------------------------------------------------------|"));
+			VULKAN_LOGMEMORY(TEXT("\t---------|------------------------------------------------------------------|"));
 		}
 		else
 		{
 			VULKAN_LOGMEMORY(TEXT("Memory Budget unavailable"));
 		}
-
-
 	}
 
 	uint32 FDeviceMemoryManager::GetEvictedMemoryProperties()
@@ -848,35 +754,24 @@ namespace VulkanRHI
 		}
 		return false;
 	}
-	void FDeviceMemoryManager::GetHostMemoryStatus(uint64* Allocated, uint64* Total)
+
+	void FDeviceMemoryManager::GetPrimaryHeapStatus(uint64& OutAllocated, uint64& OutLimit)
 	{
-		if(PrimaryHostHeap < 0)
+		if (PrimaryHeapIndex < 0)
 		{
-			*Allocated = 0;
-			*Total = 1;
+			OutAllocated = 0;
+			OutLimit = 1;
 		}
 		else
 		{
-			*Allocated = HeapInfos[PrimaryHostHeap].UsedSize;
-			check(HeapInfos[PrimaryHostHeap].TotalSize == MemoryProperties.memoryHeaps[PrimaryHostHeap].size);
-			*Total = GetBaseHeapSize(PrimaryHostHeap);
-			if (Device->GetOptionalExtensions().HasMemoryBudget)
+			OutAllocated = HeapInfos[PrimaryHeapIndex].UsedSize;
+			if (Device->GetOptionalExtensions().HasMemoryBudget && (FPlatformTime::Seconds() - MemoryUpdateTime >= 1.0))
 			{
-				if(MemoryUpdateTime == 0.0 || FPlatformTime::Seconds() - MemoryUpdateTime >= 1.0 )
-				{
-					MemoryUpdateTime = FPlatformTime::Seconds();
-					UpdateMemoryProperties();
-				}			
-				
-				*Total = MemoryBudget.heapBudget[PrimaryHostHeap];
-			}
-		}
+				MemoryUpdateTime = FPlatformTime::Seconds();
+				UpdateMemoryProperties();
+			}			
+			OutLimit = GetBaseHeapSize(PrimaryHeapIndex);
 	}
-
-
-	bool FDeviceMemoryManager::IsHostMemory(uint32 MemoryTypeIndex) const
-	{
-		return 0 != (MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 	}
 
 	FDeviceMemoryAllocation* FDeviceMemoryManager::Alloc(bool bCanFail, VkDeviceSize AllocationSize, uint32 MemoryTypeBits, VkMemoryPropertyFlags MemoryPropertyFlags, void* DedicatedAllocateInfo, float Priority, bool bExternal, const char* File, uint32 Line)
@@ -889,7 +784,7 @@ namespace VulkanRHI
 	FDeviceMemoryAllocation* FDeviceMemoryManager::Alloc(bool bCanFail, VkDeviceSize AllocationSize, uint32 MemoryTypeIndex, void* DedicatedAllocateInfo, float Priority, bool bExternal, const char* File, uint32 Line)
 	{
 		SCOPED_NAMED_EVENT(FDeviceMemoryManager_Alloc, FColor::Cyan);
-		FScopeLock Lock(&GDeviceMemLock);
+		FScopeLock Lock(&DeviceMemLock);
 
 		if(!DedicatedAllocateInfo)
 		{
@@ -946,10 +841,10 @@ namespace VulkanRHI
 
 #if VULKAN_SUPPORTS_MEMORY_PRIORITY
 		VkMemoryPriorityAllocateInfoEXT Prio;
-		ZeroVulkanStruct(Prio, VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT);
-		Prio.priority = Priority;
 		if (Device->GetOptionalExtensions().HasMemoryPriority)
 		{
+			ZeroVulkanStruct(Prio, VK_STRUCTURE_TYPE_MEMORY_PRIORITY_ALLOCATE_INFO_EXT);
+			Prio.priority = Priority;
 			Info.pNext = &Prio;
 		}
 #endif
@@ -964,7 +859,6 @@ namespace VulkanRHI
 		}
 #endif
 
-#if VULKAN_SUPPORTS_EXTERNAL_MEMORY
 		VkExportMemoryAllocateInfoKHR VulkanExportMemoryAllocateInfoKHR = {};
 #if PLATFORM_WINDOWS
 		VkExportMemoryWin32HandleInfoKHR VulkanExportMemoryWin32HandleInfoKHR = {};
@@ -986,13 +880,21 @@ namespace VulkanRHI
 #endif // PLATFORM_WINDOWS
 			Info.pNext = &VulkanExportMemoryAllocateInfoKHR;
 		}
-#endif // VULKAN_SUPPORTS_EXTERNAL_MEMORY
+
+		VkMemoryAllocateFlagsInfo MemoryAllocateFlagsInfo;
+		if (Device->GetOptionalExtensions().HasBufferDeviceAddress)
+		{
+			ZeroVulkanStruct(MemoryAllocateFlagsInfo, VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO);
+			MemoryAllocateFlagsInfo.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR;
+			MemoryAllocateFlagsInfo.pNext = Info.pNext;
+			Info.pNext = &MemoryAllocateFlagsInfo;
+		}
 
 		VkDeviceMemory Handle;
 		VkResult Result;
 
 #if !UE_BUILD_SHIPPING
-		if(	MemoryTypeIndex == PrimaryHostHeap && GVulkanFakeMemoryLimit && ((uint64)GVulkanFakeMemoryLimit << 20llu) < HeapInfos[PrimaryHostHeap].UsedSize )
+		if (MemoryTypeIndex == PrimaryHeapIndex && GVulkanFakeMemoryLimit && ((uint64)GVulkanFakeMemoryLimit << 20llu) < HeapInfos[PrimaryHeapIndex].UsedSize )
 		{
 			Handle = 0;
 			Result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1019,7 +921,7 @@ namespace VulkanRHI
 			}
 			DumpRenderTargetPoolMemory(*GLog);
 			Device->GetMemoryManager().DumpMemory();
-			GLog->PanicFlushThreadedLogs();
+			GLog->Panic();
 
 			UE_LOG(LogVulkanRHI, Fatal, TEXT("Out of %s Memory, Requested%.2fKB MemTypeIndex=%d\n"), MemoryType, AllocationSize / 1024.f, MemoryTypeIndex);
 		}
@@ -1033,9 +935,9 @@ namespace VulkanRHI
 		NewAllocation->Handle = Handle;
 		NewAllocation->Size = AllocationSize;
 		NewAllocation->MemoryTypeIndex = MemoryTypeIndex;
-		NewAllocation->bCanBeMapped = ((MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
-		NewAllocation->bIsCoherent = ((MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-		NewAllocation->bIsCached = ((MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+		NewAllocation->bCanBeMapped = VKHasAllFlags(MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+		NewAllocation->bIsCoherent = VKHasAllFlags(MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags, VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+		NewAllocation->bIsCached = VKHasAllFlags(MemoryProperties.memoryTypes[MemoryTypeIndex].propertyFlags, VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
 #if VULKAN_SUPPORTS_DEDICATED_ALLOCATION
 		NewAllocation->bDedicatedMemory = DedicatedAllocateInfo != 0;
 #else
@@ -1057,8 +959,11 @@ namespace VulkanRHI
 
 #if VULKAN_USE_LLM
 		LLM_PLATFORM_SCOPE_VULKAN(ELLMTagVulkan::VulkanDriverMemoryGPU);
-		LLM(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, (void*)NewAllocation->Handle, AllocationSize, ELLMTag::GraphicsPlatform, ELLMAllocType::System));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, (void*)NewAllocation->Handle, AllocationSize, ELLMTag::GraphicsPlatform, ELLMAllocType::System));
 		LLM_TRACK_VULKAN_SPARE_MEMORY_GPU((int64)AllocationSize);
+#else
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, (void*)NewAllocation->Handle, AllocationSize, ELLMTag::GraphicsPlatform));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Default, (void*)NewAllocation->Handle, AllocationSize, ELLMTag::Untagged));
 #endif
 
 		INC_DWORD_STAT(STAT_VulkanNumPhysicalMemAllocations);
@@ -1080,7 +985,7 @@ namespace VulkanRHI
 	void FDeviceMemoryManager::Free(FDeviceMemoryAllocation*& Allocation)
 	{
 		SCOPED_NAMED_EVENT(FDeviceMemoryManager_Free, FColor::Cyan);
-		FScopeLock Lock(&GDeviceMemLock);
+		FScopeLock Lock(&DeviceMemLock);
 
 		check(Allocation);
 		check(Allocation->Handle != VK_NULL_HANDLE);
@@ -1137,8 +1042,11 @@ namespace VulkanRHI
 		VulkanRHI::vkFreeMemory(DeviceHandle, Allocation->Handle, VULKAN_CPU_ALLOCATOR);
 
 #if VULKAN_USE_LLM
-		LLM(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, (void*)Allocation->Handle, ELLMAllocType::System));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, (void*)Allocation->Handle, ELLMAllocType::System));
 		LLM_TRACK_VULKAN_SPARE_MEMORY_GPU(-(int64)Allocation->Size);
+#else
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, (void*)Allocation->Handle));
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Default, (void*)Allocation->Handle));
 #endif
 
 		--NumAllocations;
@@ -1157,7 +1065,7 @@ namespace VulkanRHI
 	}
 	void FDeviceMemoryManager::TrimMemory(bool bFullTrim)
 	{
-		FScopeLock Lock(&GDeviceMemLock);
+		FScopeLock Lock(&DeviceMemLock);
 		//blocks are always freed after being reserved for FrameThresholdFull frames.
 		const uint32 FrameThresholdFull = 100; 
 		// After being held for FrameThresholdPartial frames, only LargeThresholdPartial/SmallThresholdPartial pages are kept reserved
@@ -1290,7 +1198,7 @@ namespace VulkanRHI
 	void FDeviceMemoryManager::DumpMemory()
 	{
 		VULKAN_LOGMEMORY(TEXT("/******************************************* Device Memory ********************************************\\"));
-		SetupAndPrintMemInfo();
+		PrintMemInfo();
 		VULKAN_LOGMEMORY(TEXT("Device Memory: %d allocations on %d heaps"), NumAllocations, HeapInfos.Num());
 		for (int32 Index = 0; Index < HeapInfos.Num(); ++Index)
 		{
@@ -1311,7 +1219,8 @@ namespace VulkanRHI
 			}
 			VULKAN_LOGMEMORY(TEXT("\t\tTotal Allocated %.2f MB, Peak %.2f MB"), TotalSize / 1024.0f / 1024.0f, HeapInfo.PeakSize / 1024.0f / 1024.0f);
 		}
-		VULKAN_LOGMEMORY(TEXT("Blocks Kept alive Current Frame (%d)\n"), GFrameNumberRenderThread);
+		VULKAN_LOGMEMORY(TEXT("Blocks Kept alive Current Frame (%d) "), GFrameNumberRenderThread);
+		VULKAN_LOGMEMORY(TEXT("Free Blocks in Allocations:"));
 		for (TPair<FDeviceMemoryBlockKey, FDeviceMemoryBlock>& Pair : Allocations)
 		{
 			FDeviceMemoryBlock& Block = Pair.Value;
@@ -1324,7 +1233,6 @@ namespace VulkanRHI
 
 #if VULKAN_OBJECT_TRACKING
 		{
-
 			TSortedMap<uint32, FVulkanMemoryBucket> AllocationBuckets;
 			auto Collector = [&](const TCHAR* Name, FName ResourceName, void* Address, void* RHIRes, uint32 Width, uint32 Height, uint32 Depth, uint32 Format)
 			{
@@ -1348,7 +1256,7 @@ namespace VulkanRHI
 			};
 
 
-			TVulkanTrackBase<FVulkanTextureBase>::CollectAll(Collector);
+			TVulkanTrackBase<FVulkanTexture>::CollectAll(Collector);
 			TVulkanTrackBase<FVulkanResourceMultiBuffer>::CollectAll(Collector);
 			for(auto& Itr : AllocationBuckets)
 			{
@@ -1386,7 +1294,7 @@ namespace VulkanRHI
 
 			if (bIsGPUHeap == bGPU)
 			{
-				TotalMemory += HeapInfos[Index].TotalSize;
+				TotalMemory += MemoryProperties.memoryHeaps[Index].size;
 			}
 		}
 		return TotalMemory;
@@ -1580,7 +1488,7 @@ namespace VulkanRHI
 		else
 		{
 			// Remove this free entry.
-			Ranges.RemoveAt(Index, 1, false);
+			Ranges.RemoveAt(Index, 1, EAllowShrinking::No);
 #if UE_VK_MEMORY_KEEP_FREELIST_SORTED_CATCHBUGS
 			SanityCheck(Ranges);
 #endif
@@ -1639,7 +1547,7 @@ namespace VulkanRHI
 	{
 		VkDeviceSize HeapSize = MemoryProperties.memoryHeaps[HeapIndex].size;
 #if !UE_BUILD_SHIPPING
-		if(GVulkanFakeMemoryLimit && PrimaryHostHeap == HeapIndex)
+		if (GVulkanFakeMemoryLimit && PrimaryHeapIndex == HeapIndex)
 		{
 			HeapSize = FMath::Min<VkDeviceSize>((uint64)GVulkanFakeMemoryLimit << 20llu, HeapSize);
 		}
@@ -1726,12 +1634,11 @@ namespace VulkanRHI
 		Owner->GetParent()->GetDeviceMemoryManager().Free(Allocation );
 		UsedMemory -= InPage->MaxSize;
 		delete InPage;
-
 	}
 
 	void FVulkanResourceHeap::FreePage(FVulkanSubresourceAllocator* InPage)
 	{
-		FScopeLock ScopeLock(&GResourceLock);
+		FScopeLock ScopeLock(&PagesLock);
 		check(InPage->JoinFreeBlocks());
 		int32 Index = -1;
 
@@ -1741,15 +1648,12 @@ namespace VulkanRHI
 		{
 			if (UsedDedicatedImagePages.Find(InPage, Index))
 			{
-				UsedDedicatedImagePages.RemoveAtSwap(Index, 1, false);
+				UsedDedicatedImagePages.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 			else
 			{
 				checkNoEntry();
 			}
-			ReleasePage(InPage);
-
-
 		}
 		else
 		{
@@ -1758,28 +1662,30 @@ namespace VulkanRHI
 			TArray<FVulkanSubresourceAllocator*>& Pages = ActivePages[BucketId];
 			if (Pages.Find(InPage, Index))
 			{
-				Pages.RemoveAtSwap(Index, 1, false);
+				Pages.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 			else
 			{
 				checkNoEntry();
 			}
 			check(!Pages.Find(InPage, Index));
-			ReleasePage(InPage);
 		}
+
+		ReleasePage(InPage);
 	}
 
-	uint64 FVulkanResourceHeap::EvictOne(FVulkanDevice& Device)
+	uint64 FVulkanResourceHeap::EvictOne(FVulkanDevice& Device, FVulkanCommandListContext& Context)
 	{
+		FScopeLock ScopeLock(&PagesLock);
 		for(int32 Index = MAX_BUCKETS - 2; Index >= 0; Index--)
 		{
 			TArray<FVulkanSubresourceAllocator*>& Pages = ActivePages[Index];
 			for (int32 Index2 = 0; Index2 < Pages.Num(); ++Index2)
 			{
 				FVulkanSubresourceAllocator* Allocator = Pages[Index2];
-				if(!Allocator->bIsEvicting && Allocator->GetSubresourceAllocatorFlags() & VulkanAllocationFlagsCanEvict)
+				if (!Allocator->bIsEvicting && Allocator->GetSubresourceAllocatorFlags() & VulkanAllocationFlagsCanEvict)
 				{
-					return Allocator->EvictToHost(Device);
+					return Allocator->EvictToHost(Device, Context);
 				}
 			}
 		}
@@ -1819,6 +1725,7 @@ namespace VulkanRHI
 			Pages[LastIndex] = Allocator;
 		}
 	}
+
 	bool FVulkanResourceHeap::GetIsDefragging(FVulkanSubresourceAllocator* Allocator)
 	{
 		return Allocator->GetIsDefragging();
@@ -1828,9 +1735,7 @@ namespace VulkanRHI
 	{
 		SCOPED_NAMED_EVENT(FVulkanSubresourceAllocator_DefragTick, FColor::Cyan);
 
-		FScopeLock ScopeLock(&GResourceLock);
-		const uint32 DefragMask = VulkanAllocationFlagsCanEvict;
-		const uint32 DefragValue = 0;
+		FScopeLock ScopeLock(&PagesLock);
 
 		FVulkanSubresourceAllocator* CurrentDefragTarget = 0;
 		//Continue if defrag currently in progress.
@@ -1897,7 +1802,7 @@ namespace VulkanRHI
 					}
 				}
 			}
-			if(PotentialDefrag.Num())
+			if (PotentialDefrag.Num())
 			{
 				PotentialDefrag.Sort([](const FPotentialDefragMove& LHS, const FPotentialDefragMove& RHS)
 					{
@@ -1910,23 +1815,23 @@ namespace VulkanRHI
 		}
 
 
-		if(CurrentDefragTarget)
+		if (CurrentDefragTarget)
 		{
 			uint32 MaxSize = CurrentDefragTarget->GetMaxSize();
 			uint32 UsedSize = CurrentDefragTarget->GetUsedSize();
 			uint32 FreeSpace = MaxSize - UsedSize;
 
-			if(GVulkanLogDefrag)
+			if (GVulkanLogDefrag)
 			{
 				VULKAN_LOGMEMORY(TEXT("Defragging heap [%d] Max %6.2fMB Free %6.2fMB   %2d"), CurrentDefragTarget->AllocatorIndex, MaxSize / (1024.f*1024.f), FreeSpace / (1024.f * 1024.f), DefragCountDown);
 			}
-			if(CurrentDefragTarget->DefragTick(Device, Context, this, Count) > 0)
+			if (CurrentDefragTarget->DefragTick(Device, Context, this, Count) > 0)
 			{
 				DefragCountDown = 3;
 			}
 			else
 			{
-				if(0 == --DefragCountDown)
+				if (0 == --DefragCountDown)
 				{
 					if(GVulkanDefragAutoPause)
 					{
@@ -1934,38 +1839,6 @@ namespace VulkanRHI
 					}
 					CurrentDefragTarget->SetIsDefragging(false);
 				}
-			}
-		}
-		else
-		{
-			if(GVulkanDefragOnce > 0 || GVulkanDefragRepeat > 0)
-			{
-				//Note: This code-path is not yet active. its intended for use in "panic" defrag scenarios.
-				uint32 Heap = GVulkanDefragRepeat ? GVulkanDefragRepeat :  GVulkanDefragOnce;
-				TArray<FVulkanSubresourceAllocator*> Allocators;
-				FVulkanSubresourceAllocator* PreferredAllocator = 0;
-				for (TArray<FVulkanSubresourceAllocator*>& Pages : ActivePages)
-				{
-					for (int32 Index = 0; Index < Pages.Num(); ++Index)
-					{
-						FVulkanSubresourceAllocator* Allocator = Pages[Index];
-						if (0 == (Allocator->GetSubresourceAllocatorFlags() & VulkanAllocationFlagsCanEvict))
-						{
-							if(Allocator->AllocatorIndex == Heap)
-							{
-								PreferredAllocator = Allocator;
-							}
-							Allocators.Add(Allocator);
-						}
-					}
-				}
-				if(!PreferredAllocator)
-				{
-					uint32 Index = rand() % Allocators.Num();
-					PreferredAllocator= Allocators[Index];
-				}
-				PreferredAllocator->DefragFull(Device, Context, this);
-
 			}
 		}
 	}
@@ -2061,7 +1934,7 @@ namespace VulkanRHI
 	bool FVulkanResourceHeap::AllocateResource(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, EType Type, uint32 Size, uint32 Alignment, bool bMapAllocation, bool bForceSeparateAllocation, EVulkanAllocationMetaType MetaType, bool bExternal, const char* File, uint32 Line)
 	{
 		SCOPED_NAMED_EVENT(FResourceHeap_AllocateResource, FColor::Cyan);
-		FScopeLock ScopeLock(&GResourceLock);
+		FScopeLock ScopeLock(&PagesLock);
 
 		bForceSeparateAllocation = bForceSeparateAllocation || GVulkanSingleAllocationPerResource != 0;
 
@@ -2077,7 +1950,7 @@ namespace VulkanRHI
 		{
 			AllocationFlags |= VulkanAllocationFlagsMapped;
 		}
-
+		
 		uint32 AllocationSize;
 
 		if (!bForceSeparateAllocation)
@@ -2126,8 +1999,14 @@ namespace VulkanRHI
 			DeviceMemoryAllocation->Map(AllocationSize, 0);
 		}
 
+		uint32 BufferId = 0;
+		if (UseVulkanDescriptorCache())
+		{
+			BufferId = ++GVulkanBufferHandleIdCounter;
+		}
+		
 		++PageIDCounter;
-		FVulkanSubresourceAllocator* Page = new FVulkanSubresourceAllocator(AllocationType, Owner, AllocationFlags, DeviceMemoryAllocation, MemoryTypeIndex, 0);
+		FVulkanSubresourceAllocator* Page = new FVulkanSubresourceAllocator(AllocationType, Owner, AllocationFlags, DeviceMemoryAllocation, MemoryTypeIndex, BufferId);
 		Owner->RegisterSubresourceAllocator(Page);
 		Page->BucketId = BucketId;
 		ActivePages[BucketId].Add(Page);
@@ -2148,7 +2027,7 @@ namespace VulkanRHI
 	bool FVulkanResourceHeap::AllocateDedicatedImage(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, VkImage Image, uint32 Size, uint32 Alignment, EVulkanAllocationMetaType MetaType, bool bExternal, const char* File, uint32 Line)
 	{
 #if VULKAN_SUPPORTS_DEDICATED_ALLOCATION
-		FScopeLock ScopeLock(&GResourceLock);
+		FScopeLock ScopeLock(&PagesLock);
 
 		uint32 AllocationSize = Size;
 
@@ -2162,8 +2041,15 @@ namespace VulkanRHI
 			return false;
 		}
 
+		
+		uint32 BufferId = 0;
+		if (UseVulkanDescriptorCache())
+		{
+			BufferId = ++GVulkanBufferHandleIdCounter;
+		}
+
 		++PageIDCounter;
-		FVulkanSubresourceAllocator* NewPage = new FVulkanSubresourceAllocator(EVulkanAllocationImageDedicated, Owner, 0, DeviceMemoryAllocation, MemoryTypeIndex, PageIDCounter);
+		FVulkanSubresourceAllocator* NewPage = new FVulkanSubresourceAllocator(EVulkanAllocationImageDedicated, Owner, 0, DeviceMemoryAllocation, MemoryTypeIndex, BufferId);
 		Owner->RegisterSubresourceAllocator(NewPage);
 		NewPage->BucketId = 0xff;
 		UsedDedicatedImagePages.Add(NewPage);
@@ -2197,26 +2083,6 @@ namespace VulkanRHI
 		const VkPhysicalDeviceMemoryProperties& MemoryProperties = DeviceMemoryManager->GetMemoryProperties();
 
 		ResourceTypeHeaps.AddZeroed(MemoryProperties.memoryTypeCount);
-
-		auto GetMemoryTypesFromProperties = [MemoryProperties](uint32 InTypeBits, VkMemoryPropertyFlags Properties, TArray<uint32>& OutTypeIndices)
-		{
-			// Search memtypes to find first index with those properties
-			for (uint32 i = 0; i < MemoryProperties.memoryTypeCount && InTypeBits; i++)
-			{
-				if ((InTypeBits & 1) == 1)
-				{
-					// Type is available, does it match user properties?
-					if ((MemoryProperties.memoryTypes[i].propertyFlags & Properties) == Properties)
-					{
-						OutTypeIndices.Add(i);
-					}
-				}
-				InTypeBits >>= 1;
-			}
-
-			// No memory types matched, return failure
-			return OutTypeIndices.Num() > 0;
-		};
 
 		// Upload heap. Spec requires this combination to exist.
 		{
@@ -2262,25 +2128,23 @@ namespace VulkanRHI
 			FVulkanPageSizeBucket Bucket1 = { UINT64_MAX, 0, FVulkanPageSizeBucket::BUCKET_MASK_IMAGE | FVulkanPageSizeBucket::BUCKET_MASK_BUFFER };
 			PageSizeBuckets.Add(Bucket0);
 			PageSizeBuckets.Add(Bucket1);
-
 		}
 
 
 		// Setup main GPU heap
 		{
-			TArray<uint32> TypeIndices;
-			GetMemoryTypesFromProperties(TypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, TypeIndices);
-			check(TypeIndices.Num() > 0);
+			uint32 Index;
+			check(DeviceMemoryManager->GetMemoryTypeFromProperties(TypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &Index) == VK_SUCCESS);
 
-			for (uint32 Index = 0; Index < MemoryProperties.memoryTypeCount; ++Index)
+			for (Index = 0; Index < MemoryProperties.memoryTypeCount; ++Index)
 			{
-				int32 HeapIndex = MemoryProperties.memoryTypes[Index].heapIndex;
-				VkDeviceSize HeapSize = MemoryProperties.memoryHeaps[HeapIndex].size;
+				const int32 HeapIndex = MemoryProperties.memoryTypes[Index].heapIndex;
+				const VkDeviceSize HeapSize = MemoryProperties.memoryHeaps[HeapIndex].size;
 				if(!ResourceTypeHeaps[Index] )
 				{
 					ResourceTypeHeaps[Index] = new FVulkanResourceHeap(this, Index);
-					ResourceTypeHeaps[Index]->bIsHostCachedSupported = ((MemoryProperties.memoryTypes[Index].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-					ResourceTypeHeaps[Index]->bIsLazilyAllocatedSupported = ((MemoryProperties.memoryTypes[Index].propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) == VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT);
+					ResourceTypeHeaps[Index]->bIsHostCachedSupported = VKHasAllFlags(MemoryProperties.memoryTypes[Index].propertyFlags, VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+					ResourceTypeHeaps[Index]->bIsLazilyAllocatedSupported = VKHasAllFlags(MemoryProperties.memoryTypes[Index].propertyFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT);
 					auto& PageSizeBuckets = ResourceTypeHeaps[Index]->PageSizeBuckets;
 
 #if PLATFORM_ANDROID
@@ -2365,7 +2229,7 @@ namespace VulkanRHI
 	{
 		TArray<FVulkanSubresourceAllocator*> BufferAllocationsToRelease;
 		{
-			FScopeLock ScopeLock(&GResourceHeapLock);
+			FScopeLock ScopeLock(&UsedFreeBufferAllocationsLock);
 			for (auto& FreeAllocations : FreeBufferAllocations)
 			{
 				for (int32 Index = 0; Index < FreeAllocations.Num(); ++Index)
@@ -2374,7 +2238,7 @@ namespace VulkanRHI
 					if (bImmediately || BufferAllocation->FrameFreed + NUM_FRAMES_TO_WAIT_BEFORE_RELEASING_TO_OS < GFrameNumberRenderThread)
 					{
 						BufferAllocationsToRelease.Add(BufferAllocation);
-						FreeAllocations.RemoveAtSwap(Index, 1, false);
+						FreeAllocations.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 					}
 				}
 			}
@@ -2437,38 +2301,39 @@ namespace VulkanRHI
 
 		ReleaseFreedResources(false);
 
-		int32 PrimaryHostHeap = DeviceMemoryManager->PrimaryHostHeap;
+		const int32 PrimaryHeapIndex = DeviceMemoryManager->PrimaryHeapIndex;
 		FVulkanResourceHeap* BestEvictHeap = 0;
 		uint64 BestEvictHeapSize = 0;
 
 		FVulkanResourceHeap* BestDefragHeap = 0;
 		uint64 BestDefragHeapSize = 0;
 
-		uint32 Idx = 0;
-		for(FVulkanResourceHeap* Heap : ResourceTypeHeaps)
 		{
-			if(Heap->HeapIndex == PrimaryHostHeap)
+			for (FVulkanResourceHeap* Heap : ResourceTypeHeaps)
 			{
-				uint64 UsedSize = Heap->UsedMemory;
-				if(CanDefragHeap(Heap) && BestDefragHeapSize < UsedSize)
+				if (Heap->HeapIndex == PrimaryHeapIndex)
 				{
-					BestDefragHeap = Heap;
-					BestDefragHeapSize = UsedSize;
+					FScopeLock ScopeLock(&Heap->PagesLock);
+
+					uint64 UsedSize = Heap->UsedMemory;
+					if (CanDefragHeap(Heap) && BestDefragHeapSize < UsedSize)
+					{
+						BestDefragHeap = Heap;
+						BestDefragHeapSize = UsedSize;
+					}
+					if (CanEvictHeap(Heap) && BestEvictHeapSize < UsedSize)
+					{
+						BestEvictHeap = Heap;
+						BestEvictHeapSize = UsedSize;
+					}
 				}
-				if(CanEvictHeap(Heap) && BestEvictHeapSize < UsedSize)
-				{
-					BestEvictHeap = Heap;
-					BestEvictHeapSize = UsedSize;
-				}
-				
 			}
-			Idx++;
 		}
 
-		if(BestEvictHeap && ((GVulkanEvictOnePage || UpdateEvictThreshold(true)) && PrimaryHostHeap >= 0))
+		if(BestEvictHeap && ((GVulkanEvictOnePage || UpdateEvictThreshold(true)) && PrimaryHeapIndex >= 0))
 		{
 			GVulkanEvictOnePage = 0;
-			PendingEvictBytes += BestEvictHeap->EvictOne(*Device);		
+			PendingEvictBytes += BestEvictHeap->EvictOne(*Device, Context);
 		}
 
 #if !PLATFORM_ANDROID
@@ -2500,38 +2365,38 @@ namespace VulkanRHI
 	{
 		SCOPED_NAMED_EVENT(FResourceHeapManager_FreeVulkanAllocationPooledBuffer, FColor::Cyan);
 		DecMetaStats(Allocation.MetaType, Allocation.Size);
-		uint32 Index = Allocation.AllocatorIndex;
-		AllBufferAllocations[Index]->Free(Allocation);
+		const uint32 Index = Allocation.AllocatorIndex;
+		GetSubresourceAllocator(Index)->Free(Allocation);
 	}
 	void FMemoryManager::FreeVulkanAllocationBuffer(FVulkanAllocation& Allocation)
 	{
 		SCOPED_NAMED_EVENT(FResourceHeapManager_FreeVulkanAllocationBuffer, FColor::Cyan);
 		DecMetaStats(Allocation.MetaType, Allocation.Size);
-		uint32 Index = Allocation.AllocatorIndex;
-		AllBufferAllocations[Index]->Free(Allocation);
+		const uint32 Index = Allocation.AllocatorIndex;
+		GetSubresourceAllocator(Index)->Free(Allocation);
 	}
 
 	void FMemoryManager::FreeVulkanAllocationImage(FVulkanAllocation& Allocation)
 	{
 		SCOPED_NAMED_EVENT(FResourceHeapManager_FreeVulkanAllocationImage, FColor::Cyan);
 		DecMetaStats(Allocation.MetaType, Allocation.Size);
-		uint32 Index = Allocation.AllocatorIndex;
-		AllBufferAllocations[Index]->Free(Allocation);
+		const uint32 Index = Allocation.AllocatorIndex;
+		GetSubresourceAllocator(Index)->Free(Allocation);
 	}
 	void FMemoryManager::FreeVulkanAllocationImageDedicated(FVulkanAllocation& Allocation)
 	{
 		SCOPED_NAMED_EVENT(FResourceHeapManager_FreeVulkanAllocationImageDedicated, FColor::Cyan);
 		DecMetaStats(Allocation.MetaType, Allocation.Size);
-		uint32 Index = Allocation.AllocatorIndex;
-		AllBufferAllocations[Index]->Free(Allocation);
+		const uint32 Index = Allocation.AllocatorIndex;
+		GetSubresourceAllocator(Index)->Free(Allocation);
 	}
 
 	void FVulkanSubresourceAllocator::SetFreePending(FVulkanAllocation& Allocation)
 	{
-		check(Allocation.Type == Type);
+		check(Allocation.GetType() == Type);
 		check(Allocation.AllocatorIndex == GetAllocatorIndex());
 		{
-			FScopeLock ScopeLock(&CS);
+			FScopeLock ScopeLock(&SubresourceAllocatorCS);
 			FVulkanAllocationInternal& Data = InternalData[Allocation.AllocationIndex];
 			Data.State = FVulkanAllocationInternal::EFREEPENDING;
 		}
@@ -2545,7 +2410,7 @@ namespace VulkanRHI
 		check(Allocation.AllocatorIndex == GetAllocatorIndex());
 		bool bTryFree = false;
 		{
-			FScopeLock ScopeLock(&CS);
+			FScopeLock ScopeLock(&SubresourceAllocatorCS);
 			FreeCalls++;
 			uint32 AllocationOffset;
 			uint32 AllocationSize;
@@ -2585,14 +2450,10 @@ namespace VulkanRHI
 				bTryFree = true; //cannot free here as it will cause incorrect lock ordering
 			}
 		}
-		if(bTryFree)
+
+		if (bTryFree)
 		{
-			FScopeLock ScopeLockResourceheap(&GResourceHeapLock);
-			FScopeLock ScopeLockResource(&GResourceLock);
-			if(JoinFreeBlocks()) //someone could've allocated memory before we claimed this lock.
-			{
-				Owner->ReleaseSubresourceAllocator(this);
-			}
+			Owner->ReleaseSubresourceAllocator(this);
 		}
 	}
 
@@ -2623,9 +2484,7 @@ namespace VulkanRHI
 		}
 		else
 		{
-
-			uint32 Index = Allocation.AllocatorIndex;
-			AllBufferAllocations[Index]->SetFreePending(Allocation);
+			GetSubresourceAllocator(Allocation.AllocatorIndex)->SetFreePending(Allocation);
 			Device->GetDeferredDeletionQueue().EnqueueResourceAllocation(Allocation);
 		}
 		check(!Allocation.HasAllocation());
@@ -2672,10 +2531,12 @@ namespace VulkanRHI
 		{
 			SubresourceAllocatorFlags &= ~VulkanAllocationFlagsMapped;
 		}
+
 		FRange FullRange;
 		FullRange.Offset = 0;
 		FullRange.Size = MaxSize;
 		FreeList.Add(FullRange);
+
 		VULKAN_FILL_TRACK_INFO(Track, __FILE__, __LINE__);
 	}
 
@@ -2699,6 +2560,7 @@ namespace VulkanRHI
 	{
 		FMemory::Memzero(MemoryUsed);
 		MaxSize = InDeviceMemoryAllocation->GetSize();
+
 		if (InDeviceMemoryAllocation->IsMapped())
 		{
 			SubresourceAllocatorFlags |= VulkanAllocationFlagsMapped;
@@ -2715,17 +2577,18 @@ namespace VulkanRHI
 
 		VULKAN_FILL_TRACK_INFO(Track, __FILE__, __LINE__);
 	}
+
 	FVulkanSubresourceAllocator::~FVulkanSubresourceAllocator()
 	{
-		if(!JoinFreeBlocks())
+		if (!JoinFreeBlocks())
 		{
 			UE_LOG(LogVulkanRHI, Warning, TEXT("FVulkanSubresourceAllocator %p has unfreed %s resources %s"), (void*)this, VulkanAllocationTypeToString(Type), *VULKAN_TRACK_STRING(Track));
 			uint32 LeakCount = 0;
-			for(FVulkanAllocationInternal& Data : InternalData)
+			for (FVulkanAllocationInternal& Data : InternalData)
 			{
-				if(Data.State == FVulkanAllocationInternal::EALLOCATED)
+				if (Data.State == FVulkanAllocationInternal::EALLOCATED)
 				{
-					UE_LOG(LogVulkanRHI, Warning, TEXT(" ** LEAK %03d [%08x-%08x] %d  %s \n%s"), LeakCount++, Data.AllocationOffset, Data.AllocationSize,  Data.Size, VulkanAllocationMetaTypeToString(Data.MetaType), *VULKAN_TRACK_STRING(Data.Track));
+					UE_LOG(LogVulkanRHI, Warning, TEXT(" ** LEAK %03d [%08x-%08x] %u  %s \n%s"), LeakCount++, Data.AllocationOffset, Data.AllocationSize,  Data.Size, VulkanAllocationMetaTypeToString(Data.MetaType), *VULKAN_TRACK_STRING(Data.Track));
 				}
 			}
 		}
@@ -2733,54 +2596,147 @@ namespace VulkanRHI
 		VULKAN_FREE_TRACK_INFO(Track);
 	}
 
-
-
-	bool FMemoryManager::AllocateBufferPooled(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, uint32 Size, VkBufferUsageFlags BufferUsageFlags, VkMemoryPropertyFlags MemoryPropertyFlags, EVulkanAllocationMetaType MetaType, const char* File, uint32 Line)
+	static uint32 CalculateBufferAlignmentFromVKUsageFlags(FVulkanDevice& InDevice, const VkBufferUsageFlags BufferUsageFlags)
 	{
-		SCOPED_NAMED_EVENT(FResourceHeapManager_AllocateBufferPooled, FColor::Cyan);
-		check(OutAllocation.Type == EVulkanAllocationEmpty);
-		const VkPhysicalDeviceLimits& Limits = Device->GetLimits();
+		const VkPhysicalDeviceLimits& Limits = InDevice.GetLimits();
+
+		const bool bIsTexelBuffer = VKHasAnyFlags(BufferUsageFlags, (VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT));
+		const bool bIsStorageBuffer = VKHasAnyFlags(BufferUsageFlags, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+		const bool bIsVertexOrIndexBuffer = VKHasAnyFlags(BufferUsageFlags, (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT));
+		const bool bIsAccelerationStructureBuffer = VKHasAnyFlags(BufferUsageFlags, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR);
+		const bool bIsUniformBuffer = VKHasAnyFlags(BufferUsageFlags, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+
 		uint32 Alignment = 1;
 
-		float Priority = VULKAN_MEMORY_MEDIUM_PRIORITY;
-
-		bool bIsTexelBuffer = (BufferUsageFlags & (VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT)) != 0;
-		bool bIsStorageBuffer = (BufferUsageFlags & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) != 0;
 		if (bIsTexelBuffer || bIsStorageBuffer)
 		{
-			Alignment = FMath::Max(Alignment, bIsTexelBuffer ? (uint32)Limits.minTexelBufferOffsetAlignment : 0);
-			Alignment = FMath::Max(Alignment, bIsStorageBuffer ? (uint32)Limits.minStorageBufferOffsetAlignment : 0);
+			Alignment = FMath::Max(Alignment, (uint32)Limits.minTexelBufferOffsetAlignment);
+			Alignment = FMath::Max(Alignment, (uint32)Limits.minStorageBufferOffsetAlignment);
+		}
+		else if (bIsVertexOrIndexBuffer)
+		{
+			// No alignment restrictions on Vertex or Index buffers, leave it at 1
+		}
+		else if (bIsAccelerationStructureBuffer)
+		{
+			Alignment = FMath::Max(Alignment, GRHIRayTracingAccelerationStructureAlignment);
+		}
+		else if (bIsUniformBuffer)
+		{
+			Alignment = FMath::Max(Alignment, (uint32)Limits.minUniformBufferOffsetAlignment);
 		}
 		else
 		{
-			bool bIsVertexOrIndexBuffer = (BufferUsageFlags & (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) != 0;
-			if (bIsVertexOrIndexBuffer)
-			{
-				// No alignment restrictions on Vertex or Index buffers, can live on CPU mem
-				Priority = VULKAN_MEMORY_LOW_PRIORITY;
-			}
-			else
-			{
-				// Uniform buffer
-				ensure((BufferUsageFlags & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) == VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-				Alignment = FMath::Max(Alignment, (uint32)Limits.minUniformBufferOffsetAlignment);
-
-				Priority = VULKAN_MEMORY_HIGHER_PRIORITY;
-			}
+			checkf(false, TEXT("Unknown buffer alignment for VkBufferUsageFlags combination: 0x%x (%s)"), BufferUsageFlags, VK_FLAGS_TO_STRING(VkBufferUsageFlags, BufferUsageFlags));
 		}
 
-		if (BufferUsageFlags & (VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT))
+		return Alignment;
+	}
+
+	uint32 FMemoryManager::CalculateBufferAlignment(FVulkanDevice& InDevice, EBufferUsageFlags InUEUsage, bool bZeroSize)
+	{
+		const VkBufferUsageFlags VulkanBufferUsage = FVulkanResourceMultiBuffer::UEToVKBufferUsageFlags(&InDevice, InUEUsage, bZeroSize);
+
+		uint32 Alignment = CalculateBufferAlignmentFromVKUsageFlags(InDevice, VulkanBufferUsage);
+
+#if VULKAN_RHI_RAYTRACING
+		if (EnumHasAllFlags(InUEUsage, BUF_RayTracingScratch))
+		{
+			Alignment = GRHIRayTracingScratchBufferAlignment;
+		}
+#endif
+		return Alignment;
+	}
+
+	float FMemoryManager::CalculateBufferPriority(const VkBufferUsageFlags BufferUsageFlags)
+	{
+		float Priority = VULKAN_MEMORY_MEDIUM_PRIORITY;
+
+		if (VKHasAnyFlags(BufferUsageFlags, (VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)))
 		{
 			Priority = VULKAN_MEMORY_HIGHEST_PRIORITY;
 		}
+		else if (VKHasAnyFlags(BufferUsageFlags, (VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)))
+		{
+			Priority = VULKAN_MEMORY_MEDIUM_PRIORITY;
+		}
+#if VULKAN_RHI_RAYTRACING
+		else if (VKHasAnyFlags(BufferUsageFlags, 
+			(VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
+			VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
+			VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR)))
+		{
+			Priority = VULKAN_MEMORY_MEDIUM_PRIORITY;
+		}
+#endif // VULKAN_RHI_RAYTRACING
+		else if (VKHasAnyFlags(BufferUsageFlags, (VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)))
+		{
+			Priority = VULKAN_MEMORY_LOW_PRIORITY;
+		}
+		else if (VKHasAnyFlags(BufferUsageFlags, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+		{
+			Priority = VULKAN_MEMORY_HIGHER_PRIORITY;
+		}
+		else
+		{
+			checkf(false, TEXT("Unknown priority for VkBufferUsageFlags combination: 0x%x (%s)"), BufferUsageFlags, VK_FLAGS_TO_STRING(VkBufferUsageFlags, BufferUsageFlags));
+		}
 
-		int32 PoolSize = (int32)GetPoolTypeForAlloc(Size, Alignment);
+		return Priority;
+	}
+
+	static VkMemoryPropertyFlags GetMemoryPropertyFlags(EVulkanAllocationFlags AllocFlags, bool bHasUnifiedMemory)
+	{
+		VkMemoryPropertyFlags MemFlags = 0;
+
+		checkf(!(EnumHasAnyFlags(AllocFlags, EVulkanAllocationFlags::PreferBAR) && !EnumHasAnyFlags(AllocFlags, EVulkanAllocationFlags::HostVisible)), TEXT("PreferBAR should always be used with HostVisible."));
+
+		if (EnumHasAnyFlags(AllocFlags, EVulkanAllocationFlags::HostCached))
+		{
+			MemFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		}
+		else if (EnumHasAnyFlags(AllocFlags, EVulkanAllocationFlags::HostVisible))
+		{
+			MemFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+			if (EnumHasAnyFlags(AllocFlags, EVulkanAllocationFlags::PreferBAR))
+			{
+				MemFlags |= VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+			}
+		}
+		else
+		{
+			MemFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+			if (bHasUnifiedMemory)
+			{
+				MemFlags |= (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			}
+		}
+
+		if (EnumHasAnyFlags(AllocFlags, EVulkanAllocationFlags::Memoryless))
+		{
+			MemFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
+		}
+
+		return MemFlags;
+	}
+
+	bool FMemoryManager::AllocateBufferPooled(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, uint32 Size, uint32 MinAlignment, VkBufferUsageFlags BufferUsageFlags, VkMemoryPropertyFlags MemoryPropertyFlags, EVulkanAllocationMetaType MetaType, const char* File, uint32 Line)
+	{
+		SCOPED_NAMED_EVENT(FResourceHeapManager_AllocateBufferPooled, FColor::Cyan);
+		check(OutAllocation.Type == EVulkanAllocationEmpty);
+
+		uint32 Alignment = FMath::Max(MinAlignment, CalculateBufferAlignmentFromVKUsageFlags(*Device, BufferUsageFlags));
+		const float Priority = CalculateBufferPriority(BufferUsageFlags);
+
+		const int32 PoolSize = (int32)GetPoolTypeForAlloc(Size, Alignment);
 		if (PoolSize != (int32)EPoolSizes::SizesCount)
 		{
 			Size = PoolSizes[PoolSize];
 		}
 
-		FScopeLock ScopeLock(&GResourceHeapLock);
+		FScopeLock ScopeLock(&UsedFreeBufferAllocationsLock);
 
 		for (int32 Index = 0; Index < UsedBufferAllocations[PoolSize].Num(); ++Index)
 		{
@@ -2806,7 +2762,7 @@ namespace VulkanRHI
 				if(SubresourceAllocator->TryAllocate2(OutAllocation, AllocationOwner, Size, Alignment, MetaType, File, Line))
 				{
 					IncMetaStats(MetaType, OutAllocation.Size);
-					FreeBufferAllocations[PoolSize].RemoveAtSwap(Index, 1, false);
+					FreeBufferAllocations[PoolSize].RemoveAtSwap(Index, 1, EAllowShrinking::No);
 					UsedBufferAllocations[PoolSize].Add(SubresourceAllocator);
 					return true;
 				}
@@ -2814,13 +2770,18 @@ namespace VulkanRHI
 		}
 
 		// New Buffer
-		uint32 BufferSize = FMath::Max(Size, BufferSizes[PoolSize]);
+		const uint32 BufferSize = FMath::Max(Size, BufferSizes[PoolSize]);
 
 		VkBuffer Buffer;
 		VkBufferCreateInfo BufferCreateInfo;
 		ZeroVulkanStruct(BufferCreateInfo, VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 		BufferCreateInfo.size = BufferSize;
 		BufferCreateInfo.usage = BufferUsageFlags;
+		// For descriptors buffers
+		if (Device->GetOptionalExtensions().HasBufferDeviceAddress)
+		{
+			BufferCreateInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
 		VERIFYVULKANRESULT(VulkanRHI::vkCreateBuffer(Device->GetInstanceHandle(), &BufferCreateInfo, VULKAN_CPU_ALLOCATOR, &Buffer));
 
 		VkMemoryRequirements MemReqs;
@@ -2835,12 +2796,12 @@ namespace VulkanRHI
 		FDeviceMemoryAllocation* DeviceMemoryAllocation = DeviceMemoryManager->Alloc(true, MemReqs.size, MemoryTypeIndex, nullptr, Priority, false, File, Line);
 		if(!DeviceMemoryAllocation)
 		{
-			VkMemoryPropertyFlags MemoryPropertyFallbackFlags = MemoryPropertyFlags & (~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-			uint32 MemoryTypeIndexFallback;
-			if(GVulkanMemoryMemoryFallbackToHost && VK_SUCCESS == Device->GetDeviceMemoryManager().GetMemoryTypeFromPropertiesExcluding(MemReqs.memoryTypeBits, MemoryPropertyFallbackFlags, MemoryTypeIndex, &MemoryTypeIndexFallback))
+			MemoryPropertyFlags &= (~VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+			const uint32 ForbiddenMemoryTypeIndex = MemoryTypeIndex;
+			if (GVulkanMemoryMemoryFallbackToHost && VK_SUCCESS == Device->GetDeviceMemoryManager().GetMemoryTypeFromPropertiesExcluding(MemReqs.memoryTypeBits, MemoryPropertyFlags, ForbiddenMemoryTypeIndex, &MemoryTypeIndex))
 			{
-				DeviceMemoryAllocation = DeviceMemoryManager->Alloc(false, MemReqs.size, MemoryTypeIndexFallback, nullptr, Priority, false, File, Line);
-			}			
+				DeviceMemoryAllocation = DeviceMemoryManager->Alloc(false, MemReqs.size, MemoryTypeIndex, nullptr, Priority, false, File, Line);
+			}
 		}
 		if(!DeviceMemoryAllocation)
 		{
@@ -2879,14 +2840,13 @@ namespace VulkanRHI
 		return false;
 	}
 
-
-
 	void FMemoryManager::RegisterSubresourceAllocator(FVulkanSubresourceAllocator* SubresourceAllocator)
 	{
 		check(SubresourceAllocator->AllocatorIndex == 0xffffffff);
-		if(AllBufferAllocationsFreeListHead != (PTRINT)-1)
+		FRWScopeLock ScopedLock(AllBufferAllocationsLock, SLT_Write);
+		if (AllBufferAllocationsFreeListHead != (PTRINT)-1)
 		{
-			uint32 Index = AllBufferAllocationsFreeListHead;
+			const uint32 Index = AllBufferAllocationsFreeListHead;
 			AllBufferAllocationsFreeListHead = (PTRINT)AllBufferAllocations[Index];
 			SubresourceAllocator->AllocatorIndex = Index;
 			AllBufferAllocations[Index] = SubresourceAllocator;
@@ -2898,41 +2858,50 @@ namespace VulkanRHI
 		}
 
 	}
+
 	void FMemoryManager::UnregisterSubresourceAllocator(FVulkanSubresourceAllocator* SubresourceAllocator)
 	{
-		if(SubresourceAllocator->bIsEvicting)
+		if (SubresourceAllocator->bIsEvicting)
 		{
 			PendingEvictBytes -= SubresourceAllocator->GetMemoryAllocation()->GetSize();
 		}
-		uint32 Index = SubresourceAllocator->AllocatorIndex;
+		FRWScopeLock ScopedLock(AllBufferAllocationsLock, SLT_Write);
+		const uint32 Index = SubresourceAllocator->AllocatorIndex;
 		check(Index != 0xffffffff);
 		AllBufferAllocations[Index] = (FVulkanSubresourceAllocator*)AllBufferAllocationsFreeListHead;
 		AllBufferAllocationsFreeListHead = Index;
 	}
 
-
-	void FMemoryManager::ReleaseSubresourceAllocator(FVulkanSubresourceAllocator* SubresourceAllocator)
+	bool FMemoryManager::ReleaseSubresourceAllocator(FVulkanSubresourceAllocator* SubresourceAllocator)
 	{
-		if(SubresourceAllocator->Type == EVulkanAllocationPooledBuffer)
+		// Lock everything to make sure no one adds anything while we get rid of it
+		FScopeLock ScopeLockBufferAllocations(&UsedFreeBufferAllocationsLock);
+		FScopeLock ScopeLockPages(&ResourceTypeHeaps[SubresourceAllocator->MemoryTypeIndex]->PagesLock);
+
+		if (SubresourceAllocator->JoinFreeBlocks())
 		{
-			check(SubresourceAllocator->JoinFreeBlocks());
-			UsedBufferAllocations[SubresourceAllocator->PoolSizeIndex].RemoveSingleSwap(SubresourceAllocator, false);
-			SubresourceAllocator->FrameFreed = GFrameNumberRenderThread;
-			FreeBufferAllocations[SubresourceAllocator->PoolSizeIndex].Add(SubresourceAllocator);
+			if (SubresourceAllocator->Type == EVulkanAllocationPooledBuffer)
+			{
+				UsedBufferAllocations[SubresourceAllocator->PoolSizeIndex].RemoveSingleSwap(SubresourceAllocator, EAllowShrinking::No);
+				SubresourceAllocator->FrameFreed = GFrameNumberRenderThread;
+				FreeBufferAllocations[SubresourceAllocator->PoolSizeIndex].Add(SubresourceAllocator);
+			}
+			else
+			{
+				FVulkanResourceHeap* Heap = ResourceTypeHeaps[SubresourceAllocator->MemoryTypeIndex];
+				Heap->FreePage(SubresourceAllocator);
+			}
+
+			return true;
 		}
-		else
-		{
-			FVulkanResourceHeap* Heap = ResourceTypeHeaps[SubresourceAllocator->MemoryTypeIndex];
-			Heap->FreePage(SubresourceAllocator);
-		}
+		return false;
 	}
-	//
+
 	bool FMemoryManager::UpdateEvictThreshold(bool bLog)
 	{
-		uint64 HostAllocated = 0;
-		uint64 HostLimit = 0;
-		DeviceMemoryManager->GetHostMemoryStatus(&HostAllocated, &HostLimit);
-		double AllocatedPercentage = 100.0 * (HostAllocated - PendingEvictBytes) / HostLimit;
+		uint64 PrimaryAllocated, PrimaryLimit;
+		DeviceMemoryManager->GetPrimaryHeapStatus(PrimaryAllocated, PrimaryLimit);
+		double AllocatedPercentage = 100.0 * (PrimaryAllocated - PendingEvictBytes) / PrimaryLimit;
 
 		double EvictionLimit = GVulkanEvictionLimitPercentage;
 		double EvictionLimitLowered = EvictionLimit * (GVulkanEvictionLimitPercentageReenableLimit / 100.f);
@@ -2942,7 +2911,7 @@ namespace VulkanRHI
 		}
 		if(bLog && GVulkanLogEvictStatus)
 		{
-			VULKAN_LOGMEMORY(TEXT("EVICT STATUS %6.2f%%/%6.2f%% :: A:%8.3fMB / E:%8.3fMB / T:%8.3fMB\n"), AllocatedPercentage, EvictionLimit, HostAllocated / (1024.f*1024.f), PendingEvictBytes/ (1024.f*1024.f), HostLimit/ (1024.f*1024.f));
+			VULKAN_LOGMEMORY(TEXT("EVICT STATUS %6.2f%%/%6.2f%% :: A:%8.3fMB / E:%8.3fMB / T:%8.3fMB\n"), AllocatedPercentage, EvictionLimit, PrimaryAllocated / (1024.f*1024.f), PendingEvictBytes/ (1024.f*1024.f), PrimaryLimit / (1024.f*1024.f));
 		}
 
 		bIsEvicting = AllocatedPercentage > EvictionLimit;
@@ -2951,18 +2920,18 @@ namespace VulkanRHI
 
 	bool FMemoryManager::AllocateImageMemory(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, const VkMemoryRequirements& MemoryReqs, VkMemoryPropertyFlags MemoryPropertyFlags, EVulkanAllocationMetaType MetaType, bool bExternal, const char* File, uint32 Line)
 	{
-		bool bHasUnifiedMemory = DeviceMemoryManager->HasUnifiedMemory();
-		bool bCanEvict = MetaTypeCanEvict(MetaType);
+		const bool bHasUnifiedMemory = DeviceMemoryManager->HasUnifiedMemory();
+		const bool bCanEvict = MetaTypeCanEvict(MetaType);
 		if(!bHasUnifiedMemory && bCanEvict && MemoryPropertyFlags == VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT && UpdateEvictThreshold(false))
 		{
 			MemoryPropertyFlags = DeviceMemoryManager->GetEvictedMemoryProperties();
 		}
-		bool bMapped = (MemoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+		bool bMapped = VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
 		uint32 TypeIndex = 0;
 
 		if (DeviceMemoryManager->GetMemoryTypeFromProperties(MemoryReqs.memoryTypeBits, MemoryPropertyFlags, &TypeIndex) != VK_SUCCESS)
 		{
-			if ((MemoryPropertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) == VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
+			if (VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT))
 			{
 				// If lazy allocations are not supported, we can fall back to real allocations.
 				MemoryPropertyFlags = MemoryPropertyFlags & ~VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
@@ -2977,8 +2946,11 @@ namespace VulkanRHI
 		{
 			UE_LOG(LogVulkanRHI, Fatal, TEXT("Missing memory type index %d, MemSize %d, MemPropTypeBits %u, MemPropertyFlags %u, %s(%d)"), TypeIndex, (uint32)MemoryReqs.size, (uint32)MemoryReqs.memoryTypeBits, (uint32)MemoryPropertyFlags, ANSI_TO_TCHAR(File), Line);
 		}
-		const bool bForceSeparateAllocation = bExternal || (MemoryPropertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) == VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
-		if(!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Image, MemoryReqs.size, MemoryReqs.alignment, bMapped, bForceSeparateAllocation, MetaType, bExternal, File, Line))
+
+		check(MemoryReqs.size <= (uint64)MAX_uint32);
+
+		const bool bForceSeparateAllocation = bExternal || VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT);
+		if (!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Image, MemoryReqs.size, MemoryReqs.alignment, bMapped, bForceSeparateAllocation, MetaType, bExternal, File, Line))
 		{
 			if(GVulkanMemoryMemoryFallbackToHost)
 			{
@@ -2986,8 +2958,8 @@ namespace VulkanRHI
 			}
 
 			VERIFYVULKANRESULT(DeviceMemoryManager->GetMemoryTypeFromPropertiesExcluding(MemoryReqs.memoryTypeBits, MemoryPropertyFlags, TypeIndex, &TypeIndex));
-			bMapped = (MemoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-			if(!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Image, MemoryReqs.size, MemoryReqs.alignment, bMapped, bForceSeparateAllocation, MetaType, bExternal, File, Line))
+			bMapped = VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+			if (!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Image, MemoryReqs.size, MemoryReqs.alignment, bMapped, bForceSeparateAllocation, MetaType, bExternal, File, Line))
 			{
 				DumpMemory();
 				UE_LOG(LogVulkanRHI, Fatal, TEXT("Out Of Memory, trying to allocate %d bytes\n"), MemoryReqs.size);
@@ -2997,21 +2969,21 @@ namespace VulkanRHI
 		return true;
 	}
 
-	bool FMemoryManager::AllocateBufferMemory(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, const VkMemoryRequirements& MemoryReqs, VkMemoryPropertyFlags MemoryPropertyFlags, EVulkanAllocationMetaType MetaType, bool bExternal, const char* File, uint32 Line)
+	bool FMemoryManager::AllocateBufferMemory(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, const VkMemoryRequirements& MemoryReqs, VkMemoryPropertyFlags MemoryPropertyFlags, EVulkanAllocationMetaType MetaType, bool bExternal, bool bForceSeparateAllocation, const char* File, uint32 Line)
 	{
 		SCOPED_NAMED_EVENT(FResourceHeapManager_AllocateBufferMemory, FColor::Cyan);
 		uint32 TypeIndex = 0;
 		VkResult Result = DeviceMemoryManager->GetMemoryTypeFromProperties(MemoryReqs.memoryTypeBits, MemoryPropertyFlags, &TypeIndex);
-		bool bMapped = (MemoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+		bool bMapped = VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
 		if ((Result != VK_SUCCESS) || !ResourceTypeHeaps[TypeIndex])
 		{
-			if ((MemoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+			if (VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
 			{
 				// Try non-cached flag
 				MemoryPropertyFlags = MemoryPropertyFlags & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 			}
 
-			if ((MemoryPropertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) == VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
+			if (VKHasAllFlags(MemoryPropertyFlags, VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT))
 			{
 				// Try non-lazy flag
 				MemoryPropertyFlags = MemoryPropertyFlags & ~VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
@@ -3031,7 +3003,9 @@ namespace VulkanRHI
 			}
 		}
 
-		if(!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Buffer, MemoryReqs.size, MemoryReqs.alignment, bMapped, false, MetaType, bExternal, File, Line))
+		check(MemoryReqs.size <= (uint64)MAX_uint32);
+
+		if (!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Buffer, MemoryReqs.size, MemoryReqs.alignment, bMapped, bForceSeparateAllocation, MetaType, bExternal, File, Line))
 		{
 			// Try another memory type if the allocation failed
 			VERIFYVULKANRESULT(DeviceMemoryManager->GetMemoryTypeFromPropertiesExcluding(MemoryReqs.memoryTypeBits, MemoryPropertyFlags, TypeIndex, &TypeIndex));
@@ -3040,7 +3014,7 @@ namespace VulkanRHI
 			{
 				UE_LOG(LogVulkanRHI, Fatal, TEXT("Missing memory type index %d, MemSize %d, MemPropTypeBits %u, MemPropertyFlags %u, %s(%d)"), TypeIndex, (uint32)MemoryReqs.size, (uint32)MemoryReqs.memoryTypeBits, (uint32)MemoryPropertyFlags, ANSI_TO_TCHAR(File), Line);
 			}
-			if(!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Buffer, MemoryReqs.size, MemoryReqs.alignment, bMapped, false, MetaType, bExternal, File, Line))
+			if (!ResourceTypeHeaps[TypeIndex]->AllocateResource(OutAllocation, AllocationOwner, EType::Buffer, MemoryReqs.size, MemoryReqs.alignment, bMapped, bForceSeparateAllocation, MetaType, bExternal, File, Line))
 			{
 				DumpMemory();
 				UE_LOG(LogVulkanRHI, Fatal, TEXT("Out Of Memory, trying to allocate %d bytes\n"), MemoryReqs.size);
@@ -3048,6 +3022,67 @@ namespace VulkanRHI
 			}
 		}
 		return true;
+	}
+
+	bool FMemoryManager::AllocateBufferMemory(FVulkanAllocation& OutAllocation, VkBuffer InBuffer, EVulkanAllocationFlags InAllocFlags, const TCHAR* InDebugName, uint32 InForceMinAlignment)
+	{
+		SCOPED_NAMED_EVENT(FMemoryManager_AllocateBufferMemory, FColor::Cyan);
+
+		VkBufferMemoryRequirementsInfo2 BufferMemoryRequirementsInfo;
+		ZeroVulkanStruct(BufferMemoryRequirementsInfo, VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2);
+		BufferMemoryRequirementsInfo.buffer = InBuffer;
+
+		VkMemoryDedicatedRequirements DedicatedRequirements;
+		ZeroVulkanStruct(DedicatedRequirements, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS);
+
+		VkMemoryRequirements2 MemoryRequirements;
+		ZeroVulkanStruct(MemoryRequirements, VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2);
+		MemoryRequirements.pNext = &DedicatedRequirements;
+
+		VulkanRHI::vkGetBufferMemoryRequirements2(Device->GetInstanceHandle(), &BufferMemoryRequirementsInfo, &MemoryRequirements);
+
+		// Allow caller to force his own alignment requirements
+		MemoryRequirements.memoryRequirements.alignment = FMath::Max(MemoryRequirements.memoryRequirements.alignment, (VkDeviceSize)InForceMinAlignment);
+
+		if (DedicatedRequirements.requiresDedicatedAllocation || DedicatedRequirements.prefersDedicatedAllocation)
+		{
+			InAllocFlags |= EVulkanAllocationFlags::Dedicated;
+		}
+
+		// For now, translate all the flags into a call to the legacy AllocateBufferMemory() function
+		const VkMemoryPropertyFlags MemoryPropertyFlags = GetMemoryPropertyFlags(InAllocFlags, DeviceMemoryManager->HasUnifiedMemory());
+		const bool bExternal = EnumHasAllFlags(InAllocFlags, EVulkanAllocationFlags::External);
+		const bool bForceSeparateAllocation = EnumHasAllFlags(InAllocFlags, EVulkanAllocationFlags::Dedicated);
+		AllocateBufferMemory(OutAllocation, nullptr, MemoryRequirements.memoryRequirements, MemoryPropertyFlags, EVulkanAllocationMetaBufferOther, bExternal, bForceSeparateAllocation, __FILE__, __LINE__);
+
+		if (OutAllocation.IsValid())
+		{
+			if (EnumHasAllFlags(InAllocFlags, EVulkanAllocationFlags::AutoBind))
+			{
+				VkBindBufferMemoryInfo BindBufferMemoryInfo;
+				ZeroVulkanStruct(BindBufferMemoryInfo, VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO);
+				BindBufferMemoryInfo.buffer = InBuffer;
+				BindBufferMemoryInfo.memory = OutAllocation.GetDeviceMemoryHandle(Device);
+				BindBufferMemoryInfo.memoryOffset = OutAllocation.Offset;
+
+				VERIFYVULKANRESULT(VulkanRHI::vkBindBufferMemory2(Device->GetInstanceHandle(), 1, &BindBufferMemoryInfo));
+			}
+
+			if (InDebugName)
+			{
+				VULKAN_SET_DEBUG_NAME((*Device), VK_OBJECT_TYPE_BUFFER, InBuffer, TEXT("%s"), InDebugName);
+			}
+		}
+		else
+		{
+			if (!EnumHasAllFlags(InAllocFlags, EVulkanAllocationFlags::NoError))
+			{
+				const bool IsHostMemory = EnumHasAnyFlags(InAllocFlags, EVulkanAllocationFlags::HostVisible | EVulkanAllocationFlags::HostCached);
+				HandleOOM(false, IsHostMemory ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_OUT_OF_DEVICE_MEMORY, MemoryRequirements.memoryRequirements.size);
+			}
+		}
+
+		return OutAllocation.IsValid();
 	}
 
 	bool FMemoryManager::AllocateDedicatedImageMemory(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, VkImage Image, const VkMemoryRequirements& MemoryReqs, VkMemoryPropertyFlags MemoryPropertyFlags, EVulkanAllocationMetaType MetaType, bool bExternal, const char* File, uint32 Line)
@@ -3061,11 +3096,11 @@ namespace VulkanRHI
 		VkMemoryDedicatedRequirementsKHR DedMemoryReqs;
 		ZeroVulkanStruct(DedMemoryReqs, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS_KHR);
 
-		VkMemoryRequirements2KHR MemoryReqs2;
+		VkMemoryRequirements2 MemoryReqs2;
 		ZeroVulkanStruct(MemoryReqs2, VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2_KHR);
 		MemoryReqs2.pNext = &DedMemoryReqs;
 
-		VulkanRHI::vkGetImageMemoryRequirements2KHR(Device->GetInstanceHandle(), &ImageMemoryReqs2, &MemoryReqs2);
+		VulkanRHI::vkGetImageMemoryRequirements2(Device->GetInstanceHandle(), &ImageMemoryReqs2, &MemoryReqs2);
 
 		bool bUseDedicated = DedMemoryReqs.prefersDedicatedAllocation != VK_FALSE || DedMemoryReqs.requiresDedicatedAllocation != VK_FALSE;
 		if (bUseDedicated)
@@ -3073,11 +3108,12 @@ namespace VulkanRHI
 			uint32 TypeIndex = 0;
 			VERIFYVULKANRESULT(DeviceMemoryManager->GetMemoryTypeFromProperties(MemoryReqs.memoryTypeBits, MemoryPropertyFlags, &TypeIndex));
 			ensure((MemoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+			check(MemoryReqs.size <= (uint64)MAX_uint32);
 			if (!ResourceTypeHeaps[TypeIndex])
 			{
 				UE_LOG(LogVulkanRHI, Fatal, TEXT("Missing memory type index %d, MemSize %d, MemPropTypeBits %u, MemPropertyFlags %u, %s(%d)"), TypeIndex, (uint32)MemoryReqs.size, (uint32)MemoryReqs.memoryTypeBits, (uint32)MemoryPropertyFlags, ANSI_TO_TCHAR(File), Line);
 			}
-			if(!ResourceTypeHeaps[TypeIndex]->AllocateDedicatedImage(OutAllocation, AllocationOwner, Image, MemoryReqs.size, MemoryReqs.alignment, MetaType, bExternal, File, Line))
+			if (!ResourceTypeHeaps[TypeIndex]->AllocateDedicatedImage(OutAllocation, AllocationOwner, Image, MemoryReqs.size, MemoryReqs.alignment, MetaType, bExternal, File, Line))
 			{
 				if(GVulkanMemoryMemoryFallbackToHost)
 				{
@@ -3085,7 +3121,7 @@ namespace VulkanRHI
 				}
 				if(VK_SUCCESS == DeviceMemoryManager->GetMemoryTypeFromPropertiesExcluding(MemoryReqs.memoryTypeBits, MemoryPropertyFlags, TypeIndex, &TypeIndex))
 				{
-					if(ResourceTypeHeaps[TypeIndex]->AllocateDedicatedImage(OutAllocation, AllocationOwner, Image, MemoryReqs.size, MemoryReqs.alignment, MetaType, bExternal, File, Line))
+					if (ResourceTypeHeaps[TypeIndex]->AllocateDedicatedImage(OutAllocation, AllocationOwner, Image, MemoryReqs.size, MemoryReqs.alignment, MetaType, bExternal, File, Line))
 					{
 						return true;
 					}
@@ -3107,7 +3143,7 @@ namespace VulkanRHI
 
 	void FMemoryManager::DumpMemory(bool bFullDump)
 	{
-		FScopeLock ScopeLock(&GResourceHeapLock);
+		FScopeLock ScopeLock(&UsedFreeBufferAllocationsLock);
 		Device->GetDeviceMemoryManager().DumpMemory();
 		VULKAN_LOGMEMORY(TEXT("/******************************************* FMemoryManager ********************************************\\"));
 		VULKAN_LOGMEMORY(TEXT("HEAP DUMP"));
@@ -3179,7 +3215,7 @@ namespace VulkanRHI
 			for (int32 Index = 0; Index < FreeAllocations.Num(); ++Index)
 			{
 				FVulkanSubresourceAllocator* BA = FreeAllocations[Index];
-				if(BA->MemoryPropertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+				if (VKHasAnyFlags(BA->MemoryPropertyFlags, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
 				{
 					StatsLocal.Pages += 1;
 					StatsLocal.BufferPages += 1;
@@ -3212,7 +3248,7 @@ namespace VulkanRHI
 				for (int32 Index = 0; Index < UsedAllocations.Num(); ++Index)
 				{
 					FVulkanSubresourceAllocator* BA = UsedAllocations[Index];
-					VULKAN_LOGMEMORY(TEXT("%6d 0x%016llx 0x%016llx 0x%06x 0x%08x %6d   %6d        %d/%d"), Index, (void*)BA->Buffer, (void*)BA->MemoryAllocation->GetHandle(), BA->MemoryPropertyFlags, BA->BufferUsageFlags, BA->NumSubAllocations, BA->FreeList.Num(), BA->UsedSize, BA->MaxSize);
+					VULKAN_LOGMEMORY(TEXT("%6d 0x%016llx 0x%016llx 0x%06x 0x%08x %6d   %6d        %u/%u"), Index, (void*)BA->Buffer, (void*)BA->MemoryAllocation->GetHandle(), BA->MemoryPropertyFlags, BA->BufferUsageFlags, BA->NumSubAllocations, BA->FreeList.Num(), BA->UsedSize, BA->MaxSize);
 
 					if (PoolSizeIndex == (int32)EPoolSizes::SizesCount)
 					{
@@ -3229,7 +3265,7 @@ namespace VulkanRHI
 						AllocBinnedTotal += BA->MaxSize;
 					}
 
-					if (BA->MemoryPropertyFlags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+					if (VKHasAnyFlags(BA->MemoryPropertyFlags, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
 					{
 						StatsLocal.Pages += 1;
 						StatsLocal.BufferPages += 1;
@@ -3258,18 +3294,18 @@ namespace VulkanRHI
 
 				if (PoolSizeIndex == (int32)EPoolSizes::SizesCount)
 				{
-					VULKAN_LOGMEMORY(TEXT(" Large Alloc Used/Max %d/%d %6.2f%%"), _UsedLargeTotal, _AllocLargeTotal, 100.0f * (float)_UsedLargeTotal / (float)_AllocLargeTotal);
+					VULKAN_LOGMEMORY(TEXT(" Large Alloc Used/Max %llu/%llu %6.2f%%"), _UsedLargeTotal, _AllocLargeTotal, 100.0f * (float)_UsedLargeTotal / (float)_AllocLargeTotal);
 				}
 				else
 				{
-					VULKAN_LOGMEMORY(TEXT(" Binned [%d] Alloc Used/Max %d/%d %6.2f%%"), PoolSizes[PoolSizeIndex], _UsedBinnedTotal, _AllocBinnedTotal, 100.0f * (float)_UsedBinnedTotal / (float)_AllocBinnedTotal);
+					VULKAN_LOGMEMORY(TEXT(" Binned [%d] Alloc Used/Max %llu/%llu %6.2f%%"), PoolSizes[PoolSizeIndex], _UsedBinnedTotal, _AllocBinnedTotal, 100.0f * (float)_UsedBinnedTotal / (float)_AllocBinnedTotal);
 				}
 			}
 		}
 
 		VULKAN_LOGMEMORY(TEXT("::Totals::"));
-		VULKAN_LOGMEMORY(TEXT("Large Alloc Used/Max %d/%d %.2f%%"), UsedLargeTotal, AllocLargeTotal, 100.0f * AllocLargeTotal > 0 ? (float)UsedLargeTotal / (float)AllocLargeTotal : 0.0f);
-		VULKAN_LOGMEMORY(TEXT("Binned Alloc Used/Max %d/%d %.2f%%"), UsedBinnedTotal, AllocBinnedTotal, AllocBinnedTotal > 0 ? 100.0f * (float)UsedBinnedTotal / (float)AllocBinnedTotal : 0.0f);
+		VULKAN_LOGMEMORY(TEXT("Large Alloc Used/Max %llu/%llu %.2f%%"), UsedLargeTotal, AllocLargeTotal, AllocLargeTotal > 0 ? 100.0f * (float)UsedLargeTotal / (float)AllocLargeTotal : 0.0f);
+		VULKAN_LOGMEMORY(TEXT("Binned Alloc Used/Max %llu/%llu %.2f%%"), UsedBinnedTotal, AllocBinnedTotal, AllocBinnedTotal > 0 ? 100.0f * (float)UsedBinnedTotal / (float)AllocBinnedTotal : 0.0f);
 		{
 			FResourceHeapStats& DedicatedStats = OverallSummary[DedicatedAllocatorSummary];
 
@@ -3289,10 +3325,8 @@ namespace VulkanRHI
 
 					const uint32 MemoryTypeIndex = ResourceTypeHeaps[TypeIndex]->MemoryTypeIndex;
 					const uint32 HeapIndex = MemoryProperties.memoryTypes[MemoryTypeIndex].heapIndex;
-					if((int32)HeapIndex < HeapSummary.Num())
-					{
-						HeapSummary[HeapIndex] += AccumulatedStats;
-					}
+					HeapSummary[HeapIndex] += AccumulatedStats;
+
 					DedicatedStats += AccumulatedStats;
 				}
 			}
@@ -3301,8 +3335,8 @@ namespace VulkanRHI
 
 		auto WriteLogLine = [](const FString& Name, FResourceHeapStats& Stat)
 		{
-			uint64 FreeMemory = Stat.TotalMemory - Stat.UsedBufferMemory - Stat.UsedImageMemory;
-			FString HostString = GetMemoryPropertyFlagsString(Stat.MemoryFlags);
+			const uint64 FreeMemory = Stat.TotalMemory - FMath::Min<uint64>(Stat.TotalMemory, Stat.UsedBufferMemory + Stat.UsedImageMemory);
+			FString HostString = (Stat.MemoryFlags != 0) ? VK_FLAGS_TO_STRING(VkMemoryPropertyFlags, Stat.MemoryFlags) : TEXT("");
 			VULKAN_LOGMEMORY(TEXT("\t\t%-33s  |%8.2fmb / %8.2fmb / %11.2fmb / %11.2fmb | %10d %10d | %6d %6d %6d | %05x | %s"),
 				*Name,
 				Stat.UsedBufferMemory / (1024.f * 1024.f),
@@ -3347,7 +3381,7 @@ namespace VulkanRHI
 		{
 			FResourceHeapStats& Stat = OverallSummary[Index];
 			Total += Stat;
-			if(Stat.MemoryFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+			if (VKHasAnyFlags(Stat.MemoryFlags, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
 			{
 				TotalLocal += Stat;
 				TotalLocal.MemoryFlags |= Stat.MemoryFlags;
@@ -3406,15 +3440,15 @@ namespace VulkanRHI
 			uint32 TotalUsed = 0;
 			uint32 FreeCount = Allocator.FreeList.Num();
             uint32 LargestFree = 0;
-            for (FRange& R : Allocator.FreeList)
+            for(FRange& R : Allocator.FreeList)
             {
                 LargestFree = FMath::Max(LargestFree, R.Size);
             }
-			for (uint32 Used : MemoryUsed)
+			for(uint32 Used : MemoryUsed)
 			{
 				TotalUsed += Used;
 			}
-			uint64 Free = TotalMemory - TotalUsed;
+			uint64 Free= TotalMemory - TotalUsed;
 			uint8 AllocatorFlags =  Allocator.GetSubresourceAllocatorFlags();
 			VULKAN_LOGMEMORY(TEXT("\t\t%-45s  | %4d %8d | %3d%% / %8.2fmb / %8.2fmb / %8.2fmb / %8.2fmb | %8.2fmb / %8.2fmb / %8.2fmb / %8.2fmb | %8.2fmb / %8.2fmb | %8.2fmb / %8.2fmb / %8.2fmb | %d %d | %s"),
 				*Name,
@@ -3445,11 +3479,11 @@ namespace VulkanRHI
 			for (FVulkanSubresourceAllocator* Allocator : Allocators)
 			{
 				VkMemoryPropertyFlags Flags = Allocator->MemoryPropertyFlags;
-				if (!Flags)
+				if(!Flags)
 				{
 					Flags = MemoryProperties.memoryTypes[Allocator->MemoryTypeIndex].propertyFlags;
 				}
-				FString MemoryString = GetMemoryPropertyFlagsString(Flags);
+				FString MemoryString = (Flags != 0) ? VK_FLAGS_TO_STRING(VkMemoryPropertyFlags, Flags) : TEXT("");
 				FString NameId = FString::Printf(TEXT("%s [%4d]"), *Name, Allocator->AllocatorIndex);
 				WriteLogLineSubAllocator(NameId, MemoryString, *Allocator);
 			}
@@ -3464,7 +3498,7 @@ namespace VulkanRHI
 				{
 					Flags = MemoryProperties.memoryTypes[Allocator->MemoryTypeIndex].propertyFlags;
 				}
-				FString MemoryString = GetMemoryPropertyFlagsString(Flags);
+				FString MemoryString = (Flags != 0) ? VK_FLAGS_TO_STRING(VkMemoryPropertyFlags, Flags) : TEXT("");
 				VULKAN_LOGMEMORY(VULKAN_LOGMEMORY_PAD2);
 				VULKAN_LOGMEMORY(TEXT("\t\t%-45s  | %4s %8s | %4s / %10s / %10s / %10s / %10s | %10s / %10s / %10s / %10s | %10s / %10s | %10s / %10s / %10s | Mapped/Evictable |"),
 					TEXT(""),
@@ -3499,7 +3533,7 @@ namespace VulkanRHI
 
 
 		VULKAN_LOGMEMORY(VULKAN_LOGMEMORY_PAD2);
-		VULKAN_LOGMEMORY(TEXT("\t\t%-45s     | %4s %8s | %4s / %10s / %10s / %10s / %10s | %10s / %10s / %10s / %10s | %10s / %10s | %10s / %10s / %10s |"),
+		VULKAN_LOGMEMORY(TEXT("\t\t%-45s  | %4s %8s | %4s / %10s / %10s / %10s / %10s | %10s / %10s / %10s / %10s | %10s / %10s | %10s / %10s / %10s |"),
 			TEXT(""),
 			TEXT("Free"),
 			TEXT("Count"),
@@ -3538,14 +3572,14 @@ namespace VulkanRHI
         };
 		VULKAN_LOGMEMORY(VULKAN_LOGMEMORY_PAD2);
 		for (int32 TypeIndex = 0; TypeIndex < ResourceTypeHeaps.Num(); ++TypeIndex)
-		{
-			if (ResourceTypeHeaps[TypeIndex])
 			{
-				for (uint32 SubIndex = 0; SubIndex < FVulkanResourceHeap::MAX_BUCKETS; ++SubIndex)
+			if (ResourceTypeHeaps[TypeIndex])
 				{
+				for (uint32 SubIndex = 0; SubIndex < FVulkanResourceHeap::MAX_BUCKETS; ++SubIndex)
+					{
 					TArray<FVulkanSubresourceAllocator*>& PageArray = ResourceTypeHeaps[TypeIndex]->ActivePages[SubIndex];
 					DumpAllocatorRange(FString::Printf(TEXT("Page[%s] - ResTypeHeaps[%d] ActivePages[%d]"), PageSuffix(TypeIndex, SubIndex), TypeIndex, SubIndex), PageArray);
-				}
+					}
 				DumpAllocatorRange(FString::Printf(TEXT("UsedDedicatedImagePages - ResTypeHeaps[%d]"), TypeIndex), ResourceTypeHeaps[TypeIndex]->UsedDedicatedImagePages);
 			}
 		}
@@ -3562,7 +3596,7 @@ namespace VulkanRHI
 		}
 		VULKAN_LOGMEMORY(VULKAN_LOGMEMORY_PAD2);
 
-		if (bFullDump)
+		if(bFullDump)
 		{
 			VULKAN_LOGMEMORY(VULKAN_LOGMEMORY_PAD2);
 			for (int32 TypeIndex = 0; TypeIndex < ResourceTypeHeaps.Num(); ++TypeIndex)
@@ -3581,7 +3615,7 @@ namespace VulkanRHI
 		}
 
 
-		GLog->PanicFlushThreadedLogs();
+		GLog->Flush();
 
 
 #undef VULKAN_LOGMEMORY_PAD
@@ -3600,28 +3634,30 @@ namespace VulkanRHI
 			case VK_ERROR_OUT_OF_DEVICE_MEMORY: MemoryType = TEXT("Local"); break;
 			}
 			DumpMemory();
-			GLog->PanicFlushThreadedLogs();
+			GLog->Panic();
 			DumpRenderTargetPoolMemory(*GLog);
-			GLog->PanicFlushThreadedLogs();
+			GLog->Flush();
 
-			UE_LOG(LogVulkanRHI, Fatal, TEXT("Out of %s Memory, Requested%.2fKB MemTypeIndex=%d\n"), MemoryType, AllocationSize, MemoryTypeIndex);
+			UE_LOG(LogVulkanRHI, Fatal, TEXT("Out of %s Memory, Requested%.2fKB MemTypeIndex=%d\n"), MemoryType, float(AllocationSize), MemoryTypeIndex);
 		}
 	}
 
-	void FMemoryManager::AllocUniformBuffer(FVulkanAllocation& OutAllocation, uint32 Size, const void* Contents)
+	void FMemoryManager::AllocUniformBuffer(FVulkanAllocation& OutAllocation, uint32 Size)
 	{
-		if(!AllocateBufferPooled(OutAllocation, nullptr, Size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, EVulkanAllocationMetaUniformBuffer, __FILE__, __LINE__))
+		if (!AllocateBufferPooled(OutAllocation, nullptr, Size, 0, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, EVulkanAllocationMetaUniformBuffer, __FILE__, __LINE__))
 		{
 			HandleOOM(false);
 			checkNoEntry();
 		}
-		FMemory::Memcpy(OutAllocation.GetMappedPointer(Device), Contents, Size);
-		OutAllocation.FlushMappedMemory(Device);
+
+		INC_MEMORY_STAT_BY(STAT_UniformBufferMemory, OutAllocation.Size);
 	}
 	void FMemoryManager::FreeUniformBuffer(FVulkanAllocation& InAllocation)
 	{
-		if(InAllocation.HasAllocation())
+		if (InAllocation.HasAllocation())
 		{
+			DEC_MEMORY_STAT_BY(STAT_UniformBufferMemory, InAllocation.Size);
+
 			FScopeLock ScopeLock(&UBAllocations.CS);
 			ProcessPendingUBFreesNoLock(false);
 			FUBPendingFree& Pending = UBAllocations.PendingFree.AddDefaulted_GetRef();
@@ -3690,7 +3726,7 @@ namespace VulkanRHI
 					}
 				}
 			}
-			UBAllocations.PendingFree.SetNum(NumAlloc - Index, false);
+			UBAllocations.PendingFree.SetNum(NumAlloc - Index, EAllowShrinking::No);
 		}
 	}
 
@@ -3702,7 +3738,7 @@ namespace VulkanRHI
 
 	bool FVulkanSubresourceAllocator::JoinFreeBlocks()
 	{
-		FScopeLock ScopeLock(&CS);
+		FScopeLock ScopeLock(&SubresourceAllocatorCS);
 #if !UE_VK_MEMORY_JOIN_FREELIST_ON_THE_FLY
 		FRange::JoinConsecutiveRanges(FreeList);
 #endif
@@ -3720,7 +3756,9 @@ namespace VulkanRHI
 	}
 
 	FVulkanAllocation::FVulkanAllocation()
+		: bHasOwnership(0)
 	{
+		SetType(EVulkanAllocationEmpty);
 	}
 	FVulkanAllocation::~FVulkanAllocation()
 	{
@@ -3732,7 +3770,7 @@ namespace VulkanRHI
 	{
 		check(State == EUNUSED);
 		State = EALLOCATED;
-		Type = Alloc.Type;
+		Type = Alloc.GetType();
 		MetaType = Alloc.MetaType;
 
 		Size = Alloc.Size;
@@ -3746,30 +3784,30 @@ namespace VulkanRHI
 	{
 		check(!HasAllocation());
 		bHasOwnership = 1;
-		Type = InType;
+		SetType(InType);
 		MetaType = InMetaType;
 		Size = InSize;
 		Offset = InAlignedOffset;
-		check(InAllocatorIndex < (1<<ALLOCATOR_INDEX_BITS));
-		check(InAllocationIndex < (1<<ALLOCATION_INDEX_BITS));
+		check(InAllocatorIndex < (uint32)MAX_uint16);
 		AllocatorIndex = InAllocatorIndex;
 		AllocationIndex = InAllocationIndex;
 		VulkanHandle = Handle;
 		HandleId = BufferId;
+		// Make sure all allocations have a valid Id on platforms that use "Descriptor Cache"
+		ensure(!UseVulkanDescriptorCache() || HandleId != 0);
 	}
 
 	void FVulkanAllocation::Free(FVulkanDevice& Device)
 	{
-		if(HasAllocation())
+		if (HasAllocation())
 		{
 			Device.GetMemoryManager().FreeVulkanAllocation(*this);
 			check(EVulkanAllocationEmpty != Type);
-
 		}
 	}
 	void FVulkanAllocation::Swap(FVulkanAllocation& Other)
 	{
-		FMemory::Memswap(this, &Other, sizeof(*this));
+		::Swap(*this, Other);
 	}
 
 	void FVulkanAllocation::Reference(const FVulkanAllocation& Other)
@@ -3862,7 +3900,7 @@ namespace VulkanRHI
 		case EVulkanAllocationBuffer:
 		case EVulkanAllocationImage:
 		case EVulkanAllocationImageDedicated:
-			return Device->GetMemoryManager().AllBufferAllocations[AllocatorIndex];
+			return Device->GetMemoryManager().GetSubresourceAllocator(AllocatorIndex);
 		break;
 		default:
 			check(0);
@@ -3903,8 +3941,8 @@ namespace VulkanRHI
 
 	bool FVulkanSubresourceAllocator::TryAllocate2(FVulkanAllocation& OutAllocation, FVulkanEvictable* AllocationOwner, uint32 InSize, uint32 InAlignment, EVulkanAllocationMetaType InMetaType, const char* File, uint32 Line)
 	{
-		FScopeLock ScopeLock(&CS);
-		if(bIsEvicting||bLocked)
+		FScopeLock ScopeLock(&SubresourceAllocatorCS);
+		if (bIsEvicting || bLocked)
 		{
 			return false;
 		}
@@ -3940,13 +3978,33 @@ namespace VulkanRHI
 		return false;
 	}
 
+	static VkDeviceSize AdjustToNonCoherentAtomSize(const VkDeviceSize RequestedOffset, const VkDeviceSize RequestedSize, const VkDeviceSize WholeAllocationSize, const VkDeviceSize NonCoherentAtomSize)
+	{
+		if (RequestedSize == VK_WHOLE_SIZE)
+		{
+			return RequestedSize;
+		}
+		
+		check(RequestedOffset + RequestedSize <= WholeAllocationSize);
+		
+		return FMath::Min(WholeAllocationSize - RequestedOffset, AlignArbitrary(RequestedSize, NonCoherentAtomSize));
+	}
+
 	void FVulkanSubresourceAllocator::Flush(VkDeviceSize Offset, VkDeviceSize AllocationSize)
 	{
-		MemoryAllocation->FlushMappedMemory(Offset, AllocationSize);
+		if (!MemoryAllocation->IsCoherent() || GForceCoherent != 0)
+		{
+			const VkDeviceSize NonCoherentAtomSize = Owner->GetParent()->GetLimits().nonCoherentAtomSize;
+			MemoryAllocation->FlushMappedMemory(Offset, AdjustToNonCoherentAtomSize(Offset, AllocationSize, MemoryAllocation->GetSize(), NonCoherentAtomSize));
+		}
 	}
 	void FVulkanSubresourceAllocator::Invalidate(VkDeviceSize Offset, VkDeviceSize AllocationSize)
 	{
-		MemoryAllocation->InvalidateMappedMemory(Offset, AllocationSize);
+		if (!MemoryAllocation->IsCoherent() || GForceCoherent != 0)
+		{
+			const VkDeviceSize NonCoherentAtomSize = Owner->GetParent()->GetLimits().nonCoherentAtomSize;
+			MemoryAllocation->InvalidateMappedMemory(Offset, AdjustToNonCoherentAtomSize(Offset, AllocationSize, MemoryAllocation->GetSize(), NonCoherentAtomSize));
+		}
 	}
 
 	TArrayView<uint32> FVulkanSubresourceAllocator::GetMemoryUsed()
@@ -3987,7 +4045,7 @@ namespace VulkanRHI
 				Entries.Add(H);
 			}
 		}
-		for (FRange& R : FreeList)
+		for(FRange& R : FreeList)
 		{
 			int32 Index = &R - &FreeList[0];
 			SDumpHeapEntry H;
@@ -4002,9 +4060,9 @@ namespace VulkanRHI
 			}
 		);
 
-		for (SDumpHeapEntry& Entry : Entries)
+		for(SDumpHeapEntry& Entry : Entries)
 		{
-			if (Entry.FreeListIndex >= 0)
+			if(Entry.FreeListIndex >= 0)
 			{
 				VULKAN_LOGMEMORY(TEXT("\t\t    [%08x - %08x]  | %11.3fMB | **FREE** "), Entry.Offset, Entry.Offset + Entry.Size, Entry.Size / (1024.f * 1024.f));
 			}
@@ -4015,27 +4073,23 @@ namespace VulkanRHI
 
 				if  (Alloc.State == FVulkanAllocationInternal::EALLOCATED)
 				{
-					const TCHAR* TypeStr = VulkanAllocationMetaTypeToString(Alloc.MetaType);
-					const TCHAR* Name = TEXT("< ? >");
-					FString Tmp;
+				const TCHAR* TypeStr = VulkanAllocationMetaTypeToString(Alloc.MetaType);
+				const TCHAR* Name = TEXT("< ? >");
+				FString Tmp;
 
-					if (Alloc.MetaType == EVulkanAllocationMetaImageRenderTarget)
+				if(Alloc.MetaType == EVulkanAllocationMetaImageRenderTarget)
+				{
+					FVulkanEvictable* Evictable = Alloc.AllocationOwner;
+					FVulkanTexture* Texture = Evictable->GetEvictableTexture();
+					if(Texture)
 					{
-						FVulkanEvictable* Evictable = Alloc.AllocationOwner;
-						FVulkanTextureBase* Texture = Evictable->GetTextureBase();
-						if (Texture)
-						{
-							FRHITexture* RHITexture = Texture->GetRHITexture();
-							if (RHITexture)
-							{
-								Tmp = RHITexture->GetName().ToString();
-								Name = *Tmp;
-							}
-						}
+						Tmp = Texture->GetName().ToString();
+						Name = *Tmp;
 					}
-
-					VULKAN_LOGMEMORY(TEXT("\t\t    [%08x - %08x]  | %11.3fMB | %20s   %s"), Entry.Offset, Entry.Offset + Entry.Size, Entry.Size / (1024.f * 1024.f), TypeStr, Name);
 				}
+
+				VULKAN_LOGMEMORY(TEXT("\t\t    [%08x - %08x]  | %11.3fMB | %20s   %s"), Entry.Offset, Entry.Offset + Entry.Size, Entry.Size / (1024.f * 1024.f), TypeStr, Name);
+			}
 				else
 				{
 					const TCHAR* StateStr =
@@ -4050,151 +4104,6 @@ namespace VulkanRHI
 		}
 	}
 
-
-	// Fully defrag a page onto a new page
-	// This moves -all- allocations to a new page, and ensures the new page is fully defragged.
-	bool FVulkanSubresourceAllocator::DefragFull(FVulkanDevice& Device, FVulkanCommandListContext& Context, FVulkanResourceHeap* Heap)
-	{
-		TRACE_BOOKMARK(TEXT("DefragFull %d"), AllocatorIndex);
-		SCOPED_NAMED_EVENT(FVulkanSubresourceAllocator_DefragFull, FColor::Cyan);
-		FScopeLock ScopeLock(&CS);
-		LastDefragFrame = GFrameNumberRenderThread;
-
-		#if !UE_BUILD_SHIPPING
-		for (FVulkanAllocationInternal& Alloc : InternalData)
-		{
-			switch(Alloc.State)
-			{
-				case FVulkanAllocationInternal::EALLOCATED:
-					{
-						FVulkanEvictable* EvictableOwner = Alloc.AllocationOwner;
-						if(!EvictableOwner->CanMove())
-						{
-							FGenericPlatformMisc::LowLevelOutputDebugStringf(TEXT("Immovable heap!!\n"));
-							return false;
-						}
-						check(Alloc.MetaType == EVulkanAllocationMetaImageRenderTarget); //defrag only done for RTs, images still pending.
-					}
-					break;
-				default:
-					break;
-			}
-		}
-		#endif
-		FDeviceMemoryManager& DeviceMemoryManager = Owner->GetParent()->GetDeviceMemoryManager();
-
-		FDeviceMemoryAllocation* OldAllocation = MemoryAllocation;
-		uint32 AllocationSize = OldAllocation->GetSize();
-
-		uint32 FreeListSize = FreeList.Num();
-		if(0 == GVulkanDefragRepeat 
-			&& (FreeListSize == 0 ||  // Allocation is fully occupied
-			   (FreeListSize == 1 && FreeList[0].Offset + FreeList[0].Size == AllocationSize)) //Allocation only has 1 allocation and its in the correct place
-		  )
-		{
-			if (GVulkanLogDefrag)
-			{
-				VULKAN_LOGMEMORY(TEXT("Memory already defragged\n"));
-			}
-			return true;
-		}
-
-
-		struct SMoveAllocation
-		{
-			uint32 Index;
-			uint32 AlignedOffset;
-			uint32 AllocatedOffset;
-			uint32 AllocatedSize;
-		};
-		TArray<SMoveAllocation> Moves;
-		uint32 Offset = 0; // Current offset in the new page
-		
-		// Build a list of Src -> Dst Moves that are needed in order to fully defrag onto another page
-		// The actual copies are only enqueued once everything succeeds
-		for(int32 Index = 0; Index < InternalData.Num(); ++Index)
-		{
-			FVulkanAllocationInternal& Alloc  = InternalData[Index];
-			switch(Alloc.State)
-			{
-				case FVulkanAllocationInternal::EALLOCATED:
-					{
-						check(Alloc.MetaType == EVulkanAllocationMetaImageRenderTarget);
-						uint32 AllocatedOffset = Offset;
-						uint32 Size = Alloc.Size;
-						uint32 AlignedOffset = Align(Offset, Alloc.Alignment); //Align to the original alignment requested by the allocation
-						uint32 AlignmentAdjustment = AlignedOffset - Offset;
-						uint32 AllocatedSize = AlignmentAdjustment + Size;
-						Offset += AllocatedSize;
-						
-						//If there are multiple allocations, with high alignment requirements, we can end up with the defragging actually using more than the full memory.
-						//in that case, bail out, and dont defrag.
-						if(Offset > AllocationSize)
-						{
-							return false;
-						}
-						if(!Alloc.AllocationOwner->CanMove())
-						{
-							return false;
-						}
-
-						SMoveAllocation M = { (uint32)Index, AlignedOffset, AllocatedOffset, AllocatedSize } ;
-						Moves.Add(M);
-					}
-					break;
-				case FVulkanAllocationInternal::EFREEPENDING:
-					{
-						//since this has already been queued to be freed, there is no need to move this, so we just tag it to be discarded.
-						LLM_TRACK_VULKAN_HIGH_LEVEL_FREE(Alloc);
-						VULKAN_FREE_TRACK_INFO(Alloc.Track);
-						Alloc.State = FVulkanAllocationInternal::EFREEDISCARDED;
-					}
-					break;
-				case FVulkanAllocationInternal::EUNUSED:
-					break;
-				default:
-					checkf(false, TEXT("Unexpected State %d\n"), Alloc.State);
-					break;
-			}
-		}
-		FDeviceMemoryAllocation* NewMemoryAllocation = DeviceMemoryManager.Alloc(true, AllocationSize, MemoryTypeIndex, nullptr, VULKAN_MEMORY_HIGHEST_PRIORITY, false, __FILE__, __LINE__);
-		if(!NewMemoryAllocation)
-		{
-			Device.GetMemoryManager().DumpMemory();
-			checkNoEntry();
-			return false;
-		}
-		MemoryAllocation = NewMemoryAllocation;
-
-		for(SMoveAllocation& Move : Moves)
-		{
-			FVulkanAllocationInternal& Alloc = InternalData[Move.Index];
-			int64 Delta = Move.AllocatedSize - Alloc.AllocationSize;
-			LLM_TRACK_VULKAN_SPARE_MEMORY_GPU(-Delta);
-			MemoryUsed[Alloc.MetaType] += Delta;
-			Alloc.AllocationOffset = Move.AllocatedOffset;
-			Alloc.AllocationSize = Move.AllocatedSize;
-			FVulkanEvictable* EvictableOwner = Alloc.AllocationOwner;
-			EvictableOwner->OnFullDefrag(Device, Context, Move.AlignedOffset);
-		}
-
-		FreeList.Empty();
-		FRange NewFree;
-		NewFree.Offset = Offset;
-		NewFree.Size = AllocationSize - Offset;
-		FRange::Add(FreeList, NewFree);
-		UsedSize = Offset;
-		if (GVulkanLogDefrag)
-		{
-			VULKAN_LOGMEMORY(TEXT("** DEFRAG Moved %6.2fMB\n"), Offset / (1024.f * 1024.f));
-		}
-		Device.GetDeferredDeletionQueue().EnqueueDeviceAllocation(OldAllocation);
-
-		return true;
-
-
-	}
-
 	bool FVulkanSubresourceAllocator::CanDefrag()
 	{
 		for (FVulkanAllocationInternal& Alloc : InternalData)
@@ -4202,14 +4111,13 @@ namespace VulkanRHI
 			if (Alloc.State == FVulkanAllocationInternal::EALLOCATED)
 			{
 				FVulkanEvictable* EvictableOwner = Alloc.AllocationOwner;
-				if(!EvictableOwner->CanMove())
+				if((EvictableOwner == nullptr) || !EvictableOwner->CanMove())
 				{
 					return false;
 				}
 			}
 		}
 		return true;
-
 	}
 	
 	// One tick of incremental defrag. This will move max Count_ allocations from this suballocator to other SubAllocators on the same Heap
@@ -4241,9 +4149,9 @@ namespace VulkanRHI
 
 		};
 
-		FScopeLock ScopeLock(&CS);
+		FScopeLock ScopeLock(&SubresourceAllocatorCS);
 
-		//Search for allocations to move to different pages.
+		// Search for allocations to move to different pages.
 		for (FVulkanAllocationInternal& Alloc : InternalData)
 		{
 			if (Alloc.State == FVulkanAllocationInternal::EALLOCATED)
@@ -4253,44 +4161,50 @@ namespace VulkanRHI
 				{
 					case EVulkanAllocationMetaImageRenderTarget: //only rendertargets can be defragged
 					{
-						FVulkanAllocation Allocation;
-						// The current SubAllocator is tagged as locked, this will never allocate in the current SubAllocator.
-						if(Heap->TryRealloc(Allocation, EvictableOwner, EType::Image, Alloc.Size, Alloc.Alignment, Alloc.MetaType))
-						{
-							check(Allocation.HasAllocation());
-							FVulkanTextureBase* Texture = (FVulkanTextureBase*)EvictableOwner;
+						FVulkanTexture* Texture = EvictableOwner->GetEvictableTexture();
 
-							if(GVulkanLogDefrag)
+						// Defrag works from the queue for layouts
+						// Only work with straightforward targets that are in a single layout
+						const FVulkanImageLayout* OriginalLayout = Context.GetQueue()->GetLayoutManager().GetFullLayout(Texture->Image);
+						if (OriginalLayout && OriginalLayout->AreAllSubresourcesSameLayout() && (OriginalLayout->MainLayout != VK_IMAGE_LAYOUT_UNDEFINED))
+						{
+							FVulkanAllocation Allocation;
+							// The current SubAllocator is tagged as locked, this will never allocate in the current SubAllocator.
+							if (Heap->TryRealloc(Allocation, EvictableOwner, EType::Image, Alloc.Size, Alloc.Alignment, Alloc.MetaType))
 							{
-								VULKAN_LOGMEMORY(TEXT("Moving %6.2fMB : %d:%08x -> %d/%08x\n"), Alloc.Size / (1024.f*1024.f),
-									AllocatorIndex,
-									Alloc.AllocationOffset,
-									Allocation.AllocatorIndex,
-									Allocation.Offset);
+								check(Allocation.HasAllocation());
+
+								if (GVulkanLogDefrag)
+								{
+									VULKAN_LOGMEMORY(TEXT("Moving %6.2fMB : %d:%08x -> %d/%08x\n"), Alloc.Size / (1024.f * 1024.f),
+										AllocatorIndex,
+										Alloc.AllocationOffset,
+										Allocation.AllocatorIndex,
+										Allocation.Offset);
+								}
+
+								//Move the Rendertarget to the new allocation
+								//Function swaps the old allocation into the Allocation object
+								Texture->Move(Device, Context, Allocation);
+								DefragCount++;
+								Device.GetMemoryManager().FreeVulkanAllocation(Allocation);
+
+								check(Alloc.State != FVulkanAllocationInternal::EALLOCATED);
+								check(!Allocation.HasAllocation()); //must be consumed by Move
 							}
-
-							//Move the Rendertarget to the new allocation
-							//Function swaps the old allocation into the Allocation object
-							Texture->Move(Device, Context, Allocation);
-							DefragCount++;
-							Device.GetMemoryManager().FreeVulkanAllocation(Allocation);
-
-							check(Alloc.State != FVulkanAllocationInternal::EALLOCATED);
-							check(!Allocation.HasAllocation()); //must be consumed by Move
+							else
+							{
+								check(!Allocation.HasAllocation());
+								bLocked = false;
+								return DefragCount;
+							}
 						}
-						else
-						{
-							check(!Allocation.HasAllocation());
-							bLocked = false;
-							return DefragCount;
-						}
-
 					}
 					break;
 					default:
 						checkNoEntry(); //not implemented.
 				}
-				if(0 >= --Count)
+				if (0 >= --Count)
 				{
 					break;
 				}
@@ -4300,20 +4214,20 @@ namespace VulkanRHI
 		return DefragCount;
 	}
 
-	uint64 FVulkanSubresourceAllocator::EvictToHost(FVulkanDevice& Device)
+	uint64 FVulkanSubresourceAllocator::EvictToHost(FVulkanDevice& Device, FVulkanCommandListContext& Context)
 	{
-		FScopeLock ScopeLock(&CS);
+		FScopeLock ScopeLock(&SubresourceAllocatorCS);
 		bIsEvicting = true;
-		for(FVulkanAllocationInternal& Alloc: InternalData)
+		for (FVulkanAllocationInternal& Alloc : InternalData)
 		{
-			if(Alloc.State == FVulkanAllocationInternal::EALLOCATED)
+			if (Alloc.State == FVulkanAllocationInternal::EALLOCATED)
 			{
 				switch(Alloc.MetaType)
 				{
 				case EVulkanAllocationMetaImageOther:
 				{
-					FVulkanEvictable* Texture= Alloc.AllocationOwner;
-					Texture->Evict(Device);
+					FVulkanEvictable* Texture = Alloc.AllocationOwner;
+					Texture->Evict(Device, Context);
 				}
 				break;
 				default:
@@ -4367,7 +4281,7 @@ namespace VulkanRHI
 
 	void FStagingBuffer::InvalidateMappedMemory()
 	{
-		Allocation. InvalidateMappedMemory(Device);
+		Allocation.InvalidateMappedMemory(Device);
 	}
 
 
@@ -4401,10 +4315,11 @@ namespace VulkanRHI
 		SCOPE_CYCLE_COUNTER(STAT_VulkanStagingBuffer);
 #endif
 		LLM_SCOPE_VULKAN(ELLMTagVulkan::VulkanStagingBuffers);
-		if (InMemoryReadFlags == VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+
+		const bool IsHostCached = (InMemoryReadFlags == VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+		if (IsHostCached)
 		{
-			uint64 NonCoherentAtomSize = (uint64)Device->GetLimits().nonCoherentAtomSize;
-			Size = AlignArbitrary(Size, NonCoherentAtomSize);
+			Size = AlignArbitrary(Size, (uint32)Device->GetLimits().nonCoherentAtomSize);
 		}
 
 		// Add both source and dest flags
@@ -4413,16 +4328,22 @@ namespace VulkanRHI
 			InUsageFlags |= (VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 		}
 
+		// For descriptors buffers
+		if (Device->GetOptionalExtensions().HasBufferDeviceAddress)
+		{
+			InUsageFlags |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+		}
+
 		//#todo-rco: Better locking!
 		{
-			FScopeLock Lock(&GStagingLock);
+			FScopeLock Lock(&StagingLock);
 			for (int32 Index = 0; Index < FreeStagingBuffers.Num(); ++Index)
 			{
 				FFreeEntry& FreeBuffer = FreeStagingBuffers[Index];
 				if (FreeBuffer.StagingBuffer->GetSize() == Size && FreeBuffer.StagingBuffer->MemoryReadFlags == InMemoryReadFlags)
 				{
 					FStagingBuffer* Buffer = FreeBuffer.StagingBuffer;
-					FreeStagingBuffers.RemoveAtSwap(Index, 1, false);
+					FreeStagingBuffers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 					UsedStagingBuffers.Add(Buffer);
 					VULKAN_FILL_TRACK_INFO(Buffer->Track, __FILE__, __LINE__);
 					return Buffer;
@@ -4431,41 +4352,30 @@ namespace VulkanRHI
 		}
 
 		FStagingBuffer* StagingBuffer = new FStagingBuffer(Device);
+		StagingBuffer->MemoryReadFlags = InMemoryReadFlags;
+		StagingBuffer->BufferSize = Size;
 
 		VkBufferCreateInfo StagingBufferCreateInfo;
 		ZeroVulkanStruct(StagingBufferCreateInfo, VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
 		StagingBufferCreateInfo.size = Size;
 		StagingBufferCreateInfo.usage = InUsageFlags;
-
-		VkDevice VulkanDevice = Device->GetInstanceHandle();
-
-		VERIFYVULKANRESULT(VulkanRHI::vkCreateBuffer(VulkanDevice, &StagingBufferCreateInfo, VULKAN_CPU_ALLOCATOR, &StagingBuffer->Buffer));
-
-		VkMemoryRequirements MemReqs;
-		VulkanRHI::vkGetBufferMemoryRequirements(VulkanDevice, StagingBuffer->Buffer, &MemReqs);
-		ensure(MemReqs.size >= Size);
+		VERIFYVULKANRESULT(VulkanRHI::vkCreateBuffer(Device->GetInstanceHandle(), &StagingBufferCreateInfo, VULKAN_CPU_ALLOCATOR, &StagingBuffer->Buffer));
 
 		// Set minimum alignment to 16 bytes, as some buffers are used with CPU SIMD instructions
-		MemReqs.alignment = FMath::Max<VkDeviceSize>(16, MemReqs.alignment);
-		static const bool bIsAmd = Device->GetDeviceProperties().vendorID == 0x1002;
-		if (InMemoryReadFlags == VK_MEMORY_PROPERTY_HOST_CACHED_BIT || bIsAmd)
+		uint32 ForcedMinAlignment = 16u;
+		static const bool bIsAmd = (Device->GetDeviceProperties().vendorID == (uint32)EGpuVendorId::Amd);
+		if (IsHostCached || bIsAmd)
 		{
-			uint64 NonCoherentAtomSize = (uint64)Device->GetLimits().nonCoherentAtomSize;
-			MemReqs.alignment = AlignArbitrary(MemReqs.alignment, NonCoherentAtomSize);
+			ForcedMinAlignment = AlignArbitrary(ForcedMinAlignment, (uint32)Device->GetLimits().nonCoherentAtomSize);
 		}
 
-		VkMemoryPropertyFlags readTypeFlags = InMemoryReadFlags;
-		if(!Device->GetMemoryManager().AllocateBufferMemory(StagingBuffer->Allocation, StagingBuffer, MemReqs, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | readTypeFlags, EVulkanAllocationMetaBufferStaging, false, __FILE__, __LINE__))
-		{
-			check(0);
-		}
-		StagingBuffer->MemoryReadFlags = InMemoryReadFlags;
-		StagingBuffer->BufferSize = Size;
-		StagingBuffer->Allocation.BindBuffer(Device, StagingBuffer->Buffer);
-		//StagingBuffer->ResourceAllocation->BindBuffer(Device, StagingBuffer->Buffer);
+		const EVulkanAllocationFlags AllocFlags = EVulkanAllocationFlags::AutoBind |
+			(IsHostCached ? EVulkanAllocationFlags::HostCached : EVulkanAllocationFlags::HostVisible);
+
+		Device->GetMemoryManager().AllocateBufferMemory(StagingBuffer->Allocation, StagingBuffer->Buffer, AllocFlags, TEXT("StagingBuffer"), ForcedMinAlignment);
 
 		{
-			FScopeLock Lock(&GStagingLock);
+			FScopeLock Lock(&StagingLock);
 			UsedStagingBuffers.Add(StagingBuffer);
 			UsedMemory += StagingBuffer->GetSize();
 			PeakUsedMemory = FMath::Max(UsedMemory, PeakUsedMemory);
@@ -4485,9 +4395,9 @@ namespace VulkanRHI
 			}
 		}
 
-		FPendingItemsPerCmdBuffer* New = new(PendingFreeStagingBuffers) FPendingItemsPerCmdBuffer;
-		New->CmdBuffer = CmdBuffer;
-		return New;
+		FPendingItemsPerCmdBuffer& New = PendingFreeStagingBuffers.AddDefaulted_GetRef();
+		New.CmdBuffer = CmdBuffer;
+		return &New;
 	}
 
 	inline FStagingManager::FPendingItemsPerCmdBuffer::FPendingItems* FStagingManager::FPendingItemsPerCmdBuffer::FindOrAddItemsForFence(uint64 Fence)
@@ -4500,9 +4410,9 @@ namespace VulkanRHI
 			}
 		}
 
-		FPendingItems* New = new(PendingItems) FPendingItems;
-		New->FenceCounter = Fence;
-		return New;
+		FPendingItems& New = PendingItems.AddDefaulted_GetRef();
+		New.FenceCounter = Fence;
+		return &New;
 	}
 
 	void FStagingManager::ReleaseBuffer(FVulkanCmdBuffer* CmdBuffer, FStagingBuffer*& StagingBuffer)
@@ -4511,8 +4421,8 @@ namespace VulkanRHI
 		SCOPE_CYCLE_COUNTER(STAT_VulkanStagingBuffer);
 #endif
 
-		FScopeLock Lock(&GStagingLock);
-		UsedStagingBuffers.RemoveSingleSwap(StagingBuffer, false);
+		FScopeLock Lock(&StagingLock);
+		UsedStagingBuffers.RemoveSingleSwap(StagingBuffer, EAllowShrinking::No);
 
 		if (CmdBuffer)
 		{
@@ -4617,13 +4527,13 @@ namespace VulkanRHI
 						FreeStagingBuffers.Add({PendingItems.Resources[ResourceIndex], GFrameNumberRenderThread});
 					}
 
-					EntriesPerCmdBuffer.PendingItems.RemoveAtSwap(FenceIndex, 1, false);
+					EntriesPerCmdBuffer.PendingItems.RemoveAtSwap(FenceIndex, 1, EAllowShrinking::No);
 				}
 			}
 
 			if (EntriesPerCmdBuffer.PendingItems.Num() == 0)
 			{
-				PendingFreeStagingBuffers.RemoveAtSwap(Index, 1, false);
+				PendingFreeStagingBuffers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 		}
 
@@ -4638,7 +4548,7 @@ namespace VulkanRHI
 					UsedMemory -= Entry.StagingBuffer->GetSize();
 					Entry.StagingBuffer->Destroy();
 					delete Entry.StagingBuffer;
-					FreeStagingBuffers.RemoveAtSwap(Index, 1, false);
+					FreeStagingBuffers.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 				}
 			}
 		}
@@ -4650,7 +4560,7 @@ namespace VulkanRHI
 		SCOPE_CYCLE_COUNTER(STAT_VulkanStagingBuffer);
 #endif
 
-		FScopeLock Lock(&GStagingLock);
+		FScopeLock Lock(&StagingLock);
 		ProcessPendingFreeNoLock(bImmediately, bFreeToOS);
 	}
 
@@ -4689,7 +4599,7 @@ namespace VulkanRHI
 
 	void FFenceManager::Deinit()
 	{
-		FScopeLock Lock(&GFenceLock);
+		FScopeLock Lock(&FenceLock);
 		ensureMsgf(UsedFences.Num() == 0, TEXT("No all fences are done!"));
 		VkDevice DeviceHandle = Device->GetInstanceHandle();
 		for (FFence* Fence : FreeFences)
@@ -4700,11 +4610,11 @@ namespace VulkanRHI
 
 	FFence* FFenceManager::AllocateFence(bool bCreateSignaled)
 	{
-		FScopeLock Lock(&GFenceLock);
+		FScopeLock Lock(&FenceLock);
 		if (FreeFences.Num() != 0)
 		{
 			FFence* Fence = FreeFences[0];
-			FreeFences.RemoveAtSwap(0, 1, false);
+			FreeFences.RemoveAtSwap(0, 1, EAllowShrinking::No);
 			UsedFences.Add(Fence);
 
 			if (bCreateSignaled)
@@ -4722,9 +4632,9 @@ namespace VulkanRHI
 	// Sets it to nullptr
 	void FFenceManager::ReleaseFence(FFence*& Fence)
 	{
-		FScopeLock Lock(&GFenceLock);
+		FScopeLock Lock(&FenceLock);
 		ResetFence(Fence);
-		UsedFences.RemoveSingleSwap(Fence, false);
+		UsedFences.RemoveSingleSwap(Fence, EAllowShrinking::No);
 #if VULKAN_REUSE_FENCES
 		FreeFences.Add(Fence);
 #else
@@ -4735,14 +4645,14 @@ namespace VulkanRHI
 
 	void FFenceManager::WaitAndReleaseFence(FFence*& Fence, uint64 TimeInNanoseconds)
 	{
-		FScopeLock Lock(&GFenceLock);
+		FScopeLock Lock(&FenceLock);
 		if (!Fence->IsSignaled())
 		{
 			WaitForFence(Fence, TimeInNanoseconds);
 		}
 
 		ResetFence(Fence);
-		UsedFences.RemoveSingleSwap(Fence, false);
+		UsedFences.RemoveSingleSwap(Fence, EAllowShrinking::No);
 		FreeFences.Add(Fence);
 		Fence = nullptr;
 	}
@@ -4844,7 +4754,7 @@ namespace VulkanRHI
 #if VULKAN_HAS_DEBUGGING_ENABLED
 			FEntry* ExistingEntry = Entries.FindByPredicate([&](const FEntry& InEntry)
 				{
-					return InEntry.Handle == Entry.Handle;
+					return (InEntry.Handle == Entry.Handle) && (InEntry.StructureType == Entry.StructureType);
 				});
 			checkf(ExistingEntry == nullptr, TEXT("Attempt to double-delete resource, FDeferredDeletionQueue2::EType: %d, Handle: %llu"), (int32)Type, Handle);
 #endif
@@ -4945,15 +4855,31 @@ namespace VulkanRHI
 				{
 					check(Entry->DeviceMemoryAllocation);
 					Device->GetDeviceMemoryManager().Free(Entry->DeviceMemoryAllocation);
+					break;
 				}
-				break;
-
+#if VULKAN_RHI_RAYTRACING
+				case EType::AccelerationStructure:
+				{
+					VulkanDynamicAPI::vkDestroyAccelerationStructureKHR(DeviceHandle, (VkAccelerationStructureKHR)Entry->Handle, VULKAN_CPU_ALLOCATOR);
+					break;
+				}
+#endif // VULKAN_RHI_RAYTRACING
+				case EType::BindlessHandle:
+				{
+					check(Device->SupportsBindless());
+					uint32 BindlessType = (uint32)(Entry->Handle >> 32);
+					check(BindlessType < MAX_uint8);
+					uint32 BindlessIndex = (uint32)(Entry->Handle & 0xFFFFFFFF);
+					FRHIDescriptorHandle DescriptorHandle((uint8)BindlessType, BindlessIndex);
+					Device->GetBindlessDescriptorManager()->Unregister(DescriptorHandle);
+					break;
+				}
 
 				default:
 					check(0);
 					break;
 				}
-				Entries.RemoveAtSwap(Index, 1, false);
+				Entries.RemoveAtSwap(Index, 1, EAllowShrinking::No);
 			}
 		}
 	}
@@ -4997,7 +4923,7 @@ namespace VulkanRHI
 		PeakUsed = 0;
 		FMemoryManager& ResourceHeapManager = InDevice->GetMemoryManager();
 		check(Allocation.Type == EVulkanAllocationEmpty);
-		if(ResourceHeapManager.AllocateBufferPooled(Allocation, nullptr, InSize,
+		if(ResourceHeapManager.AllocateBufferPooled(Allocation, nullptr, InSize, 0,
 			VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
 			VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
 			VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -5145,6 +5071,8 @@ void* FVulkanCustomMemManager::Alloc(void* UserData, size_t Size, size_t Alignme
 {
 	check(AllocScope < VK_SYSTEM_ALLOCATION_SCOPE_RANGE_SIZE);
 	LLM_SCOPE_VULKAN(ELLMTagVulkan::VulkanDriverMemoryCPU);
+	LLM_PLATFORM_SCOPE(ELLMTag::GraphicsPlatform);
+
 	FScopeLock Lock(&GMemMgrCS);
 	void* Data = FMemory::Malloc(Size, Alignment);
 	FType& Type = GetType(UserData, AllocScope);
@@ -5157,6 +5085,8 @@ void* FVulkanCustomMemManager::Alloc(void* UserData, size_t Size, size_t Alignme
 void FVulkanCustomMemManager::Free(void* UserData, void* Mem)
 {
 	LLM_SCOPE_VULKAN(ELLMTagVulkan::VulkanDriverMemoryCPU);
+	LLM_PLATFORM_SCOPE(ELLMTag::GraphicsPlatform);
+
 	FScopeLock Lock(&GMemMgrCS);
 	FMemory::Free(Mem);
 	for (int32 Index = 0; Index < GVulkanInstrumentedMemMgr.Types.Num(); ++Index)
@@ -5175,6 +5105,8 @@ void* FVulkanCustomMemManager::Realloc(void* UserData, void* Original, size_t Si
 {
 	check(AllocScope < VK_SYSTEM_ALLOCATION_SCOPE_RANGE_SIZE);
 	LLM_SCOPE_VULKAN(ELLMTagVulkan::VulkanDriverMemoryCPU);
+	LLM_PLATFORM_SCOPE(ELLMTag::GraphicsPlatform);
+
 	FScopeLock Lock(&GMemMgrCS);
 	void* Data = FMemory::Realloc(Original, Size, Alignment);
 	FType& Type = GetType(UserData, AllocScope);
@@ -5244,27 +5176,4 @@ VkResult FDeviceMemoryManager::GetMemoryTypeFromPropertiesExcluding(uint32 TypeB
 const VkPhysicalDeviceMemoryProperties& FDeviceMemoryManager::GetMemoryProperties() const
 {
 	return MemoryProperties;
-}
-
-
-void FStagingBuffer::Evict(FVulkanDevice& InDevice)
-{
-	checkNoEntry(); //stagingbuffers are always in system memory so this should not happen
-}
-void FStagingBuffer::Move(FVulkanDevice& InDevice, FVulkanCommandListContext& Context, FVulkanAllocation& InAllocation)
-{
-	checkNoEntry();//stagingbuffers are always in system memory so this should not happen
-}
-void FVulkanRingBuffer::Evict(FVulkanDevice& InDevice)
-{
-	checkNoEntry(); //stagingbuffers are always in system memory so this should not happen
-}
-void FVulkanRingBuffer::Move(FVulkanDevice& InDevice, FVulkanCommandListContext& Context, FVulkanAllocation& InAllocation)
-{
-	checkNoEntry();//stagingbuffers are always in system memory so this should not happen
-}
-
-void FVulkanEvictable::OnFullDefrag(FVulkanDevice& InDevice, FVulkanCommandListContext& Context, uint32 NewOffset)
-{
-	checkNoEntry();
 }

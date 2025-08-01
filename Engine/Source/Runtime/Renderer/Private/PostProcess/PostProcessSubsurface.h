@@ -4,7 +4,6 @@
 
 #include "ScreenPass.h"
 #include "OverridePassSequence.h"
-#include "RenderingCompositionGraph.h"
 
 // Returns whether subsurface scattering is globally enabled.
 bool IsSubsurfaceEnabled();
@@ -31,8 +30,7 @@ struct FVisualizeSubsurfaceInputs
 
 FScreenPassTexture AddVisualizeSubsurfacePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FVisualizeSubsurfaceInputs& Inputs);
 
-FRDGTextureRef AddSubsurfacePass(
+void AddSubsurfacePass(
 	FRDGBuilder& GraphBuilder,
-	TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformBuffer,
-	TArrayView<const FViewInfo> Views,
-	FRDGTextureRef SceneColorTexture);
+	FSceneTextures& SceneTextures,
+	TArrayView<const FViewInfo> Views);

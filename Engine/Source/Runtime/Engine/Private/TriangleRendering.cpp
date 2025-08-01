@@ -4,20 +4,17 @@
 	TriangleRendering.cpp: Simple triangle rendering implementation.
 =============================================================================*/
 
-#include "ShowFlags.h"
-#include "RHI.h"
-#include "RenderResource.h"
-#include "RenderingThread.h"
-#include "VertexFactory.h"
-#include "PackedNormal.h"
-#include "LocalVertexFactory.h"
-#include "SceneView.h"
-#include "CanvasTypes.h"
-#include "MeshBatch.h"
-#include "RendererInterface.h"
-#include "SceneUtils.h"
+#include "CanvasRendererItem.h"
+#include "CanvasRender.h"
+#include "PrimitiveUniformShaderParameters.h"
+#include "RHIStaticStates.h"
 #include "EngineModule.h"
 #include "MeshPassProcessor.h"
+#include "RenderGraphUtils.h"
+#include "UnrealClient.h"
+#include "Materials/MaterialRenderProxy.h"
+
+DECLARE_GPU_STAT_NAMED(CanvasDrawTriangles, TEXT("CanvasDrawTriangles"));
 
 FCanvasTriangleRendererItem::FTriangleVertexFactory::FTriangleVertexFactory(
 	const FStaticMeshVertexBuffers* InVertexBuffers,
@@ -26,14 +23,7 @@ FCanvasTriangleRendererItem::FTriangleVertexFactory::FTriangleVertexFactory(
 	, VertexBuffers(InVertexBuffers)
 {}
 
-FCanvasTriangleRendererItem::FTriangleMesh::FTriangleMesh(
-	const FRawIndexBuffer* InIndexBuffer,
-	const FTriangleVertexFactory* InVertexFactory)
-	: IndexBuffer(InIndexBuffer)
-	, VertexFactory(InVertexFactory)
-{}
-
-void FCanvasTriangleRendererItem::FTriangleVertexFactory::InitResource()
+void FCanvasTriangleRendererItem::FTriangleVertexFactory::InitResource(FRHICommandListBase& RHICmdList)
 {
 	FLocalVertexFactory::FDataType VertexData;
 	VertexBuffers->PositionVertexBuffer.BindPositionVertexBuffer(this, VertexData);
@@ -41,35 +31,55 @@ void FCanvasTriangleRendererItem::FTriangleVertexFactory::InitResource()
 	VertexBuffers->StaticMeshVertexBuffer.BindPackedTexCoordVertexBuffer(this, VertexData);
 	VertexBuffers->StaticMeshVertexBuffer.BindLightMapVertexBuffer(this, VertexData, 0);
 	VertexBuffers->ColorVertexBuffer.BindColorVertexBuffer(this, VertexData);
-	SetData(VertexData);
+	SetData(RHICmdList, VertexData);
 
-	FLocalVertexFactory::InitResource();
+	FLocalVertexFactory::InitResource(RHICmdList);
 }
 
-void FCanvasTriangleRendererItem::FTriangleMesh::InitRHI()
+FMeshBatch* FCanvasTriangleRendererItem::FRenderData::AllocTriangleMeshBatch(FCanvasRenderContext& InRenderContext, FHitProxyId InHitProxyId)
 {
-	MeshBatch.VertexFactory = VertexFactory;
-	MeshBatch.ReverseCulling = false;
-	MeshBatch.bDisableBackfaceCulling = true;
-	MeshBatch.Type = PT_TriangleList;
-	MeshBatch.DepthPriorityGroup = SDPG_Foreground;
+	FMeshBatch* MeshBatch = InRenderContext.Alloc<FMeshBatch>();
 
-	FMeshBatchElement& MeshBatchElement = MeshBatch.Elements[0];
-	MeshBatchElement.IndexBuffer = IndexBuffer;
+	MeshBatch->VertexFactory = &VertexFactory;
+	MeshBatch->MaterialRenderProxy = MaterialRenderProxy;
+	MeshBatch->ReverseCulling = false;
+	MeshBatch->bDisableBackfaceCulling = true;
+	MeshBatch->Type = PT_TriangleList;
+	MeshBatch->DepthPriorityGroup = SDPG_Foreground;
+	MeshBatch->BatchHitProxyId = InHitProxyId;
+
+	FMeshBatchElement& MeshBatchElement = MeshBatch->Elements[0];
+	MeshBatchElement.IndexBuffer = &IndexBuffer;
 	MeshBatchElement.FirstIndex = 0;
-	MeshBatchElement.NumPrimitives = 1;
+	MeshBatchElement.NumPrimitives = 0;
 	MeshBatchElement.MinVertexIndex = 0;
-	MeshBatchElement.MaxVertexIndex = 2;
+	MeshBatchElement.MaxVertexIndex = GetNumVertices() - 1;
 	MeshBatchElement.PrimitiveUniformBufferResource = &GIdentityPrimitiveUniformBuffer;
+
+	return MeshBatch;
 }
 
-void FCanvasTriangleRendererItem::FRenderData::InitTriangleMesh(const FSceneView& View, bool bNeedsToSwitchVerticalAxis)
+uint32 FCanvasTriangleRendererItem::FRenderData::GetNumVertices() const
 {
-	StaticMeshVertexBuffers.PositionVertexBuffer.Init(Triangles.Num() * 3);
-	StaticMeshVertexBuffers.StaticMeshVertexBuffer.Init(Triangles.Num() * 3, 1);
-	StaticMeshVertexBuffers.ColorVertexBuffer.Init(Triangles.Num() * 3);
+	return Triangles.Num() * 3;
+}
 
-	IndexBuffer.Indices.SetNum(Triangles.Num() * 3);
+uint32 FCanvasTriangleRendererItem::FRenderData::GetNumIndices() const
+{
+	return Triangles.Num() * 3;
+}
+
+void FCanvasTriangleRendererItem::FRenderData::InitTriangleMesh(FRHICommandListBase& RHICmdList, const FSceneView& View)
+{
+	const uint32 NumIndices = GetNumIndices();
+	const uint32 NumVertices = GetNumIndices();
+	StaticMeshVertexBuffers.PositionVertexBuffer.Init(NumVertices);
+	StaticMeshVertexBuffers.StaticMeshVertexBuffer.Init(NumVertices, 1);
+	StaticMeshVertexBuffers.ColorVertexBuffer.Init(NumVertices);
+
+	IndexBuffer.Indices.SetNum(NumIndices);
+	// Make sure the index buffer is using the appropriate size :
+	IndexBuffer.ForceUse32Bit(NumVertices > MAX_uint16);
 
 	for (int32 i = 0; i < Triangles.Num(); i++)
 	{
@@ -85,43 +95,32 @@ void FCanvasTriangleRendererItem::FRenderData::InitTriangleMesh(const FSceneView
 		const FCanvasUVTri& Tri = Triangles[i].Tri;
 
 		// create verts. Notice the order is (1, 0, 2)
-		if (bNeedsToSwitchVerticalAxis)
-		{
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 0) = FVector(Tri.V1_Pos.X, View.UnscaledViewRect.Height() - Tri.V1_Pos.Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 1) = FVector(Tri.V0_Pos.X, View.UnscaledViewRect.Height() - Tri.V0_Pos.Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 2) = FVector(Tri.V2_Pos.X, View.UnscaledViewRect.Height() - Tri.V2_Pos.Y, 0.0f);
-		}
-		else
-		{
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 0) = FVector(Tri.V1_Pos.X, Tri.V1_Pos.Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 1) = FVector(Tri.V0_Pos.X, Tri.V0_Pos.Y, 0.0f);
-			StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 2) = FVector(Tri.V2_Pos.X, Tri.V2_Pos.Y, 0.0f);
-		}
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 0) = FVector3f(Tri.V1_Pos.X, Tri.V1_Pos.Y, 0.0f);
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 1) = FVector3f(Tri.V0_Pos.X, Tri.V0_Pos.Y, 0.0f);
+		StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(StartIndex + 2) = FVector3f(Tri.V2_Pos.X, Tri.V2_Pos.Y, 0.0f);
 
-		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(StartIndex + 0, FVector(1.0f, 0.0f, 0.0f), FVector(0.0f, 1.0f, 0.0f), FVector(0.0f, 0.0f, 1.0f));
-		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(StartIndex + 1, FVector(1.0f, 0.0f, 0.0f), FVector(0.0f, 1.0f, 0.0f), FVector(0.0f, 0.0f, 1.0f));
-		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(StartIndex + 2, FVector(1.0f, 0.0f, 0.0f), FVector(0.0f, 1.0f, 0.0f), FVector(0.0f, 0.0f, 1.0f));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(StartIndex + 0, FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.0f, 1.0f));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(StartIndex + 1, FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.0f, 1.0f));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(StartIndex + 2, FVector3f(1.0f, 0.0f, 0.0f), FVector3f(0.0f, 1.0f, 0.0f), FVector3f(0.0f, 0.0f, 1.0f));
 
-		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(StartIndex + 0, 0, FVector2D(Tri.V1_UV.X, Tri.V1_UV.Y));
-		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(StartIndex + 1, 0, FVector2D(Tri.V0_UV.X, Tri.V0_UV.Y));
-		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(StartIndex + 2, 0, FVector2D(Tri.V2_UV.X, Tri.V2_UV.Y));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(StartIndex + 0, 0, FVector2f(Tri.V1_UV.X, Tri.V1_UV.Y));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(StartIndex + 1, 0, FVector2f(Tri.V0_UV.X, Tri.V0_UV.Y));
+		StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(StartIndex + 2, 0, FVector2f(Tri.V2_UV.X, Tri.V2_UV.Y));
 
 		StaticMeshVertexBuffers.ColorVertexBuffer.VertexColor(StartIndex + 0) = Tri.V1_Color.ToFColor(true);
 		StaticMeshVertexBuffers.ColorVertexBuffer.VertexColor(StartIndex + 1) = Tri.V0_Color.ToFColor(true);
 		StaticMeshVertexBuffers.ColorVertexBuffer.VertexColor(StartIndex + 2) = Tri.V2_Color.ToFColor(true);
 	}
 
-	StaticMeshVertexBuffers.PositionVertexBuffer.InitResource();
-	StaticMeshVertexBuffers.StaticMeshVertexBuffer.InitResource();
-	StaticMeshVertexBuffers.ColorVertexBuffer.InitResource();
-	IndexBuffer.InitResource();
-	VertexFactory.InitResource();
-	TriMesh.InitResource();
+	StaticMeshVertexBuffers.PositionVertexBuffer.InitResource(RHICmdList);
+	StaticMeshVertexBuffers.StaticMeshVertexBuffer.InitResource(RHICmdList);
+	StaticMeshVertexBuffers.ColorVertexBuffer.InitResource(RHICmdList);
+	IndexBuffer.InitResource(RHICmdList);
+	VertexFactory.InitResource(RHICmdList);
 };
 
 void FCanvasTriangleRendererItem::FRenderData::ReleaseTriangleMesh()
 {
-	TriMesh.ReleaseResource();
 	VertexFactory.ReleaseResource();
 	IndexBuffer.ReleaseResource();
 	StaticMeshVertexBuffers.PositionVertexBuffer.ReleaseResource();
@@ -130,64 +129,83 @@ void FCanvasTriangleRendererItem::FRenderData::ReleaseTriangleMesh()
 }
 
 void FCanvasTriangleRendererItem::FRenderData::RenderTriangles(
-	FRHICommandListImmediate& RHICmdList,
+	FCanvasRenderContext& RenderContext,
 	FMeshPassProcessorRenderState& DrawRenderState,
 	const FSceneView& View,
-	bool bIsHitTesting,
-	bool bNeedsToSwitchVerticalAxis)
+	bool bIsHitTesting)
 {
 	check(IsInRenderingThread());
 
+	if (Triangles.Num() == 0)
+	{
+		return;
+	}
+
+	RDG_GPU_STAT_SCOPE(RenderContext.GraphBuilder, CanvasDrawTriangles);
+	RDG_EVENT_SCOPE(RenderContext.GraphBuilder, "%s", *MaterialRenderProxy->GetIncompleteMaterialWithFallback(GMaxRHIFeatureLevel).GetFriendlyName());
+	TRACE_CPUPROFILER_EVENT_SCOPE(CanvasDrawTriangles);
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_CanvasDrawTriangles)
+
 	IRendererModule& RendererModule = GetRendererModule();
 
-	InitTriangleMesh(View, bNeedsToSwitchVerticalAxis);
+	InitTriangleMesh(RenderContext.GraphBuilder.RHICmdList, View);
 
-	SCOPED_DRAW_EVENTF(RHICmdList, CanvasDrawTriangles, *MaterialRenderProxy->GetIncompleteMaterialWithFallback(GMaxRHIFeatureLevel).GetFriendlyName());
+
+	// We know we have at least 1 triangle so prep up a new batch right away : 
+	FMeshBatch* CurrentMeshBatch = AllocTriangleMeshBatch(RenderContext, Triangles[0].HitProxyId);
+	check (CurrentMeshBatch->Elements[0].FirstIndex == 0); // The first batch should always start at the first index 
 
 	for (int32 TriIdx = 0; TriIdx < Triangles.Num(); TriIdx++)
 	{
 		const FTriangleInst& Tri = Triangles[TriIdx];
 
-		FMeshBatch& MeshBatch = TriMesh.MeshBatch;
-		MeshBatch.VertexFactory = &VertexFactory;
-		MeshBatch.MaterialRenderProxy = MaterialRenderProxy;
-		MeshBatch.Elements[0].FirstIndex = 3 * TriIdx;
+		// We only need a new batch when the hit proxy id changes : 
+		if (CurrentMeshBatch->BatchHitProxyId != Tri.HitProxyId)
+		{
+			// Flush the current batch before allocating a new one: 
+			GetRendererModule().DrawTileMesh(RenderContext, DrawRenderState, View, *CurrentMeshBatch, bIsHitTesting, CurrentMeshBatch->BatchHitProxyId);
 
-		GetRendererModule().DrawTileMesh(RHICmdList, DrawRenderState, View, MeshBatch, bIsHitTesting, Tri.HitProxyId);
+			CurrentMeshBatch = AllocTriangleMeshBatch(RenderContext, Tri.HitProxyId);
+			CurrentMeshBatch->Elements[0].FirstIndex = 3 * TriIdx;
+		}
+
+		// Add 1 triangle to the batch :
+		++CurrentMeshBatch->Elements[0].NumPrimitives;
 	}
 
-	ReleaseTriangleMesh();
+	// Flush the final batch: 
+	check(CurrentMeshBatch != nullptr);
+	GetRendererModule().DrawTileMesh(RenderContext, DrawRenderState, View, *CurrentMeshBatch, bIsHitTesting, CurrentMeshBatch->BatchHitProxyId);
+
+	AddPass(RenderContext.GraphBuilder, RDG_EVENT_NAME("ReleaseTriangleMesh"), [this](FRHICommandListImmediate&)
+	{
+		ReleaseTriangleMesh();
+	});
 }
 
-bool FCanvasTriangleRendererItem::Render_RenderThread(FRHICommandListImmediate& RHICmdList, FMeshPassProcessorRenderState& DrawRenderState, const FCanvas* Canvas)
+bool FCanvasTriangleRendererItem::Render_RenderThread(FCanvasRenderContext& RenderContext, FMeshPassProcessorRenderState& DrawRenderState, const FCanvas* Canvas)
 {
-	float CurrentRealTime = 0.f;
-	float CurrentWorldTime = 0.f;
-	float DeltaWorldTime = 0.f;
-
+	FGameTime Time;
 	if (!bFreezeTime)
 	{
-		CurrentRealTime = Canvas->GetCurrentRealTime();
-		CurrentWorldTime = Canvas->GetCurrentWorldTime();
-		DeltaWorldTime = Canvas->GetCurrentDeltaWorldTime();
+		Time = Canvas->GetTime();
 	}
 
 	checkSlow(Data);
 
 	const FRenderTarget* CanvasRenderTarget = Canvas->GetRenderTarget();
 
-	TUniquePtr<const FSceneViewFamily> ViewFamily = MakeUnique<const FSceneViewFamily>(FSceneViewFamily::ConstructionValues(
+	const FSceneViewFamily& ViewFamily = *RenderContext.Alloc<const FSceneViewFamily>(FSceneViewFamily::ConstructionValues(
 		CanvasRenderTarget,
 		nullptr,
 		FEngineShowFlags(ESFIM_Game))
-		.SetWorldTimes(CurrentWorldTime, DeltaWorldTime, CurrentRealTime)
-		.SetGammaCorrection(CanvasRenderTarget->GetDisplayGamma()));
+		.SetTime(Time));
 
 	const FIntRect ViewRect(FIntPoint(0, 0), CanvasRenderTarget->GetSizeXY());
 
 	// make a temporary view
 	FSceneViewInitOptions ViewInitOptions;
-	ViewInitOptions.ViewFamily = ViewFamily.Get();
+	ViewInitOptions.ViewFamily = &ViewFamily;
 	ViewInitOptions.SetViewRectangle(ViewRect);
 	ViewInitOptions.ViewOrigin = FVector::ZeroVector;
 	ViewInitOptions.ViewRotationMatrix = FMatrix::Identity;
@@ -195,31 +213,25 @@ bool FCanvasTriangleRendererItem::Render_RenderThread(FRHICommandListImmediate& 
 	ViewInitOptions.BackgroundColor = FLinearColor::Black;
 	ViewInitOptions.OverlayColor = FLinearColor::White;
 
-	TUniquePtr<const FSceneView> View = MakeUnique<const FSceneView>(ViewInitOptions);
+	const FSceneView& View = *RenderContext.Alloc<const FSceneView>(ViewInitOptions);
 
-	const bool bNeedsToSwitchVerticalAxis = RHINeedsToSwitchVerticalAxis(Canvas->GetShaderPlatform()) && Canvas->GetAllowSwitchVerticalAxis();
-
-	Data->RenderTriangles(RHICmdList, DrawRenderState, *View, Canvas->IsHitTesting(), bNeedsToSwitchVerticalAxis);
+	Data->RenderTriangles(RenderContext, DrawRenderState, View, Canvas->IsHitTesting());
 
 	if (Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender)
 	{
+		RenderContext.DeferredRelease(MoveTemp(Data));
 		Data = nullptr;
 	}
 
 	return true;
 }
 
-bool FCanvasTriangleRendererItem::Render_GameThread(const FCanvas* Canvas, FRenderThreadScope& RenderScope)
+bool FCanvasTriangleRendererItem::Render_GameThread(const FCanvas* Canvas, FCanvasRenderThreadScope& RenderScope)
 {
-	float CurrentRealTime = 0.f;
-	float CurrentWorldTime = 0.f;
-	float DeltaWorldTime = 0.f;
-
+	FGameTime Time;
 	if (!bFreezeTime)
 	{
-		CurrentRealTime = Canvas->GetCurrentRealTime();
-		CurrentWorldTime = Canvas->GetCurrentWorldTime();
-		DeltaWorldTime = Canvas->GetCurrentDeltaWorldTime();
+		Time = Canvas->GetTime();
 	}
 
 	checkSlow(Data);
@@ -230,8 +242,7 @@ bool FCanvasTriangleRendererItem::Render_GameThread(const FCanvas* Canvas, FRend
 		CanvasRenderTarget,
 		Canvas->GetScene(),
 		FEngineShowFlags(ESFIM_Game))
-		.SetWorldTimes(CurrentWorldTime, DeltaWorldTime, CurrentRealTime)
-		.SetGammaCorrection(CanvasRenderTarget->GetDisplayGamma()));
+		.SetTime(Time));
 
 	const FIntRect ViewRect(FIntPoint(0, 0), CanvasRenderTarget->GetSizeXY());
 
@@ -247,22 +258,22 @@ bool FCanvasTriangleRendererItem::Render_GameThread(const FCanvas* Canvas, FRend
 
 	const FSceneView* View = new FSceneView(ViewInitOptions);
 
-	const bool bNeedsToSwitchVerticalAxis = RHINeedsToSwitchVerticalAxis(Canvas->GetShaderPlatform()) && Canvas->GetAllowSwitchVerticalAxis();
 	const bool bIsHitTesting = Canvas->IsHitTesting();
 	const bool bDeleteOnRender = Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender;
 
 	RenderScope.EnqueueRenderCommand(
-		[LocalData = Data, View, bIsHitTesting, bNeedsToSwitchVerticalAxis](FRHICommandListImmediate& RHICmdList)
+		[LocalData = Data, View, bIsHitTesting](FCanvasRenderContext& RenderContext) mutable
 	{
-		FMeshPassProcessorRenderState DrawRenderState(*View);
+		FMeshPassProcessorRenderState DrawRenderState;
 
 		// disable depth test & writes
 		DrawRenderState.SetDepthStencilState(TStaticDepthStencilState<false, CF_Always>::GetRHI());
 
-		LocalData->RenderTriangles(RHICmdList, DrawRenderState, *View, bIsHitTesting, bNeedsToSwitchVerticalAxis);
+		LocalData->RenderTriangles(RenderContext, DrawRenderState, *View, bIsHitTesting);
 
-		delete View->Family;
-		delete View;
+		RenderContext.DeferredRelease(MoveTemp(LocalData));
+		RenderContext.DeferredDelete(View->Family);
+		RenderContext.DeferredDelete(View);
 	});
 
 	if (Canvas->GetAllowedModes() & FCanvas::Allow_DeleteOnRender)

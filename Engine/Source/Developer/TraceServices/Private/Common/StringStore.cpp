@@ -1,8 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Common/StringStore.h"
+#include "Misc/ScopeLock.h"
 
-namespace Trace
+
+namespace TraceServices
 {
 
 FStringStore::FStringStore(FSlabAllocator& InAllocator)
@@ -18,6 +20,7 @@ const TCHAR* FStringStore::Store(const TCHAR* String)
 
 const TCHAR* FStringStore::Store(const FStringView& String)
 {
+	FScopeLock _(&Cs);
 	uint32 Hash = GetTypeHash(String);
 	const TCHAR** AlreadyStored = StoredStrings.Find(Hash);
 	if (AlreadyStored && !String.Compare(FStringView(*AlreadyStored)))
@@ -45,4 +48,4 @@ const TCHAR* FStringStore::Store(const FStringView& String)
 }
 
 
-}
+} // namespace TraceServices

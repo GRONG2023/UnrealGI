@@ -14,7 +14,15 @@ FVirtualTextureLevelRedirector::~FVirtualTextureLevelRedirector()
 	delete VirtualTextures[1];
 }
 
+bool FVirtualTextureLevelRedirector::IsPageStreamed(uint8 vLevel, uint32 vAddress) const
+{
+	const int32 VirtualTextureIndex = vLevel < TransitionLevel ? 0 : 1;
+	const int32 vLevelOffset = vLevel < TransitionLevel ? 0 : TransitionLevel;
+	return VirtualTextures[VirtualTextureIndex]->IsPageStreamed(vLevel - vLevelOffset, vAddress);
+}
+
 FVTRequestPageResult FVirtualTextureLevelRedirector::RequestPageData(
+	FRHICommandList& RHICmdList,
 	const FVirtualTextureProducerHandle& ProducerHandle,
 	uint8 LayerMask,
 	uint8 vLevel,
@@ -23,11 +31,11 @@ FVTRequestPageResult FVirtualTextureLevelRedirector::RequestPageData(
 {
 	int32 VirtualTextureIndex = vLevel < TransitionLevel ? 0 : 1;
 	int32 vLevelOffset = vLevel < TransitionLevel ? 0 : TransitionLevel;
-	return VirtualTextures[VirtualTextureIndex]->RequestPageData(ProducerHandle, LayerMask, vLevel - vLevelOffset, vAddress, Priority);
+	return VirtualTextures[VirtualTextureIndex]->RequestPageData(RHICmdList, ProducerHandle, LayerMask, vLevel - vLevelOffset, vAddress, Priority);
 }
 
 IVirtualTextureFinalizer* FVirtualTextureLevelRedirector::ProducePageData(
-	FRHICommandListImmediate& RHICmdList,
+	FRHICommandList& RHICmdList,
 	ERHIFeatureLevel::Type FeatureLevel,
 	EVTProducePageFlags Flags,
 	const FVirtualTextureProducerHandle& ProducerHandle,
@@ -40,4 +48,20 @@ IVirtualTextureFinalizer* FVirtualTextureLevelRedirector::ProducePageData(
 	int32 VirtualTextureIndex = vLevel < TransitionLevel ? 0 : 1;
 	int32 vLevelOffset = vLevel < TransitionLevel ? 0 : TransitionLevel;
 	return VirtualTextures[VirtualTextureIndex]->ProducePageData(RHICmdList, FeatureLevel, Flags, ProducerHandle, LayerMask, vLevel - vLevelOffset, vAddress, RequestHandle, TargetLayers);
+}
+
+void FVirtualTextureLevelRedirector::GatherProducePageDataTasks(
+	FVirtualTextureProducerHandle const& ProducerHandle, 
+	FGraphEventArray& InOutTasks) const
+{
+	VirtualTextures[0]->GatherProducePageDataTasks(ProducerHandle, InOutTasks);
+	VirtualTextures[1]->GatherProducePageDataTasks(ProducerHandle, InOutTasks);
+}
+
+void FVirtualTextureLevelRedirector::GatherProducePageDataTasks(
+	uint64 RequestHandle,
+	FGraphEventArray& InOutTasks) const
+{
+	VirtualTextures[0]->GatherProducePageDataTasks(RequestHandle, InOutTasks);
+	VirtualTextures[1]->GatherProducePageDataTasks(RequestHandle, InOutTasks);
 }

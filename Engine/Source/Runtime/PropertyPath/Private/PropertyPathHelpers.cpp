@@ -3,6 +3,8 @@
 #include "PropertyPathHelpers.h"
 #include "UObject/UnrealType.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PropertyPathHelpers)
+
 /** Internal helper functions */
 namespace PropertyPathHelpersInternal
 {
@@ -15,9 +17,7 @@ namespace PropertyPathHelpersInternal
 		// Reset cached address usage flag at the path root. This will be reset later in the recursion if conditions are not met in the path.
 		if(SegmentIndex == 0)
 		{
-#if DO_CHECK
 			InPropertyPath.SetCachedContainer(InContainer);
-#endif
 			InPropertyPath.SetCanSafelyUsedCachedAddress(true);
 		}
 
@@ -45,6 +45,7 @@ namespace PropertyPathHelpersInternal
 						// can continue, if the object is null we safely stop processing the chain of properties.
 						if ( UObject* CurrentObject = ObjectProperty->GetPropertyValue_InContainer(InContainer, ArrayIndex) )
 						{
+							InPropertyPath.SetCachedLastContainer(CurrentObject, SegmentIndex);
 							return IteratePropertyPathRecursive(CurrentObject->GetClass(), CurrentObject, SegmentIndex + 1, InPropertyPath, InResolver);
 						}
 					}
@@ -60,6 +61,7 @@ namespace PropertyPathHelpersInternal
 						// can continue, if the object is null we safely stop processing the chain of properties.
 						if ( UObject* CurrentObject = WeakObject.Get() )
 						{
+							InPropertyPath.SetCachedLastContainer(CurrentObject, SegmentIndex);
 							return IteratePropertyPathRecursive(CurrentObject->GetClass(), CurrentObject, SegmentIndex + 1, InPropertyPath, InResolver);
 						}
 					}
@@ -75,6 +77,7 @@ namespace PropertyPathHelpersInternal
 						// can continue, if the object is null we safely stop processing the chain of properties.
 						if ( UObject* CurrentObject = SoftObject.Get() )
 						{
+							InPropertyPath.SetCachedLastContainer(CurrentObject, SegmentIndex);
 							return IteratePropertyPathRecursive(CurrentObject->GetClass(), CurrentObject, SegmentIndex + 1, InPropertyPath, InResolver);
 						}
 					}
@@ -115,15 +118,15 @@ namespace PropertyPathHelpersInternal
 					}
 				}
 			}
-				else
-				{
+			else
+			{
 				// If it's the final segment, use the resolver to get the value.
 				if (bFinalSegment)
 				{
 					return InResolver.Resolve(static_cast<ContainerType*>(InContainer), InPropertyPath);
 				}
-			else
-			{
+				else
+				{
 					// If it's not the final segment, but still a function, we're going to treat it as an Object* getter.
 					// in the hopes that it leads to another object that we can resolve the next segment on.  These
 					// getter functions must be very simple.
@@ -134,10 +137,11 @@ namespace PropertyPathHelpersInternal
 
 					FCachedPropertyPath TempPath(Segment);
 					if (GetterResolver.Resolve(InContainer, TempPath))
-				{
+					{
 						if (CurrentObject)
 						{
 							InPropertyPath.SetCanSafelyUsedCachedAddress(false);
+							InPropertyPath.SetCachedLastContainer(CurrentObject, SegmentIndex);
 
 							return IteratePropertyPathRecursive(CurrentObject->GetClass(), CurrentObject, SegmentIndex + 1, InPropertyPath, InResolver);
 						}
@@ -180,7 +184,7 @@ namespace PropertyPathHelpersInternal
 						ReturnProperty->InitializeValue(TempBuffer.GetData());
 
 						InContainer->ProcessEvent(InFunction, TempBuffer.GetData());
-						ReturnProperty->ExportTextItem(OutValue, TempBuffer.GetData(), nullptr, nullptr, 0);
+						ReturnProperty->ExportTextItem_Direct(OutValue, TempBuffer.GetData(), nullptr, nullptr, 0);
 						return true;
 					}
 				}
@@ -209,17 +213,17 @@ namespace PropertyPathHelpersInternal
 				if ( ArrayHelper.IsValidIndex(ArrayIndex) )
 				{
 					OutProperty = ArrayProp->Inner;
-					OutProperty->ExportTextItem(OutValue, static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)), nullptr, nullptr, 0);
+					OutProperty->ExportTextItem_Direct(OutValue, static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)), nullptr, nullptr, 0);
 					return true;
 				}
 			}
 			else
 			{
 				// No index, so assume we want the array property itself
-				if ( void* ValuePtr = ArrayProp->ContainerPtrToValuePtr<void>(InContainer) )
+				if ( !!ArrayProp->ContainerPtrToValuePtr<void>(InContainer) )
 				{
 					OutProperty = ArrayProp;
-					OutProperty->ExportTextItem(OutValue, ValuePtr, nullptr, nullptr, 0);
+					OutProperty->ExportTextItem_InContainer(OutValue, InContainer, nullptr, nullptr, 0);
 					return true;
 				}
 			}
@@ -236,7 +240,7 @@ namespace PropertyPathHelpersInternal
 				if ( void* ValuePtr = Property->ContainerPtrToValuePtr<void>(InContainer, ArrayIndex) )
 				{
 					OutProperty = Property;
-					OutProperty->ExportTextItem(OutValue, ValuePtr, nullptr, nullptr, 0);
+					OutProperty->ExportTextItem_Direct(OutValue, ValuePtr, nullptr, nullptr, 0);
 					return true;
 				}
 			}
@@ -275,7 +279,7 @@ namespace PropertyPathHelpersInternal
 						TempBuffer.AddUninitialized(ParamProperty->ElementSize);
 						ParamProperty->InitializeValue(TempBuffer.GetData());
 
-						ParamProperty->ImportText(*InValue, TempBuffer.GetData(), 0, nullptr);
+						ParamProperty->ImportText_Direct(*InValue, TempBuffer.GetData(), nullptr, 0);
 						InContainer->ProcessEvent(InFunction, TempBuffer.GetData());
 						return true;
 					}
@@ -304,16 +308,16 @@ namespace PropertyPathHelpersInternal
 				FScriptArrayHelper_InContainer ArrayHelper(ArrayProp, InContainer);
 				if ( ArrayHelper.IsValidIndex(ArrayIndex) )
 				{
-					ArrayProp->Inner->ImportText(*InValue, static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)), 0, nullptr);
+					ArrayProp->Inner->ImportText_Direct(*InValue, static_cast<void*>(ArrayHelper.GetRawPtr(ArrayIndex)), nullptr, 0);
 					return true;
 				}
 			}
 			else
 			{
 				// No index, so assume we want the array property itself
-				if ( void* ValuePtr = ArrayProp->ContainerPtrToValuePtr<void>(InContainer) )
+				if ( !!ArrayProp->ContainerPtrToValuePtr<void>(InContainer) )
 				{
-					ArrayProp->ImportText(*InValue, ValuePtr, 0, nullptr);
+					ArrayProp->ImportText_InContainer(*InValue, InContainer, nullptr, 0);
 					return true;
 				}
 			}
@@ -329,7 +333,7 @@ namespace PropertyPathHelpersInternal
 			{
 				if ( void* ValuePtr = Property->ContainerPtrToValuePtr<void>(InContainer, ArrayIndex) )
 				{
-					Property->ImportText(*InValue, ValuePtr, 0, nullptr);
+					Property->ImportText_Direct(*InValue, ValuePtr, nullptr, 0);
 					return true;
 				}
 			}
@@ -476,9 +480,9 @@ namespace PropertyPathHelpersInternal
 	{
 		if (InContainer)
 		{
-		FCachedPropertyPath InternalPropertyPath(InPropertyPath);
-		return IteratePropertyPathRecursive<UObject>(InContainer->GetClass(), InContainer, 0, InternalPropertyPath, InResolver);
-	}
+			FCachedPropertyPath InternalPropertyPath(InPropertyPath);
+			return IteratePropertyPathRecursive<UObject>(InContainer->GetClass(), InContainer, 0, InternalPropertyPath, InResolver);
+		}
 
 		return false;
 	}
@@ -487,8 +491,8 @@ namespace PropertyPathHelpersInternal
 	{
 		if (InContainer)
 		{
-		return IteratePropertyPathRecursive<UObject>(InContainer->GetClass(), InContainer, 0, InPropertyPath, InResolver);
-	}
+			return IteratePropertyPathRecursive<UObject>(InContainer->GetClass(), InContainer, 0, InPropertyPath, InResolver);
+		}
 
 		return false;
 	}
@@ -514,6 +518,143 @@ namespace PropertyPathHelpersInternal
 			}
 		}
 		return nullptr;
+	}
+
+	void CallParentSetters(const FCachedPropertyPath& InPropertyPath)
+	{
+		int32 LastContainerInPathIndex = InPropertyPath.GetCachedLastContainerInPathIndex();
+		int32 IndexAfterCachedLastContainer = InPropertyPath.GetCachedLastContainerInPathIndex() + 1;
+
+		void* ObjectContainerPtr = LastContainerInPathIndex == INDEX_NONE 
+			? InPropertyPath.GetCachedContainer()
+			: InPropertyPath.GetCachedLastContainerInPath();
+
+		// Compilers will warn if Alloca is used inside a loop, so break Alloca logic out of the loop
+		int32 ParentSegmentIndex = INDEX_NONE;
+
+		// Call the topmost setter on the last UObject in path
+		const int32 NumSegments = InPropertyPath.GetNumSegments();
+		for (int32 Index = IndexAfterCachedLastContainer; Index < NumSegments; Index++)
+		{
+			const FPropertyPathSegment& ParentSegment = InPropertyPath.GetSegment(Index);
+			int32 ParentArrayIndex = ParentSegment.GetArrayIndex();
+			FProperty* ParentProperty = CastFieldChecked<FProperty>(ParentSegment.GetField().ToField());
+			ParentArrayIndex = ParentArrayIndex == INDEX_NONE ? 0 : ParentArrayIndex;
+
+			if (ParentProperty->HasSetter() && ParentArrayIndex < ParentProperty->ArrayDim)
+			{
+				ParentSegmentIndex = Index;
+				break;
+			}
+		}
+
+		// Note: We check for HasSetter & ParentArrayIndex valid above
+		if (ParentSegmentIndex != INDEX_NONE)
+		{
+			const FPropertyPathSegment& ParentSegment = InPropertyPath.GetSegment(ParentSegmentIndex);
+			int32 ParentArrayIndex = ParentSegment.GetArrayIndex();
+			FProperty* ParentProperty = CastFieldChecked<FProperty>(ParentSegment.GetField().ToField());
+			ParentArrayIndex = ParentArrayIndex == INDEX_NONE ? 0 : ParentArrayIndex;
+
+			// We want to call the setter with the current value, so just get the pointer to current value via container
+			if (void* ParentAddress = ParentProperty->ContainerPtrToValuePtr<void>(ObjectContainerPtr, ParentArrayIndex))
+			{
+				if (ParentProperty->HasGetter())
+				{
+					// Call getter if it has one, getter SHOULD be pure and thus won't cause behavioral changes.
+					// But this is a read on ParentAddress so we call getter for now
+
+					int32 Size = ParentSegment.GetStruct()->GetPropertiesSize();
+					int32 Alignment = ParentSegment.GetStruct()->GetMinAlignment();
+					uint8* Temp = (uint8*)FMemory_Alloca_Aligned(Size, Alignment);
+					FMemory::Memzero(Temp, Size);
+
+					ParentProperty->InitializeValue(Temp);
+					ParentProperty->CallGetter(ObjectContainerPtr, Temp);
+					ParentProperty->CallSetter(ObjectContainerPtr, Temp);
+					ParentProperty->DestroyValue(Temp);
+				}
+				else
+				{
+					ParentProperty->CallSetter(ObjectContainerPtr, ParentAddress);
+				}
+				return;
+			}
+		}
+	}
+
+	void CallParentGetters(void* OutValue, const FCachedPropertyPath& InPropertyPath, const void* InPropertyAddress)
+	{
+		int32 LastContainerInPathIndex = InPropertyPath.GetCachedLastContainerInPathIndex();
+		int32 IndexAfterCachedLastContainer = InPropertyPath.GetCachedLastContainerInPathIndex() + 1;
+
+		void* ObjectContainerPtr = LastContainerInPathIndex == INDEX_NONE 
+			? InPropertyPath.GetCachedContainer()
+			: InPropertyPath.GetCachedLastContainerInPath();
+
+		// Helper to get value regardless of property address / if parent getter is called
+		auto GetValueFromProperty = [](void* OutValue, const FCachedPropertyPath& InPropertyPath, const void* PropertyAddress)
+		{
+			FProperty* Property = CastFieldChecked<FProperty>(InPropertyPath.GetLastSegment().GetField().ToField());
+			if (FBoolProperty* BoolProperty = CastField<FBoolProperty>(Property))
+			{
+				*static_cast<bool*>(OutValue) = BoolProperty->GetPropertyValue(PropertyAddress);
+			}
+			else if (ensure(Property))
+			{
+				Property->CopySingleValue(OutValue, PropertyAddress);
+			}
+		};
+
+		// Compilers will warn if Alloca is used inside a loop, so break Alloca logic out of the loop
+		int32 ParentSegmentIndex = INDEX_NONE;
+
+		// Call the topmost getter on the last UObject in path
+		const int32 NumSegments = InPropertyPath.GetNumSegments();
+		for (int32 Index = IndexAfterCachedLastContainer; Index < NumSegments; Index++)
+		{
+			const FPropertyPathSegment& ParentSegment = InPropertyPath.GetSegment(Index);
+			int32 ParentArrayIndex = ParentSegment.GetArrayIndex();
+			FProperty* ParentProperty = CastFieldChecked<FProperty>(ParentSegment.GetField().ToField());
+			ParentArrayIndex = ParentArrayIndex == INDEX_NONE ? 0 : ParentArrayIndex;
+
+			if (ParentProperty->HasGetter() && ParentArrayIndex < ParentProperty->ArrayDim)
+			{
+				ParentSegmentIndex = Index;
+				break;
+			}
+		}
+
+		// Note: We check for HasGetter & ParentArrayIndex valid above
+		if (ParentSegmentIndex != INDEX_NONE)
+		{
+			const FPropertyPathSegment& ParentSegment = InPropertyPath.GetSegment(ParentSegmentIndex);
+			int32 ParentArrayIndex = ParentSegment.GetArrayIndex();
+			FProperty* ParentProperty = CastFieldChecked<FProperty>(ParentSegment.GetField().ToField());
+			ParentArrayIndex = ParentArrayIndex == INDEX_NONE ? 0 : ParentArrayIndex;
+
+			// We want to call the Getter with the current value, so just get the pointer to current value via container
+			void* ParentAddress = ParentProperty->ContainerPtrToValuePtr<void>(ObjectContainerPtr, ParentArrayIndex);
+			if (ensure(ParentAddress))
+			{
+				int32 Size = ParentSegment.GetStruct()->GetPropertiesSize();
+				int32 Alignment = ParentSegment.GetStruct()->GetMinAlignment();
+				uint8* Temp = (uint8*)FMemory_Alloca_Aligned(Size, Alignment);
+				FMemory::Memzero(Temp, Size);
+
+				ParentProperty->InitializeValue(Temp);
+				ParentProperty->CallGetter(ObjectContainerPtr, Temp);
+
+				// We resolved the property address earlier & it's containing parent, use this for relative-offset for Temp
+				uint8* TempPropertyAddress = Temp + ((uint8*)InPropertyAddress - (uint8*)ParentAddress);
+				GetValueFromProperty(OutValue, InPropertyPath, TempPropertyAddress);
+				ParentProperty->DestroyValue(Temp);
+			}
+
+			return;
+		}
+
+		GetValueFromProperty(OutValue, InPropertyPath, InPropertyAddress);
 	}
 }
 
@@ -599,9 +740,9 @@ UStruct* FPropertyPathSegment::GetStruct() const
 FCachedPropertyPath::FCachedPropertyPath()
 	: CachedAddress(nullptr)
 	, CachedFunction(nullptr)
-#if DO_CHECK
 	, CachedContainer(nullptr)
-#endif
+	, CachedLastContainerInPath(nullptr)
+	, CachedLastContainerInPathIndex(INDEX_NONE)
 	, bCanSafelyUsedCachedAddress(false)
 {
 }
@@ -609,9 +750,9 @@ FCachedPropertyPath::FCachedPropertyPath()
 FCachedPropertyPath::FCachedPropertyPath(const FString& Path)
 	: CachedAddress(nullptr)
 	, CachedFunction(nullptr)
-#if DO_CHECK
 	, CachedContainer(nullptr)
-#endif
+	, CachedLastContainerInPath(nullptr)
+	, CachedLastContainerInPathIndex(INDEX_NONE)
 	, bCanSafelyUsedCachedAddress(false)
 {
 	MakeFromString(Path);
@@ -620,9 +761,9 @@ FCachedPropertyPath::FCachedPropertyPath(const FString& Path)
 FCachedPropertyPath::FCachedPropertyPath(const TArray<FString>& PathSegments)
 	: CachedAddress(nullptr)
 	, CachedFunction(nullptr)
-#if DO_CHECK
 	, CachedContainer(nullptr)
-#endif
+	, CachedLastContainerInPath(nullptr)
+	, CachedLastContainerInPathIndex(INDEX_NONE)
 	, bCanSafelyUsedCachedAddress(false)
 {
 	for (const FString& Segment : PathSegments)
@@ -634,13 +775,15 @@ FCachedPropertyPath::FCachedPropertyPath(const TArray<FString>& PathSegments)
 FCachedPropertyPath::FCachedPropertyPath(const FPropertyPathSegment& Segment)
 	: CachedAddress(nullptr)
 	, CachedFunction(nullptr)
-#if DO_CHECK
 	, CachedContainer(nullptr)
-#endif
+	, CachedLastContainerInPath(nullptr)
+	, CachedLastContainerInPathIndex(INDEX_NONE)
 	, bCanSafelyUsedCachedAddress(false)
 {
 	Segments.Add(Segment);
 }
+
+FCachedPropertyPath::~FCachedPropertyPath() = default;
 
 void FCachedPropertyPath::MakeFromString(const FString& InPropertyPath)
 {
@@ -719,6 +862,23 @@ void FCachedPropertyPath::SetCanSafelyUsedCachedAddress(bool bInCanSafelyUsedCac
 	bCanSafelyUsedCachedAddress = bInCanSafelyUsedCachedAddress;
 }
 
+void FCachedPropertyPath::SetCachedLastContainer(void* InContainer, int32 InIndex) const
+{
+	SetCanSafelyUsedCachedAddress(false);
+	CachedLastContainerInPath = InContainer;
+	CachedLastContainerInPathIndex = InIndex;
+}
+
+void* FCachedPropertyPath::GetCachedLastContainerInPath() const
+{
+	return CachedLastContainerInPath;
+}
+
+int32 FCachedPropertyPath::GetCachedLastContainerInPathIndex() const
+{
+	return CachedLastContainerInPathIndex;
+}
+
 bool FCachedPropertyPath::IsResolved() const
 {
 	return (CachedFunction != nullptr || CachedAddress != nullptr);
@@ -726,16 +886,14 @@ bool FCachedPropertyPath::IsResolved() const
 
 bool FCachedPropertyPath::IsFullyResolved() const
 {
-#if DO_CHECK
 	bool bCachedContainer = CachedContainer != nullptr;
-#else
-	bool bCachedContainer = true;
-#endif
 	return bCanSafelyUsedCachedAddress && bCachedContainer && IsResolved();
 }
 
 void* FCachedPropertyPath::GetCachedAddress() const
 {
+	// @TODO: DarenC - Should we? Maybe add a GetCachedAddressUnsafe method.
+	// check(bCanSafelyUsedCachedAddress); 
 	return CachedAddress;
 }
 
@@ -815,7 +973,6 @@ bool FCachedPropertyPath::Equals(const FString& Other) const
 	return ToString() == Other;
 }
 
-#if DO_CHECK
 void* FCachedPropertyPath::GetCachedContainer() const
 {
 	return CachedContainer;
@@ -825,7 +982,6 @@ void FCachedPropertyPath::SetCachedContainer(void* InContainer) const
 {
 	CachedContainer = InContainer;
 }
-#endif
 
 void FCachedPropertyPath::RemoveFromEnd(int32 InNumSegments)
 {
@@ -841,9 +997,9 @@ void FCachedPropertyPath::RemoveFromEnd(int32 InNumSegments)
 		}
 		CachedAddress = nullptr;
 		CachedFunction = nullptr;
-#if DO_CHECK
 		CachedContainer = nullptr;
-#endif// DO_CHECK
+		CachedLastContainerInPath = nullptr;
+		CachedLastContainerInPathIndex = INDEX_NONE;
 		bCanSafelyUsedCachedAddress = false;
 	}
 }
@@ -862,9 +1018,9 @@ void FCachedPropertyPath::RemoveFromStart(int32 InNumSegments)
 		}
 		CachedAddress = nullptr;
 		CachedFunction = nullptr;
-#if DO_CHECK
 		CachedContainer = nullptr;
-#endif // DO_CHECK
+		CachedLastContainerInPath = nullptr;
+		CachedLastContainerInPathIndex = INDEX_NONE;
 		bCanSafelyUsedCachedAddress = false;
 	}
 }
@@ -1017,6 +1173,18 @@ namespace PropertyPathHelpers
 		return ResolvePropertyPath(InContainer, InStruct, InPropertyPath, Resolver);
 	}
 
+	bool SetPropertyValue(UObject* InContainer, const FCachedPropertyPath& InPropertyPath, const UScriptStruct* InScriptStruct, const uint8* InValue)
+	{
+		PropertyPathHelpersInternal::FPropertyStructView StructView(InScriptStruct, InValue);
+		return SetPropertyValue(InContainer, InPropertyPath, StructView);
+	}
+
+	bool SetPropertyValue(UObject* InContainer, const FString& InPropertyPath, const UScriptStruct* InScriptStruct, const uint8* InValue)
+	{
+		PropertyPathHelpersInternal::FPropertyStructView StructView(InScriptStruct, InValue);
+		return SetPropertyValue(InContainer, InPropertyPath, StructView);
+	}
+
 	bool CopyPropertyValue(UObject* InContainer, const FCachedPropertyPath& InDestPropertyPath, const FCachedPropertyPath& InSrcPropertyPath)
 	{
 		if(InDestPropertyPath.IsFullyResolved() && InSrcPropertyPath.IsFullyResolved())
@@ -1044,10 +1212,8 @@ namespace PropertyPathHelpers
 
 	bool CopyPropertyValueFast(UObject* InContainer, const FCachedPropertyPath& InDestPropertyPath, const FCachedPropertyPath& InSrcPropertyPath)
 	{
-#if DO_CHECK
 		check(InContainer == InDestPropertyPath.GetCachedContainer());
 		check(InContainer == InSrcPropertyPath.GetCachedContainer());
-#endif // DO_CHECK
 		checkSlow(InDestPropertyPath.IsResolved());
 		checkSlow(InSrcPropertyPath.IsResolved());
 		checkSlow(PropertyPathHelpersInternal::CanCopyProperties(InDestPropertyPath, InSrcPropertyPath));

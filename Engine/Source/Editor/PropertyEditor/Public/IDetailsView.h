@@ -3,142 +3,29 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "DetailsDisplayManager.h"
 #include "Widgets/SCompoundWidget.h"
 #include "PropertyEditorDelegates.h"
 #include "Framework/Commands/UICommandList.h"
+#include "DetailsViewArgs.h"
 
+class FDetailTreeNode;
 class AActor;
 class FNotifyHook;
 class FPropertyPath;
 class FTabManager;
+class FUICommandList;
+class IClassViewerFilter;
 class IDetailKeyframeHandler;
 class IDetailPropertyExtensionHandler;
 class IDetailRootObjectCustomization;
 class IPropertyTypeIdentifier;
 class FDetailsViewObjectFilter;
+class FComplexPropertyNode;
 
-enum class EEditDefaultsOnlyNodeVisibility : uint8
-{
-	/** Always show nodes that have the EditDefaultsOnly aka CPF_DisableEditOnInstance flag. */
-	Show,
-	/** Always hide nodes that have the EditDefaultsOnly aka CPF_DisableEditOnInstance flag. */
-	Hide,
-	/** Let the details panel control it. If the CDO is selected EditDefaultsOnly nodes will be visible, otherwise false. */
-	Automatic,
-};
+typedef TArray<TSharedPtr<FComplexPropertyNode>> FRootPropertyNodeList;
 
-
-/**
- * Init params for a details view widget
- */
-struct FDetailsViewArgs
-{
-	enum ENameAreaSettings
-	{
-		/** The name area should never be displayed */
-		HideNameArea,
-		/** All object types use name area */
-		ObjectsUseNameArea,
-		/** Only Actors use name area */
-		ActorsUseNameArea,
-		/** Components and actors use the name area. Components will display their actor owner as the name */
-		ComponentsAndActorsUseNameArea,
-	};
-
-	/** Controls how CPF_DisableEditOnInstance nodes will be treated */
-	EEditDefaultsOnlyNodeVisibility DefaultsOnlyVisibility;
-	/** The command list from the host of the details view, allowing child widgets to bind actions with a bound chord */
-	TSharedPtr<class FUICommandList> HostCommandList;
-	/** The tab manager from the host of the details view, allowing child widgets to spawn tabs */
-	TSharedPtr<FTabManager> HostTabManager;
-	/** Optional object filter to use for more complex handling of what a details panel is viewing. */
-	TSharedPtr<FDetailsViewObjectFilter> ObjectFilter;
-
-	/** Identifier for this details view; NAME_None if this view is anonymous */
-	FName ViewIdentifier;
-	/** Notify hook to call when properties are changed */
-	FNotifyHook* NotifyHook;
-	/** Settings for displaying the name area */
-	ENameAreaSettings NameAreaSettings;
-	/** True if the viewed objects updates from editor selection */
-	uint32 bUpdatesFromSelection : 1;
-	/** True if this property view can be locked */
-	uint32 bLockable : 1;
-	/** True if we allow searching */
-	uint32 bAllowSearch : 1;
-	/** True if you want to not show the tip when no objects are selected (should only be used if viewing actors properties or bObjectsUseNameArea is true ) */
-	uint32 bHideSelectionTip : 1;
-	/** True if you want the search box to have initial keyboard focus */
-	uint32 bSearchInitialKeyFocus : 1;
-	/** True if the 'Open Selection in Property Matrix' button should be shown */
-	uint32 bShowPropertyMatrixButton : 1;
-	/** Allow options to be changed */
-	uint32 bShowOptions : 1;
-	/** True if you want to show the 'Show Only Modified Properties'. Only valid in conjunction with bShowOptions */
-	uint32 bShowModifiedPropertiesOption : 1;
-	/** True if you want to show the actor label */
-	uint32 bShowActorLabel : 1;
-	/** Bind this delegate to hide differing properties */
-	uint32 bShowDifferingPropertiesOption : 1;
-	/** If true, the name area will be created but will not be displayed so it can be placed in a custom location.  */
-	uint32 bCustomNameAreaLocation : 1;
-	/** If true, the filter area will be created but will not be displayed so it can be placed in a custom location.  */
-	uint32 bCustomFilterAreaLocation : 1;
-	/** If false, the current properties editor will never display the favorite system */
-	uint32 bAllowFavoriteSystem : 1;
-	/** If true the details panel will assume each object passed in through SetObjects will be a unique object shown in the tree and not combined with other objects */
-	uint32 bAllowMultipleTopLevelObjects : 1;
-	/** If false, the details panel's scrollbar will always be hidden. Useful when embedding details panels in widgets that either grow to accommodate them, or with scrollbars of their own. */
-	uint32 bShowScrollBar : 1;
-	/** If true, all properties will be visible, not just those with CPF_Edit */
-	uint32 bForceHiddenPropertyVisibility : 1;
-	/** True if you want to show the 'Show Only Keyable Properties'. Only valid in conjunction with bShowOptions */
-	uint32 bShowKeyablePropertiesOption : 1;
-	/** True if you want to show the 'Show Only Animated Properties'. Only valid in conjunction with bShowOptions */
-	uint32 bShowAnimatedPropertiesOption: 1;
-	/** True if you want to show a custom filter. */
-	uint32 bShowCustomFilterOption : 1;
-	/** The default column width */
-	float ColumnWidth;
-
-public:
-	/** Default constructor */
-	FDetailsViewArgs( const bool InUpdateFromSelection = false
-					, const bool InLockable = false
-					, const bool InAllowSearch = true
-					, const ENameAreaSettings InNameAreaSettings = ActorsUseNameArea
-					, const bool InHideSelectionTip = false
-					, FNotifyHook* InNotifyHook = NULL
-					, const bool InSearchInitialKeyFocus = false
-					, FName InViewIdentifier = NAME_None )
-		: DefaultsOnlyVisibility(EEditDefaultsOnlyNodeVisibility::Show)
-		, ViewIdentifier( InViewIdentifier )
-		, NotifyHook( InNotifyHook )
-		, NameAreaSettings( InNameAreaSettings )
-		, bUpdatesFromSelection( InUpdateFromSelection )
-		, bLockable(InLockable)
-		, bAllowSearch( InAllowSearch )
-		, bHideSelectionTip( InHideSelectionTip )
-		, bSearchInitialKeyFocus( InSearchInitialKeyFocus )
-		, bShowPropertyMatrixButton(true)
-		, bShowOptions( true )
-		, bShowModifiedPropertiesOption(true)
-		, bShowActorLabel(true)
-		, bShowDifferingPropertiesOption(false)
-		, bCustomNameAreaLocation(false)
-		, bCustomFilterAreaLocation(false)
-		, bAllowFavoriteSystem(true)	
-		, bAllowMultipleTopLevelObjects(false)
-		, bShowScrollBar(true)
-		, bForceHiddenPropertyVisibility(false)
-		, bShowKeyablePropertiesOption(true)
-		, bShowAnimatedPropertiesOption(true)
-		, bShowCustomFilterOption(false)
-		, ColumnWidth(.65f)
-	{
-	}
-};
-
+DECLARE_DELEGATE_RetVal_OneParam(bool, FOnValidateDetailsViewPropertyNodes, const FRootPropertyNodeList&)
 
 /**
  * Interface class for all detail views
@@ -184,7 +71,7 @@ public:
 	 *
 	 * @param InRootObjectCustomization	If null is passed in, the customization will be removed
 	 */
-	virtual void SetRootObjectCustomizationInstance(TSharedPtr<class IDetailRootObjectCustomization> InRootObjectCustomization) = 0;
+	virtual void SetRootObjectCustomizationInstance(TSharedPtr<IDetailRootObjectCustomization> InRootObjectCustomization) = 0;
 
 	/**
 	 * Sets the objects this details view is viewing
@@ -252,17 +139,16 @@ public:
 	virtual FIsPropertyReadOnly& GetIsPropertyReadOnlyDelegate() = 0;
 
 	/**
-	 * Sets a delegate to call to check if custom row visibility is filtered,
-	 * i.e. whether the FIsCustomRowVisible delegate will always return true no matter the parameters.
-	 */
-	virtual void SetIsCustomRowVisibilityFilteredDelegate(FIsCustomRowVisibilityFiltered InIsCustomRowVisibilityFiltered) = 0;
-	virtual FIsCustomRowVisibilityFiltered& GetIsCustomRowVisibilityFilteredDelegate() = 0;
-
-	/**
 	 * Sets a delegate to call to determine if a specific custom row should be visible in this instance of the details view
 	 */
 	virtual void SetIsCustomRowVisibleDelegate(FIsCustomRowVisible InIsCustomRowVisible) = 0;
 	virtual FIsCustomRowVisible& GetIsCustomRowVisibleDelegate() = 0;
+
+	/**
+	 * Sets a delegate to call to determine if a specific custom row should be visible in this instance of the details view
+	 */
+	virtual void SetIsCustomRowReadOnlyDelegate(FIsCustomRowReadOnly InIsCustomRowVisible) = 0;
+	virtual FIsCustomRowReadOnly& GetIsCustomRowReadOnlyDelegate() = 0;
 
 	/**
 	 * Sets a delegate to call to layout generic details not specific to an object being viewed
@@ -276,13 +162,11 @@ public:
 	virtual void SetIsPropertyEditingEnabledDelegate( FIsPropertyEditingEnabled IsPropertyEditingEnabled ) = 0;
 	virtual FIsPropertyEditingEnabled& GetIsPropertyEditingEnabledDelegate() = 0;
 
-	virtual void SetKeyframeHandler( TSharedPtr<class IDetailKeyframeHandler> InKeyframeHandler ) = 0;
+	virtual void SetKeyframeHandler( TSharedPtr<IDetailKeyframeHandler> InKeyframeHandler ) = 0;
+	virtual TSharedPtr<IDetailKeyframeHandler> GetKeyframeHandler() const = 0;
 
-	virtual TSharedPtr<IDetailKeyframeHandler> GetKeyframeHandler() = 0;
-
-	virtual void SetExtensionHandler(TSharedPtr<class IDetailPropertyExtensionHandler> InExtensionandler) = 0;
-
-	virtual TSharedPtr<class IDetailPropertyExtensionHandler> GetExtensionHandler() = 0;
+	virtual void SetExtensionHandler(TSharedPtr<IDetailPropertyExtensionHandler> InExtensionHandler) = 0;
+	virtual TSharedPtr<IDetailPropertyExtensionHandler> GetExtensionHandler() const = 0;
 
 	/**
 	 * @return true if property editing is enabled (based on the FIsPropertyEditingEnabled delegate)
@@ -305,12 +189,44 @@ public:
 	 * Returns a list of all the properties displayed (via full path), order in list corresponds to draw order:
 	 */
 	virtual TArray< FPropertyPath > GetPropertiesInOrderDisplayed() const = 0;
+	
+	/**
+	 * Returns the row number in the underlying TableView for each property being displayed. Note this won't include
+	 * any properties that are apart of a collapsed section of the property tree because those properties don't have
+	 * row numbers. If you need a list of all properties independent of expansion state, use GetPropertiesInOrderDisplayed
+	 */
+	virtual TArray<TPair<int32, FPropertyPath>> GetPropertyRowNumbers() const  = 0;
+
+	/**
+	 * Returns the boundary (in paint space) of a detail tree node if it's currently visible Otherwise return an invalid boundary
+	 */
+	virtual FSlateRect GetPaintSpacePropertyBounds(const TSharedRef<FDetailTreeNode>& InDetailTreeNode, bool IncludeChildren = true) const {return FSlateRect();}
+	
+	/**
+	 * Returns the boundary (in tick space) of a detail tree node if it's currently visible Otherwise return an invalid boundary
+	 */
+	virtual FSlateRect GetTickSpacePropertyBounds(const TSharedRef<FDetailTreeNode>& InDetailTreeNode, bool IncludeChildren = true) const {return FSlateRect();}
+
+	/**
+	 * Returns true if the provided detail tree node is part of a collapsed/hidden subsection of the details panel
+	 */
+	virtual bool IsAncestorCollapsed(const TSharedRef<IDetailTreeNode>& Node) const { return false; }
+	
+	/**
+	 * returns the number of rows in the underlying TableView
+	 */
+	virtual int32 CountRows() const  = 0;
 
 	/**
 	 * Creates a box around the treenode corresponding to Property and scrolls the treenode into view
 	 */
 	virtual void HighlightProperty(const FPropertyPath& Property) = 0;
-	
+
+	/**
+	 * Scrolls the treenode for the specific property into view
+	 */
+	virtual void ScrollPropertyIntoView(const FPropertyPath& Property, bool bExpandProperty = false) = 0;
+
 	/**
 	 * Forces all advanced property sections to be in expanded state:
 	 */
@@ -335,16 +251,19 @@ public:
 	/**
 	 * Sets the set of properties that are considered differing, used when filtering out identical properties
 	 */
-	virtual void UpdatePropertiesWhitelist(const TSet<FPropertyPath> InWhitelistedProperties) = 0;
+	virtual void UpdatePropertyAllowList(const TSet<FPropertyPath>& InAllowedProperties) = 0;
 
 	/** Returns the name area widget used to display object naming functionality so it can be placed in a custom location.  Note FDetailsViewArgs.bCustomNameAreaLocation must be true */
 	virtual TSharedPtr<SWidget> GetNameAreaWidget() = 0;
+
+	/** Optionally add custom tools into the NameArea */
+	virtual void SetNameAreaCustomContent(TSharedRef<SWidget>& InCustomContent) = 0;
 
 	/** Returns the search area widget used to display search and view options so it can be placed in a custom location.  Note FDetailsViewArgs.bCustomFilterAreaLocation must be true */
 	virtual TSharedPtr<SWidget> GetFilterAreaWidget() = 0;
 
 	/** Returns the command list of the hosting toolkit (can be nullptr if the widget that contains the details panel didn't route a command list in) */
-	virtual TSharedPtr<class FUICommandList> GetHostCommandList() const = 0;
+	virtual TSharedPtr<FUICommandList> GetHostCommandList() const = 0;
 
 	/** Returns the tab manager of the hosting toolkit (can be nullptr if the details panel is not hosted within a tab) */
 	virtual TSharedPtr<FTabManager> GetHostTabManager() const = 0;
@@ -354,12 +273,44 @@ public:
 
 	/** Force refresh */
 	virtual void ForceRefresh() = 0;
+
+	/** Invalidates any cached state without necessarily doing a complete rebuild. */
+	virtual void InvalidateCachedState()
+	{
+		ForceRefresh();
+	}
 	
 	/** Sets an optional object filter to use for more complex handling of what a details panel is viewing. */
 	virtual void SetObjectFilter(TSharedPtr<FDetailsViewObjectFilter> InFilter) = 0;
+
+	/** Sets the custom filter(s) to be used when selecting values for class properties in this view. */
+	virtual void SetClassViewerFilters(const TArray<TSharedRef<IClassViewerFilter>>& InFilters) = 0;
 
 	/** Allows other systems to add a custom filter in the details panel */
 	virtual void SetCustomFilterDelegate(FSimpleDelegate InDelegate) = 0;
 
 	virtual void SetCustomFilterLabel(FText InText) = 0;
+
+		/* Use this function to set a callback for SDetailsView that will skip the EnsureDataIsValid call in Tick.
+	 * This is useful if your implementation doesn't need to validate nodes every tick or needs to perform some other form of validation. */
+	virtual void SetCustomValidatePropertyNodesFunction(FOnValidateDetailsViewPropertyNodes InCustomValidatePropertyNodesFunction) = 0;
+
+	/** Sets the minimum width of the detail panel's right column. */
+	virtual void SetRightColumnMinWidth(float InMinWidth) = 0;
+
+	/**
+	* Updates @code FDetailsViewStyleKey& StyleKey @endcode for the current IDetailsView state
+	*/
+	virtual void UpdateStyleKey() = 0;
+
+	/**
+	* Gets the @code FDetailsViewStyleKey& @endcode which provides a Key to the current style for a Details View
+	*/
+	virtual const FDetailsViewStyleKey& GetStyleKey() = 0;
+	
+	/**
+   	* Returns a bool indicating whether the given @code FDetailsViewStyleKey @endcode is the default Details View Style 
+   	*/
+   	virtual bool IsDefaultStyle() const = 0;
+
 };

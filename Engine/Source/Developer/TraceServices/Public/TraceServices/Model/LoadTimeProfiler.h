@@ -2,14 +2,19 @@
 
 #pragma once
 
-#include "TraceServices/Model/AnalysisSession.h"
-#include "Serialization/LoadTimeTrace.h"
-#include "TraceServices/Containers/Timelines.h"
-#include "TraceServices/Containers/Tables.h"
 #include "Containers/Array.h"
+#include "HAL/Platform.h"
+#include "Serialization/LoadTimeTrace.h"
+#include "Templates/Function.h"
+#include "TraceServices/Containers/Tables.h"
+#include "TraceServices/Containers/Timelines.h"
+#include "TraceServices/Model/AnalysisSession.h"
+#include "UObject/NameTypes.h"
 
-namespace Trace
+namespace TraceServices
 {
+
+template <typename RowType> class ITable;
 
 struct FFileInfo
 {
@@ -20,6 +25,7 @@ struct FFileInfo
 enum EFileActivityType
 {
 	FileActivityType_Open,
+	FileActivityType_ReOpen,
 	FileActivityType_Close,
 	FileActivityType_Read,
 	FileActivityType_Write,
@@ -41,6 +47,8 @@ struct FFileActivity
 	uint32 ThreadId = 0;
 	EFileActivityType ActivityType = FileActivityType_Invalid;
 	bool Failed = false;
+	uint64 FileHandle;
+	uint64 ReadWriteHandle;
 };
 
 class IFileActivityProvider
@@ -59,6 +67,7 @@ struct FPackageSummaryInfo
 	uint32 TotalHeaderSize = 0;
 	uint32 ImportCount = 0;
 	uint32 ExportCount = 0;
+	int32 Priority = 0;
 };
 
 struct FClassInfo
@@ -81,12 +90,15 @@ struct FPackageInfo
 	uint32 Id;
 	const TCHAR* Name = nullptr;
 	FPackageSummaryInfo Summary;
+	TArray<const FPackageInfo*> ImportedPackages;
 	TArray<const FPackageExportInfo*> Exports;
 	uint64 TotalExportsSerialSize = 0;
+	uint64 RequestId = 0;
 };
 
 struct FLoadRequest
 {
+	uint64 Id = 0;
 	const TCHAR* Name = nullptr;
 	uint32 ThreadId = uint32(-1);
 	double StartTime = 0.0;
@@ -114,11 +126,21 @@ struct FExportsTableRow
 struct FPackagesTableRow
 {
 	const FPackageInfo* PackageInfo = nullptr;
+	uint64 TotalSerializedSize = 0;
 	uint64 SerializedHeaderSize = 0;
 	uint64 SerializedExportsCount = 0;
 	uint64 SerializedExportsSize = 0;
 	double MainThreadTime = 0.0;
 	double AsyncLoadingThreadTime = 0.0;
+};
+
+struct FRequestsTableRow
+{
+	uint64 Id = 0;
+	const TCHAR* Name = nullptr;
+	double StartTime = 0.0;
+	double Duration = 0.0;
+	TArray<const FPackageInfo*> Packages;
 };
 
 struct FLoadTimeProfilerCpuEvent
@@ -155,10 +177,14 @@ public:
 	virtual ITable<FLoadTimeProfilerAggregatedStats>* CreateObjectTypeAggregation(double IntervalStart, double IntervalEnd) const = 0;
 	virtual ITable<FPackagesTableRow>* CreatePackageDetailsTable(double IntervalStart, double IntervalEnd) const = 0;
 	virtual ITable<FExportsTableRow>* CreateExportDetailsTable(double IntervalStart, double IntervalEnd) const = 0;
+	virtual ITable<FRequestsTableRow>* CreateRequestsTable(double IntervalStart, double IntervalEnd) const = 0;
 	virtual const ITable<FLoadRequest>& GetRequestsTable() const = 0;
 };
 
+TRACESERVICES_API FName GetLoadTimeProfilerProviderName();
 TRACESERVICES_API const ILoadTimeProfilerProvider* ReadLoadTimeProfilerProvider(const IAnalysisSession& Session);
+
+TRACESERVICES_API FName GetFileActivityProviderName();
 TRACESERVICES_API const IFileActivityProvider* ReadFileActivityProvider(const IAnalysisSession& Session);
 
-}
+} // namespace TraceServices

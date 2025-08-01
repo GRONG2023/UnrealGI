@@ -2,11 +2,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -34,6 +34,19 @@ namespace UnrealBuildTool
 			/// The attribute containing this argument's info
 			/// </summary>
 			public CommandLineAttribute Attribute;
+
+			/// <summary>
+			/// Constructor
+			/// </summary>
+			/// <param name="Prefix"></param>
+			/// <param name="FieldInfo"></param>
+			/// <param name="Attribute"></param>
+			public Parameter(string Prefix, FieldInfo FieldInfo, CommandLineAttribute Attribute)
+			{
+				this.Prefix = Prefix;
+				this.FieldInfo = FieldInfo;
+				this.Attribute = Attribute;
+			}
 		}
 
 		/// <summary>
@@ -41,14 +54,22 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Arguments">List of arguments. Parsed arguments will be removed from this list when the function returns.</param>
 		/// <param name="TargetObject">Object to receive the parsed arguments. Fields in this object should be marked up with CommandLineArgumentAttribute's to indicate how they should be parsed.</param>
-		public static void ParseArguments(IEnumerable<string> Arguments, object TargetObject)
+		public static void ParseArguments(IEnumerable<string> Arguments, object TargetObject) => ParseArguments(Arguments, TargetObject, Log.Logger);
+
+		/// <summary>
+		/// Parse the given list of arguments and apply them to the given object
+		/// </summary>
+		/// <param name="Arguments">List of arguments. Parsed arguments will be removed from this list when the function returns.</param>
+		/// <param name="TargetObject">Object to receive the parsed arguments. Fields in this object should be marked up with CommandLineArgumentAttribute's to indicate how they should be parsed.</param>
+		/// <param name="Logger">Logger for output</param>
+		public static void ParseArguments(IEnumerable<string> Arguments, object TargetObject, ILogger Logger)
 		{
-			ParseAndRemoveArguments(Arguments.ToList(), TargetObject);
+			ParseAndRemoveArguments(Arguments.ToList(), TargetObject, Logger);
 		}
 
 		private static Type NonNullableType(Type type)
 		{
-			Type UnderlyingType = Nullable.GetUnderlyingType(type);
+			Type? UnderlyingType = Nullable.GetUnderlyingType(type);
 			if (UnderlyingType != null)
 			{
 				return UnderlyingType;
@@ -61,21 +82,22 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="Arguments">List of arguments. Parsed arguments will be removed from this list when the function returns.</param>
 		/// <param name="TargetObject">Object to receive the parsed arguments. Fields in this object should be marked up with CommandLineArgumentAttribute's to indicate how they should be parsed.</param>
-		public static void ParseAndRemoveArguments(List<string> Arguments, object TargetObject)
+		/// <param name="Logger">Logger for output</param>
+		public static void ParseAndRemoveArguments(List<string> Arguments, object TargetObject, ILogger Logger)
 		{
 			// Build a mapping from name to field and attribute for this object
 			Dictionary<string, Parameter> PrefixToParameter = new Dictionary<string, Parameter>(StringComparer.InvariantCultureIgnoreCase);
-			for(Type TargetType = TargetObject.GetType(); TargetType != typeof(object); TargetType = TargetType.BaseType)
+			for (Type TargetType = TargetObject.GetType(); TargetType != typeof(object); TargetType = TargetType.BaseType!)
 			{
-				foreach(FieldInfo FieldInfo in TargetType.GetFields(BindingFlags.Instance | BindingFlags.GetField | BindingFlags.GetProperty | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+				foreach (FieldInfo FieldInfo in TargetType.GetFields(BindingFlags.Instance | BindingFlags.GetField | BindingFlags.GetProperty | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
 				{
 					IEnumerable<CommandLineAttribute> Attributes = FieldInfo.GetCustomAttributes<CommandLineAttribute>();
-					foreach(CommandLineAttribute Attribute in Attributes)
+					foreach (CommandLineAttribute Attribute in Attributes)
 					{
-						string Prefix = Attribute.Prefix;
-						if(Prefix == null)
+						string? Prefix = Attribute.Prefix;
+						if (Prefix == null)
 						{
-							if(NonNullableType(FieldInfo.FieldType) == typeof(bool))
+							if (NonNullableType(FieldInfo.FieldType) == typeof(bool))
 							{
 								Prefix = String.Format("-{0}", FieldInfo.Name);
 							}
@@ -86,56 +108,56 @@ namespace UnrealBuildTool
 						}
 						else
 						{
-							if(NonNullableType(FieldInfo.FieldType) != typeof(bool) && Attribute.Value == null && !Prefix.EndsWith("=") && !Prefix.EndsWith(":"))
+							if (NonNullableType(FieldInfo.FieldType) != typeof(bool) && Attribute.Value == null && !Prefix.EndsWith("=") && !Prefix.EndsWith(":"))
 							{
 								Prefix = Prefix + "=";
 							}
 						}
-						PrefixToParameter.Add(Prefix, new Parameter { Prefix = Prefix, Attribute = Attribute, FieldInfo = FieldInfo });
+						PrefixToParameter.Add(Prefix, new Parameter(Prefix, FieldInfo, Attribute));
 					}
 				}
 			}
 
 			// Step through the arguments, and remove those that we can parse
 			Dictionary<FieldInfo, Parameter> AssignedFieldToParameter = new Dictionary<FieldInfo, Parameter>();
-			for(int Idx = 0; Idx < Arguments.Count; Idx++)
+			for (int Idx = 0; Idx < Arguments.Count; Idx++)
 			{
 				string Argument = Arguments[Idx];
-				if(Argument.Length > 0 && Argument[0] == '-')
+				if (Argument.Length > 0 && Argument[0] == '-')
 				{
 					// Get the length of the argument prefix
-					int EqualsIdx = Argument.IndexOfAny(new char[]{ '=', ':' });
-					string Prefix = (EqualsIdx == -1)? Argument : Argument.Substring(0, EqualsIdx + 1);
+					int EqualsIdx = Argument.IndexOfAny(new char[] { '=', ':' });
+					string Prefix = (EqualsIdx == -1) ? Argument : Argument.Substring(0, EqualsIdx + 1);
 
 					// Check if there's a matching argument registered
-					Parameter Parameter;
-					if(PrefixToParameter.TryGetValue(Prefix, out Parameter))
+					Parameter? Parameter;
+					if (PrefixToParameter.TryGetValue(Prefix, out Parameter))
 					{
 						int NextIdx = Idx + 1;
 
 						// Parse the value
-						if(Parameter.Attribute.Value != null)
+						if (Parameter.Attribute.Value != null)
 						{
-							if(EqualsIdx != -1)
+							if (EqualsIdx != -1)
 							{
-								Log.WriteLine(LogEventType.Warning, "Cannot specify a value for {0}", Parameter.Prefix);
+								Logger.LogWarning("Cannot specify a value for {ParameterPrefix}", Parameter.Prefix);
 							}
 							else
 							{
-								AssignValue(Parameter, Parameter.Attribute.Value, TargetObject, AssignedFieldToParameter);
+								AssignValue(Parameter, Parameter.Attribute.Value, TargetObject, AssignedFieldToParameter, Logger);
 							}
 						}
-						else if(EqualsIdx != -1)
+						else if (EqualsIdx != -1)
 						{
-							AssignValue(Parameter, Argument.Substring(EqualsIdx + 1), TargetObject, AssignedFieldToParameter);
+							AssignValue(Parameter, Argument.Substring(EqualsIdx + 1), TargetObject, AssignedFieldToParameter, Logger);
 						}
-						else if(NonNullableType(Parameter.FieldInfo.FieldType) == typeof(bool))
+						else if (NonNullableType(Parameter.FieldInfo.FieldType) == typeof(bool))
 						{
-							AssignValue(Parameter, "true", TargetObject, AssignedFieldToParameter);
+							AssignValue(Parameter, "true", TargetObject, AssignedFieldToParameter, Logger);
 						}
 						else
 						{
-							Log.WriteLine(LogEventType.Warning, "Missing value for {0}", Parameter.Prefix);
+							Logger.LogWarning("Missing value for {ParameterPrefix}", Parameter.Prefix);
 						}
 
 						// Remove the argument from the list
@@ -147,16 +169,16 @@ namespace UnrealBuildTool
 
 			// Make sure there are no required parameters that are missing
 			Dictionary<FieldInfo, Parameter> MissingFieldToParameter = new Dictionary<FieldInfo, Parameter>();
-			foreach(Parameter Parameter in PrefixToParameter.Values)
+			foreach (Parameter Parameter in PrefixToParameter.Values)
 			{
-				if(Parameter.Attribute.Required && !AssignedFieldToParameter.ContainsKey(Parameter.FieldInfo) && !MissingFieldToParameter.ContainsKey(Parameter.FieldInfo))
+				if (Parameter.Attribute.Required && !AssignedFieldToParameter.ContainsKey(Parameter.FieldInfo) && !MissingFieldToParameter.ContainsKey(Parameter.FieldInfo))
 				{
 					MissingFieldToParameter.Add(Parameter.FieldInfo, Parameter);
 				}
 			}
-			if(MissingFieldToParameter.Count > 0)
+			if (MissingFieldToParameter.Count > 0)
 			{
-				if(MissingFieldToParameter.Count == 1)
+				if (MissingFieldToParameter.Count == 1)
 				{
 					throw new BuildException("Missing {0} argument", MissingFieldToParameter.First().Value.Prefix.Replace("=", "=..."));
 				}
@@ -171,17 +193,18 @@ namespace UnrealBuildTool
 		/// Checks that the list of arguments is empty. If not, throws an exception listing them.
 		/// </summary>
 		/// <param name="RemainingArguments">List of remaining arguments</param>
-		public static void CheckNoRemainingArguments(List<string> RemainingArguments)
+		/// <param name="Logger">Logger for output</param>
+		public static void CheckNoRemainingArguments(List<string> RemainingArguments, ILogger Logger)
 		{
-			if(RemainingArguments.Count > 0)
+			if (RemainingArguments.Count > 0)
 			{
-				if(RemainingArguments.Count == 1)
+				if (RemainingArguments.Count == 1)
 				{
-					Log.TraceWarning("Invalid argument: {0}", RemainingArguments[0]);
+					Logger.LogWarning("Invalid argument: {Arg}", RemainingArguments[0]);
 				}
 				else
 				{
-					Log.TraceWarning("Invalid arguments:\n{0}", String.Join("\n", RemainingArguments));
+					Logger.LogWarning("Invalid arguments:\n{Args}", String.Join("\n", RemainingArguments));
 				}
 			}
 		}
@@ -193,10 +216,11 @@ namespace UnrealBuildTool
 		/// <param name="Text">Argument text</param>
 		/// <param name="TargetObject">The target object to assign values to</param>
 		/// <param name="AssignedFieldToParameter">Maps assigned fields to the parameter that wrote to it. Used to detect duplicate and conflicting arguments.</param>
-		static void AssignValue(Parameter Parameter, string Text, object TargetObject, Dictionary<FieldInfo, Parameter> AssignedFieldToParameter)
+		/// <param name="Logger">Logger for output</param>
+		static void AssignValue(Parameter Parameter, string Text, object TargetObject, Dictionary<FieldInfo, Parameter> AssignedFieldToParameter, ILogger Logger)
 		{
 			// Check if the field type implements ICollection<>. If so, we can take multiple values.
-			Type CollectionType = null;
+			Type? CollectionType = null;
 			foreach (Type InterfaceType in Parameter.FieldInfo.FieldType.GetInterfaces())
 			{
 				if (InterfaceType.IsGenericType && InterfaceType.GetGenericTypeDefinition() == typeof(ICollection<>))
@@ -210,27 +234,27 @@ namespace UnrealBuildTool
 			if (CollectionType == null)
 			{
 				// Try to parse the value
-				object Value;
-				if(!TryParseValue(Parameter.FieldInfo.FieldType, Text, out Value))
+				object? Value;
+				if (!TryParseValue(Parameter.FieldInfo.FieldType, Text, out Value))
 				{
-					Log.WriteLine(LogEventType.Warning, "Invalid value for {0}... - ignoring {1}", Parameter.Prefix, Text);
+					Logger.LogWarning("Invalid value for {ParameterPrefix}... - ignoring {Text}", Parameter.Prefix, Text);
 					return;
 				}
 
 				// Check if this field has already been assigned to. Output a warning if the previous value is in conflict with the new one.
-				Parameter PreviousParameter;
-				if(AssignedFieldToParameter.TryGetValue(Parameter.FieldInfo, out PreviousParameter))
+				Parameter? PreviousParameter;
+				if (AssignedFieldToParameter.TryGetValue(Parameter.FieldInfo, out PreviousParameter))
 				{
-					object PreviousValue = Parameter.FieldInfo.GetValue(TargetObject);
-					if(!PreviousValue.Equals(Value))
+					object? PreviousValue = Parameter.FieldInfo.GetValue(TargetObject);
+					if (!Object.Equals(PreviousValue, Value))
 					{
-						if(PreviousParameter.Prefix == Parameter.Prefix)
+						if (PreviousParameter.Prefix == Parameter.Prefix)
 						{
-							Log.WriteLine(LogEventType.Warning, "Conflicting {0} arguments - ignoring", Parameter.Prefix);
+							Logger.LogWarning("Conflicting {ParameterPrefix} arguments - ignoring", Parameter.Prefix);
 						}
 						else
 						{
-							Log.WriteLine(LogEventType.Warning, "{0} conflicts with {1} - ignoring", Parameter.Prefix, PreviousParameter.Prefix);
+							Logger.LogWarning("{ParameterPrefix} conflicts with {PreviousParameterPrefix} - ignoring", Parameter.Prefix, PreviousParameter.Prefix);
 						}
 					}
 					return;
@@ -244,7 +268,7 @@ namespace UnrealBuildTool
 			{
 				// Split the text into an array of values if necessary
 				string[] ItemArray;
-				if(Parameter.Attribute.ListSeparator == 0)
+				if (Parameter.Attribute.ListSeparator == 0)
 				{
 					ItemArray = new string[] { Text };
 				}
@@ -254,16 +278,16 @@ namespace UnrealBuildTool
 				}
 
 				// Parse each of the argument values separately
-				foreach(string Item in ItemArray)
+				foreach (string Item in ItemArray)
 				{
-					object Value;
-					if(TryParseValue(CollectionType.GenericTypeArguments[0], Item, out Value))
+					object? Value;
+					if (TryParseValue(CollectionType.GenericTypeArguments[0], Item, out Value))
 					{
 						CollectionType.InvokeMember("Add", BindingFlags.InvokeMethod, null, Parameter.FieldInfo.GetValue(TargetObject), new object[] { Value });
 					}
 					else
 					{
-						Log.WriteLine(LogEventType.Warning, "'{0}' is not a valid value for -{1}=... - ignoring", Item, Parameter.Prefix);
+						Logger.LogWarning("'{Item}' is not a valid value for -{ParameterPrefix}=... - ignoring", Item, Parameter.Prefix);
 					}
 				}
 			}
@@ -276,10 +300,10 @@ namespace UnrealBuildTool
 		/// <param name="Text">The value text</param>
 		/// <param name="Value">On success, contains the parsed object</param>
 		/// <returns>True if the text could be parsed, false otherwise</returns>
-		static bool TryParseValue(Type FieldType, string Text, out object Value)
+		static bool TryParseValue(Type FieldType, string Text, [NotNullWhen(true)] out object? Value)
 		{
 			FieldType = NonNullableType(FieldType);
-			if(FieldType.IsEnum)
+			if (FieldType.IsEnum)
 			{
 				// Special handling for enums; parse the value ignoring case.
 				try
@@ -287,13 +311,13 @@ namespace UnrealBuildTool
 					Value = Enum.Parse(FieldType, Text, true);
 					return true;
 				}
-				catch(ArgumentException)
+				catch (ArgumentException)
 				{
 					Value = null;
 					return false;
 				}
 			}
-			else if(FieldType == typeof(FileReference))
+			else if (FieldType == typeof(FileReference))
 			{
 				// Construct a file reference from the string
 				try
@@ -315,7 +339,7 @@ namespace UnrealBuildTool
 					Value = Convert.ChangeType(Text, FieldType);
 					return true;
 				}
-				catch(InvalidCastException)
+				catch (InvalidCastException)
 				{
 					Value = null;
 					return false;

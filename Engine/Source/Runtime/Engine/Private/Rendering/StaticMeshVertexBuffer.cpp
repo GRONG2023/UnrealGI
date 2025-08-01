@@ -1,10 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Rendering/StaticMeshVertexBuffer.h"
-#include "EngineUtils.h"
+
 #include "Components.h"
-#include "GPUSkinCache.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "EngineUtils.h"
+#include "LocalVertexFactory.h"
+#include "MeshUVChannelInfo.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
+#include "RHIResourceUpdates.h"
+#include "StaticMeshVertexData.h"
 
 FStaticMeshVertexBuffer::FStaticMeshVertexBuffer() :
 	TangentsData(nullptr),
@@ -13,7 +18,7 @@ FStaticMeshVertexBuffer::FStaticMeshVertexBuffer() :
 	TexcoordDataPtr(nullptr),
 	NumTexCoords(0),
 	NumVertices(0),
-	bUseFullPrecisionUVs(!GVertexElementTypeSupport.IsSupported(VET_Half2)),
+	bUseFullPrecisionUVs(false),
 	bUseHighPrecisionTangentBasis(false)
 {}
 
@@ -58,20 +63,30 @@ void FStaticMeshVertexBuffer::Init(uint32 InNumVertices, uint32 InNumTexCoords, 
 * @param InVertices - The vertices to initialize the buffer with.
 * @param InNumTexCoords - The number of texture coordinate to store in the buffer.
 */
-void FStaticMeshVertexBuffer::Init(const TArray<FStaticMeshBuildVertex>& InVertices, uint32 InNumTexCoords, bool bNeedsCPUAccess)
+void FStaticMeshVertexBuffer::Init(const TArray<FStaticMeshBuildVertex>& InVertices, uint32 InNumTexCoords, const FStaticMeshVertexBufferFlags & InInitFlags)
 {
-	Init(InVertices.Num(), InNumTexCoords, bNeedsCPUAccess);
+	FConstMeshBuildVertexView VertexView = MakeConstMeshBuildVertexView(InVertices);
+	Init(VertexView, InInitFlags);
+}
+
+/**
+* Initializes the buffer with the given vertex view.
+* @param InVertices - The vertices to initialize the buffer with.
+* @param InNumTexCoords - The number of texture coordinate to store in the buffer.
+*/
+void FStaticMeshVertexBuffer::Init(const FConstMeshBuildVertexView& InVertices, const FStaticMeshVertexBufferFlags& InInitFlags)
+{
+	Init(InVertices.Position.Num(), InVertices.UVs.Num(), InInitFlags.bNeedsCPUAccess);
 
 	// Copy the vertices into the buffer.
-	for (int32 VertexIndex = 0; VertexIndex < InVertices.Num(); VertexIndex++)
+	for (int32 VertexIndex = 0; VertexIndex < InVertices.Position.Num(); VertexIndex++)
 	{
-		const FStaticMeshBuildVertex& SourceVertex = InVertices[VertexIndex];
 		const uint32 DestVertexIndex = VertexIndex;
-		SetVertexTangents(DestVertexIndex, SourceVertex.TangentX, SourceVertex.TangentY, SourceVertex.TangentZ);
+		SetVertexTangents(DestVertexIndex, InVertices.TangentX[VertexIndex], InVertices.TangentY[VertexIndex], InVertices.TangentZ[VertexIndex]);
 
-		for (uint32 UVIndex = 0; UVIndex < NumTexCoords; UVIndex++)
+		for (int32 UVIndex = 0; UVIndex < InVertices.UVs.Num(); UVIndex++)
 		{
-			SetVertexUV(DestVertexIndex, UVIndex, SourceVertex.UVs[UVIndex]);
+			SetVertexUV(DestVertexIndex, UVIndex, InVertices.UVs[UVIndex][VertexIndex], InInitFlags.bUseBackwardsCompatibleF16TruncUVs);
 		}
 	}
 }
@@ -103,17 +118,9 @@ void FStaticMeshVertexBuffer::Init(const FStaticMeshVertexBuffer& InVertexBuffer
 			check(GetNumTexCoords() == InVertexBuffer.GetNumTexCoords());
 			const uint8* InData = InVertexBuffer.TexcoordDataPtr;
 
-			// convert half float data to full float if the HW requires it.
-			if (!GetUseFullPrecisionUVs() && !GVertexElementTypeSupport.IsSupported(VET_Half2))
-			{
-				ConvertHalfTexcoordsToFloat(InData);
-			}
-			else
-			{
-				TexcoordData->ResizeBuffer(NumVertices * GetNumTexCoords());
-				TexcoordDataPtr = TexcoordData->GetDataPointer();
-				FMemory::Memcpy(TexcoordDataPtr, InData, TexcoordData->GetStride() * NumVertices * GetNumTexCoords());
-			}
+			TexcoordData->ResizeBuffer(NumVertices * GetNumTexCoords());
+			TexcoordDataPtr = TexcoordData->GetDataPointer();
+			FMemory::Memcpy(TexcoordDataPtr, InData, TexcoordData->GetStride() * NumVertices * GetNumTexCoords());
 		}
 	}
 }
@@ -131,7 +138,7 @@ void FStaticMeshVertexBuffer::ConvertHalfTexcoordsToFloat(const uint8* InData)
 	TexcoordDataPtr = TexcoordData->GetDataPointer();
 	TexcoordStride = sizeof(UVType);
 
-	FVector2D* DestTexcoordDataPtr = (FVector2D*)TexcoordDataPtr;
+	FVector2f* DestTexcoordDataPtr = (FVector2f*)TexcoordDataPtr;
 	FVector2DHalf* SourceTexcoordDataPtr = (FVector2DHalf*)(InData ? InData : OriginalTexcoordData->GetDataPointer());
 	for (uint32 i = 0; i < NumVertices * GetNumTexCoords(); i++)
 	{
@@ -143,7 +150,7 @@ void FStaticMeshVertexBuffer::ConvertHalfTexcoordsToFloat(const uint8* InData)
 }
 
 
-void FStaticMeshVertexBuffer::AppendVertices( const FStaticMeshBuildVertex* Vertices, const uint32 NumVerticesToAppend )
+void FStaticMeshVertexBuffer::AppendVertices( const FStaticMeshBuildVertex* Vertices, const uint32 NumVerticesToAppend, bool bUseBackwardsCompatibleF16TruncUVs)
 {
 	if ((TangentsData == nullptr || TexcoordData == nullptr) && NumVerticesToAppend > 0)
 	{
@@ -179,7 +186,7 @@ void FStaticMeshVertexBuffer::AppendVertices( const FStaticMeshBuildVertex* Vert
 				SetVertexTangents( DestVertexIndex, SourceVertex.TangentX, SourceVertex.TangentY, SourceVertex.TangentZ );
 				for( uint32 UVIndex = 0; UVIndex < NumTexCoords; UVIndex++ )
 				{
-					SetVertexUV( DestVertexIndex, UVIndex, SourceVertex.UVs[ UVIndex ] );
+					SetVertexUV( DestVertexIndex, UVIndex, SourceVertex.UVs[ UVIndex ], bUseBackwardsCompatibleF16TruncUVs );
 				}
 			}
 		}
@@ -199,7 +206,7 @@ void FStaticMeshVertexBuffer::Serialize(FArchive& Ar, bool bNeedsCPUAccess)
 
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("FStaticMeshVertexBuffer::Serialize"), STAT_StaticMeshVertexBuffer_Serialize, STATGROUP_LoadTime);
 
-	FStripDataFlags StripFlags(Ar, 0, VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX);
+	FStripDataFlags StripFlags(Ar, 0, FPackageFileVersion::CreateUE4Version(VER_UE4_STATIC_SKELETAL_MESH_SERIALIZATION_FIX));
 
 	SerializeMetaData(Ar);
 
@@ -209,7 +216,7 @@ void FStaticMeshVertexBuffer::Serialize(FArchive& Ar, bool bNeedsCPUAccess)
 		AllocateData(bNeedsCPUAccess);
 	}
 
-	if (!StripFlags.IsDataStrippedForServer() || Ar.IsCountingMemory())
+	if (!StripFlags.IsAudioVisualDataStripped() || Ar.IsCountingMemory())
 	{
 		if (TangentsData != nullptr)
 		{
@@ -227,12 +234,6 @@ void FStaticMeshVertexBuffer::Serialize(FArchive& Ar, bool bNeedsCPUAccess)
 
 			// Make a copy of the vertex data pointer.
 			TexcoordDataPtr = NumVertices ? TexcoordData->GetDataPointer() : nullptr;
-
-			// convert half float data to full float if the HW requires it.
-			if (NumVertices && !GetUseFullPrecisionUVs() && !GVertexElementTypeSupport.IsSupported(VET_Half2))
-			{
-				ConvertHalfTexcoordsToFloat(nullptr);
-			}
 		}
 	}
 }
@@ -249,7 +250,7 @@ void FStaticMeshVertexBuffer::SerializeMetaData(FArchive& Ar)
 void FStaticMeshVertexBuffer::ClearMetaData()
 {
 	NumTexCoords = NumVertices = 0;
-	bUseFullPrecisionUVs = !GVertexElementTypeSupport.IsSupported(VET_Half2);
+	bUseFullPrecisionUVs = false;
 	bUseHighPrecisionTangentBasis = false;
 	TangentsStride = TexcoordStride = 0;
 }
@@ -266,117 +267,88 @@ void FStaticMeshVertexBuffer::operator=(const FStaticMeshVertexBuffer &Other)
 	bUseHighPrecisionTangentBasis = Other.bUseHighPrecisionTangentBasis;
 }
 
-template <bool bRenderThread>
-FVertexBufferRHIRef FStaticMeshVertexBuffer::CreateTangentsRHIBuffer_Internal()
+FBufferRHIRef FStaticMeshVertexBuffer::CreateTangentsRHIBuffer(FRHICommandListBase& RHICmdList)
 {
-	if (GetNumVertices())
+	return CreateRHIBuffer(RHICmdList, TangentsData, GetNumVertices(), BUF_Static | BUF_ShaderResource, TEXT("TangentsRHIBuffer"));
+}
+
+FBufferRHIRef FStaticMeshVertexBuffer::CreateTangentsRHIBuffer_RenderThread()
+{
+	return CreateTangentsRHIBuffer(FRHICommandListImmediate::Get());
+}
+
+FBufferRHIRef FStaticMeshVertexBuffer::CreateTangentsRHIBuffer_Async()
+{
+	FRHIAsyncCommandList CommandList;
+	return CreateTangentsRHIBuffer(*CommandList);
+}
+
+FBufferRHIRef FStaticMeshVertexBuffer::CreateTexCoordRHIBuffer(FRHICommandListBase& RHICmdList)
+{
+	return CreateRHIBuffer(RHICmdList, TexcoordData, GetNumTexCoords(), BUF_Static | BUF_ShaderResource, TEXT("TexCoordRHIBuffer"));
+}
+
+FBufferRHIRef FStaticMeshVertexBuffer::CreateTexCoordRHIBuffer_RenderThread()
+{
+	return CreateTexCoordRHIBuffer(FRHICommandListImmediate::Get());
+}
+
+FBufferRHIRef FStaticMeshVertexBuffer::CreateTexCoordRHIBuffer_Async()
+{
+	FRHIAsyncCommandList CommandList;
+	return CreateTexCoordRHIBuffer(*CommandList);
+}
+
+void FStaticMeshVertexBuffer::InitRHIForStreaming(
+	FRHIBuffer* IntermediateTangentsBuffer,
+	FRHIBuffer* IntermediateTexCoordBuffer,
+	FRHIResourceUpdateBatcher& Batcher)
+{
+	check(TangentsVertexBuffer.VertexBufferRHI && TexCoordVertexBuffer.VertexBufferRHI);
+	if (IntermediateTangentsBuffer)
 	{
- 		FResourceArrayInterface* RESTRICT ResourceArray = TangentsData ? TangentsData->GetResourceArray() : nullptr;
-		const uint32 SizeInBytes = ResourceArray ? ResourceArray->GetResourceDataSize() : 0;
-		FRHIResourceCreateInfo CreateInfo(ResourceArray);
-		CreateInfo.bWithoutNativeResource = !TangentsData;
-		if (bRenderThread)
-		{
-			return RHICreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
-		}
-		else
-		{
-			return RHIAsyncCreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
-		}
+		Batcher.QueueUpdateRequest(TangentsVertexBuffer.VertexBufferRHI, IntermediateTangentsBuffer);
 	}
-	return nullptr;
-}
-
-FVertexBufferRHIRef FStaticMeshVertexBuffer::CreateTangentsRHIBuffer_RenderThread()
-{
-	return CreateTangentsRHIBuffer_Internal<true>();
-}
-
-FVertexBufferRHIRef FStaticMeshVertexBuffer::CreateTangentsRHIBuffer_Async()
-{
-	return CreateTangentsRHIBuffer_Internal<false>();
-}
-
-template <bool bRenderThread>
-FVertexBufferRHIRef FStaticMeshVertexBuffer::CreateTexCoordRHIBuffer_Internal()
-{
-	if (GetNumTexCoords())
+	if (IntermediateTexCoordBuffer)
 	{
-		FResourceArrayInterface* RESTRICT ResourceArray = TexcoordData ? TexcoordData->GetResourceArray() : nullptr;
-		const uint32 SizeInBytes = ResourceArray ? ResourceArray->GetResourceDataSize() : 0;
-		FRHIResourceCreateInfo CreateInfo(ResourceArray);
-		CreateInfo.bWithoutNativeResource = !TexcoordData;
-		if (bRenderThread)
-		{
-			return RHICreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
-		}
-		else
-		{
-			return RHIAsyncCreateVertexBuffer(SizeInBytes, BUF_Static | BUF_ShaderResource, CreateInfo);
-		}
+		Batcher.QueueUpdateRequest(TexCoordVertexBuffer.VertexBufferRHI, IntermediateTexCoordBuffer);
 	}
-	return nullptr;
 }
 
-FVertexBufferRHIRef FStaticMeshVertexBuffer::CreateTexCoordRHIBuffer_RenderThread()
+void FStaticMeshVertexBuffer::ReleaseRHIForStreaming(FRHIResourceUpdateBatcher& Batcher)
 {
-	return CreateTexCoordRHIBuffer_Internal<true>();
+	check(TangentsVertexBuffer.VertexBufferRHI && TexCoordVertexBuffer.VertexBufferRHI);
+	Batcher.QueueUpdateRequest(TangentsVertexBuffer.VertexBufferRHI, nullptr);
+	Batcher.QueueUpdateRequest(TexCoordVertexBuffer.VertexBufferRHI, nullptr);
 }
 
-FVertexBufferRHIRef FStaticMeshVertexBuffer::CreateTexCoordRHIBuffer_Async()
+void FStaticMeshVertexBuffer::InitRHI(FRHICommandListBase& RHICmdList)
 {
-	return CreateTexCoordRHIBuffer_Internal<false>();
-}
-
-void FStaticMeshVertexBuffer::CopyRHIForStreaming(const FStaticMeshVertexBuffer& Other, bool InAllowCPUAccess)
-{
-	// Copy serialized properties.
-	TangentsStride = Other.TangentsStride;
-	TexcoordStride = Other.TexcoordStride;
-	NumTexCoords = Other.NumTexCoords;
-	NumVertices = Other.NumVertices;
-	bUseFullPrecisionUVs = Other.bUseFullPrecisionUVs;
-	bUseHighPrecisionTangentBasis = Other.bUseHighPrecisionTangentBasis;
-
-	// Handle CPU access.
-	if (InAllowCPUAccess)
-	{
-		NeedsCPUAccess = Other.NeedsCPUAccess;
-		AllocateData(NeedsCPUAccess);
-	}
-	else
-	{
-		NeedsCPUAccess = false;
-	}
-
-	// Copy resource references.
-	TangentsVertexBuffer.VertexBufferRHI = Other.TangentsVertexBuffer.VertexBufferRHI;
-	TexCoordVertexBuffer.VertexBufferRHI = Other.TexCoordVertexBuffer.VertexBufferRHI;
-	TangentsSRV = Other.TangentsSRV;
-	TextureCoordinatesSRV = Other.TextureCoordinatesSRV;
-}
-
-void FStaticMeshVertexBuffer::InitRHI()
-{
+	TRACE_CPUPROFILER_EVENT_SCOPE(FStaticMeshVertexBuffer::InitRHI);
 	SCOPED_LOADTIMER(FStaticMeshVertexBuffer_InitRHI);
 
-	TangentsVertexBuffer.VertexBufferRHI = CreateTangentsRHIBuffer_RenderThread();
-	TexCoordVertexBuffer.VertexBufferRHI = CreateTexCoordRHIBuffer_RenderThread();
-	if (TangentsVertexBuffer.VertexBufferRHI && (RHISupportsManualVertexFetch(GMaxRHIShaderPlatform) || IsGPUSkinCacheAvailable(GMaxRHIShaderPlatform)))
+	// When bAllowCPUAccess is true the meshes is likely going to be used for Niagara to spawn particles on mesh surface.
+	// And it can be the case for CPU *and* GPU access: no differenciation today. That is why we create a SRV in this case.
+	// This also avoid setting lots of states on all the members of all the different buffers used by meshes. Follow up: https://jira.it.epicgames.net/browse/UE-69376.
+
+	const bool bHadTangentsData = TangentsData != nullptr;
+	const bool bCreateTangentsSRV = bHadTangentsData && TangentsData->GetAllowCPUAccess();
+	TangentsVertexBuffer.VertexBufferRHI = CreateTangentsRHIBuffer(RHICmdList);
+	if (TangentsVertexBuffer.VertexBufferRHI && (bCreateTangentsSRV || RHISupportsManualVertexFetch(GMaxRHIShaderPlatform) || IsGPUSkinPassThroughSupported(GMaxRHIShaderPlatform)))
 	{
-		// When TangentsData is null, this buffer hasn't been streamed in yet. We still need to create a FRHIShaderResourceView which will be
-		// cached in a vertex factory uniform buffer later. The nullptr tells the RHI that the SRV doesn't view on anything yet.
-		TangentsSRV = RHICreateShaderResourceView(FShaderResourceViewInitializer(
-			TangentsData ? TangentsVertexBuffer.VertexBufferRHI : nullptr,
-			GetUseHighPrecisionTangentBasis() ? PF_R16G16B16A16_SNORM : PF_R8G8B8A8_SNORM));
+		uint32       Stride = GetUseHighPrecisionTangentBasis() ? 8 : 4;
+		EPixelFormat Format = GetUseHighPrecisionTangentBasis() ? PF_R16G16B16A16_SNORM : PF_R8G8B8A8_SNORM;
+		TangentsSRV = RHICmdList.CreateShaderResourceView(TangentsVertexBuffer.VertexBufferRHI, Stride, Format);
 	}
-	if (TexCoordVertexBuffer.VertexBufferRHI && RHISupportsManualVertexFetch(GMaxRHIShaderPlatform))
+
+	const bool bHadTexCoordData = TexcoordData != nullptr;
+	const bool bCreateTexCoordSRV = bHadTexCoordData && TexcoordData->GetAllowCPUAccess();
+	TexCoordVertexBuffer.VertexBufferRHI = CreateTexCoordRHIBuffer(RHICmdList);
+	if (TexCoordVertexBuffer.VertexBufferRHI && (bCreateTexCoordSRV || RHISupportsManualVertexFetch(GMaxRHIShaderPlatform)))
 	{
-		// When TexcoordData is null, this buffer hasn't been streamed in yet. We still need to create a FRHIShaderResourceView which will be
-		// cached in a vertex factory uniform buffer later. The nullptr tells the RHI that the SRV doesn't view on anything yet.
-		TextureCoordinatesSRV = RHICreateShaderResourceView(FShaderResourceViewInitializer(
-			TexcoordData ? TexCoordVertexBuffer.VertexBufferRHI : nullptr,
-			GetUseFullPrecisionUVs() ? PF_G32R32F : PF_G16R16F));
+		uint32       Stride = GetUseFullPrecisionUVs() ? 8 : 4;
+		EPixelFormat Format = GetUseFullPrecisionUVs() ? PF_G32R32F : PF_G16R16F;
+		TextureCoordinatesSRV = RHICmdList.CreateShaderResourceView(TexCoordVertexBuffer.VertexBufferRHI, Stride, Format);
 	}
 }
 
@@ -388,11 +360,11 @@ void FStaticMeshVertexBuffer::ReleaseRHI()
 	TexCoordVertexBuffer.ReleaseRHI();
 }
 
-void FStaticMeshVertexBuffer::InitResource()
+void FStaticMeshVertexBuffer::InitResource(FRHICommandListBase& RHICmdList)
 {
-	FRenderResource::InitResource();
-	TangentsVertexBuffer.InitResource();
-	TexCoordVertexBuffer.InitResource();
+	FRenderResource::InitResource(RHICmdList);
+	TangentsVertexBuffer.InitResource(RHICmdList);
+	TexCoordVertexBuffer.InitResource(RHICmdList);
 }
 
 void FStaticMeshVertexBuffer::ReleaseResource()
@@ -435,7 +407,7 @@ void FStaticMeshVertexBuffer::AllocateData(bool bNeedsCPUAccess /*= true*/)
 	}
 }
 
-int FStaticMeshVertexBuffer::GetTangentSize()
+int FStaticMeshVertexBuffer::GetTangentSize() const
 {
 	if (GetUseHighPrecisionTangentBasis())
 	{
@@ -451,7 +423,7 @@ int FStaticMeshVertexBuffer::GetTangentSize()
 	}
 }
 
-int FStaticMeshVertexBuffer::GetTexCoordSize()
+int FStaticMeshVertexBuffer::GetTexCoordSize() const
 {
 	if (GetUseFullPrecisionUVs())
 	{
@@ -526,7 +498,7 @@ void FStaticMeshVertexBuffer::BindTangentVertexBuffer(const FVertexFactory* Vert
 	}
 }
 
-void FStaticMeshVertexBuffer::BindPackedTexCoordVertexBuffer(const FVertexFactory* VertexFactory, FStaticMeshDataType& Data) const
+void FStaticMeshVertexBuffer::BindPackedTexCoordVertexBuffer(const FVertexFactory* VertexFactory, FStaticMeshDataType& Data, int32 MaxNumTexCoords) const
 {
 	Data.TextureCoordinates.Empty();
 	Data.NumTexCoords = GetNumTexCoords();
@@ -554,8 +526,16 @@ void FStaticMeshVertexBuffer::BindPackedTexCoordVertexBuffer(const FVertexFactor
 
 		uint32 UvStride = UVSizeInBytes * GetNumTexCoords();
 
+		// If the max num of UVs is specified, clamp to that number.
+		int32 ClampedNumTexCoords = GetNumTexCoords();
+		if (MaxNumTexCoords > -1)
+		{
+			ClampedNumTexCoords = FMath::Min<int32>(GetNumTexCoords(), MaxNumTexCoords);
+		}
+		check(ClampedNumTexCoords >= 0);
+
 		int32 UVIndex;
-		for (UVIndex = 0; UVIndex < (int32)GetNumTexCoords() - 1; UVIndex += 2)
+		for (UVIndex = 0; UVIndex < (int32)ClampedNumTexCoords - 1; UVIndex += 2)
 		{
 			Data.TextureCoordinates.Add(FVertexStreamComponent(
 				&TexCoordVertexBuffer,
@@ -567,7 +547,7 @@ void FStaticMeshVertexBuffer::BindPackedTexCoordVertexBuffer(const FVertexFactor
 		}
 
 		// possible last UV channel if we have an odd number
-		if (UVIndex < (int32)GetNumTexCoords())
+		if (UVIndex < (int32)ClampedNumTexCoords)
 		{
 			Data.TextureCoordinates.Add(FVertexStreamComponent(
 				&TexCoordVertexBuffer,
@@ -633,7 +613,8 @@ void FStaticMeshVertexBuffer::BindTexCoordVertexBuffer(const FVertexFactory* Ver
 void FStaticMeshVertexBuffer::BindLightMapVertexBuffer(const FVertexFactory* VertexFactory, FStaticMeshDataType& Data, int LightMapCoordinateIndex) const
 {
 	LightMapCoordinateIndex = LightMapCoordinateIndex < (int32)GetNumTexCoords() ? LightMapCoordinateIndex : (int32)GetNumTexCoords() - 1;
-	check(LightMapCoordinateIndex >= 0);
+	//FIXME: pso precache triggers this before mesh postload has completed. normally, EnforceLightmapRestrictions called from mesh postload prevents this
+	//check(LightMapCoordinateIndex >= 0);  
 
 	Data.LightMapCoordinateIndex = LightMapCoordinateIndex;
 	Data.NumTexCoords = GetNumTexCoords();

@@ -4,10 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 
 namespace UnrealBuildTool
 {
@@ -34,16 +32,25 @@ namespace UnrealBuildTool
 		{
 			this.Document = Document;
 
-			foreach(XmlElement KeyElement in Document.SelectNodes("/plist/dict/key"))
+			XmlNodeList? Nodes = Document.SelectNodes("/plist/dict/key");
+			if (Nodes != null)
 			{
-				XmlNode ValueNode = KeyElement.NextSibling;
-				while(ValueNode != null)
+				foreach (XmlElement? KeyElement in Nodes)
 				{
-					XmlElement ValueElement = ValueNode as XmlElement;
-					if(ValueElement != null)
+					if (KeyElement == null)
 					{
-						NameToValue[KeyElement.InnerText] = ValueElement;
-						break;
+						continue;
+					}
+
+					XmlNode? ValueNode = KeyElement.NextSibling;
+					while (ValueNode != null)
+					{
+						XmlElement? ValueElement = ValueNode as XmlElement;
+						if (ValueElement != null)
+						{
+							NameToValue[KeyElement.InnerText] = ValueElement;
+							break;
+						}
 					}
 				}
 			}
@@ -55,8 +62,8 @@ namespace UnrealBuildTool
 		/// <returns>UUID for the provision</returns>
 		public string GetUniqueId()
 		{
-			XmlElement UniqueIdElement;
-			if(!NameToValue.TryGetValue("UUID", out UniqueIdElement))
+			XmlElement? UniqueIdElement;
+			if (!NameToValue.TryGetValue("UUID", out UniqueIdElement))
 			{
 				throw new BuildException("Missing UUID in MobileProvision");
 			}
@@ -69,23 +76,32 @@ namespace UnrealBuildTool
 		/// <returns>Bundle Identifier for the provision</returns>
 		public string GetBundleIdentifier()
 		{
-			XmlElement UniqueIdElement = null, UniqueIdEntitlement;
+			XmlElement? UniqueIdElement = null;
+			XmlElement? UniqueIdEntitlement;
 			if (!NameToValue.TryGetValue("Entitlements", out UniqueIdEntitlement) || UniqueIdEntitlement.Name != "dict")
 			{
 				throw new BuildException("Missing Entitlements in MobileProvision");
 			}
 
-			foreach (XmlElement KeyElement in UniqueIdEntitlement.SelectNodes("key"))
+			XmlNodeList? Nodes = UniqueIdEntitlement.SelectNodes("key");
+			if (Nodes != null)
 			{
-				Console.WriteLine("Found entitlement node:" + KeyElement.InnerText);
-				if (!KeyElement.InnerText.Equals("application-identifier"))
+				foreach (XmlElement? KeyElement in Nodes)
 				{
-					continue;
-				}
-				UniqueIdElement = KeyElement.NextSibling as XmlElement;
-				break;
-			}
+					if (KeyElement == null)
+					{
+						continue;
+					}
 
+					Console.WriteLine("Found entitlement node:" + KeyElement.InnerText);
+					if (!KeyElement.InnerText.Equals("application-identifier"))
+					{
+						continue;
+					}
+					UniqueIdElement = KeyElement.NextSibling as XmlElement;
+					break;
+				}
+			}
 
 			if (UniqueIdElement == null)
 			{
@@ -99,17 +115,17 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="UniqueId">Receives the team unique id</param>
 		/// <returns>True if the team unique ID was found, false otherwise</returns>
-		public bool TryGetTeamUniqueId(out string UniqueId)
+		public bool TryGetTeamUniqueId(out string? UniqueId)
 		{
-			XmlElement UniqueIdElement;
-			if(!NameToValue.TryGetValue("TeamIdentifier", out UniqueIdElement) || UniqueIdElement.Name != "array")
+			XmlElement? UniqueIdElement;
+			if (!NameToValue.TryGetValue("TeamIdentifier", out UniqueIdElement) || UniqueIdElement.Name != "array")
 			{
 				UniqueId = null;
 				return false;
 			}
 
-			XmlElement ValueElement = UniqueIdElement.SelectSingleNode("string") as XmlElement;
-			if(ValueElement == null)
+			XmlElement? ValueElement = UniqueIdElement.SelectSingleNode("string") as XmlElement;
+			if (ValueElement == null)
 			{
 				UniqueId = null;
 				return false;
@@ -138,21 +154,21 @@ namespace UnrealBuildTool
 		public static XmlDocument ReadXml(FileReference Location)
 		{
 			// Provision data is stored as PKCS7-signed file in ASN.1 BER format
-			using(BinaryReader Reader = new BinaryReader(File.Open(Location.FullName, FileMode.Open, FileAccess.Read)))
+			using (BinaryReader Reader = new BinaryReader(File.Open(Location.FullName, FileMode.Open, FileAccess.Read)))
 			{
 				long Length = Reader.BaseStream.Length;
-				while(Reader.BaseStream.Position < Length)
+				while (Reader.BaseStream.Position < Length)
 				{
 					Asn.FieldInfo Field = Asn.ReadField(Reader);
-					if(Field.Tag == Asn.FieldTag.OBJECT_IDENTIFIER)
+					if (Field.Tag == Asn.FieldTag.OBJECT_IDENTIFIER)
 					{
 						int[] Identifier = Asn.ReadObjectIdentifier(Reader, Field.Length);
-						if(Enumerable.SequenceEqual(Identifier, Asn.ObjectIdentifier.Pkcs7_Data))
+						if (Enumerable.SequenceEqual(Identifier, Asn.ObjectIdentifier.Pkcs7_Data))
 						{
-							while(Reader.BaseStream.Position < Length)
+							while (Reader.BaseStream.Position < Length)
 							{
 								Asn.FieldInfo NextField = Asn.ReadField(Reader);
-								if(NextField.Tag == Asn.FieldTag.OCTET_STRING)
+								if (NextField.Tag == Asn.FieldTag.OCTET_STRING)
 								{
 									byte[] Data = Reader.ReadBytes(NextField.Length);
 
@@ -180,12 +196,13 @@ namespace UnrealBuildTool
 		// return the outerXML of the node's value
 		public string GetNodeXMLValueByName(string InValue)
 		{
-			XmlNodeList elemList = this.Document.GetElementsByTagName("key");
+			XmlNodeList elemList = Document.GetElementsByTagName("key");
 			for (int i = 0; i < elemList.Count; i++)
 			{
-				if (elemList[i].InnerXml.Equals(InValue))
+				XmlNode? Node = elemList[i];
+				if (Node != null && Node.InnerXml.Equals(InValue))
 				{
-					XmlNode valueNode = elemList[i].NextSibling;
+					XmlNode? valueNode = Node.NextSibling;
 
 					if (valueNode != null)
 					{
@@ -199,17 +216,18 @@ namespace UnrealBuildTool
 		// return the innerXML of the node's value
 		public string GetNodeValueByName(string InValue)
 		{
-			XmlNodeList elemList = this.Document.GetElementsByTagName("key");
+			XmlNodeList elemList = Document.GetElementsByTagName("key");
 			for (int i = 0; i < elemList.Count; i++)
 			{
-				if (elemList[i].InnerXml.Equals(InValue))
+				XmlNode? Node = elemList[i];
+				if (Node != null && Node.InnerXml.Equals(InValue))
 				{
-					XmlNode valueNode = elemList[i].NextSibling;
+					XmlNode? valueNode = Node.NextSibling;
 					if (valueNode != null)
 					{
 						if (valueNode.Name.Equals("array"))
 						{
-							XmlNode firstChildNode = valueNode.FirstChild;
+							XmlNode? firstChildNode = valueNode.FirstChild;
 							if (firstChildNode != null)
 							{
 								return firstChildNode.InnerXml;

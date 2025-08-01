@@ -7,6 +7,7 @@
 #include "GPUBenchmark.h"
 #include "GenericPlatform/GenericPlatformSurvey.h"
 #include "RHI.h"
+#include "DataDrivenShaderPlatformInfo.h"
 #include "ShaderParameters.h"
 #include "RenderResource.h"
 #include "RendererInterface.h"
@@ -23,6 +24,7 @@
 #include "LongGPUTask.h"
 #include "VisualizeTexture.h"
 #include "CommonRenderResources.h"
+#include "SceneView.h"
 
 static const uint32 GBenchmarkResolution = 512;
 static const uint32 GBenchmarkPrimitives = 200000;
@@ -60,13 +62,11 @@ public:
 		InputTextureSampler.Bind(Initializer.ParameterMap,TEXT("InputTextureSampler"));
 	}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FSceneView& View, TRefCountPtr<IPooledRenderTarget>& Src)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FSceneView& View, TRefCountPtr<IPooledRenderTarget>& Src)
 	{
-		FRHIPixelShader* ShaderRHI = RHICmdList.GetBoundPixelShader();
+		FGlobalShader::SetParameters<FViewUniformShaderParameters>(BatchedParameters, View.ViewUniformBuffer);
 
-		FGlobalShader::SetParameters<FViewUniformShaderParameters>(RHICmdList, ShaderRHI, View.ViewUniformBuffer);
-
-		SetTextureParameter(RHICmdList, ShaderRHI, InputTexture, InputTextureSampler, TStaticSamplerState<>::GetRHI(), Src->GetRenderTargetItem().ShaderResourceTexture);
+		SetTextureParameter(BatchedParameters, InputTexture, InputTextureSampler, TStaticSamplerState<>::GetRHI(), Src->GetRHI());
 	}
 
 	static const TCHAR* GetSourceFilename()
@@ -115,11 +115,9 @@ public:
 	{
 	}
 
-	void SetParameters(FRHICommandList& RHICmdList, const FSceneView& View)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FSceneView& View)
 	{
-		FRHIVertexShader* ShaderRHI = RHICmdList.GetBoundVertexShader();
-		
-		FGlobalShader::SetParameters<FViewUniformShaderParameters>(RHICmdList, ShaderRHI, View.ViewUniformBuffer);
+		FGlobalShader::SetParameters<FViewUniformShaderParameters>(BatchedParameters, View.ViewUniformBuffer);
 	}
 };
 
@@ -133,11 +131,11 @@ IMPLEMENT_SHADER_TYPE(template<>,FPostProcessBenchmarkVS2,TEXT("/Engine/Private/
 
 struct FBenchmarkVertex
 {
-	FVector4 Arg0;
-	FVector4 Arg1;
-	FVector4 Arg2;
-	FVector4 Arg3;
-	FVector4 Arg4;
+	FVector4f Arg0;
+	FVector4f Arg1;
+	FVector4f Arg2;
+	FVector4f Arg3;
+	FVector4f Arg4;
 
 	FBenchmarkVertex(uint32 VertexID)
 		: Arg0(VertexID, 0.0f, 0.0f, 0.0f)
@@ -152,15 +150,15 @@ struct FVertexThroughputDeclaration : public FRenderResource
 {
 	FVertexDeclarationRHIRef DeclRHI;
 
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
 		FVertexDeclarationElementList Elements = 
 		{
-			{ 0, 0 * sizeof(FVector4), VET_Float4, 0, sizeof(FBenchmarkVertex) },
-			{ 0, 1 * sizeof(FVector4), VET_Float4, 1, sizeof(FBenchmarkVertex) },
-			{ 0, 2 * sizeof(FVector4), VET_Float4, 2, sizeof(FBenchmarkVertex) },
-			{ 0, 3 * sizeof(FVector4), VET_Float4, 3, sizeof(FBenchmarkVertex) },
-			{ 0, 4 * sizeof(FVector4), VET_Float4, 4, sizeof(FBenchmarkVertex) },
+			{ 0, 0 * sizeof(FVector4f), VET_Float4, 0, sizeof(FBenchmarkVertex) },
+			{ 0, 1 * sizeof(FVector4f), VET_Float4, 1, sizeof(FBenchmarkVertex) },
+			{ 0, 2 * sizeof(FVector4f), VET_Float4, 2, sizeof(FBenchmarkVertex) },
+			{ 0, 3 * sizeof(FVector4f), VET_Float4, 3, sizeof(FBenchmarkVertex) },
+			{ 0, 4 * sizeof(FVector4f), VET_Float4, 4, sizeof(FBenchmarkVertex) },
 		};
 
 		DeclRHI = PipelineStateCache::GetOrCreateVertexDeclaration(Elements);
@@ -175,7 +173,7 @@ struct FVertexThroughputDeclaration : public FRenderResource
 TGlobalResource<FVertexThroughputDeclaration> GVertexThroughputDeclaration;
 
 template <uint32 VsMethod, uint32 PsMethod>
-void RunBenchmarkShader(FRHICommandList& RHICmdList, FRHIVertexBuffer* VertexThroughputBuffer, const FSceneView& View, TRefCountPtr<IPooledRenderTarget>& Src, float WorkScale)
+void RunBenchmarkShader(FRHICommandList& RHICmdList, FRHIBuffer* VertexThroughputBuffer, const FSceneView& View, TRefCountPtr<IPooledRenderTarget>& Src, float WorkScale)
 {
 	auto ShaderMap = GetGlobalShaderMap(View.GetFeatureLevel());
 
@@ -198,10 +196,10 @@ void RunBenchmarkShader(FRHICommandList& RHICmdList, FRHIVertexBuffer* VertexThr
 	GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 	GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
-	PixelShader->SetParameters(RHICmdList, View, Src);
-	VertexShader->SetParameters(RHICmdList, View);
+	SetShaderParametersLegacyPS(RHICmdList, PixelShader, View, Src);
+	SetShaderParametersLegacyVS(RHICmdList, VertexShader, View);
 
 	if (bVertexTest)
 	{
@@ -252,7 +250,7 @@ void RunBenchmarkShader(FRHICommandList& RHICmdList, FRHIVertexBuffer* VertexThr
 	}
 }
 
-void RunBenchmarkShader(FRHICommandListImmediate& RHICmdList, FRHIVertexBuffer* VertexThroughputBuffer, const FSceneView& View, uint32 MethodId, TRefCountPtr<IPooledRenderTarget>& Src, float WorkScale)
+void RunBenchmarkShader(FRHICommandListImmediate& RHICmdList, FRHIBuffer* VertexThroughputBuffer, const FSceneView& View, uint32 MethodId, TRefCountPtr<IPooledRenderTarget>& Src, float WorkScale)
 {
 	SCOPED_DRAW_EVENTF(RHICmdList, Benchmark, TEXT("Benchmark Method:%d"), MethodId);
 
@@ -406,7 +404,7 @@ void RendererGPUBenchmark(FRHICommandListImmediate& RHICmdList, FSynthBenchmarkR
 		return;
 	}
 
-	
+	RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
 	MeasureLongGPUTaskExecutionTime(RHICmdList);
 	RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);	
 
@@ -417,23 +415,16 @@ void RendererGPUBenchmark(FRHICommandListImmediate& RHICmdList, FSynthBenchmarkR
 		Vertices.Emplace(Index);
 	}
 
-	FRHIResourceCreateInfo CreateInfo(&Vertices);
-	FVertexBufferRHIRef VertexBuffer = RHICreateVertexBuffer(GBenchmarkVertices * sizeof(FBenchmarkVertex), BUF_Static, CreateInfo);
+	FRHIResourceCreateInfo CreateInfo(TEXT("RendererGPUBenchmark"), &Vertices);
+	FBufferRHIRef VertexBuffer = RHICmdList.CreateVertexBuffer(GBenchmarkVertices * sizeof(FBenchmarkVertex), BUF_Static, CreateInfo);
 
-	// two RT to ping pong so we force the GPU to flush it's pipeline
-	TRefCountPtr<IPooledRenderTarget> RTItems[3];
+	// two RT to ping pong so we force the GPU to flush its pipeline
+	TRefCountPtr<IPooledRenderTarget> RTItems[2];
 	{
 		FPooledRenderTargetDesc Desc(FPooledRenderTargetDesc::Create2DDesc(FIntPoint(GBenchmarkResolution, GBenchmarkResolution), PF_B8G8R8A8, FClearValueBinding::None, TexCreate_None, TexCreate_RenderTargetable | TexCreate_ShaderResource, false));
-		Desc.AutoWritable = false;
 
 		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, RTItems[0], TEXT("Benchmark0"));
 		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, RTItems[1], TEXT("Benchmark1"));
-
-		Desc.Extent = FIntPoint(1, 1);
-		Desc.Flags = TexCreate_CPUReadback;	// needs TexCreate_ResolveTargetable?
-		Desc.TargetableFlags = TexCreate_None;
-
-		GRenderTargetPool.FindFreeElement(RHICmdList, Desc, RTItems[2], TEXT("BenchmarkReadback"));
 	}
 
 	{
@@ -544,6 +535,10 @@ void RendererGPUBenchmark(FRHICommandListImmediate& RHICmdList, FSynthBenchmarkR
 		// multiple iterations to see how trust able the values are
 		for(uint32 Iteration = 0; Iteration < IterationCount; ++Iteration)
 		{
+			if(Iteration % 10 == 0)
+			{
+				RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+			}
 			SCOPED_DRAW_EVENTF(RHICmdList, Benchmark, TEXT("Iteration:%d"), Iteration);
 
 			for(uint32 MethodIterator = 0; MethodIterator < MethodCount; ++MethodIterator)
@@ -562,35 +557,14 @@ void RendererGPUBenchmark(FRHICommandListImmediate& RHICmdList, FSynthBenchmarkR
 				// decide how much work we do in this pass
 				LocalWorkScale[Iteration] = (Iteration / 10.f + 1.f) * WorkScale;
 
-				FRHIRenderPassInfo RPInfo(RTItems[DestRTIndex]->GetRenderTargetItem().TargetableTexture, ERenderTargetActions::Load_Store);
-				TransitionRenderPassTargets(RHICmdList, RPInfo);
+				FRHIRenderPassInfo RPInfo(RTItems[DestRTIndex]->GetRHI(), ERenderTargetActions::Load_Store);
+				RHICmdList.Transition(FRHITransitionInfo(RTItems[DestRTIndex]->GetRHI(), ERHIAccess::Unknown, ERHIAccess::RTV));
 				RHICmdList.BeginRenderPass(RPInfo, TEXT("GPUBenchmark"));
 				{
 					RunBenchmarkShader(RHICmdList, VertexBuffer, View, MethodId, RTItems[SrcRTIndex], LocalWorkScale[Iteration]);
 				}
 				RHICmdList.EndRenderPass();
-				RHICmdList.CopyToResolveTarget(RTItems[DestRTIndex]->GetRenderTargetItem().TargetableTexture, RTItems[DestRTIndex]->GetRenderTargetItem().ShaderResourceTexture, FResolveParams());
-
-				/*if(bGPUCPUSync)
-				{
-					// more consistent timing but strangely much faster to the level that is unrealistic
-
-					FResolveParams Param;
-
-					Param.Rect = FResolveRect(0, 0, 1, 1);
-					RHICmdList.CopyToResolveTarget(
-						RTItems[DestRTIndex]->GetRenderTargetItem().TargetableTexture,
-						RTItems[2]->GetRenderTargetItem().ShaderResourceTexture,
-						false,
-						Param);
-
-					void* Data = 0;
-					int Width = 0;
-					int Height = 0;
-
-					RHIMapStagingSurface(RTItems[2]->GetRenderTargetItem().ShaderResourceTexture, Data, Width, Height);
-					RHIUnmapStagingSurface(RTItems[2]->GetRenderTargetItem().ShaderResourceTexture);
-				}*/
+				RHICmdList.Transition(FRHITransitionInfo(RTItems[DestRTIndex]->GetRHI(), ERHIAccess::RTV, ERHIAccess::SRVMask));
 
 				RHICmdList.EndRenderQuery(TimerQueries[QueryIndex].GetQuery());
 
@@ -604,10 +578,15 @@ void RendererGPUBenchmark(FRHICommandListImmediate& RHICmdList, FSynthBenchmarkR
 			// flushes the RHI thread to make sure all RHICmdList.EndRenderQuery() commands got executed.
 			RHICmdList.SubmitCommandsHint();
 			RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
-			RHICmdList.GetRenderQueryResult(TimerQueries[0].GetQuery(), OldAbsTime, true);
+			RHIGetRenderQueryResult(TimerQueries[0].GetQuery(), OldAbsTime, true);
 
 			for(uint32 Iteration = 0; Iteration < IterationCount; ++Iteration)
 			{
+				if(Iteration % 10 == 0)
+				{
+					RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
+				}
+
 				uint32 Results[MethodCount];
 
 				for(uint32 MethodId = 0; MethodId < MethodCount; ++MethodId)
@@ -615,7 +594,7 @@ void RendererGPUBenchmark(FRHICommandListImmediate& RHICmdList, FSynthBenchmarkR
 					uint32 QueryIndex = 1 + Iteration * MethodCount + MethodId;
 
 					uint64 AbsTime;
-					RHICmdList.GetRenderQueryResult(TimerQueries[QueryIndex].GetQuery(), AbsTime, true);
+					RHIGetRenderQueryResult(TimerQueries[QueryIndex].GetQuery(), AbsTime, true);
 
 					uint64 RelTime = FMath::Max(AbsTime - OldAbsTime, 1ull);
 

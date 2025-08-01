@@ -14,9 +14,9 @@ class UMaterialInterface;
 struct FMovieSceneCaptureSettings;
 struct FFrameCaptureViewExtension;
 
-/** Used by UCompositionGraphCaptureSettings. Matches gamut oreder in TonemapCommon.usf OuputGamutMappingMatrix()*/
+/** Used by UCompositionGraphCaptureSettings. Matches gamut order in EDisplayColorGamut */
 UENUM(BlueprintType)
-enum EHDRCaptureGamut
+enum EHDRCaptureGamut : int
 {
 	HCGM_Rec709 UMETA(DisplayName = "Rec.709 / sRGB"),
 	HCGM_P3DCI UMETA(DisplayName = "P3 D65"),
@@ -27,8 +27,17 @@ enum EHDRCaptureGamut
 	HCGM_MAX,
 };
 
+static_assert(HCGM_Rec709 == (int32)EDisplayColorGamut::sRGB_D65, "EHDRCaptureGamut and EDisplayColorGamut not matching");
+static_assert(HCGM_P3DCI == (int32)EDisplayColorGamut::DCIP3_D65, "EHDRCaptureGamut and EDisplayColorGamut not matching");
+static_assert(HCGM_Rec2020 == (int32)EDisplayColorGamut::Rec2020_D65, "EHDRCaptureGamut and EDisplayColorGamut not matching");
+static_assert(HCGM_ACES == (int32)EDisplayColorGamut::ACES_D60, "EHDRCaptureGamut and EDisplayColorGamut not matching");
+static_assert(HCGM_ACEScg == (int32)EDisplayColorGamut::ACEScg_D60, "EHDRCaptureGamut and EDisplayColorGamut not matching");
+// HCGM_Linear gets remapped to DCIP3_D65 internally
+//static_assert(HCGM_Linear == (int32)EDisplayColorGamut::DCIP3_D65, "EHDRCaptureGamut and EDisplayColorGamut not matching")
+static_assert(HCGM_MAX == (int32)EDisplayColorGamut::MAX + 1, "EHDRCaptureGamut and EDisplayColorGamut not matching");
+
 USTRUCT(BlueprintType)
-struct MOVIESCENECAPTURE_API FCompositionGraphCapturePasses
+struct FCompositionGraphCapturePasses
 {
 	GENERATED_BODY()
 
@@ -37,8 +46,8 @@ struct MOVIESCENECAPTURE_API FCompositionGraphCapturePasses
 	TArray<FString> Value;
 };
 
-UCLASS(config=EditorPerProjectUserSettings, meta=(DisplayName="Custom Render Passes", CommandLineID="CustomRenderPasses"))
-class MOVIESCENECAPTURE_API UCompositionGraphCaptureProtocol : public UMovieSceneImageCaptureProtocolBase
+UCLASS(config=EditorPerProjectUserSettings, meta=(DisplayName="Custom Render Passes", CommandLineID="CustomRenderPasses"), MinimalAPI)
+class UCompositionGraphCaptureProtocol : public UMovieSceneImageCaptureProtocolBase
 {
 public:
 	GENERATED_BODY()
@@ -75,19 +84,19 @@ public:
 public:
 
 	/**~ UMovieSceneCaptureProtocolBase implementation */
-	virtual bool SetupImpl();
-	virtual void CaptureFrameImpl(const FFrameMetrics& FrameMetrics);
-	virtual void TickImpl() override;
-	virtual void FinalizeImpl() override;
-	virtual bool HasFinishedProcessingImpl() const override;
-	virtual void OnReleaseConfigImpl(FMovieSceneCaptureSettings& InSettings) override;
-	virtual void OnLoadConfigImpl(FMovieSceneCaptureSettings& InSettings) override;
+	MOVIESCENECAPTURE_API virtual bool SetupImpl();
+	MOVIESCENECAPTURE_API virtual void CaptureFrameImpl(const FFrameMetrics& FrameMetrics);
+	MOVIESCENECAPTURE_API virtual void TickImpl() override;
+	MOVIESCENECAPTURE_API virtual void FinalizeImpl() override;
+	MOVIESCENECAPTURE_API virtual bool HasFinishedProcessingImpl() const override;
+	MOVIESCENECAPTURE_API virtual void OnReleaseConfigImpl(FMovieSceneCaptureSettings& InSettings) override;
+	MOVIESCENECAPTURE_API virtual void OnLoadConfigImpl(FMovieSceneCaptureSettings& InSettings) override;
 	/**~ End UMovieSceneCaptureProtocolBase implementation */
 
 private:
 
 	UPROPERTY(transient)
-	UMaterialInterface* PostProcessingMaterialPtr;
+	TObjectPtr<UMaterialInterface> PostProcessingMaterialPtr;
 
 	/** The viewport we are capturing from */
 	TWeakPtr<FSceneViewport> SceneViewport;

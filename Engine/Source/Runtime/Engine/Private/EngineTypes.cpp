@@ -2,15 +2,9 @@
 
 #include "Engine/EngineTypes.h"
 #include "UObject/UnrealType.h"
-#include "HAL/IConsoleManager.h"
-#include "Engine/EngineBaseTypes.h"
-#include "Components/SceneComponent.h"
 #include "GameFramework/Actor.h"
-#include "Engine/World.h"
-#include "Components/PrimitiveComponent.h"
 #include "Engine/MeshMerging.h"
 #include "Engine/CollisionProfile.h"
-#include "PhysicalMaterials/PhysicalMaterial.h"
 
 FAttachmentTransformRules FAttachmentTransformRules::KeepRelativeTransform(EAttachmentRule::KeepRelative, false);
 FAttachmentTransformRules FAttachmentTransformRules::KeepWorldTransform(EAttachmentRule::KeepWorld, false);
@@ -20,61 +14,82 @@ FAttachmentTransformRules FAttachmentTransformRules::SnapToTargetIncludingScale(
 FDetachmentTransformRules FDetachmentTransformRules::KeepRelativeTransform(EDetachmentRule::KeepRelative, true);
 FDetachmentTransformRules FDetachmentTransformRules::KeepWorldTransform(EDetachmentRule::KeepWorld, true);
 
-/** If true, origin rebasing is enabled in multiplayer games, meaning that servers and clients can have different local world origins. */
-int32 FRepMovement::EnableMultiplayerWorldOriginRebasing = 0;
-
-/** Console variable ref to enable multiplayer world origin rebasing. */
-FAutoConsoleVariableRef CVarEnableMultiplayerWorldOriginRebasing(
-	TEXT("p.EnableMultiplayerWorldOriginRebasing"),
-	FRepMovement::EnableMultiplayerWorldOriginRebasing,
-	TEXT("Enable world origin rebasing for multiplayer, meaning that servers and clients can have different world origin locations."),
-	ECVF_ReadOnly);
-
 #if WITH_EDITORONLY_DATA
-void FMeshProxySettings::PostLoadDeprecated()
+void FMeshProxySettings::PostSerialize(const FArchive& Ar)
 {
-	MaterialSettings.MaterialMergeType = EMaterialMergeType::MaterialMergeType_Simplygon;
+	if (Ar.IsLoading())
+	{
+		MaterialSettings.MaterialMergeType = EMaterialMergeType::MaterialMergeType_Simplygon;
+
+		if (bGenerateNaniteEnabledMesh_DEPRECATED)
+		{
+			NaniteSettings.bEnabled = true;
+			NaniteSettings.FallbackPercentTriangles = NaniteProxyTrianglePercent_DEPRECATED / 100.0f;
+		}
+	}
 }
 
-void FMeshMergingSettings::PostLoadDeprecated()
+void FMeshMergingSettings::PostSerialize(const FArchive& Ar)
 {
-	FMeshMergingSettings DefaultObject;
-	if (bImportVertexColors_DEPRECATED != DefaultObject.bImportVertexColors_DEPRECATED)
+	if (Ar.IsLoading())
 	{
-		bBakeVertexDataToMesh = bImportVertexColors_DEPRECATED;
-	}
+		FMeshMergingSettings DefaultObject;
+		if (bImportVertexColors_DEPRECATED != DefaultObject.bImportVertexColors_DEPRECATED)
+		{
+			bBakeVertexDataToMesh = bImportVertexColors_DEPRECATED;
+		}
 
-	if (bExportNormalMap_DEPRECATED != DefaultObject.bExportNormalMap_DEPRECATED)
-	{
-		MaterialSettings.bNormalMap = bExportNormalMap_DEPRECATED;
-	}
+		if (bExportNormalMap_DEPRECATED != DefaultObject.bExportNormalMap_DEPRECATED)
+		{
+			MaterialSettings.bNormalMap = bExportNormalMap_DEPRECATED;
+		}
 
-	if (bExportMetallicMap_DEPRECATED != DefaultObject.bExportMetallicMap_DEPRECATED)
-	{
-		MaterialSettings.bMetallicMap = bExportMetallicMap_DEPRECATED;
-	}
-	if (bExportRoughnessMap_DEPRECATED != DefaultObject.bExportRoughnessMap_DEPRECATED)
-	{
-		MaterialSettings.bRoughnessMap = bExportRoughnessMap_DEPRECATED;
-	}
-	if (bExportSpecularMap_DEPRECATED != DefaultObject.bExportSpecularMap_DEPRECATED)
-	{
-		MaterialSettings.bSpecularMap = bExportSpecularMap_DEPRECATED;
-	}
-	if (MergedMaterialAtlasResolution_DEPRECATED != DefaultObject.MergedMaterialAtlasResolution_DEPRECATED)
-	{
-		MaterialSettings.TextureSize.X = MergedMaterialAtlasResolution_DEPRECATED;
-		MaterialSettings.TextureSize.Y = MergedMaterialAtlasResolution_DEPRECATED;
-	}
-	if (bCalculateCorrectLODModel_DEPRECATED != DefaultObject.bCalculateCorrectLODModel_DEPRECATED)
-	{
-		LODSelectionType = EMeshLODSelectionType::CalculateLOD;
-	}
+		if (bExportMetallicMap_DEPRECATED != DefaultObject.bExportMetallicMap_DEPRECATED)
+		{
+			MaterialSettings.bMetallicMap = bExportMetallicMap_DEPRECATED;
+		}
+		if (bExportRoughnessMap_DEPRECATED != DefaultObject.bExportRoughnessMap_DEPRECATED)
+		{
+			MaterialSettings.bRoughnessMap = bExportRoughnessMap_DEPRECATED;
+		}
+		if (bExportSpecularMap_DEPRECATED != DefaultObject.bExportSpecularMap_DEPRECATED)
+		{
+			MaterialSettings.bSpecularMap = bExportSpecularMap_DEPRECATED;
+		}
+		if (MergedMaterialAtlasResolution_DEPRECATED != DefaultObject.MergedMaterialAtlasResolution_DEPRECATED)
+		{
+			MaterialSettings.TextureSize.X = MergedMaterialAtlasResolution_DEPRECATED;
+			MaterialSettings.TextureSize.Y = MergedMaterialAtlasResolution_DEPRECATED;
+		}
+		if (bCalculateCorrectLODModel_DEPRECATED != DefaultObject.bCalculateCorrectLODModel_DEPRECATED)
+		{
+			LODSelectionType = EMeshLODSelectionType::CalculateLOD;
+		}
 
-	if (ExportSpecificLOD_DEPRECATED != DefaultObject.ExportSpecificLOD_DEPRECATED)
+		if (ExportSpecificLOD_DEPRECATED != DefaultObject.ExportSpecificLOD_DEPRECATED)
+		{
+			SpecificLOD = ExportSpecificLOD_DEPRECATED;
+			LODSelectionType = EMeshLODSelectionType::SpecificLOD;
+		}
+
+		if (bGenerateNaniteEnabledMesh_DEPRECATED)
+		{
+			NaniteSettings.bEnabled = true;
+			NaniteSettings.FallbackPercentTriangles = NaniteFallbackTrianglePercent_DEPRECATED / 100.0f;
+		}
+	}
+}
+
+void FMeshApproximationSettings::PostSerialize(const FArchive& Ar)
+{
+	if (Ar.IsLoading())
 	{
-		SpecificLOD = ExportSpecificLOD_DEPRECATED;
-		LODSelectionType = EMeshLODSelectionType::SpecificLOD;
+		FMeshApproximationSettings DefaultObject;
+		if (NaniteProxyTrianglePercent_DEPRECATED != DefaultObject.NaniteProxyTrianglePercent_DEPRECATED)
+		{
+			NaniteFallbackTarget = ENaniteFallbackTarget::Auto;
+			NaniteFallbackPercentTriangles = NaniteProxyTrianglePercent_DEPRECATED / 100.0f;
+		}
 	}
 }
 #endif
@@ -109,75 +124,6 @@ ETraceTypeQuery UEngineTypes::ConvertToTraceType(ECollisionChannel CollisionChan
 	return UCollisionProfile::Get()->ConvertToTraceType(CollisionChannel);
 }
 
-void FDamageEvent::GetBestHitInfo(AActor const* HitActor, AActor const* HitInstigator, FHitResult& OutHitInfo, FVector& OutImpulseDir) const
-{
-	ensure(HitActor);
-	if (HitActor)
-	{
-		// fill out the hitinfo as best we can
-		OutHitInfo.Actor = const_cast<AActor*>(HitActor);
-		OutHitInfo.bBlockingHit = true;
-		OutHitInfo.BoneName = NAME_None;
-		OutHitInfo.Component = Cast<UPrimitiveComponent>(HitActor->GetRootComponent());
-		
-		// assume the actor got hit in the center of his root component
-		OutHitInfo.ImpactPoint = HitActor->GetActorLocation();
-		OutHitInfo.Location = OutHitInfo.ImpactPoint;
-		
-		// assume hit came from instigator's location
-		OutImpulseDir = HitInstigator ? 
-			( OutHitInfo.ImpactPoint - HitInstigator->GetActorLocation() ).GetSafeNormal()
-			: FVector::ZeroVector;
-
-		// assume normal points back toward instigator
-		OutHitInfo.ImpactNormal = -OutImpulseDir;
-		OutHitInfo.Normal = OutHitInfo.ImpactNormal;
-	}
-}
-
-void FPointDamageEvent::GetBestHitInfo(AActor const* HitActor, AActor const* HitInstigator, FHitResult& OutHitInfo, FVector& OutImpulseDir) const
-{
-	// assume the actor got hit in the center of his root component
-	OutHitInfo = HitInfo;
-	OutImpulseDir = ShotDirection;
-}
-
-
-void FRadialDamageEvent::GetBestHitInfo(AActor const* HitActor, AActor const* HitInstigator, FHitResult& OutHitInfo, FVector& OutImpulseDir) const
-{
-	ensure(ComponentHits.Num() > 0);
-
-	// for now, just return the first one
-	OutHitInfo = ComponentHits[0];
-	OutImpulseDir = (OutHitInfo.ImpactPoint - Origin).GetSafeNormal();
-}
-
-
-float FRadialDamageParams::GetDamageScale(float DistanceFromEpicenter) const
-{
-	float const ValidatedInnerRadius = FMath::Max(0.f, InnerRadius);
-	float const ValidatedOuterRadius = FMath::Max(OuterRadius, ValidatedInnerRadius);
-	float const ValidatedDist = FMath::Max(0.f, DistanceFromEpicenter);
-
-	if (ValidatedDist >= ValidatedOuterRadius)
-	{
-		// outside the radius, no effect
-		return 0.f;
-	}
-
-	if ( (DamageFalloff == 0.f)	|| (ValidatedDist <= ValidatedInnerRadius) )
-	{
-		// no falloff or inside inner radius means full effect
-		return 1.f;
-	}
-
-	// calculate the interpolated scale
-	float DamageScale = 1.f - ( (ValidatedDist - ValidatedInnerRadius) / (ValidatedOuterRadius - ValidatedInnerRadius) );
-	DamageScale = FMath::Pow(DamageScale, DamageFalloff);
-
-	return DamageScale;
-}
-
 FLightmassDebugOptions::FLightmassDebugOptions()
 	: bDebugMode(false)
 	, bStatsEnabled(false)
@@ -197,7 +143,8 @@ FLightmassDebugOptions::FLightmassDebugOptions()
 	, ExecutionTimeDivisor(15.0f)
 {}
 
-UActorComponent* FComponentReference::GetComponent(AActor* OwningActor) const
+
+UActorComponent* FBaseComponentReference::ExtractComponent(AActor* SearchActor) const 
 {
 	UActorComponent* Result = nullptr;
 
@@ -208,8 +155,6 @@ UActorComponent* FComponentReference::GetComponent(AActor* OwningActor) const
 	}
 	else
 	{
-		// Look in Actor if specified, OwningActor if not
-		AActor* SearchActor = (OtherActor != NULL) ? OtherActor : OwningActor;
 		if(SearchActor)
 		{
 			if(ComponentProperty != NAME_None)
@@ -235,106 +180,69 @@ UActorComponent* FComponentReference::GetComponent(AActor* OwningActor) const
 	return Result;
 }
 
-FString FHitResult::ToString() const
+UActorComponent* FComponentReference::GetComponent(AActor* OwningActor) const
 {
-	return FString::Printf(TEXT("bBlockingHit:%s bStartPenetrating:%s Time:%f Location:%s ImpactPoint:%s Normal:%s ImpactNormal:%s TraceStart:%s TraceEnd:%s PenetrationDepth:%f Item:%d PhysMaterial:%s Actor:%s Component:%s BoneName:%s FaceIndex:%d"),
-		bBlockingHit == true ? TEXT("True") : TEXT("False"),
-		bStartPenetrating == true ? TEXT("True") : TEXT("False"),
-		Time,
-		*Location.ToString(),
-		*ImpactPoint.ToString(),
-		*Normal.ToString(),
-		*ImpactNormal.ToString(),
-		*TraceStart.ToString(),
-		*TraceEnd.ToString(),
-		PenetrationDepth,
-		Item,
-		PhysMaterial.IsValid() ? *PhysMaterial->GetName() : TEXT("None"),
-		Actor.IsValid() ? *Actor->GetName() : TEXT("None"),
-		Component.IsValid() ? *Component->GetName() : TEXT("None"),
-		BoneName.IsValid() ? *BoneName.ToString() : TEXT("None"),
-		FaceIndex);
+	AActor* SearchActor = (OtherActor.IsValid()) ? OtherActor.Get() : OwningActor;
+	return ExtractComponent(SearchActor);
 }
 
-FRepMovement::FRepMovement()
-	: LinearVelocity(ForceInit)
-	, AngularVelocity(ForceInit)
-	, Location(ForceInit)
-	, Rotation(ForceInit)
-	, bSimulatedPhysicSleep(false)
-	, bRepPhysics(false)
-	, LocationQuantizationLevel(EVectorQuantization::RoundWholeNumber)
-	, VelocityQuantizationLevel(EVectorQuantization::RoundWholeNumber)
-	, RotationQuantizationLevel(ERotatorQuantization::ByteComponents)
+UActorComponent* FSoftComponentReference::GetComponent(AActor* OwningActor) const
 {
+	AActor* SearchActor = (OtherActor.IsValid()) ? OtherActor.Get() : OwningActor;
+	return ExtractComponent(SearchActor);
 }
 
-/** Rebase zero-origin position onto local world origin value. */
-FVector FRepMovement::RebaseOntoLocalOrigin(const struct FVector& Location, const struct FIntVector& LocalOrigin)
+bool FSoftComponentReference::SerializeFromMismatchedTag(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot)
 {
-	if (EnableMultiplayerWorldOriginRebasing <= 0 || LocalOrigin == FIntVector::ZeroValue)
+	static const FName ComponentReferenceContextName("ComponentReference");
+	if (Tag.GetType().IsStruct(ComponentReferenceContextName))
 	{
-		return Location;
+		FComponentReference Reference;
+		FComponentReference::StaticStruct()->SerializeItem(Slot, &Reference, nullptr);
+		if (Reference.OtherActor.IsValid())
+		{
+			OtherActor = Reference.OtherActor.Get();
+			ComponentProperty = Reference.ComponentProperty;
+			PathToComponent = Reference.PathToComponent;
+		}
+		return true;
 	}
 
-	return FVector(Location.X - LocalOrigin.X, Location.Y - LocalOrigin.Y, Location.Z - LocalOrigin.Z);
+	return false;
 }
 
-/** Rebase local-origin position onto zero world origin value. */
-FVector FRepMovement::RebaseOntoZeroOrigin(const struct FVector& Location, const struct FIntVector& LocalOrigin)
+const TCHAR* LexToString(const EWorldType::Type Value)
 {
-	if (EnableMultiplayerWorldOriginRebasing <= 0 || LocalOrigin == FIntVector::ZeroValue)
+	switch (Value)
 	{
-		return Location;
+	case EWorldType::Type::Editor:
+		return TEXT("Editor");
+		break;
+	case EWorldType::Type::EditorPreview:
+		return TEXT("EditorPreview");
+		break;
+	case EWorldType::Type::Game:
+		return TEXT("Game");
+		break;
+	case EWorldType::Type::GamePreview:
+		return TEXT("GamePreview");
+		break;
+	case EWorldType::Type::GameRPC:
+		return TEXT("GameRPC");
+		break;
+	case EWorldType::Type::Inactive:
+		return TEXT("Inactive");
+		break;
+	case EWorldType::Type::PIE:
+		return TEXT("PIE");
+		break;
+	case EWorldType::Type::None:
+		return TEXT("None");
+		break;
+	default:
+		return TEXT("Unknown");
+		break;
 	}
-
-	return FVector(Location.X + LocalOrigin.X, Location.Y + LocalOrigin.Y, Location.Z + LocalOrigin.Z);
-}
-
-/** Rebase zero-origin position onto local world origin value based on an actor's world. */
-FVector FRepMovement::RebaseOntoLocalOrigin(const struct FVector& Location, const AActor* const WorldContextActor)
-{
-	if (WorldContextActor == nullptr || EnableMultiplayerWorldOriginRebasing <= 0)
-	{
-		return Location;
-	}
-
-	return RebaseOntoLocalOrigin(Location, WorldContextActor->GetWorld()->OriginLocation);
-}
-
-/** Rebase local-origin position onto zero world origin value based on an actor's world.*/
-FVector FRepMovement::RebaseOntoZeroOrigin(const struct FVector& Location, const AActor* const WorldContextActor)
-{
-	if (WorldContextActor == nullptr || EnableMultiplayerWorldOriginRebasing <= 0)
-	{
-		return Location;
-	}
-
-	return RebaseOntoZeroOrigin(Location, WorldContextActor->GetWorld()->OriginLocation);
-}
-
-/// @cond DOXYGEN_WARNINGS
-
-/** Rebase zero-origin position onto local world origin value based on an actor component's world. */
-FVector FRepMovement::RebaseOntoLocalOrigin(const struct FVector& Location, const UActorComponent* const WorldContextActorComponent)
-{
-	if (WorldContextActorComponent == nullptr || EnableMultiplayerWorldOriginRebasing <= 0)
-	{
-		return Location;
-	}
-
-	return RebaseOntoLocalOrigin(Location, WorldContextActorComponent->GetWorld()->OriginLocation);
-}
-
-/** Rebase local-origin position onto zero world origin value based on an actor component's world.*/
-FVector FRepMovement::RebaseOntoZeroOrigin(const struct FVector& Location, const UActorComponent* const WorldContextActorComponent)
-{
-	if (WorldContextActorComponent == nullptr || EnableMultiplayerWorldOriginRebasing <= 0)
-	{
-		return Location;
-	}
-
-	return RebaseOntoZeroOrigin(Location, WorldContextActorComponent->GetWorld()->OriginLocation);
 }
 
 /// @endcond

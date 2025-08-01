@@ -11,6 +11,7 @@
 #include "VectorField.h"
 #include "ParticleSortingGPU.h"
 #include "GPUSortManager.h"
+#include "ParticleVertexFactory.h"
 
 class FCanvas;
 class FGlobalDistanceFieldParameterData;
@@ -56,24 +57,7 @@ enum EParticleCollisionShaderMode
 };
 
 /** Helper function to determine whether the given particle collision shader mode is supported on the given shader platform */
-inline bool IsParticleCollisionModeSupported(EShaderPlatform InPlatform, EParticleCollisionShaderMode InCollisionShaderMode, bool bForCaching = false)
-{
-	switch (InCollisionShaderMode)
-	{
-	case PCM_None:
-		return IsFeatureLevelSupported(InPlatform, ERHIFeatureLevel::ES3_1);
-	case PCM_DepthBuffer:
-		// we only need to check for simple forward if we're NOT currently attempting to cache the shader
-		// since SF is a runtime change, we need to compile the shader regardless, because we could be switching to deferred at any time
-		return (IsFeatureLevelSupported(InPlatform, ERHIFeatureLevel::SM5))
-			&& (bForCaching || !IsSimpleForwardShadingEnabled(InPlatform));
-	case PCM_DistanceField:
-		return IsFeatureLevelSupported(InPlatform, ERHIFeatureLevel::SM5);
-	}
-	check(0);
-	return IsFeatureLevelSupported(InPlatform, ERHIFeatureLevel::SM5);
-}
-
+extern bool IsParticleCollisionModeSupported(EShaderPlatform InPlatform, EParticleCollisionShaderMode InCollisionShaderMode);
 
 inline EParticleSimulatePhase::Type GetLastParticleSimulationPhase(EShaderPlatform InPlatform)
 {
@@ -90,15 +74,15 @@ Injecting particles in to the GPU for simulation.
 struct FNewParticle
 {
 	/** The initial position of the particle. */
-	FVector Position;
+	FVector3f Position;
 	/** The relative time of the particle. */
 	float RelativeTime;
 	/** The initial velocity of the particle. */
-	FVector Velocity;
+	FVector3f Velocity;
 	/** The time scale for the particle. */
 	float TimeScale;
 	/** Initial size of the particle. */
-	FVector2D Size;
+	FVector2f Size;
 	/** Initial rotation of the particle. */
 	float Rotation;
 	/** Relative rotation rate of the particle. */
@@ -116,7 +100,78 @@ struct FNewParticle
 	/** Random selection of orbit attributes. */
 	float RandomOrbit;
 	/** The offset at which to inject the new particle. */
-	FVector2D Offset;
+	FVector3f Offset;
+};
+
+
+/**
+ * Vertex factory for render sprites from GPU simulated particles.
+ */
+class FGPUSpriteVertexFactory : public FParticleVertexFactoryBase
+{
+	DECLARE_VERTEX_FACTORY_TYPE(FGPUSpriteVertexFactory);
+
+public:
+	FGPUSpriteVertexFactory(ERHIFeatureLevel::Type InFeatureLevel)
+		: FParticleVertexFactoryBase(InFeatureLevel)
+	{
+	}
+
+	/** Emitter uniform buffer. */
+	FRHIUniformBuffer* EmitterUniformBuffer;
+	/** Emitter uniform buffer for dynamic parameters. */
+	FUniformBufferRHIRef EmitterDynamicUniformBuffer;
+	/** Buffer containing unsorted particle indices. */
+	FRHIShaderResourceView* UnsortedParticleIndicesSRV;
+	/** Texture containing positions for all particles. */
+	FRHITexture2D* PositionTextureRHI;
+	/** Texture containing velocities for all particles. */
+	FRHITexture2D* VelocityTextureRHI;
+	/** Texture containint attributes for all particles. */
+	FRHITexture2D* AttributesTextureRHI;
+	/** LWC tile offset, will be 0,0,0 for localspace emitters. */
+	FVector3f LWCTile;
+	/** Tile page offset factors associated with the GPU particle simulation resources. */
+	FVector3f TilePageScale;
+
+	FGPUSpriteVertexFactory()
+		: FParticleVertexFactoryBase(PVFT_MAX, ERHIFeatureLevel::Num)
+		, UnsortedParticleIndicesSRV(0)
+		, PositionTextureRHI(nullptr)
+		, VelocityTextureRHI(nullptr)
+		, AttributesTextureRHI(nullptr)
+		, LWCTile(FVector3f::ZeroVector)
+		, TilePageScale(FVector3f::OneVector)
+	{}
+
+	/**
+	 * Constructs render resources for this vertex factory.
+	 */
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual bool RendersPrimitivesAsCameraFacingSprites() const override { return true; }
+
+	/**
+	 * Set the source vertex buffer that contains particle indices.
+	 */
+	void SetUnsortedParticleIndicesSRV(FRHIShaderResourceView* VertexBuffer)
+	{
+		UnsortedParticleIndicesSRV = VertexBuffer;
+	}
+
+	/**
+	 * Should we cache the material's shadertype on this platform with this vertex factory?
+	 */
+	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+
+	/**
+	 * Can be overridden by FVertexFactory subclasses to modify their compile environment just before compilation occurs.
+	 */
+	static void ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+
+	/**
+	 * Get vertex elements used when during PSO precaching materials using this vertex factory type
+	 */
+	static void GetPSOPrecacheVertexFetchElements(EVertexInputStreamType VertexInputStreamType, FVertexDeclarationElementList& Elements);
 };
 
 /*-----------------------------------------------------------------------------
@@ -140,7 +195,7 @@ public:
 	virtual FFXSystemInterface* GetInterface(const FName& InName) override;
 
 	// Begin FFXSystemInterface.
-	virtual void Tick(float DeltaSeconds) override;
+	virtual void Tick(UWorld* World, float DeltaSeconds) override;
 #if WITH_EDITOR
 	virtual void Suspend() override;
 	virtual void Resume() override;
@@ -150,18 +205,14 @@ public:
 	virtual void RemoveVectorField(UVectorFieldComponent* VectorFieldComponent) override;
 	virtual void UpdateVectorField(UVectorFieldComponent* VectorFieldComponent) override;
 	FParticleEmitterInstance* CreateGPUSpriteEmitterInstance(FGPUSpriteEmitterInfo& EmitterInfo);
-	virtual void PreInitViews(FRHICommandListImmediate& RHICmdList, bool bAllowGPUParticleUpdate) override;
-	virtual void PostInitViews(FRHICommandListImmediate& RHICmdList, FRHIUniformBuffer* ViewUniformBuffer, bool bAllowGPUParticleUpdate) override;
+	virtual void PreInitViews(class FRDGBuilder& GraphBuilder, bool bAllowGPUParticleUpdate, const TArrayView<const FSceneViewFamily*>& ViewFamilies, const FSceneViewFamily* CurrentFamily) override;
+	virtual void PostInitViews(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, bool bAllowGPUParticleUpdate) override;
 	virtual bool UsesGlobalDistanceField() const override;
 	virtual bool UsesDepthBuffer() const override;
 	virtual bool RequiresEarlyViewUniformBuffer() const override;
-	virtual void PreRender(FRHICommandListImmediate& RHICmdList, const FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData, bool bAllowGPUParticleUpdate) override;
-	virtual void PostRenderOpaque(
-		FRHICommandListImmediate& RHICmdList, 
-		FRHIUniformBuffer* ViewUniformBuffer,
-		const FShaderParametersMetadata* SceneTexturesUniformBufferStruct,
-		FRHIUniformBuffer* SceneTexturesUniformBuffer,
-		bool bAllowGPUParticleUpdate) override;
+	virtual bool RequiresRayTracingScene() const override;
+	virtual void PreRender(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleUpdate) override;
+	virtual void PostRenderOpaque(FRDGBuilder& GraphBuilder, TConstStridedView<FSceneView> Views, FSceneUniformBuffer &SceneUniformBuffer, bool bAllowGPUParticleUpdate) override;
 	// End FFXSystemInterface.
 
 	/*--------------------------------------------------------------------------
@@ -175,7 +226,7 @@ public:
 	/**
 	 * Retrieve shaderplatform that this FXSystem was created for
 	 */
-	EShaderPlatform GetShaderPlatform() const { return ShaderPlatform; }
+	EShaderPlatform GetShaderPlatform() const { return GShaderPlatformForFeatureLevel[FeatureLevel]; }
 
 	/**
 	 * Add a new GPU simulation to the system.
@@ -213,13 +264,15 @@ public:
 	 * @param OutInfo The bindings for this GPU sort task, if success. 
 	 * @returns true if the work was registered, or false it GPU sorting is not available or impossible.
 	 */
-	bool AddSortedGPUSimulation(FParticleSimulationGPU* Simulation, const FVector& ViewOrigin, bool bIsTranslucent, FGPUSortManager::FAllocationInfo& OutInfo);
+	bool AddSortedGPUSimulation(FRHICommandListBase& RHICmdList, FParticleSimulationGPU* Simulation, const FVector& ViewOrigin, bool bIsTranslucent, FGPUSortManager::FAllocationInfo& OutInfo);
 
 	void PrepareGPUSimulation(FRHICommandListImmediate& RHICmdList);
 	void FinalizeGPUSimulation(FRHICommandListImmediate& RHICmdList);
 
 	/** Get the shared SortManager, used in the rendering loop to call FGPUSortManager::OnPreRender() and FGPUSortManager::OnPostRenderOpaque() */
 	virtual FGPUSortManager* GetGPUSortManager() const override;
+
+	virtual void SetSceneTexturesUniformBuffer(const TUniformBufferRef<FSceneTextureUniformParameters>& InSceneTexturesUniformParams) override { SceneTexturesUniformParams = InSceneTexturesUniformParams; }
 
 private:
 
@@ -270,11 +323,12 @@ private:
 	/**
 	 * Prepares GPU particles for simulation and rendering in the next frame.
 	 */
-	void AdvanceGPUParticleFrame(bool bAllowGPUParticleUpdate);
+	void AdvanceGPUParticleFrame(FRHICommandListImmediate& RHICmdList, bool bAllowGPUParticleUpdate);
 
 	bool UsesGlobalDistanceFieldInternal() const;
 	bool UsesDepthBufferInternal() const;
 	bool RequiresEarlyViewUniformBufferInternal() const;
+	bool RequiresRayTracingSceneInternal() const;
 
 	/**
 	* Updates resources used in a multi-GPU context
@@ -289,10 +343,8 @@ private:
 	void SimulateGPUParticles(
 		FRHICommandListImmediate& RHICmdList,
 		EParticleSimulatePhase::Type Phase,
-		FRHIUniformBuffer* ViewUniformBuffer,
-		const FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData,
-		const FShaderParametersMetadata* SceneTexturesUniformBufferStruct,
-		FRHIUniformBuffer* SceneTexturesUniformBuffer
+		const TUniformBufferRef<FViewUniformShaderParameters>& ViewUniformBuffer,
+		const FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData
 		);
 
 	/**
@@ -307,7 +359,7 @@ private:
 	void SimulateGPUParticles_Internal(
 		FRHICommandListImmediate& RHICmdList,
 		EParticleSimulatePhase::Type Phase,
-		FRHIUniformBuffer* ViewUniformBuffer,
+		const TUniformBufferRef<FViewUniformShaderParameters>& ViewUniformBuffer,
 		const FGlobalDistanceFieldParameterData* GlobalDistanceFieldParameterData,
 		FRHITexture2D* SceneDepthTexture,
 		FRHITexture2D* GBufferATexture
@@ -327,8 +379,6 @@ private:
 	FParticleSimulationResources* ParticleSimulationResources;
 	/** Feature level of this effects system */
 	ERHIFeatureLevel::Type FeatureLevel;
-	/** Shader platform that will be rendering this effects system */
-	EShaderPlatform ShaderPlatform;
 
 	/** The shared GPUSortManager, used to register GPU sort tasks in order to generate sorted particle indices per emitter. */
 	TRefCountPtr<FGPUSortManager> GPUSortManager;
@@ -337,14 +387,19 @@ private:
 
 	/** Previous frame new particles for multi-gpu simulation*/
 	TArray<FNewParticle> LastFrameNewParticles;
+
+	UE::FMutex AddSortedGPUSimulationMutex;
+
 #if WITH_EDITOR
 	/** true if the system has been suspended. */
 	bool bSuspended;
 #endif // #if WITH_EDITOR
 
 #if WITH_MGPU
-	EParticleSimulatePhase::Type PhaseToWaitForTemporalEffect = EParticleSimulatePhase::First;
-	EParticleSimulatePhase::Type PhaseToBroadcastTemporalEffect = EParticleSimulatePhase::First;
+	EParticleSimulatePhase::Type PhaseToWaitForResourceTransfer = EParticleSimulatePhase::First;
+	EParticleSimulatePhase::Type PhaseToBroadcastResourceTransfer = EParticleSimulatePhase::First;
 #endif
+
+	TUniformBufferRef<FSceneTextureUniformParameters> SceneTexturesUniformParams;
 };
 

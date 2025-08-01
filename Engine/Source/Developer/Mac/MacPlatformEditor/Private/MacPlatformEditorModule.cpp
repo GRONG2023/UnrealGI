@@ -5,11 +5,13 @@
 #include "ISettingsModule.h"
 #include "Modules/ModuleManager.h"
 #include "MacTargetSettings.h"
+#include "XcodeProjectSettings.h"
 #include "UObject/WeakObjectPtr.h"
 #include "UObject/Class.h"
+#include "PropertyEditorModule.h"
+#include "XcodeProjectSettingsDetailsCustomization.h"
 
 #define LOCTEXT_NAMESPACE "MacPlatformEditorModule"
-
 
 /**
  * Module for Mac project settings
@@ -27,10 +29,21 @@ class FMacPlatformEditorModule
 		if (SettingsModule != nullptr)
 		{
 			SettingsModule->RegisterSettings("Project", "Platforms", "Mac",
-				LOCTEXT("TargetSettingsName", "Mac"),
-				LOCTEXT("TargetSettingsDescription", "Settings for Mac target platform"),
+				LOCTEXT("MacTargetSettingsName", "Mac"),
+				LOCTEXT("MacTargetSettingsDescription", "Settings for Mac target platform"),
 				GetMutableDefault<UMacTargetSettings>()
 			);
+            SettingsModule->RegisterSettings("Project", "Platforms", "Xcode",
+                LOCTEXT("XcodeProjectSettingsName", "Xcode Projects"),
+                LOCTEXT("XcodeProjectSettingsDescription", "Settings for Xcode projects"),
+                GetMutableDefault<UXcodeProjectSettings>()
+            );
+            
+            FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+            PropertyModule.RegisterCustomClassLayout(
+                "XcodeProjectSettings",
+                FOnGetDetailCustomizationInstance::CreateStatic(&FXcodeProjectSettingsDetailsCustomization::MakeInstance)
+            );
 		}
 	}
 
@@ -41,6 +54,7 @@ class FMacPlatformEditorModule
 		if (SettingsModule != nullptr)
 		{
 			SettingsModule->UnregisterSettings("Project", "Platforms", "Mac");
+            SettingsModule->UnregisterSettings("Project", "Platforms", "Xcode");
 		}
 	}
 };

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "DSP/BufferVectorOperations.h"
+#include "DSP/FloatArrayMath.h"
 
 namespace Audio
 {
@@ -60,7 +61,7 @@ namespace Audio
 			FMemory::Memcpy(RawPCMData.GetData(), Other.RawPCMData.GetData(), NumSamples * sizeof(SampleType));
 		}
 
-		FORCEINLINE TSampleBuffer(const AlignedFloatBuffer& InData, int32 InNumChannels, int32 InSampleRate)
+		FORCEINLINE TSampleBuffer(const FAlignedFloatBuffer& InData, int32 InNumChannels, int32 InSampleRate)
 		{
 			*this =  TSampleBuffer(InData.GetData(), InData.Num(), InNumChannels, InSampleRate);
 		}
@@ -76,16 +77,16 @@ namespace Audio
 			RawPCMData.Reset(NumSamples);
 			RawPCMData.AddUninitialized(NumSamples);
 
-			if (TIsSame<SampleType, float>::Value)
+			if constexpr(std::is_same_v<SampleType, float>)
 			{
 				FMemory::Memcpy(RawPCMData.GetData(), InBufferPtr, NumSamples * sizeof(float));
 			}
-			else if (TIsSame<SampleType, int16>::Value)
+			else if constexpr(std::is_same_v<SampleType, int16>)
 			{
 				// Convert from float to int:
 				for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
 				{
-					RawPCMData[SampleIndex] = (int16)(InBufferPtr[SampleIndex] * 32767.0f);
+					RawPCMData[SampleIndex] = (int16)(FMath::Clamp(InBufferPtr[SampleIndex], -1.0f, 1.0f) * 32767.0f);
 				}
 			}
 			else
@@ -109,17 +110,14 @@ namespace Audio
 			RawPCMData.Reset(NumSamples);
 			RawPCMData.AddUninitialized(NumSamples);
 
-			if (TIsSame<SampleType, int16>::Value)
+			if constexpr(std::is_same_v<SampleType, int16>)
 			{
 				FMemory::Memcpy(RawPCMData.GetData(), InBufferPtr, NumSamples * sizeof(int16));
 			}
-			else if (TIsSame<SampleType, float>::Value)
+			else if constexpr(std::is_same_v<SampleType, float>)
 			{
 				// Convert from int to float:
-				for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
-				{
-					RawPCMData[SampleIndex] = ((float)InBufferPtr[SampleIndex]) / 32767.0f;
-				}
+				Audio::ArrayPcm16ToFloat(MakeArrayView(InBufferPtr, NumSamples), RawPCMData);
 			}
 			else
 			{
@@ -161,33 +159,27 @@ namespace Audio
 			RawPCMData.Reset(NumSamples);
 			RawPCMData.AddUninitialized(NumSamples);
 
-			if (TIsSame<SampleType, OtherSampleType>::Value)
+			if constexpr(std::is_same_v<SampleType, OtherSampleType>)
 			{
 				// If buffers are of the same type, copy over:
 				FMemory::Memcpy(RawPCMData.GetData(), Other.RawPCMData.GetData(), NumSamples * sizeof(SampleType));
 			}
-			else if (TIsSame<SampleType, int16>::Value && TIsSame<OtherSampleType, float>::Value)
+			else if constexpr(std::is_same_v<SampleType, int16> && std::is_same_v<OtherSampleType, float>)
 			{
 				// Convert from float to int:
-				for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
-				{
-					RawPCMData[SampleIndex] = (int16)(Other.RawPCMData[SampleIndex] * 32767.0f);
-				}
+				Audio::ArrayFloatToPcm16(MakeArrayView(Other.RawPCMData), MakeArrayView(RawPCMData));
 			}
-			else if (TIsSame<SampleType, float>::Value && TIsSame<OtherSampleType, int16>::Value)
+			else if constexpr(std::is_same_v<SampleType, float> && std::is_same_v<OtherSampleType, int16>)
 			{
 				// Convert from int to float:
-				for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
-				{
-					RawPCMData[SampleIndex] = ((float)Other.RawPCMData[SampleIndex]) / 32767.0f;
-				}
+				Audio::ArrayPcm16ToFloat(MakeArrayView(Other.RawPCMData), MakeArrayView(RawPCMData));
 			}
 			else
 			{
 				// for any other types, we don't know how to explicitly convert, so we fall back to casts:
 				for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
 				{
-					RawPCMData[SampleIndex] = Other.RawPCMData[SampleIndex];
+					RawPCMData[SampleIndex] = (SampleType)Other.RawPCMData[SampleIndex];
 				}
 			}
 
@@ -215,27 +207,21 @@ namespace Audio
 		{
 			int32 StartIndex = RawPCMData.AddUninitialized(InNumSamples);
 
-			if (TIsSame<SampleType, OtherSampleType>::Value)
+			if constexpr(std::is_same_v<SampleType, OtherSampleType>)
 			{
 				FMemory::Memcpy(&RawPCMData[StartIndex], InputBuffer, InNumSamples * sizeof(SampleType));
 			}
 			else
 			{
-				if (TIsSame<SampleType, int16>::Value && TIsSame<OtherSampleType, float>::Value)
+				if constexpr(std::is_same_v<SampleType, int16> && std::is_same_v<OtherSampleType, float>)
 				{
 					// Convert from float to int:
-					for (int32 SampleIndex = 0; SampleIndex < InNumSamples; SampleIndex++)
-					{
-						RawPCMData[StartIndex + SampleIndex] = (int16)(InputBuffer[SampleIndex] * 32767.0f);
-					}
+					Audio::ArrayFloatToPcm16(MakeArrayView(InputBuffer, InNumSamples), MakeArrayView(&RawPCMData[StartIndex], InNumSamples));
 				}
-				else if (TIsSame<SampleType, float>::Value && TIsSame<OtherSampleType, int16>::Value)
+				else if constexpr(std::is_same_v<SampleType, float> && std::is_same_v<OtherSampleType, int16>)
 				{
 					// Convert from int to float:
-					for (int32 SampleIndex = 0; SampleIndex < InNumSamples; SampleIndex++)
-					{
-						RawPCMData[StartIndex + SampleIndex] = (float)InputBuffer[SampleIndex] / 32767.0f;
-					}
+					Audio::ArrayPcm16ToFloat(MakeArrayView(InputBuffer, InNumSamples), MakeArrayView(&RawPCMData[StartIndex], NumSamples));
 				}
 				else
 				{
@@ -358,23 +344,23 @@ namespace Audio
 
 		void Clamp(float Ceiling = 1.0f)
 		{
-			if (TIsSame<SampleType, float>::Value)
+			if constexpr(std::is_same_v<SampleType, float>)
 			{
 				// Float case:
 				float ClampMin = Ceiling * -1.0f;
 
 				for (int32 SampleIndex = 0; SampleIndex < RawPCMData.Num(); SampleIndex++)
 				{
-					RawPCMData[SampleIndex] = FMath::Clamp<float>(RawPCMData[SampleIndex], ClampMin, Ceiling);
+					RawPCMData[SampleIndex] = static_cast<SampleType>(FMath::Clamp<float>(RawPCMData[SampleIndex], ClampMin, Ceiling));
 				}
 			}
-			else if (TIsSame<SampleType, int16>::Value)
+			else if constexpr(std::is_same_v<SampleType, int16>)
 			{
 				// int16 case:
 				Ceiling = FMath::Clamp(Ceiling, 0.0f, 1.0f);
 
-				int16 ClampMax = Ceiling * 32767.0f;
-				int16 ClampMin = Ceiling * -32767.0f;
+				int16 ClampMax = static_cast<int16>(Ceiling * 32767.0f);
+				int16 ClampMin = static_cast<int16>(Ceiling * -32767.0f);
 
 				for (int32 SampleIndex = 0; SampleIndex < NumSamples; SampleIndex++)
 				{
@@ -388,7 +374,7 @@ namespace Audio
 
 				for (int32 SampleIndex = 0; SampleIndex < RawPCMData.Num(); SampleIndex++)
 				{
-					RawPCMData[SampleIndex] = FMath::Clamp<SampleType>(RawPCMData[SampleIndex], ClampMin, Ceiling);
+					RawPCMData[SampleIndex] = static_cast<SampleType>(FMath::Clamp<SampleType>(RawPCMData[SampleIndex], ClampMin, Ceiling));
 				}
 			}
 		}
@@ -480,7 +466,7 @@ namespace Audio
 			{
 				float SampleA, SampleB;
 
-				if (TIsSame<SampleType, float>::Value)
+				if constexpr(std::is_same_v<SampleType, float>)
 				{
 					SampleA = RawPCMData[(WholeThisIndex * NumChannels) + i];
 					SampleB = RawPCMData[(WholeNextIndex * NumChannels) + i];

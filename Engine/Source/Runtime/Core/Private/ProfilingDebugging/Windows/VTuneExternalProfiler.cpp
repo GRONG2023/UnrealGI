@@ -9,11 +9,10 @@
 #include "Containers/Map.h"
 #include "HAL/ThreadSingleton.h"
 
-// VTune header for ITT event tracing
-#include "ittnotify.h"
-
 #if UE_EXTERNAL_PROFILING_ENABLED
 
+// VTune header for ITT event tracing
+#include "ittnotify.h"
 
 /** Per thread TMap for all ITT String Handles */
 struct FVTunePerThreadHandleMap : public TThreadSingleton<FVTunePerThreadHandleMap>
@@ -77,9 +76,9 @@ public:
 		VTResume();
 	}
 
-	void StartScopedEvent(const TCHAR* Text) 
+	void StartScopedEvent(const struct FColor& Color, const TCHAR* Text) override
 	{
-		uint32 Hash = GetTypeHash(Text);
+		uint32 Hash = FCrc::Strihash_DEPRECATED(Text);
 
 		TMap<uint32, __itt_string_handle *>& VTuneHandleMap = FVTunePerThreadHandleMap::Get().VTuneHandleMap;
 
@@ -93,7 +92,7 @@ public:
 		__itt_task_begin(Domain, __itt_null, __itt_null, Handle);
 	}
 
-	void EndScopedEvent()
+	void EndScopedEvent() override
 	{
 		//Deactivate last event
 		__itt_task_end(Domain);

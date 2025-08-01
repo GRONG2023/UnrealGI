@@ -1,18 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "AnimTimelineTrack_Curves.h"
+#include "AnimTimeline/AnimTimelineTrack_Curves.h"
 #include "PersonaUtils.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Layout/SScrollBox.h"
+#include "Widgets/Input/SSearchBox.h"
 #include "AnimSequenceTimelineCommands.h"
+#include "IEditableSkeleton.h"
+#include "SAnimCurvePicker.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Animation/AnimSequenceBase.h"
-#include "SAnimCurvePanel.h"
 #include "Widgets/Input/STextEntryPopup.h"
 #include "Framework/Application/SlateApplication.h"
 #include "ScopedTransaction.h"
 #include "Animation/AnimMontage.h"
-#include "SAnimOutlinerItem.h"
+#include "AnimTimeline/SAnimOutlinerItem.h"
 #include "Preferences/PersonaOptions.h"
+#include "SListViewSelectorDropdownMenu.h"
+#include "Animation/AnimData/IAnimationDataModel.h"
 
 #define LOCTEXT_NAMESPACE "FAnimTimelineTrack_Notifies"
 
@@ -29,7 +34,7 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::GenerateContainerWidgetForOutline
 	TSharedPtr<SHorizontalBox> InnerHorizontalBox;
 	OutlinerWidget = GenerateStandardOutlinerWidget(InRow, false, OuterBorder, InnerHorizontalBox);
 
-	OuterBorder->SetBorderBackgroundColor(FEditorStyle::GetColor("AnimTimeline.Outliner.HeaderColor"));
+	OuterBorder->SetBorderBackgroundColor(FAppStyle::GetColor("AnimTimeline.Outliner.HeaderColor"));
 
 	InnerHorizontalBox->AddSlot()
 		.VAlign(VAlign_Center)
@@ -38,7 +43,7 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::GenerateContainerWidgetForOutline
 		.AutoWidth()
 		[
 			SNew(STextBlock)
-			.TextStyle(&FEditorStyle::Get().GetWidgetStyle<FTextBlockStyle>("AnimTimeline.Outliner.Label"))
+			.TextStyle(&FAppStyle::Get().GetWidgetStyle<FTextBlockStyle>("AnimTimeline.Outliner.Label"))
 			.Text(this, &FAnimTimelineTrack_Curves::GetLabel)
 			.HighlightText(InRow->GetHighlightText())
 		];
@@ -50,11 +55,11 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::GenerateContainerWidgetForOutline
 		.Padding(5.0f, 1.0f)
 		[
 			SNew(STextBlock)
-			.TextStyle(&FEditorStyle::Get().GetWidgetStyle<FTextBlockStyle>("TinyText"))
+			.TextStyle(&FAppStyle::Get().GetWidgetStyle<FTextBlockStyle>("TinyText"))
 			.Text_Lambda([this]()
 			{ 
 				UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
-				return FText::Format(LOCTEXT("CurveCountFormat", "({0})"), FText::AsNumber(AnimSequenceBase->RawCurveData.FloatCurves.Num())); 
+				return FText::Format(LOCTEXT("CurveCountFormat", "({0})"), FText::AsNumber(AnimSequenceBase->GetDataModel()->GetNumberOfFloatCurves())); 
 			})
 		];
 
@@ -76,14 +81,9 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::GenerateContainerWidgetForOutline
 
 void FAnimTimelineTrack_Curves::DeleteAllCurves()
 {
-	const FScopedTransaction Transaction( LOCTEXT("AnimCurve_RemoveAllCurves", "Remove All Curves") );
-
 	UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
-	AnimSequenceBase->Modify(true);
-	AnimSequenceBase->RawCurveData.DeleteAllCurveData();
-	AnimSequenceBase->MarkRawDataAsModified();
-
-	GetModel()->RefreshTracks();
+	IAnimationDataController& Controller = AnimSequenceBase->GetController();
+	Controller.RemoveAllCurvesOfType(ERawCurveTrackTypes::RCT_Float);
 }
 
 TSharedRef<SWidget> FAnimTimelineTrack_Curves::BuildCurvesSubMenu()
@@ -105,7 +105,7 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::BuildCurvesSubMenu()
 		);
 
 		UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
-		if(AnimSequenceBase->RawCurveData.FloatCurves.Num() > 0)
+		if(AnimSequenceBase->GetDataModel()->GetNumberOfFloatCurves() > 0)
 		{
 			MenuBuilder.AddMenuEntry(
 				FAnimSequenceTimelineCommands::Get().RemoveAllCurves->GetLabel(),
@@ -132,6 +132,19 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::BuildCurvesSubMenu()
 			NAME_None,
 			EUserInterfaceActionType::ToggleButton
 		);
+
+		MenuBuilder.AddMenuEntry(
+			FAnimSequenceTimelineCommands::Get().UseTreeView->GetLabel(),
+			FAnimSequenceTimelineCommands::Get().UseTreeView->GetDescription(),
+			FAnimSequenceTimelineCommands::Get().UseTreeView->GetIcon(),
+			FUIAction(
+				FExecuteAction::CreateSP(this, &FAnimTimelineTrack_Curves::HandleUseTreeView),
+				FCanExecuteAction(),
+				FIsActionChecked::CreateSP(this, &FAnimTimelineTrack_Curves::IsUseTreeViewEnabled)
+			),
+			NAME_None,
+			EUserInterfaceActionType::ToggleButton
+		);
 	}
 	MenuBuilder.EndSection();
 
@@ -140,130 +153,64 @@ TSharedRef<SWidget> FAnimTimelineTrack_Curves::BuildCurvesSubMenu()
 
 void FAnimTimelineTrack_Curves::FillMetadataEntryMenu(FMenuBuilder& Builder)
 {
-	UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
-	USkeleton* CurrentSkeleton = AnimSequenceBase->GetSkeleton();
-	check(CurrentSkeleton);
-
-	const FSmartNameMapping* Mapping = CurrentSkeleton->GetSmartNameContainer(USkeleton::AnimCurveMappingName);
-	TArray<USkeleton::AnimCurveUID> CurveUids;
-	Mapping->FillUidArray(CurveUids);
-
-	Builder.BeginSection(NAME_None, LOCTEXT("MetadataMenu_ListHeading", "Available Names"));
+	// Add new metadata entry menu button
 	{
-		TArray<FSmartNameSortItem> SmartNameList;
+		const FText Description = LOCTEXT("NewMetadataCreateNew_ToolTip", "Create a new metadata entry");
+		const FText Label = LOCTEXT("NewMetadataCreateNew_Label","Create Metadata Entry");
+		FUIAction UIAction;
+		UIAction.ExecuteAction.BindRaw(this, &FAnimTimelineTrack_Curves::CreateNewMetadataEntryClicked);
 
-		for (USkeleton::AnimCurveUID Id : CurveUids)
-		{
-			if (!AnimSequenceBase->RawCurveData.GetCurveData(Id))
-			{
-				FName CurveName;
-				if (Mapping->GetName(Id, CurveName))
-				{
-					SmartNameList.Add(FSmartNameSortItem(CurveName, Id));
-				}
-			}
-		}
-
-		{
-			SmartNameList.Sort(FSmartNameSortItemSortOp());
-
-			for (FSmartNameSortItem SmartNameItem : SmartNameList)
-			{
-				const FText Description = LOCTEXT("NewMetadataSubMenu_ToolTip", "Add an existing metadata curve");
-				const FText Label = FText::FromName(SmartNameItem.SmartName);
-
-				FUIAction UIAction;
-				UIAction.ExecuteAction.BindRaw(
-					this, &FAnimTimelineTrack_Curves::AddMetadataEntry,
-					SmartNameItem.ID);
-
-				Builder.AddMenuEntry(Label, Description, FSlateIcon(), UIAction);
-			}
-		}
+		Builder.AddMenuEntry(Label, Description, FSlateIcon(), UIAction);
 	}
+	
+	Builder.BeginSection(NAME_None, LOCTEXT("MetadataMenu_ListHeading", "Available Names"));
+
+	// Add existing curve to timeline using curve picker
+	{
+		const TSharedRef<SWidget> CurvePickerWidget = SNew(SAnimCurvePicker, &GetModel()->GetEditableSkeleton()->GetSkeleton())
+		.OnCurvePicked(this, &FAnimTimelineTrack_Curves::OnMetadataCurveNamePicked)
+		.IsCurveNameMarkedForExclusion(this, &FAnimTimelineTrack_Curves::IsCurveMarkedForExclusion);
+		Builder.AddWidget(CurvePickerWidget, FText::GetEmpty(), true);
+	}
+	
 	Builder.EndSection();
-
-	Builder.AddMenuSeparator();
-
-	const FText Description = LOCTEXT("NewMetadataCreateNew_ToolTip", "Create a new metadata entry");
-	const FText Label = LOCTEXT("NewMetadataCreateNew_Label","Create New");
-	FUIAction UIAction;
-	UIAction.ExecuteAction.BindRaw(this, &FAnimTimelineTrack_Curves::CreateNewMetadataEntryClicked);
-
-	Builder.AddMenuEntry(Label, Description, FSlateIcon(), UIAction);
 }
 
 void FAnimTimelineTrack_Curves::FillVariableCurveMenu(FMenuBuilder& Builder)
 {
-	FText Description = LOCTEXT("NewVariableCurveCreateNew_ToolTip", "Create a new variable curve");
-	FText Label = LOCTEXT("NewVariableCurveCreateNew_Label", "Create Curve");
-	FUIAction UIAction;
-	UIAction.ExecuteAction.BindRaw(this, &FAnimTimelineTrack_Curves::CreateNewCurveClicked);
-
-	Builder.AddMenuEntry(Label, Description, FSlateIcon(), UIAction);
-
-	UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
-	USkeleton* CurrentSkeleton = AnimSequenceBase->GetSkeleton();
-	check(CurrentSkeleton);
-
-	const FSmartNameMapping* Mapping = CurrentSkeleton->GetSmartNameContainer(USkeleton::AnimCurveMappingName);
-	TArray<USkeleton::AnimCurveUID> CurveUids;
-	Mapping->FillUidArray(CurveUids);
-
-	Builder.BeginSection(NAME_None, LOCTEXT("VariableMenu_ListHeading", "Available Names"));
+	// Menu entry to create a new curve
 	{
-		TArray<FSmartNameSortItem> SmartNameList;
-
-		for (USkeleton::AnimCurveUID Id : CurveUids)
-		{
-			if (!AnimSequenceBase->RawCurveData.GetCurveData(Id))
-			{
-				FName CurveName;
-				if (Mapping->GetName(Id, CurveName))
-				{
-					SmartNameList.Add(FSmartNameSortItem(CurveName, Id));
-				}
-			}
-		}
-
-		{
-			SmartNameList.Sort(FSmartNameSortItemSortOp());
-
-			for (FSmartNameSortItem SmartNameItem : SmartNameList)
-			{
-				Description = LOCTEXT("NewVariableSubMenu_ToolTip", "Add an existing variable curve");
-				Label = FText::FromName(SmartNameItem.SmartName);
-
-				UIAction.ExecuteAction.BindRaw(
-					this, &FAnimTimelineTrack_Curves::AddVariableCurve,
-					SmartNameItem.ID);
-
-				Builder.AddMenuEntry(Label, Description, FSlateIcon(), UIAction);
-			}
-		}
+		FText Description = LOCTEXT("NewVariableCurveCreateNew_ToolTip", "Create a new variable curve");
+		FText Label = LOCTEXT("NewVariableCurveCreateNew_Label", "Create Curve");
+		FUIAction UIAction;
+		UIAction.ExecuteAction.BindRaw(this, &FAnimTimelineTrack_Curves::CreateNewCurveClicked);
+		Builder.AddMenuEntry(Label, Description, FSlateIcon(), UIAction);
 	}
+	
+	Builder.BeginSection(NAME_None, LOCTEXT("VariableMenu_ListHeading", "Available Names"));
+
+	// Add existing curve to timeline using curve picker
+	{
+		const TSharedRef<SWidget> CurvePickerWidget = SNew(SAnimCurvePicker, &GetModel()->GetEditableSkeleton()->GetSkeleton())
+		.OnCurvePicked(this, &FAnimTimelineTrack_Curves::OnVariableCurveNamePicked)
+		.IsCurveNameMarkedForExclusion(this, &FAnimTimelineTrack_Curves::IsCurveMarkedForExclusion);
+		
+		Builder.AddWidget(CurvePickerWidget, FText::GetEmpty(), true);
+	}
+	
 	Builder.EndSection();
 }
 
-void FAnimTimelineTrack_Curves::AddMetadataEntry(USkeleton::AnimCurveUID Uid)
+void FAnimTimelineTrack_Curves::AddMetadataEntry(const FName& InCurveName)
 {
-	FSmartName NewName;
 	UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
-	ensureAlways(AnimSequenceBase->GetSkeleton()->GetSmartNameByUID(USkeleton::AnimCurveMappingName, Uid, NewName));
 
-	FScopedTransaction Transaction(LOCTEXT("AddCurveMetadata", "Add Curve Metadata"));
+	IAnimationDataController& Controller = AnimSequenceBase->GetController();
+	IAnimationDataController::FScopedBracket ScopedBracket(Controller, LOCTEXT("AddCurveMetadata", "Add Curve Metadata"));
 
-	AnimSequenceBase->Modify(true);
-
-	if(AnimSequenceBase->RawCurveData.AddCurveData(NewName))
-	{
-		AnimSequenceBase->MarkRawDataAsModified();
-		FFloatCurve* Curve = static_cast<FFloatCurve *>(AnimSequenceBase->RawCurveData.GetCurveData(Uid, ERawCurveTrackTypes::RCT_Float));
-		Curve->FloatCurve.AddKey(0.0f, 1.0f);
-		Curve->SetCurveTypeFlag(AACF_Metadata, true);
-		
-		GetModel()->RefreshTracks();
-	}
+	const FAnimationCurveIdentifier MetadataCurveId(InCurveName, ERawCurveTrackTypes::RCT_Float);
+	Controller.AddCurve(MetadataCurveId, AACF_Metadata);
+	Controller.SetCurveKeys(MetadataCurveId, { FRichCurveKey(0.f, 1.f) });
 }
 
 void FAnimTimelineTrack_Curves::CreateNewMetadataEntryClicked()
@@ -293,12 +240,7 @@ void FAnimTimelineTrack_Curves::CreateNewMetadataEntry(const FText& CommittedTex
 		USkeleton* Skeleton = AnimSequenceBase->GetSkeleton();
 		if(Skeleton && !CommittedText.IsEmpty())
 		{
-			FSmartName CurveName;
-
-			if(Skeleton->AddSmartNameAndModify(USkeleton::AnimCurveMappingName, FName(*CommittedText.ToString()), CurveName))
-			{
-				AddMetadataEntry(CurveName.UID);
-			}
+			AddMetadataEntry(FName(*CommittedText.ToString()));
 		}
 	}
 }
@@ -329,32 +271,24 @@ void FAnimTimelineTrack_Curves::CreateTrack(const FText& ComittedText, ETextComm
 		if(Skeleton && !ComittedText.IsEmpty())
 		{
 			const FScopedTransaction Transaction(LOCTEXT("AnimCurve_AddTrack", "Add New Curve"));
-			FSmartName NewTrackName;
 
-			if(Skeleton->AddSmartNameAndModify(USkeleton::AnimCurveMappingName, FName(*ComittedText.ToString()), NewTrackName))
-			{
-				AddVariableCurve(NewTrackName.UID);
-			}
+			AddVariableCurve(FName(*ComittedText.ToString()));
 		}
 
 		FSlateApplication::Get().DismissAllMenus();
 	}
 }
 
-void FAnimTimelineTrack_Curves::AddVariableCurve(USkeleton::AnimCurveUID CurveUid)
+void FAnimTimelineTrack_Curves::AddVariableCurve(const FName& InCurveName)
 {
 	FScopedTransaction Transaction(LOCTEXT("AddCurve", "Add Curve"));
 
 	UAnimSequenceBase* AnimSequenceBase = GetModel()->GetAnimSequenceBase();
 	AnimSequenceBase->Modify();
-	
-	USkeleton* Skeleton = AnimSequenceBase->GetSkeleton();
-	FSmartName NewName;
-	ensureAlways(Skeleton->GetSmartNameByUID(USkeleton::AnimCurveMappingName, CurveUid, NewName));
-	AnimSequenceBase->RawCurveData.AddCurveData(NewName);
-	AnimSequenceBase->MarkRawDataAsModified();
 
-	GetModel()->RefreshTracks();
+	IAnimationDataController& Controller = AnimSequenceBase->GetController();
+	const FAnimationCurveIdentifier FloatCurveId(InCurveName, ERawCurveTrackTypes::RCT_Float);
+	Controller.AddCurve(FloatCurveId);
 }
 
 void FAnimTimelineTrack_Curves::HandleShowCurvePoints()
@@ -367,4 +301,39 @@ bool FAnimTimelineTrack_Curves::IsShowCurvePointsEnabled() const
 	return GetDefault<UPersonaOptions>()->bTimelineDisplayCurveKeys;
 }
 
+void FAnimTimelineTrack_Curves::HandleUseTreeView()
+{
+	GetMutableDefault<UPersonaOptions>()->bUseTreeViewForAnimationCurves = !GetDefault<UPersonaOptions>()->bUseTreeViewForAnimationCurves;
+	GetModel()->RefreshTracks();
+}
+
+bool FAnimTimelineTrack_Curves::IsUseTreeViewEnabled() const
+{
+	return GetDefault<UPersonaOptions>()->bUseTreeViewForAnimationCurves;
+}
+
+void FAnimTimelineTrack_Curves::OnMetadataCurveNamePicked(const FName& InCurveName)
+{
+	FSlateApplication::Get().DismissAllMenus();
+
+	if(InCurveName != NAME_None)
+	{
+		AddMetadataEntry(InCurveName);
+	}
+}
+
+void FAnimTimelineTrack_Curves::OnVariableCurveNamePicked(const FName& InCurveName)
+{
+	FSlateApplication::Get().DismissAllMenus();
+	
+	if(InCurveName != NAME_None)
+	{
+		AddVariableCurve(InCurveName);
+	}
+}
+
+bool FAnimTimelineTrack_Curves::IsCurveMarkedForExclusion(const FName& InCurveName)
+{
+	return GetModel()->GetAnimSequenceBase()->GetDataModel()->FindFloatCurve(FAnimationCurveIdentifier(InCurveName, ERawCurveTrackTypes::RCT_Float)) != nullptr;
+}
 #undef LOCTEXT_NAMESPACE

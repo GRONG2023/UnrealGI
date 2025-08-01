@@ -7,13 +7,10 @@
 
 #include "SceneOutlinerMenuContext.generated.h"
 
-namespace SceneOutliner
-{
-	class SSceneOutliner;
-}
+class SSceneOutliner;
 
 UCLASS()
-class USceneOutlinerMenuContext : public UObject
+class SCENEOUTLINER_API USceneOutlinerMenuContext : public UObject
 {
 	GENERATED_BODY()
 public:
@@ -22,15 +19,21 @@ public:
 		: Super(ObjectInitializer)
 	{
 		bShowParentTree = false;
+		bRepresentingPartitionedWorld = false;
+		bRepresentingGameWorld = false;
 		NumSelectedItems = 0;
 		NumSelectedFolders = 0;
 		NumWorldsSelected = 0;
+		NumPinnedItems = 0;
 	}
 
-	TWeakPtr<SceneOutliner::SSceneOutliner> SceneOutliner;
+	TWeakPtr<SSceneOutliner> SceneOutliner;
 
 	bool bShowParentTree;
+	bool bRepresentingGameWorld;
+	bool bRepresentingPartitionedWorld;
 	int32 NumSelectedItems;
 	int32 NumSelectedFolders;
 	int32 NumWorldsSelected;
+	int32 NumPinnedItems;
 };

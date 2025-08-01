@@ -6,19 +6,20 @@
 #include "Widgets/Text/STextBlock.h"
 #include "UObject/Package.h"
 #include "Components/StaticMeshComponent.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Engine/StaticMesh.h"
 #include "IStaticMeshEditor.h"
 #include "StaticMeshEditorActions.h"
 #include "Slate/SceneViewport.h"
 #include "ComponentReregisterContext.h"
-#include "Runtime/Analytics/Analytics/Public/AnalyticsEventAttribute.h"
-#include "Runtime/Analytics/Analytics/Public/Interfaces/IAnalyticsProvider.h"
+#include "AnalyticsEventAttribute.h"
+#include "Interfaces/IAnalyticsProvider.h"
 #include "EngineAnalytics.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Engine/StaticMeshSocket.h"
-#include "Editor/UnrealEd/Public/SEditorViewportToolBarMenu.h"
+#include "SEditorViewportToolBarMenu.h"
 #include "StaticMeshViewportLODCommands.h"
+#include "PreviewProfileController.h"
 
 #define LOCTEXT_NAMESPACE "StaticMeshEditorViewportToolbar"
 
@@ -28,7 +29,7 @@
 
 void SStaticMeshEditorViewportToolbar::Construct(const FArguments& InArgs, TSharedPtr<class ICommonEditorViewportToolbarInfoProvider> InInfoProvider)
 {
-	SCommonEditorViewportToolbarBase::Construct(SCommonEditorViewportToolbarBase::FArguments(), InInfoProvider);
+	SCommonEditorViewportToolbarBase::Construct(SCommonEditorViewportToolbarBase::FArguments().PreviewProfileController(MakeShared<FPreviewProfileController>()), InInfoProvider);
 }
 
 // SCommonEditorViewportToolbarBase interface
@@ -43,23 +44,25 @@ TSharedRef<SWidget> SStaticMeshEditorViewportToolbar::GenerateShowMenu() const
 	{
 		auto Commands = FStaticMeshEditorCommands::Get();
 
-		ShowMenuBuilder.AddMenuEntry(Commands.SetShowSockets);
-		ShowMenuBuilder.AddMenuEntry(Commands.SetShowPivot);
-		ShowMenuBuilder.AddMenuEntry(Commands.SetShowVertices);
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowNaniteFallback);
 
+		ShowMenuBuilder.BeginSection("MeshComponents", LOCTEXT("MeshComponments", "Mesh Components"));
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowSockets);
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowVertices);
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowVertexColor);
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowNormals);
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowTangents);
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowBinormals);
 		ShowMenuBuilder.AddMenuSeparator();
 
+		ShowMenuBuilder.AddMenuEntry(Commands.SetShowPivot);
 		ShowMenuBuilder.AddMenuEntry(Commands.SetShowGrid);
 		ShowMenuBuilder.AddMenuEntry(Commands.SetShowBounds);
 		ShowMenuBuilder.AddMenuEntry(Commands.SetShowSimpleCollision);
 		ShowMenuBuilder.AddMenuEntry(Commands.SetShowComplexCollision);
 		ShowMenuBuilder.AddMenuEntry(Commands.SetShowPhysicalMaterialMasks);
 
-		ShowMenuBuilder.AddMenuSeparator();
 
- 		ShowMenuBuilder.AddMenuEntry(Commands.SetShowNormals);
-		ShowMenuBuilder.AddMenuEntry(Commands.SetShowTangents);
-		ShowMenuBuilder.AddMenuEntry(Commands.SetShowBinormals);
 
 		//ShowMenuBuilder.AddMenuSeparator();
 		//ShowMenuBuilder.AddMenuEntry(Commands.SetShowMeshEdges);

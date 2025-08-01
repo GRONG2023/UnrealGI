@@ -9,7 +9,6 @@
 #include "Internationalization/Internationalization.h"
 #include "HAL/PlatformFileManager.h"
 
-#include "Windows/WindowsHWrapper.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include <ShlObj.h>
 #include "Windows/HideWindowsPlatformTypes.h"
@@ -156,7 +155,7 @@ void FWindowsErrorReport::FindMostRecentErrorReports(TArray<FString>& ErrorRepor
 		if (bIsDirectory)
 		{
 			FDateTime CreationTime;
-			if (TryGetDirectoryCreationTimeUtc(FilenameOrDirectory, CreationTime) && CreationTime > MinCreationTime && FCString::Strstr(FilenameOrDirectory, TEXT("UE4-")))
+			if (TryGetDirectoryCreationTimeUtc(FilenameOrDirectory, CreationTime) && CreationTime > MinCreationTime && FCString::Strstr(FilenameOrDirectory, TEXT("UE-")))
 			{
 				ErrorReportPaths.Add(FilenameOrDirectory);
 			}

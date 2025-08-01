@@ -1,13 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "VisualLogger/VisualLoggerAutomationTests.h"
+#include "Engine/World.h"
 #include "Misc/AutomationTest.h"
-#include "EngineDefines.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
 
-#include "VisualLogger/VisualLoggerTypes.h"
 #include "VisualLogger/VisualLogger.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(VisualLoggerAutomationTests)
 
 namespace
 {
@@ -130,7 +131,7 @@ bool FVisualLogTest::RunTest(const FString& Parameters)
 
 	{
 		const FString TextToLog = TEXT("Simple text line to test if UE_VLOG_UELOG works fine");
-		float CurrentTimestamp = World->TimeSeconds;
+		double CurrentTimestamp = FVisualLogger::Get().GetTimeStampForObject(World);
 		UE_VLOG_UELOG(World, LogVisual, Log, TEXT("%s"), *TextToLog);
 		CHECK_SUCCESS(Context.Device.LastObject != World);
 		CHECK_SUCCESS(Context.Device.LastEntry.TimeStamp == -1);
@@ -143,8 +144,9 @@ bool FVisualLogTest::RunTest(const FString& Parameters)
 			CHECK_SUCCESS(CurrentEntry->LogLines[0].Category == LogVisual.GetCategoryName());
 			CHECK_SUCCESS(CurrentEntry->LogLines[0].Line == TextToLog);
 
-			const float NewTimestamp = CurrentTimestamp + 0.1;
+			const double NewTimestamp = CurrentTimestamp + 0.1;
 			FVisualLogEntry* NewEntry = FVisualLogger::Get().GetEntryToWrite(World, NewTimestamp); //generate new entry and serialize old one
+			FVisualLogger::Get().FlushThreadsEntries();
 			CurrentEntry = &Context.Device.LastEntry;
 			CHECK_NOT_NULL(CurrentEntry);
 			CHECK_SUCCESS(CurrentEntry->TimeStamp == CurrentTimestamp);
@@ -153,7 +155,7 @@ bool FVisualLogTest::RunTest(const FString& Parameters)
 			CHECK_SUCCESS(CurrentEntry->LogLines[0].Line == TextToLog);
 
 			CHECK_NOT_NULL(NewEntry);
-			CHECK_SUCCESS(NewEntry->TimeStamp - NewTimestamp <= SMALL_NUMBER);
+			CHECK_SUCCESS(NewEntry->TimeStamp - NewTimestamp <= UE_SMALL_NUMBER);
 			CHECK_SUCCESS(NewEntry->LogLines.Num() == 0);
 		}
 	}
@@ -189,7 +191,7 @@ bool FVisualLogSegmentsTest::RunTest(const FString& Parameters)
 		CHECK_SUCCESS(Context.Device.LastEntry.TimeStamp == -1);
 		FVisualLogEntry* CurrentEntry = FVisualLogger::Get().GetEntryToWrite(World, World->TimeSeconds, ECreateIfNeeded::DontCreate);
 
-		float CurrentTimestamp = World->TimeSeconds;
+		double CurrentTimestamp = FVisualLogger::Get().GetTimeStampForObject(World);
 		{
 			CHECK_NOT_NULL(CurrentEntry);
 			CHECK_SUCCESS(CurrentEntry->TimeStamp == CurrentTimestamp);
@@ -199,8 +201,9 @@ bool FVisualLogSegmentsTest::RunTest(const FString& Parameters)
 			CHECK_SUCCESS(CurrentEntry->ElementsToDraw[0].Points[0] == StartPoint);
 			CHECK_SUCCESS(CurrentEntry->ElementsToDraw[0].Points[1] == EndPoint);
 
-			const float NewTimestamp = CurrentTimestamp + 0.1;
+			const double NewTimestamp = CurrentTimestamp + 0.1;
 			FVisualLogEntry* NewEntry = FVisualLogger::Get().GetEntryToWrite(World, NewTimestamp); //generate new entry and serialize old one
+			FVisualLogger::Get().FlushThreadsEntries();
 			CurrentEntry = &Context.Device.LastEntry;
 			CHECK_NOT_NULL(CurrentEntry);
 			CHECK_SUCCESS(CurrentEntry->TimeStamp == CurrentTimestamp);
@@ -211,7 +214,7 @@ bool FVisualLogSegmentsTest::RunTest(const FString& Parameters)
 			CHECK_SUCCESS(CurrentEntry->ElementsToDraw[0].Points[1] == EndPoint);
 
 			CHECK_NOT_NULL(NewEntry);
-			CHECK_SUCCESS(NewEntry->TimeStamp - NewTimestamp <= SMALL_NUMBER);
+			CHECK_SUCCESS(NewEntry->TimeStamp - NewTimestamp <= UE_SMALL_NUMBER);
 			CHECK_SUCCESS(NewEntry->ElementsToDraw.Num() == 0);
 		}
 	}
@@ -242,9 +245,12 @@ bool FVisualLogEventsTest::RunTest(const FString& Parameters)
 	CHECK_SUCCESS(EventTest3.Name == TEXT("EventTest3"));
 	CHECK_SUCCESS(EventTest3.FriendlyDesc == TEXT("Third simple event for vlog tests"));
 
-	FVisualLogEntry* CurrentEntry = FVisualLogger::Get().GetEntryToWrite(World, World->TimeSeconds, ECreateIfNeeded::DontCreate);
-	float CurrentTimestamp = World->TimeSeconds;
+	double CurrentTimestamp = FVisualLogger::Get().GetTimeStampForObject(World);
+	FVisualLogEntry* CurrentEntry = FVisualLogger::Get().GetEntryToWrite(World, CurrentTimestamp, ECreateIfNeeded::DontCreate);
+	CHECK_SUCCESS(CurrentEntry == nullptr);
+
 	UE_VLOG_EVENTS(World, NAME_None, EventTest);
+	CurrentEntry = FVisualLogger::Get().GetEntryToWrite(World, CurrentTimestamp, ECreateIfNeeded::DontCreate);
 	CHECK_NOT_NULL(CurrentEntry);
 	CHECK_SUCCESS(CurrentEntry->TimeStamp == CurrentTimestamp);
 	CHECK_SUCCESS(CurrentEntry->Events.Num() == 1);
@@ -259,7 +265,7 @@ bool FVisualLogEventsTest::RunTest(const FString& Parameters)
 	CHECK_SUCCESS(CurrentEntry->Events[1].Counter == 1);
 	CHECK_SUCCESS(CurrentEntry->Events[1].Name == TEXT("EventTest2"));
 
-	CurrentTimestamp = World->TimeSeconds;
+	CurrentTimestamp = FVisualLogger::Get().GetTimeStampForObject(World);
 	UE_VLOG_EVENTS(World, NAME_None, EventTest, EventTest2, EventTest3);
 
 	{
@@ -277,8 +283,12 @@ bool FVisualLogEventsTest::RunTest(const FString& Parameters)
 		CHECK_SUCCESS(CurrentEntry->Events[1].UserFriendlyDesc == TEXT("Second simple event for vlog tests"));
 		CHECK_SUCCESS(CurrentEntry->Events[2].UserFriendlyDesc == TEXT("Third simple event for vlog tests"));
 
-		const float NewTimestamp = CurrentTimestamp + 0.1;
+		// Create a NewEntry that has no data in it.  In this case, our entry won't coalesce with the previous data and we should end up with NewTimestamp.
+		// This functionality (requesting an explicit TimeStamp) is deprecated and will be removed, since we should always be using GetTimeStampForObject()
+		// as that functionality is what's used when actually logging.
+		const double NewTimestamp = CurrentTimestamp + 0.1;
 		FVisualLogEntry* NewEntry = FVisualLogger::Get().GetEntryToWrite(World, NewTimestamp); //generate new entry and serialize old one
+		FVisualLogger::Get().FlushThreadsEntries();
 		CurrentEntry = &Context.Device.LastEntry;
 		CHECK_NOT_NULL(CurrentEntry);
 		CHECK_SUCCESS(CurrentEntry->TimeStamp == CurrentTimestamp);
@@ -295,7 +305,7 @@ bool FVisualLogEventsTest::RunTest(const FString& Parameters)
 		CHECK_SUCCESS(CurrentEntry->Events[2].UserFriendlyDesc == TEXT("Third simple event for vlog tests"));
 
 		CHECK_NOT_NULL(NewEntry);
-		CHECK_SUCCESS(NewEntry->TimeStamp - NewTimestamp <= SMALL_NUMBER);
+		CHECK_SUCCESS(NewEntry->TimeStamp - NewTimestamp <= UE_SMALL_NUMBER);
 		CHECK_SUCCESS(NewEntry->Events.Num() == 0);
 	}
 
@@ -326,6 +336,272 @@ bool FVisualLogEventsTest::RunTest(const FString& Parameters)
 	CHECK_SUCCESS(CurrentEntry->Events[0].EventTags[EventTag2] == 1);
 	CHECK_SUCCESS(CurrentEntry->Events[0].EventTags[EventTag3] == 2);
 
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisualLogRedirectionsCleanupTest, "System.Engine.VisualLogger.Redirections.Cleanup", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVisualLogRedirectionsCleanupTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GetSimpleEngineAutomationTestWorld(GetTestFlags());
+	CHECK_NOT_NULL(World);
+
+	FVisualLogger& Logger = FVisualLogger::Get();
+	Logger.Cleanup(World);
+	FVisualLogger::FOwnerToChildrenRedirectionMap& RedirectionMap = Logger.GetRedirectionMap(World);
+	CHECK_SUCCESS(RedirectionMap.Num() == 0);
+
+	const UObject* ObjA = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjA"), RF_Transient);
+	const UObject* ObjB = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjB"), RF_Transient);
+	const UObject* ObjC = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjC"), RF_Transient);
+
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjA);
+	REDIRECT_OBJECT_TO_VLOG(ObjC, ObjB);
+	// C -> B -> A
+	CHECK_SUCCESS(RedirectionMap.Num() == 2);
+	CHECK_NOT_NULL(RedirectionMap.Find(ObjA));
+	CHECK_NOT_NULL(RedirectionMap.Find(ObjB));
+	CHECK_SUCCESS(RedirectionMap.Find(ObjC) == nullptr);
+	
+	Logger.Cleanup(World);
+	CHECK_SUCCESS(RedirectionMap.Num() == 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisualLogRedirectionsMultipleChildrenTest, "System.Engine.VisualLogger.Redirections.MultipleChildren", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVisualLogRedirectionsMultipleChildrenTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GetSimpleEngineAutomationTestWorld(GetTestFlags());
+	CHECK_NOT_NULL(World);
+
+	FVisualLogger& Logger = FVisualLogger::Get();
+	Logger.Cleanup(World);
+	FVisualLogger::FOwnerToChildrenRedirectionMap& RedirectionMap = Logger.GetRedirectionMap(World);
+	CHECK_SUCCESS(RedirectionMap.Num() == 0);
+
+	const UObject* ObjA = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjA"), RF_Transient);
+	const UObject* ObjB = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjB"), RF_Transient);
+	const UObject* ObjC = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjC"), RF_Transient);
+	const UObject* ObjD = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjD"), RF_Transient);
+
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjA);
+	// B -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 1);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjB) == ObjA);
+	}
+
+	REDIRECT_OBJECT_TO_VLOG(ObjC, ObjA);
+	// B -> A
+	// C -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 2);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjC) == ObjA);
+	}
+
+	REDIRECT_OBJECT_TO_VLOG(ObjD, ObjA);
+	// B -> A
+	// C -> A
+	// D -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 3);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjD) == ObjA);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisualLogRedirectionsCreationOrderTest, "System.Engine.VisualLogger.Redirections.CreationOrder", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVisualLogRedirectionsCreationOrderTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GetSimpleEngineAutomationTestWorld(GetTestFlags());
+	CHECK_NOT_NULL(World);
+
+	FVisualLogger& Logger = FVisualLogger::Get();
+	Logger.Cleanup(World);
+	FVisualLogger::FOwnerToChildrenRedirectionMap& RedirectionMap = Logger.GetRedirectionMap(World);
+	CHECK_SUCCESS(RedirectionMap.Num() == 0);
+
+	const UObject* ObjA = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjA"), RF_Transient);
+	const UObject* ObjB = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjB"), RF_Transient);
+	const UObject* ObjC = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjC"), RF_Transient);
+	const UObject* ObjD = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjD"), RF_Transient);
+
+	// Validate that redirection creation order doesn't affect the final list of children
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjA);
+	// B -> A
+	REDIRECT_OBJECT_TO_VLOG(ObjC, ObjB);
+	// C -> B -> A
+	REDIRECT_OBJECT_TO_VLOG(ObjD, ObjC);
+	// D -> C -> B -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfB = RedirectionMap.Find(ObjB);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfC = RedirectionMap.Find(ObjC);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_NOT_NULL(ChildrenOfB);
+		CHECK_NOT_NULL(ChildrenOfC);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 3);
+		CHECK_SUCCESS(ChildrenOfB->Num() == 2);
+		CHECK_SUCCESS(ChildrenOfC->Num() == 1);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjB) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjC) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjD) == ObjA);
+	}
+
+	Logger.Cleanup(World);
+
+	REDIRECT_OBJECT_TO_VLOG(ObjD, ObjC);
+	// D -> C
+	REDIRECT_OBJECT_TO_VLOG(ObjC, ObjB);
+	// D -> C -> B
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjA);
+	// D -> C -> B -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfB = RedirectionMap.Find(ObjB);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfC = RedirectionMap.Find(ObjC);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_NOT_NULL(ChildrenOfB);
+		CHECK_NOT_NULL(ChildrenOfC);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 3);
+		CHECK_SUCCESS(ChildrenOfB->Num() == 2);
+		CHECK_SUCCESS(ChildrenOfC->Num() == 1);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjB) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjC) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjD) == ObjA);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisualLogRedirectionsWithinHierachyTest, "System.Engine.VisualLogger.Redirections.WithinHierachy", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVisualLogRedirectionsWithinHierachyTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GetSimpleEngineAutomationTestWorld(GetTestFlags());
+	CHECK_NOT_NULL(World);
+
+	FVisualLogger& Logger = FVisualLogger::Get();
+	Logger.Cleanup(World);
+	FVisualLogger::FOwnerToChildrenRedirectionMap& RedirectionMap = Logger.GetRedirectionMap(World);
+	CHECK_SUCCESS(RedirectionMap.Num() == 0);
+
+	const UObject* ObjA = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjA"), RF_Transient);
+	const UObject* ObjB = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjB"), RF_Transient);
+	const UObject* ObjC = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjC"), RF_Transient);
+	const UObject* ObjD = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjD"), RF_Transient);
+	const UObject* ObjE = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjE"), RF_Transient);
+
+	REDIRECT_OBJECT_TO_VLOG(ObjE, ObjD);
+	REDIRECT_OBJECT_TO_VLOG(ObjD, ObjB);
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjA);
+	REDIRECT_OBJECT_TO_VLOG(ObjC, ObjA);
+	// E -> D -> B -> A
+	//           C -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfB = RedirectionMap.Find(ObjB);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfD = RedirectionMap.Find(ObjD);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_NOT_NULL(ChildrenOfB);
+		CHECK_NOT_NULL(ChildrenOfD);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 4);
+		CHECK_SUCCESS(ChildrenOfB->Num() == 2);
+		CHECK_SUCCESS(ChildrenOfD->Num() == 1);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjB) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjC) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjD) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjE) == ObjA);
+	}
+
+	REDIRECT_OBJECT_TO_VLOG(ObjD, ObjC);
+	//           B -> A
+	// E -> D -> C -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfB = RedirectionMap.Find(ObjB);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfC = RedirectionMap.Find(ObjC);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfD = RedirectionMap.Find(ObjD);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_NOT_NULL(ChildrenOfB);
+		CHECK_NOT_NULL(ChildrenOfC);
+		CHECK_NOT_NULL(ChildrenOfD);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 4);
+		CHECK_SUCCESS(ChildrenOfB->Num() == 0);
+		CHECK_SUCCESS(ChildrenOfC->Num() == 2);
+		CHECK_SUCCESS(ChildrenOfD->Num() == 1);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjB) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjC) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjD) == ObjA);
+		CHECK_SUCCESS(Logger.FindRedirection(ObjE) == ObjA);
+	}
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FVisualLogRedirectionsDeepHierarchyToNewParentTest, "System.Engine.VisualLogger.Redirections.DeepHierarchyToNewParent", EAutomationTestFlags::ClientContext | EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FVisualLogRedirectionsDeepHierarchyToNewParentTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = GetSimpleEngineAutomationTestWorld(GetTestFlags());
+	CHECK_NOT_NULL(World);
+
+	FVisualLogger& Logger = FVisualLogger::Get();
+	Logger.Cleanup(World);
+	FVisualLogger::FOwnerToChildrenRedirectionMap& RedirectionMap = Logger.GetRedirectionMap(World);
+
+	const UObject* ObjA = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjA"), RF_Transient);
+	const UObject* ObjB = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjB"), RF_Transient);
+	const UObject* ObjC = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjC"), RF_Transient);
+	const UObject* ObjD = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjD"), RF_Transient);
+	const UObject* ObjE = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjE"), RF_Transient);
+	const UObject* ObjF = NewObject<AActor>(World->GetCurrentLevel(), TEXT("VLogTestObjF"), RF_Transient);
+
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjA);
+	REDIRECT_OBJECT_TO_VLOG(ObjC, ObjB);
+	REDIRECT_OBJECT_TO_VLOG(ObjD, ObjC);
+	REDIRECT_OBJECT_TO_VLOG(ObjE, ObjD);
+	// E -> D -> C -> B -> A
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfB = RedirectionMap.Find(ObjB);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfC = RedirectionMap.Find(ObjC);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfD = RedirectionMap.Find(ObjD);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_NOT_NULL(ChildrenOfB);
+		CHECK_NOT_NULL(ChildrenOfC);
+		CHECK_NOT_NULL(ChildrenOfD);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 4);
+		CHECK_SUCCESS(ChildrenOfB->Num() == 3);
+		CHECK_SUCCESS(ChildrenOfC->Num() == 2);
+		CHECK_SUCCESS(ChildrenOfD->Num() == 1);
+	}
+	
+	REDIRECT_OBJECT_TO_VLOG(ObjB, ObjF);
+	// E -> D -> C -> B -> F
+	{
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfA = RedirectionMap.Find(ObjA);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfB = RedirectionMap.Find(ObjB);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfC = RedirectionMap.Find(ObjC);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfD = RedirectionMap.Find(ObjD);
+		TArray<TWeakObjectPtr<const UObject>>* ChildrenOfF = RedirectionMap.Find(ObjF);
+		CHECK_NOT_NULL(ChildrenOfA);
+		CHECK_NOT_NULL(ChildrenOfB);
+		CHECK_NOT_NULL(ChildrenOfC);
+		CHECK_NOT_NULL(ChildrenOfD);
+		CHECK_NOT_NULL(ChildrenOfF);
+		CHECK_SUCCESS(ChildrenOfA->Num() == 0);
+		CHECK_SUCCESS(ChildrenOfF->Num() == 4);
+		CHECK_SUCCESS(ChildrenOfB->Num() == 3);
+		CHECK_SUCCESS(ChildrenOfC->Num() == 2);
+		CHECK_SUCCESS(ChildrenOfD->Num() == 1);
+	}
 
 	return true;
 }

@@ -5,18 +5,18 @@
 #include "Trace/Analyzer.h"
 #include "Containers/Map.h"
 
-namespace Trace
+namespace TraceServices
 {
-	class IAnalysisSession;
-	class IEditableCounter;
-	class ICounterProvider;
-}
+
+class IAnalysisSession;
+class IEditableCounter;
+class IEditableCounterProvider;
 
 class FCountersAnalyzer
-	: public Trace::IAnalyzer
+	: public UE::Trace::IAnalyzer
 {
 public:
-	FCountersAnalyzer(Trace::IAnalysisSession& Session, Trace::ICounterProvider& CounterProvider);
+	FCountersAnalyzer(IAnalysisSession& Session, IEditableCounterProvider& EditableCounterProvider);
 	virtual void OnAnalysisBegin(const FOnAnalysisContext& Context) override;
 	virtual bool OnEvent(uint16 RouteId, EStyle Style, const FOnEventContext& Context) override;
 
@@ -28,7 +28,9 @@ private:
 		RouteId_SetValueFloat,
 	};
 
-	Trace::IAnalysisSession& Session;
-	Trace::ICounterProvider& CounterProvider;
-	TMap<uint16, Trace::IEditableCounter*> CountersMap;
+	IAnalysisSession& Session;
+	IEditableCounterProvider& EditableCounterProvider;
+	TMap<uint16, IEditableCounter*> EditableCountersMap;
 };
+
+} // namespace TraceServices

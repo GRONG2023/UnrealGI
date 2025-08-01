@@ -49,6 +49,7 @@ namespace Audio
 		virtual void Pause() override;
 		virtual bool IsFinished() override;
 		virtual float GetPlaybackPercent() const override;
+		virtual int64 GetNumFramesPlayed() const override;
 		virtual float GetEnvelopeValue() const override;
 		//~ End FSoundSource Interface
 
@@ -79,20 +80,27 @@ namespace Audio
 		/** Updates and source effect on this voice. */
 		void UpdateEffects();
 
+		/** Updates the Modulation Routing settings on this voice. */
+		void UpdateModulation();
+
 		/** Updates source bus send levels based on game data. */
 		void UpdateSourceBusSends();
 
 		/** Updates the channel map of the sound if its a 3d sound.*/
 		void UpdateChannelMaps();
 
+#if ENABLE_AUDIO_DEBUG
+		void UpdateCPUCoreUtilization();
+#endif // ENABLE_AUDIO_DEBUG
+
 		/** Computes the mono-channel map. */
-		bool ComputeMonoChannelMap(Audio::AlignedFloatBuffer& OutChannelMap);
+		bool ComputeMonoChannelMap(Audio::FAlignedFloatBuffer& OutChannelMap);
 
 		/** Computes the stereo-channel map. */
-		bool ComputeStereoChannelMap(Audio::AlignedFloatBuffer& OutChannelMap);
+		bool ComputeStereoChannelMap(Audio::FAlignedFloatBuffer& OutChannelMap);
 
 		/** Compute the channel map based on the number of output and source channels. */
-		bool ComputeChannelMap(const int32 NumSourceChannels, Audio::AlignedFloatBuffer& OutChannelMap);
+		bool ComputeChannelMap(const int32 NumSourceChannels, Audio::FAlignedFloatBuffer& OutChannelMap);
 
 		/** Whether or not we should create the source voice with the HRTF spatializer. */
 		bool UseObjectBasedSpatialization() const;
@@ -109,12 +117,25 @@ namespace Audio
 		/** Whether or not to use the reverb plugin. */
 		bool UseReverbPlugin() const;
 
+		/** Whether or not to use the source data override plugin */
+		bool UseSourceDataOverridePlugin() const;
+
+		/** Gets an accumulated volume value based on the Modulation Destination data of the WaveInstance's submix and all of the submix's ancestors */
+		float GetInheritedSubmixVolumeModulation() const;
+
 	private:
+		void UpdateSubmixSendLevels(const FSoundSubmixSendInfoBase& InSendInfo, EMixerSourceSubmixSendStage InSendStage);
 
 		FMixerDevice* MixerDevice;
 		FMixerBuffer* MixerBuffer;
 		TSharedPtr<FMixerSourceBuffer, ESPMode::ThreadSafe> MixerSourceBuffer;
 		FMixerSourceVoice* MixerSourceVoice;
+		IAudioLinkFactory::FAudioLinkSourcePushedSharedPtr AudioLink;
+		FMixerSubmixWeakPtr PreviousSubmixResolved;
+		TObjectKey<USoundSubmixBase> PrevousSubmix;
+
+		// These modulators are obtained from the submix and used only on binaural assets
+		bool bBypassingSubmixModulation;
 
 		uint32 bPreviousBusEnablement;
 		uint32 bPreviousBaseSubmixEnablement;
@@ -136,7 +157,7 @@ namespace Audio
 		};
 
 		// Mapping of channel map types to channel maps. Determined by what submixes this source sends its audio to.
-		Audio::AlignedFloatBuffer ChannelMap;
+		Audio::FAlignedFloatBuffer ChannelMap;
 		FRWLock ChannelMapLock;
 
 		float PreviousAzimuth;
@@ -161,12 +182,12 @@ namespace Audio
 
 		// An array of submix sends from previous update. Allows us to clear out submix sends if they are no longer being sent.
 		TArray<FSoundSubmixSendInfo> PreviousSubmixSendSettings;
+		TArray<FAttenuationSubmixSendSettings> PreviousAttenuationSendSettings;
 
 		// Whether or not we're currently releasing our resources. Prevents recycling the source until release is finished.
 		FThreadSafeBool bIsReleasing;
 
 		uint32 bEditorWarnedChangedSpatialization : 1;
-		uint32 bUsingHRTFSpatialization : 1;
 		uint32 bIs3D : 1;
 		uint32 bDebugMode : 1;
 		uint32 bIsVorbis : 1;

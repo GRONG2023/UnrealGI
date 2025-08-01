@@ -11,7 +11,7 @@
 
 /** A wrapper struct used to allow the use of either FoliageType assets or FoliageType blueprint classes */
 USTRUCT()
-struct FOLIAGE_API FFoliageTypeObject
+struct FFoliageTypeObject
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -19,33 +19,35 @@ struct FOLIAGE_API FFoliageTypeObject
 		: FoliageTypeObject(nullptr), TypeInstance(nullptr), bIsAsset(false) {}
 
 	/** Refreshes the type instance based on the assigned object. Intended to be called after some change is made. */
-	void RefreshInstance();
+	FOLIAGE_API void RefreshInstance();
 
 	/** Gets the instance of this foliage type. Creates the instance if needed. */
-	const UFoliageType* GetInstance();
+	FOLIAGE_API const UFoliageType* GetInstance();
 
 	/** Gets the instance of this foliage type. */
-	const UFoliageType* GetInstance() const;
+	FOLIAGE_API const UFoliageType* GetInstance() const;
 
 	/** @return Whether this would return a valid instance */
-	bool ContainsValidInstance() const;
+	FOLIAGE_API bool ContainsValidInstance() const;
 
 	/** @return Whether any foliage type is assigned at all */
-	bool HasFoliageType() const;
+	FOLIAGE_API bool HasFoliageType() const;
 
-	bool IsDirty() const;
-	void SetClean();
+	FOLIAGE_API bool IsDirty() const;
+	FOLIAGE_API void SetClean();
 
-	void PostSerialize(const FArchive& Ar);
+#if WITH_EDITORONLY_DATA
+	FOLIAGE_API void PostSerialize(const FArchive& Ar);
+#endif
 
 private:
 	/** The foliage type that will be spawned by the procedural foliage simulation */
-	UPROPERTY(Category = ProceduralFoliageSimulation, EditAnywhere, meta=(AllowedClasses="FoliageType_InstancedStaticMesh,FoliageType_Actor,Blueprint", DisplayThumbnail="true", ThumbnailSize="X=40 Y=40"))
-	UObject* FoliageTypeObject;
+	UPROPERTY(Category = ProceduralFoliageSimulation, EditAnywhere, meta=(AllowedClasses="/Script/Foliage.FoliageType_InstancedStaticMesh,/Script/Foliage.FoliageType_Actor,/Script/Engine.Blueprint", DisplayThumbnail="true", ThumbnailSize="X=40 Y=40"))
+	TObjectPtr<UObject> FoliageTypeObject;
 
 	/** The actual instance of the foliage type that is used for spawning */
 	UPROPERTY(transient)
-	UFoliageType* TypeInstance;
+	TObjectPtr<UFoliageType> TypeInstance;
 
 	/** Whether this contains an asset object (as opposed to a BP class) */
 	UPROPERTY()
@@ -55,6 +57,7 @@ private:
 	TSubclassOf<UFoliageType_InstancedStaticMesh> Type_DEPRECATED;
 };
 
+#if WITH_EDITORONLY_DATA
 template<>
 struct TStructOpsTypeTraits<FFoliageTypeObject> : public TStructOpsTypeTraitsBase2<FFoliageTypeObject>
 {
@@ -63,3 +66,4 @@ struct TStructOpsTypeTraits<FFoliageTypeObject> : public TStructOpsTypeTraitsBas
 		WithPostSerialize = true,
 	};
 };
+#endif

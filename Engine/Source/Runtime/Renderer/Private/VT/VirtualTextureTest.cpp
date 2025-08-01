@@ -5,7 +5,7 @@
 #if 0
 #include "SpriteIndexBuffer.h"
 #include "ScreenRendering.h"
-#include "SceneFilterRendering.h"
+#include "PostProcess/SceneFilterRendering.h"
 #include "RenderTargetPool.h"
 #include "GlobalShader.h"
 #include "PipelineStateCache.h"
@@ -49,14 +49,14 @@ FVirtualTextureTestType::~FVirtualTextureTestType()
 	delete Pool;
 }
 
-void FVirtualTextureTestType::InitDynamicRHI()
+void FVirtualTextureTestType::InitRHI(FRHICommandListBase&)
 {
 	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
 	FPooledRenderTargetDesc Desc( FPooledRenderTargetDesc::Create2DDesc( PhysicalTextureSize, PhysicalTextureFormat, FClearValueBinding::None, TexCreate_None, TexCreate_SRGB | TexCreate_RenderTargetable | TexCreate_ShaderResource, false ) );
 	GRenderTargetPool.FindFreeElement( RHICmdList, Desc, PhysicalTexture, TEXT("PhysicalTexture") );
 }
 
-void FVirtualTextureTestType::ReleaseDynamicRHI()
+void FVirtualTextureTestType::ReleaseRHI()
 {
 	GRenderTargetPool.FreeUnusedResource( PhysicalTexture );
 }
@@ -88,7 +88,7 @@ FVirtualTextureTest::FVirtualTextureTest( uint32 InSizeX, uint32 InSizeY, uint32
 FVirtualTextureTest::~FVirtualTextureTest()
 {}
 
-bool FVirtualTextureTest::RequestPageData( uint8 vLevel, uint64 vAddress, void* RESTRICT& Location ) /*const*/
+bool FVirtualTextureTest::RequestPageData(FRHICommandList& RHICmdList, uint8 vLevel, uint64 vAddress, void* RESTRICT& Location ) /*const*/
 {
 	/*
 	const size_t VTHeaderSize = 0;
@@ -115,7 +115,7 @@ bool FVirtualTextureTest::RequestPageData( uint8 vLevel, uint64 vAddress, void* 
 
 class FVirtualTextureTestPS : public FGlobalShader
 {
-	DECLARE_SHADER_TYPE(FVirtualTextureTestPS, Global);
+	DECLARE_GLOBAL_SHADER(FVirtualTextureTestPS);
 
 	static bool ShouldCache( EShaderPlatform Platform )
 	{
@@ -185,9 +185,9 @@ void FVirtualTextureTest::ProducePageData( FRHICommandList& RHICmdList, ERHIFeat
 
 	auto ShaderMap = GetGlobalShaderMap( FeatureLevel );
 
-	FSceneRenderTargetItem& RenderTarget = PhysicalTexture->GetRenderTargetItem();
+	FRHITexture* RenderTarget = PhysicalTexture->GetRHI();
 
-	FRHIRenderPassInfo RPInfo(RenderTarget.TargetableTexture, ERenderTargetActions::Load_Store);
+	FRHIRenderPassInfo RPInfo(RenderTarget, ERenderTargetActions::Load_Store);
 	RHICmdList.BeginRenderPass(RPInfo, TEXT("ProducePageData"));
 	{
 		RHICmdList.SetViewport(DstRect.Min.X, DstRect.Min.Y, 0.0f, DstRect.Max.X, DstRect.Max.Y, 1.0f);
@@ -206,7 +206,7 @@ void FVirtualTextureTest::ProducePageData( FRHICommandList& RHICmdList, ERHIFeat
 		GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GFilterVertexDeclaration.VertexDeclarationRHI;
 		GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 		GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
-		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+		SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 		DrawRectangle(
 			RHICmdList,
@@ -220,7 +220,7 @@ void FVirtualTextureTest::ProducePageData( FRHICommandList& RHICmdList, ERHIFeat
 			EDRF_UseTriangleOptimization);
 	}
 	RHICmdList.EndRenderPass();
-	RHICmdList.CopyToResolveTarget(RenderTarget.TargetableTexture, RenderTarget.ShaderResourceTexture, FResolveParams());
+	RHICmdList.Transition(FRHITransitionInfo(RenderTarget, ERHIAccess::RTV, ERHIAccess::SRVMask));
 
 	GVisualizeTexture.SetCheckPoint( RHICmdList, PhysicalTexture );
 }

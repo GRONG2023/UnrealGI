@@ -7,7 +7,7 @@
 #include "ItemPropertyNode.h"
 #include "ObjectPropertyNode.h"
 
-#include "Editor/SceneOutliner/Public/SceneOutlinerFilters.h"
+#include "SceneOutlinerFilters.h"
 #include "IDetailPropertyRow.h"
 #include "PropertyCustomizationHelpers.h"
 #include "PropertyEditorHelpers.h"
@@ -20,7 +20,10 @@
 #include "EditConditionParser.h"
 #include "EditConditionContext.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "ActorTreeItem.h"
 #include "PropertyHandleImpl.h"
+#include "IPropertyUtilities.h"
+#include "ScopedTransaction.h"
 
 #define LOCTEXT_NAMESPACE "PropertyEditor"
 
@@ -41,27 +44,6 @@ FPropertyEditor::FPropertyEditor( const TSharedRef<FPropertyNode>& InPropertyNod
 	// FPropertyEditor isn't built to handle CategoryNodes
 	check( InPropertyNode->AsCategoryNode() == NULL );
 
-	FProperty* Property = InPropertyNode->GetProperty();
-
-	if( Property )
-	{
-		static const FName EditConditionName = TEXT("EditCondition");
-
-		//see if the property supports some kind of edit condition and this isn't the "parent" property of a static array
-		if (Property->HasMetaData(EditConditionName) && !PropertyEditorHelpers::IsStaticArray(PropertyNode.Get()))
-		{
-			TSharedPtr<FEditConditionParser> Parser = PropertyUtilities->GetEditConditionParser();
-			if (Parser.IsValid())
-			{
-				EditConditionExpression = Parser->Parse(Property->GetMetaData(EditConditionName));
-				if (EditConditionExpression.IsValid())
-				{
-					EditConditionContext = MakeShareable(new FEditConditionContext(PropertyNode.Get()));
-				}
-			}
-		}
-	}
-
 	PropertyHandle = PropertyEditorHelpers::GetPropertyHandle( InPropertyNode, PropertyUtilities->GetNotifyHook(), PropertyUtilities );
 	check( PropertyHandle.IsValid() && PropertyHandle->IsValidHandle() );
 }
@@ -69,25 +51,16 @@ FPropertyEditor::FPropertyEditor( const TSharedRef<FPropertyNode>& InPropertyNod
 
 FText FPropertyEditor::GetDisplayName() const
 {
-	FCategoryPropertyNode* CategoryNode = PropertyNode->AsCategoryNode();
 	FItemPropertyNode* ItemPropertyNode = PropertyNode->AsItemPropertyNode();
 
-	if ( CategoryNode != NULL )
-	{
-		return CategoryNode->GetDisplayName();
-	}
-	else if ( ItemPropertyNode != NULL )
+	if ( ItemPropertyNode != NULL )
 	{
 		return ItemPropertyNode->GetDisplayName();
 	}
-	else
-	{
-		FString DisplayName;
-		PropertyNode->GetQualifiedName( DisplayName, true );
-		return FText::FromString(DisplayName);
-	}
 
-	return FText::GetEmpty();
+	FString DisplayName;
+	PropertyNode->GetQualifiedName( DisplayName, true );
+	return FText::FromString(DisplayName);
 }
 
 FText FPropertyEditor::GetToolTipText() const
@@ -323,6 +296,42 @@ void FPropertyEditor::OnAddGivenItem(const FString InGivenItem)
 	}
 }
 
+void FPropertyEditor::SetOptionalItem(FProperty* NewValue)
+{
+	// This action must be deferred until next tick so that we avoid accessing invalid data before we have a chance to tick
+	PropertyUtilities->EnqueueDeferredAction(FSimpleDelegate::CreateSP(this, &FPropertyEditor::OnSetOptionalValue, NewValue));
+}
+
+void FPropertyEditor::ClearOptionalItem()
+{
+	// This action must be deferred until next tick so that we avoid accessing invalid data before we have a chance to tick
+	PropertyUtilities->EnqueueDeferredAction(FSimpleDelegate::CreateSP(this, &FPropertyEditor::OnClearOptionalValue));
+}
+
+void FPropertyEditor::OnSetOptionalValue(FProperty* NewValue)
+{
+	TSharedPtr<IPropertyHandleOptional> OptionalHandle = PropertyHandle->AsOptional();
+	if (OptionalHandle.IsValid())
+	{
+		OptionalHandle->SetOptionalValue(NewValue);
+	}
+}
+
+void FPropertyEditor::OnClearOptionalValue()
+{
+	// This func is called by an options value, not the option itself.
+	if (!PropertyNode->IsOptionalValueNode())
+	{
+		return;
+	}
+
+	TSharedPtr<IPropertyHandleOptional> OptionalHandle = PropertyHandle->GetParentHandle()->AsOptional();
+	if (OptionalHandle.IsValid())
+	{
+		OptionalHandle->ClearOptionalValue();
+	}
+}
+
 void FPropertyEditor::ClearItem()
 {
 	OnClearItem();
@@ -338,7 +347,7 @@ void FPropertyEditor::MakeNewBlueprint()
 {
 	FProperty* NodeProperty = PropertyNode->GetProperty();
 	FClassProperty* ClassProp = CastField<FClassProperty>(NodeProperty);
-	UClass* Class = (ClassProp ? ClassProp->MetaClass : FEditorClassUtils::GetClassFromString(NodeProperty->GetMetaData("MetaClass")));
+	UClass* Class = (ClassProp ? ToRawPtr(ClassProp->MetaClass) : ToRawPtr(FEditorClassUtils::GetClassFromString(NodeProperty->GetMetaData("MetaClass"))));
 
 	UClass* RequiredInterface = FEditorClassUtils::GetClassFromString(NodeProperty->GetMetaData("MustImplement"));
 
@@ -350,7 +359,7 @@ void FPropertyEditor::MakeNewBlueprint()
 		{
 			if (RequiredInterface != nullptr && FKismetEditorUtilities::CanBlueprintImplementInterface(Blueprint, RequiredInterface))
 			{
-				FBlueprintEditorUtils::ImplementNewInterface(Blueprint, RequiredInterface->GetFName());
+				FBlueprintEditorUtils::ImplementNewInterface(Blueprint, RequiredInterface->GetClassPathName());
 			}
 			
 			PropertyHandle->SetValueFromFormattedString(Blueprint->GeneratedClass->GetPathName());
@@ -505,67 +514,35 @@ bool FPropertyEditor::IsEditConst() const
 	return PropertyNode->IsEditConst();
 }
 
+bool FPropertyEditor::SupportsEditConditionToggle() const
+{
+	return PropertyNode->SupportsEditConditionToggle();
+}
+
+bool FPropertyEditor::HasEditCondition() const
+{
+	return PropertyNode->HasEditCondition();
+}
+
+bool FPropertyEditor::IsEditConditionMet() const
+{
+	return PropertyNode->IsEditConditionMet();
+}
+
+bool FPropertyEditor::IsOnlyVisibleWhenEditConditionMet() const
+{
+	return PropertyNode->IsOnlyVisibleWhenEditConditionMet();
+}
+
 void FPropertyEditor::ToggleEditConditionState()
 {
 	const FScopedTransaction Transaction(FText::Format(LOCTEXT("SetEditConditionState", "Set {0} edit condition state "), PropertyNode->GetDisplayName()));
 
 	PropertyNode->NotifyPreChange( PropertyNode->GetProperty(), PropertyUtilities->GetNotifyHook() );
 
-	const FBoolProperty* EditConditionProperty = EditConditionContext->GetSingleBoolProperty(EditConditionExpression);
-	check(EditConditionProperty != nullptr);
+	PropertyNode->ToggleEditConditionState();
 
-	FPropertyNode* ParentNode = PropertyNode->GetParentNode();
-	check(ParentNode != nullptr);
-
-	bool OldValue = true;
-
-	FComplexPropertyNode* ComplexParentNode = PropertyNode->FindComplexParent();
-	for (int32 Index = 0; Index < ComplexParentNode->GetInstancesNum(); ++Index)
-	{
-		// ComplexParentNode points to the top-level object 
-		// ParentNode can point to a struct inside that object (which is stored as an FItemPropertyNode)
-		// We need all three pointers to get the value pointer
-		uint8* BaseAddress = ComplexParentNode->GetMemoryOfInstance(Index);
-		uint8* ParentOffset = ParentNode->GetValueAddress(BaseAddress, PropertyNode->HasNodeFlags(EPropertyNodeFlags::IsSparseClassData) != 0);
-
-		uint8* ValuePtr = ComplexParentNode->GetValuePtrOfInstance(Index, EditConditionProperty, ParentNode);
-
-		// SPARSEDATA_TODO: these two lines should go away once we're really confident the pointer math is all correct
-		uint8* OldValuePtr = EditConditionProperty->ContainerPtrToValuePtr<uint8>(ParentOffset);
-		check(OldValuePtr == ValuePtr || PropertyNode->HasNodeFlags(EPropertyNodeFlags::IsSparseClassData));
-
-		OldValue &= EditConditionProperty->GetPropertyValue(ValuePtr);
-		EditConditionProperty->SetPropertyValue(ValuePtr, !OldValue);
-	}
-
-	// Propagate the value change to any instances if we're editing a template object
-	FObjectPropertyNode* ObjectNode = PropertyNode->FindObjectItemParent();
-	if (ObjectNode != nullptr)
-	{
-		for (int32 ObjIndex = 0; ObjIndex < ObjectNode->GetNumObjects(); ++ObjIndex)
-		{
-			TWeakObjectPtr<UObject> ObjectWeakPtr = ObjectNode->GetUObject(ObjIndex);
-			UObject* Object = ObjectWeakPtr.Get();
-			if (Object != nullptr && Object->IsTemplate())
-			{
-				TArray<UObject*> ArchetypeInstances;
-				Object->GetArchetypeInstances(ArchetypeInstances);
-				for (int32 InstanceIndex = 0; InstanceIndex < ArchetypeInstances.Num(); ++InstanceIndex)
-				{
-					uint8* ArchetypeBaseOffset = ComplexParentNode->GetValueAddressFromObject(ArchetypeInstances[InstanceIndex]);
-					uint8* ArchetypeParentOffset = ParentNode->GetValueAddress(ArchetypeBaseOffset, PropertyNode->HasNodeFlags(EPropertyNodeFlags::IsSparseClassData) != 0);
-					uint8* ArchetypeValueAddr = EditConditionProperty->ContainerPtrToValuePtr<uint8>(ArchetypeParentOffset);
-
-					// Only propagate if the current value on the instance matches the previous value on the template.
-					const bool CurValue = EditConditionProperty->GetPropertyValue(ArchetypeValueAddr);
-					if (OldValue == CurValue)
-					{
-						EditConditionProperty->SetPropertyValue(ArchetypeValueAddr, !OldValue);
-					}
-				}
-			}
-		}
-	}
+	const FComplexPropertyNode* ComplexParentNode = PropertyNode->FindComplexParent();
 
 	TArray<TMap<FString,int32>> ArrayIndicesPerObject;
 	ArrayIndicesPerObject.AddDefaulted(ComplexParentNode->GetInstancesNum());
@@ -575,7 +552,7 @@ void FPropertyEditor::ToggleEditConditionState()
 		FPropertyValueImpl::GenerateArrayIndexMapToObjectNode(ArrayIndicesPerObject[ObjectIndex], &PropertyNode.Get());
 	}
 
-	FPropertyChangedEvent ChangeEvent(PropertyNode->GetProperty(), EPropertyChangeType::ValueSet);
+	FPropertyChangedEvent ChangeEvent(PropertyNode->GetProperty(), EPropertyChangeType::ToggleEditable);
 	ChangeEvent.SetArrayIndexPerObject(ArrayIndicesPerObject);
 	PropertyNode->NotifyPostChange( ChangeEvent, PropertyUtilities->GetNotifyHook() );
 }
@@ -587,7 +564,7 @@ void FPropertyEditor::OnGetClassesForAssetPicker( TArray<const UClass*>& OutClas
 	FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>( NodeProperty );
 
 	// This class and its children are the classes that we can show objects for
-	UClass* AllowedClass = ObjProp ? ObjProp->PropertyClass : UObject::StaticClass();
+	UClass* AllowedClass = ObjProp ? ToRawPtr(ObjProp->PropertyClass) : ToRawPtr(UObject::StaticClass());
 
 	OutClasses.Add( AllowedClass );
 }
@@ -604,7 +581,7 @@ void FPropertyEditor::OnActorSelected( AActor* InActor )
 	OnAssetSelected(InActor);
 }
 
-void FPropertyEditor::OnGetActorFiltersForSceneOutliner( TSharedPtr<SceneOutliner::FOutlinerFilters>& OutFilters )
+void FPropertyEditor::OnGetActorFiltersForSceneOutliner( TSharedPtr<FSceneOutlinerFilters>& OutFilters )
 {
 	struct Local
 	{
@@ -616,18 +593,18 @@ void FPropertyEditor::OnGetActorFiltersForSceneOutliner( TSharedPtr<SceneOutline
 			FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>( NodeProperty );
 
 			// This class and its children are the classes that we can show objects for
-			UClass* AllowedClass = ObjProp ? ObjProp->PropertyClass : AActor::StaticClass();
+			UClass* AllowedClass = ObjProp ? ToRawPtr(ObjProp->PropertyClass) : ToRawPtr(AActor::StaticClass());
 
 			return Actor->IsA( AllowedClass );
 		}
 	};
 
-	OutFilters->AddFilterPredicate( SceneOutliner::FActorFilterPredicate::CreateStatic( &Local::IsFilteredActor, AsShared() ) );
+	OutFilters->AddFilterPredicate<FActorTreeItem>(FActorTreeItem::FFilterPredicate::CreateStatic( &Local::IsFilteredActor, AsShared() ) );
 }
 
 bool FPropertyEditor::IsPropertyEditingEnabled() const
 {
-	return ( PropertyUtilities->IsPropertyEditingEnabled() ) && (!HasEditCondition() || IsEditConditionMet());
+	return PropertyUtilities->IsPropertyEditingEnabled() && (!PropertyNode->HasEditCondition() || PropertyNode->IsEditConditionMet());
 }
 
 void FPropertyEditor::ForceRefresh()
@@ -638,97 +615,6 @@ void FPropertyEditor::ForceRefresh()
 void FPropertyEditor::RequestRefresh()
 {
 	PropertyUtilities->RequestRefresh();
-}
-
-bool FPropertyEditor::IsOnlyVisibleWhenEditConditionMet() const
-{
-	static const FName Name_EditConditionHides("EditConditionHides");
-	FProperty* Property = PropertyNode->GetProperty();
-	if (Property && Property->HasMetaData(Name_EditConditionHides))
-	{
-		return HasEditCondition();
-	}
-
-	return false;
-}
-
-bool FPropertyEditor::HasEditCondition() const 
-{ 
-	return EditConditionExpression.IsValid();
-}
-
-bool FPropertyEditor::IsEditConditionMet() const 
-{ 
-	if (HasEditCondition())
-	{
-		TSharedPtr<FEditConditionParser> EditConditionParser = PropertyUtilities->GetEditConditionParser();
-		if (EditConditionParser.IsValid())
-		{
-			TOptional<bool> Result = EditConditionParser->Evaluate(*EditConditionExpression.Get(), *EditConditionContext.Get());
-			if (Result.IsSet())
-			{
-				return Result.GetValue();
-			}
-		}
-	}
-
-	return true;
-}
-
-bool FPropertyEditor::SupportsEditConditionToggle() const
-{
-	FProperty* Property = PropertyNode->GetProperty();
-
-	static const FName Name_HideEditConditionToggle("HideEditConditionToggle");
-	if (EditConditionExpression.IsValid() && !Property->HasMetaData(Name_HideEditConditionToggle))
-	{
-		const FBoolProperty* ConditionalProperty = EditConditionContext->GetSingleBoolProperty(EditConditionExpression);
-		if (ConditionalProperty != nullptr)
-		{
-			// There are 2 valid states for inline edit conditions:
-			// 1. The property is marked as editable and has InlineEditConditionToggle set. 
-			// 2. The property is not marked as editable and does not have InlineEditConditionToggle set.
-			// In both cases, the original property will be hidden and only show up as a toggle.
-
-			static const FName Name_InlineEditConditionToggle("InlineEditConditionToggle");
-			const bool bIsInlineEditCondition = ConditionalProperty->HasMetaData(Name_InlineEditConditionToggle);
-			const bool bIsEditable = ConditionalProperty->HasAllPropertyFlags(CPF_Edit);
-
-			if (bIsInlineEditCondition == bIsEditable)
-			{
-				return true;
-			}
-
-			if (bIsInlineEditCondition && !bIsEditable)
-			{
-				UE_LOG(LogPropertyEditor, Warning, TEXT("Property being used as inline edit condition is not editable, but has redundant InlineEditConditionToggle flag. Field \"%s\" in class \"%s\"."), *ConditionalProperty->GetNameCPP(), *Property->GetOwnerStruct()->GetName());
-				return true;
-			}
-
-			// The property is already shown, and not marked as inline edit condition.
-			if (!bIsInlineEditCondition && bIsEditable)
-			{
-				return false;
-			}
-		}
-	}
-
-	return false;
-}
-
-void FPropertyEditor::AddPropertyEditorChild( const TSharedRef<FPropertyEditor>& Child )
-{
-	ChildPropertyEditors.Add( Child );
-}
-
-void FPropertyEditor::RemovePropertyEditorChild( const TSharedRef<FPropertyEditor>& Child )
-{
-	ChildPropertyEditors.Remove( Child );
-}
-
-const TArray< TSharedRef< FPropertyEditor > >& FPropertyEditor::GetPropertyEditorChildren() const
-{
-	return ChildPropertyEditors;
 }
 
 TSharedRef< FPropertyNode > FPropertyEditor::GetPropertyNode() const
@@ -801,19 +687,20 @@ void FPropertyEditor::SyncToObjectsInNode( const TWeakPtr< FPropertyNode >& Weak
 		TArray<UObject*> Objects;
 		for ( int32 ObjectIndex = 0 ; ObjectIndex < ObjectNames.Num() ; ++ObjectIndex )
 		{
-
-			UObject* Package = ANY_PACKAGE;
+			UObject* Object = nullptr;
 			if( ObjectNames[ObjectIndex].Contains( TEXT(".")) )
 			{
-				// Formatted text string, use the exact path instead of any package
-				Package = NULL;
+				Object = StaticFindObject(PropertyClass, nullptr, *ObjectNames[ObjectIndex]);
+				if (!Object)
+				{
+					Object = StaticLoadObject(PropertyClass, nullptr, *ObjectNames[ObjectIndex]);
+				}
+			}
+			else
+			{
+				Object = StaticFindFirstObject(PropertyClass, *ObjectNames[ObjectIndex], EFindFirstObjectOptions::EnsureIfAmbiguous);
 			}
 
-			UObject* Object = StaticFindObject( PropertyClass, Package, *ObjectNames[ObjectIndex] );
-			if( !Object && Package != ANY_PACKAGE )
-			{
-				Object = StaticLoadObject(PropertyClass, Package, *ObjectNames[ObjectIndex]);
-			}
 			if ( Object )
 			{
 				// If the selected object is a blueprint generated class, then browsing to it in the content browser should instead point to the blueprint

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/MaterialMerging.h"
+#include "SceneTypes.h"
 #include "HLODProxyDesc.generated.h"
 
 class ALODActor;
@@ -25,13 +26,16 @@ public:
 
 public:
 	UPROPERTY()
-	UStaticMesh* StaticMesh = nullptr;
+	TObjectPtr<UStaticMesh> StaticMesh = nullptr;
 	
 	UPROPERTY()
-	const UMaterialInterface* Material = nullptr;
+	TObjectPtr<UMaterialInterface> Material = nullptr;
 
 	UPROPERTY()
 	TArray<FTransform> Instances;
+
+	UPROPERTY()
+	TArray<FCustomPrimitiveData> InstancesCustomPrimitiveData;
 };
 
 /** Describe a LODActor */
@@ -63,7 +67,7 @@ private:
 	TArray<FName> SubActors;
 
 	UPROPERTY()
-	UStaticMesh* StaticMesh;
+	TObjectPtr<UStaticMesh> StaticMesh;
 
 	UPROPERTY()
 	TArray<FHLODISMComponentDesc> ISMComponentsDesc;

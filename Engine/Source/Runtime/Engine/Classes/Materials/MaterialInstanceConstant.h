@@ -28,6 +28,9 @@ class UMaterialInstanceConstant : public UMaterialInstance
 	FGuid ParameterStateId;
 #endif
 
+	virtual ENGINE_API void PostLoad() override;
+	virtual ENGINE_API void FinishDestroy() override;
+
 #if WITH_EDITOR
 	/** For constructing new MICs. */
 	friend class UMaterialInstanceConstantFactoryNew;
@@ -35,29 +38,34 @@ class UMaterialInstanceConstant : public UMaterialInstance
 	friend class UMaterialEditorInstanceConstant;
 
 	virtual ENGINE_API void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual ENGINE_API void UpdateCachedData() override final;
 #endif
 
 	/** Physical material mask to use for this graphics material. Used for sounds, effects etc.*/
 	UPROPERTY(EditAnywhere, Category = PhysicalMaterial)
-	class UPhysicalMaterialMask* PhysMaterialMask;
+	TObjectPtr<class UPhysicalMaterialMask> PhysMaterialMask;
 
 	// Begin UMaterialInterface interface.
 	ENGINE_API virtual UPhysicalMaterialMask* GetPhysicalMaterialMask() const override;
 	// End UMaterialInterface interface.
 
 	/** Get the scalar (float) parameter value from an MIC */
-	UFUNCTION(BlueprintCallable, meta=(DisplayName = "GetScalarParameterValue", ScriptName = "GetScalarParameterValue", Keywords = "GetFloatParameterValue"), Category="Rendering|Material")
+	UFUNCTION(BlueprintCallable, meta=(DisplayName = "Get Scalar Parameter Value", ScriptName = "GetScalarParameterValue", Keywords = "GetFloatParameterValue"), Category="Rendering|Material")
 	float K2_GetScalarParameterValue(FName ParameterName);
 
 	/** Get the MIC texture parameter value */
-	UFUNCTION(BlueprintCallable, meta=(DisplayName = "GetTextureParameterValue", ScriptName = "GetTextureParameterValue"), Category="Rendering|Material")
+	UFUNCTION(BlueprintCallable, meta=(DisplayName = "Get Texture Parameter Value", ScriptName = "GetTextureParameterValue"), Category="Rendering|Material")
 	class UTexture* K2_GetTextureParameterValue(FName ParameterName);
 
 	/** Get the MIC vector parameter value */
-	UFUNCTION(BlueprintCallable, meta=(DisplayName = "GetVectorParameterValue", ScriptName = "GetVectorParameterValue", Keywords = "GetColorParameterValue"), Category="Rendering|Material")
+	UFUNCTION(BlueprintCallable, meta=(DisplayName = "Get Vector Parameter Value", ScriptName = "GetVectorParameterValue", Keywords = "GetColorParameterValue"), Category="Rendering|Material")
 	FLinearColor K2_GetVectorParameterValue(FName ParameterName);
 
 #if WITH_EDITOR
+	/** Set an override material which will be used when rendering with nanite. */
+	UFUNCTION(BlueprintCallable, Category = "Rendering|Material")
+	void SetNaniteOverrideMaterial(bool bInEnableOverride, UMaterialInterface* InOverrideMaterial);
+
 	/**
 	 * Set the parent of this material instance. This function may only be called in the Editor!
 	 *   WARNING: You MUST call PostEditChange afterwards to propagate changes to other materials in the chain!
@@ -85,6 +93,7 @@ class UMaterialInstanceConstant : public UMaterialInstance
 	ENGINE_API void SetScalarParameterAtlasEditorOnly(const FMaterialParameterInfo& ParameterInfo, FScalarParameterAtlasInstanceData AtlasData);
 	ENGINE_API void SetTextureParameterValueEditorOnly(const FMaterialParameterInfo& ParameterInfo, class UTexture* Value);
 	ENGINE_API void SetRuntimeVirtualTextureParameterValueEditorOnly(const FMaterialParameterInfo& ParameterInfo, class URuntimeVirtualTexture* Value);
+	ENGINE_API void SetSparseVolumeTextureParameterValueEditorOnly(const FMaterialParameterInfo& ParameterInfo, class USparseVolumeTexture* Value);
 	ENGINE_API void SetFontParameterValueEditorOnly(const FMaterialParameterInfo& ParameterInfo, class UFont* FontValue, int32 FontPage);
 
 	/**
@@ -92,8 +101,8 @@ class UMaterialInstanceConstant : public UMaterialInstance
 	 * may be called only in the Editor!
 	 */
 	ENGINE_API void ClearParameterValuesEditorOnly();
-#endif // #if WITH_EDITOR
 
-	ENGINE_API void PostLoad();
+	ENGINE_API virtual uint32 ComputeAllStateCRC() const override;
+#endif // #if WITH_EDITOR
 };
 

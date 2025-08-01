@@ -26,11 +26,25 @@ ENUM_CLASS_FLAGS(ETimeChangedFlags);
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+class TRACEINSIGHTS_API ITimeMarker
+{
+public:
+	virtual ~ITimeMarker() = default;
+
+	virtual double GetTime() const = 0;
+	virtual void SetTime(const double  InTime) = 0;
+};
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 /** The delegate to be invoked when the selection have been changed */
 DECLARE_MULTICAST_DELEGATE_ThreeParams(FSelectionChangedDelegate, ETimeChangedFlags /*InFlags*/, double /*StartTime*/, double /*EndTime*/);
 
 /** The delegate to be invoked when the time marker has changed */
 DECLARE_MULTICAST_DELEGATE_TwoParams(FTimeMarkerChangedDelegate, ETimeChangedFlags /*InFlags*/, double /*TimeMarker*/);
+
+/** The delegate to be invoked when a custom time marker has changed */
+DECLARE_MULTICAST_DELEGATE_TwoParams(FCustomTimeMarkerChangedDelegate, ETimeChangedFlags /*InFlags*/, TSharedRef<ITimeMarker> /*TimeMarker*/);
 
 /** The delegate to be invoked when the timing track being hovered by the mouse has changed */
 DECLARE_MULTICAST_DELEGATE_OneParam(FHoveredTrackChangedDelegate, const TSharedPtr<FBaseTimingTrack> /*InTrack*/);
@@ -44,6 +58,15 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FSelectedTrackChangedDelegate, const TShared
 /** The delegate to be invoked when the selected timing event has changed */
 DECLARE_MULTICAST_DELEGATE_OneParam(FSelectedEventChangedDelegate, const TSharedPtr<const ITimingEvent> /*InEvent*/);
 
+/** The delegate to be invoked when a track visibility has changed */
+DECLARE_MULTICAST_DELEGATE(FTrackVisibilityChangedDelegate);
+
+/** The delegate to be invoked when a track is added. */
+DECLARE_MULTICAST_DELEGATE_OneParam(FTrackAddedDelegate, const TSharedPtr<const FBaseTimingTrack> /*Track*/);
+
+/** The delegate to be invoked when a track is removed. */
+DECLARE_MULTICAST_DELEGATE_OneParam(FTrackRemovedDelegate, const TSharedPtr<const FBaseTimingTrack> /*Track*/);
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /** Hosts a number of timing view visualizers, represents a session of the timing view. */
@@ -51,6 +74,9 @@ class TRACEINSIGHTS_API ITimingViewSession
 {
 public:
 	virtual ~ITimingViewSession() = default;
+
+	/** Gets the name of the view. */
+	virtual const FName& GetName() const = 0;
 
 	/** Adds a new top docked track. */
 	virtual void AddTopDockedTrack(TSharedPtr<FBaseTimingTrack> Track) = 0;
@@ -97,6 +123,8 @@ public:
 	virtual FSelectionChangedDelegate& OnSelectionChanged() = 0;
 	/** Gets the delegate to be invoked when the time marker has changed. */
 	virtual FTimeMarkerChangedDelegate& OnTimeMarkerChanged() = 0;
+	/** Gets the delegate to be invoked when a custom time marker has changed. */
+	virtual FCustomTimeMarkerChangedDelegate& OnCustomTimeMarkerChanged() = 0;
 
 	/** Gets the delegate to be invoked when the timing track being hovered by the mouse has changed. */
 	virtual FHoveredTrackChangedDelegate& OnHoveredTrackChanged() = 0;
@@ -108,12 +136,29 @@ public:
 	/** Gets the delegate to be invoked when the selected timing event has changed. */
 	virtual FSelectedEventChangedDelegate& OnSelectedEventChanged() = 0;
 
+	/** Gets the delegate to be invoked when the track visibility has changed. */
+	virtual FTrackVisibilityChangedDelegate& OnTrackVisibilityChanged() = 0;
+
+	/** Gets the delegate to be invoked when a new track is added. */
+	virtual Insights::FTrackAddedDelegate& OnTrackAdded() = 0;
+
+	/** Gets the delegate to be invoked when a track is removed. */
+	virtual Insights::FTrackRemovedDelegate& OnTrackRemoved() = 0;
+
+	//////////////////////////////////////////////////
+
+	/** Resets the selected event back to empty. */
+	virtual void ResetSelectedEvent() = 0;
+
+	/** Resets the event filter back to empty. */
+	virtual void ResetEventFilter() = 0;
+
 	//////////////////////////////////////////////////
 
 	/** Prevents mouse movements from throttling application updates. */
 	virtual void PreventThrottling() = 0;
 
-	/** Add a slot to the overlay */
+	/** Adds a slot to the overlay. */
 	virtual void AddOverlayWidget(const TSharedRef<SWidget>& InWidget) = 0;
 };
 

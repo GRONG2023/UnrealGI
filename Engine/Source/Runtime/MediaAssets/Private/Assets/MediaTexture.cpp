@@ -18,6 +18,7 @@
 #include "Misc/MediaTextureResource.h"
 #include "IMediaTextureSample.h"
 
+#include "RectLightTexture.h"
 
 /* Local helpers
  *****************************************************************************/
@@ -40,15 +41,29 @@ public:
 
 	virtual void TickRender(FTimespan DeltaTime, FTimespan Timecode) override
 	{
+		FScopeLock Lock(&CriticalSection);
+
 		if (UMediaTexture* OwnerPtr = Owner.Get())
 		{
 			OwnerPtr->TickResource(Timecode);
 		}
 	}
 
+	/**
+	 * Call this when the owner is destroyed.
+	 */
+	void OwnerDestroyed()
+	{
+		FScopeLock Lock(&CriticalSection);
+		Owner.Reset();
+	}
+
 private:
 
 	TWeakObjectPtr<UMediaTexture> Owner;
+
+	/** Used to prevent owner destruction happening during tick. */
+	FCriticalSection CriticalSection;
 };
 
 
@@ -64,14 +79,16 @@ UMediaTexture::UMediaTexture(const FObjectInitializer& ObjectInitializer)
 	, EnableGenMips(false)
 	, NumMips(1)
 	, NewStyleOutput(false)
-	, OutputFormat(MTOF_Default)
 	, CurrentAspectRatio(0.0f)
 	, CurrentOrientation(MTORI_Original)
 	, DefaultGuid(FGuid::NewGuid())
 	, Dimensions(FIntPoint::ZeroValue)
+	, bIsCleared(false)
 	, Size(0)
 	, CachedNextSampleTime(FTimespan::MinValue())
 	, TextureNumMips(1)
+	, MipMapBias(0.0f)
+	, ColorspaceOverride(UE::Color::EColorSpace::None)
 {
 	NeverStream = true;
 	SRGB = true;
@@ -153,9 +170,12 @@ FTextureResource* UMediaTexture::CreateResource()
 		}
 	}
 
-	Filter = (EnableGenMips && (TextureNumMips > 1)) ? TF_Trilinear : TF_Bilinear;
+	if (!NewStyleOutput)
+	{
+		Filter = (TextureNumMips > 1) ? TF_Trilinear : TF_Bilinear;
+	}
 
-	return new FMediaTextureResource(*this, Dimensions, Size, ClearColor, CurrentGuid.IsValid() ? CurrentGuid : DefaultGuid, EnableGenMips, NumMips);
+	return new FMediaTextureResource(*this, Dimensions, Size, ClearColor, CurrentGuid.IsValid() ? CurrentGuid : DefaultGuid, EnableGenMips, NumMips, ColorspaceOverride);
 }
 
 
@@ -171,13 +191,13 @@ EMaterialValueType UMediaTexture::GetMaterialType() const
 
 float UMediaTexture::GetSurfaceWidth() const
 {
-	return Dimensions.X;
+	return (float)Dimensions.X;
 }
 
 
 float UMediaTexture::GetSurfaceHeight() const
 {
-	return Dimensions.Y;
+	return (float)Dimensions.Y;
 }
 
 
@@ -199,6 +219,12 @@ void UMediaTexture::SetRenderedExternalTextureGuid(const FGuid& InNewGuid)
 	CurrentRenderedGuid = InNewGuid;
 }
 
+
+uint32 UMediaTexture::CalcTextureMemorySizeEnum(ETextureMipCount Enum) const
+{
+	return Size;
+}
+
 /* UObject interface
  *****************************************************************************/
 
@@ -206,6 +232,9 @@ void UMediaTexture::BeginDestroy()
 {
 	if (ClockSink.IsValid())
 	{
+		// Tell sink we are done.
+		ClockSink->OwnerDestroyed(); 
+
 		IMediaModule* MediaModule = FModuleManager::LoadModulePtr<IMediaModule>("Media");
 
 		if (MediaModule != nullptr)
@@ -244,6 +273,18 @@ void UMediaTexture::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
 	CumulativeResourceSize.AddUnknownMemoryBytes(Size);
 }
 
+
+void UMediaTexture::PostInitProperties()
+{
+	Super::PostInitProperties();
+
+#if WITH_EDITORONLY_DATA
+	if (!HasAnyFlags(RF_ClassDefaultObject | RF_NeedLoad))
+	{
+		NewStyleOutput = true;
+	}
+#endif
+}
 
 void UMediaTexture::PostLoad()
 {
@@ -311,7 +352,7 @@ void UMediaTexture::PostEditChangeProperty(FPropertyChangedEvent& PropertyChange
 
 void UMediaTexture::TickResource(FTimespan Timecode)
 {
-	if (Resource == nullptr)
+	if (GetResource() == nullptr)
 	{
 		return;
 	}
@@ -323,7 +364,7 @@ void UMediaTexture::TickResource(FTimespan Timecode)
 
 	if (!CurrentPlayer.IsValid())
 	{
-		if ((LastClearColor == ClearColor) && (LastSrgb == SRGB))
+		if ((LastClearColor == ClearColor) && (LastSrgb == SRGB) && (bIsCleared))
 		{
 			return; // nothing to render
 		}
@@ -335,14 +376,11 @@ void UMediaTexture::TickResource(FTimespan Timecode)
 	// set up render parameters
 	FMediaTextureResource::FRenderParams RenderParams;
 
+	bool bIsSampleValid = false;
 	if (UMediaPlayer* CurrentPlayerPtr = CurrentPlayer.Get())
 	{
-		const bool PlayerActive = CurrentPlayerPtr->IsPaused() || CurrentPlayerPtr->IsPlaying() || CurrentPlayerPtr->IsPreparing();
-
-		if (PlayerActive)
+		if (CurrentPlayerPtr->GetPlayerFacade()->GetPlayer().IsValid())
 		{
-			check(CurrentPlayerPtr->GetPlayerFacade()->GetPlayer());
-
 			if (CurrentPlayerPtr->GetPlayerFacade()->GetPlayer()->GetPlayerFeatureFlag(IMediaPlayer::EFeatureFlag::UsePlaybackTimingV2))
 			{
 				/*
@@ -374,28 +412,44 @@ void UMediaTexture::TickResource(FTimespan Timecode)
 				LastSrgb = SRGB;
 
 				TextureNumMips = (Sample->GetNumMips() > 1) ? Sample->GetNumMips() : NumMips;
+				bIsSampleValid = true;
 			}
 			else
 			{
 				//
 				// Old style: pass queue along and dequeue only at render time
 				//
-				TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe> Sample;
-				if (SampleQueue->Peek(Sample))
+				const bool PlayerActive = CurrentPlayerPtr->IsPaused() || CurrentPlayerPtr->IsPlaying() || CurrentPlayerPtr->IsPreparing();
+				if (PlayerActive)
 				{
-					UpdateSampleInfo(Sample);
+					TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe> Sample;
+					if (SampleQueue->Peek(Sample))
+					{
+						UpdateSampleInfo(Sample);
 
-					// See above: track sRGB state (for V1 we don't look at all samples - but this should be fine as this should not change on a per sample basis usually)
-					SRGB = Sample->IsOutputSrgb();
-					LastSrgb = SRGB;
+						// See above: track sRGB state (for V1 we don't look at all samples - but this should be fine as this should not change on a per sample basis usually)
+						SRGB = Sample->IsOutputSrgb();
+						LastSrgb = SRGB;
 
-					TextureNumMips = (Sample->GetNumMips() > 1) ? Sample->GetNumMips() : NumMips;
+						TextureNumMips = (Sample->GetNumMips() > 1) ? Sample->GetNumMips() : NumMips;
+						bIsSampleValid = true;
+					}
+
+					RenderParams.SampleSource = SampleQueue;
+
+					RenderParams.Rate = CurrentPlayerPtr->GetRate();
+					RenderParams.Time = FMediaTimeStamp(CurrentPlayerPtr->GetTime());
 				}
+				else
+				{
+					CurrentAspectRatio = 0.0f;
+					CurrentOrientation = MTORI_Original;
 
-				RenderParams.SampleSource = SampleQueue;
-
-				RenderParams.Rate = CurrentPlayerPtr->GetRate();
-				RenderParams.Time = CurrentPlayerPtr->GetTime();
+					if (!AutoClear)
+					{
+						return; // retain last frame
+					}
+				}
 			}
 		}
 		else 
@@ -415,7 +469,10 @@ void UMediaTexture::TickResource(FTimespan Timecode)
 	}
 
 	// update filter state, responding to mips setting
-	Filter = (EnableGenMips && (TextureNumMips > 1)) ? TF_Trilinear : TF_Bilinear;
+	if (!NewStyleOutput)
+	{
+		Filter = (TextureNumMips > 1) ? TF_Trilinear : TF_Bilinear;
+	}
 
 	// setup render parameters
 	RenderParams.CanClear = AutoClear;
@@ -425,12 +482,44 @@ void UMediaTexture::TickResource(FTimespan Timecode)
 	RenderParams.NumMips = NumMips;
 	
 	// redraw texture resource on render thread
-	FMediaTextureResource* ResourceParam = (FMediaTextureResource*)Resource;
+	FMediaTextureResource* ResourceParam = (FMediaTextureResource*)GetResource();
+
+	const ERenderMode RenderModeParam = GetRenderMode();
+	const UTexture* TexturePtrNotDeferenced = this;
+
 	ENQUEUE_RENDER_COMMAND(MediaTextureResourceRender)(
-		[ResourceParam, RenderParams](FRHICommandListImmediate& RHICmdList)
+		[ResourceParam, RenderParams, RenderModeParam, TexturePtrNotDeferenced](FRHICommandListImmediate& RHICmdList)
 		{
-			ResourceParam->Render(RenderParams);
+			check(ResourceParam);
+
+			// Lock/Enqueue rect atlas refresh if that texture is used by a rect. light
+			RectLightAtlas::FAtlasTextureInvalidationScope InvalidationScope(TexturePtrNotDeferenced);
+
+			if (RenderModeParam == ERenderMode::JustInTime)
+			{
+				// Cache the render params if this is a just in time render mode. 
+				// User must call JustInTimeRender to update the resource.
+				ResourceParam->SetJustInTimeRenderParams(RenderParams);
+			}
+			else
+			{
+				// Otherwise, render the texture right away
+				ResourceParam->ResetJustInTimeRenderParams();
+				ResourceParam->Render(RenderParams);
+			}
 		});
+
+	
+	// The texture is cleared if we have auto clear enabled, and we do not have a valid sample.
+	bIsCleared = ((AutoClear) && (bIsSampleValid == false));
+}
+
+void UMediaTexture::JustInTimeRender()
+{
+	if (FMediaTextureResource* MediaResource = static_cast<FMediaTextureResource*>(GetResource()))
+	{
+		MediaResource->JustInTimeRender();
+	}
 }
 
 void UMediaTexture::UpdateSampleInfo(const TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe> & Sample)
@@ -455,7 +544,7 @@ void UMediaTexture::UpdatePlayerAndQueue()
 		// Player changed?
 		if (CurrentGuid != PlayerGuid)
 		{
-			if (FMediaTextureResource* MediaResource = static_cast<FMediaTextureResource*>(Resource))
+			if (FMediaTextureResource* MediaResource = static_cast<FMediaTextureResource*>(GetResource()))
 			{
 				MediaResource->FlushPendingData();
 			}
@@ -474,7 +563,7 @@ void UMediaTexture::UpdatePlayerAndQueue()
 			SampleQueue.Reset();
 			CurrentGuid = DefaultGuid;
 
-			if (FMediaTextureResource* MediaResource = static_cast<FMediaTextureResource*>(Resource))
+			if (FMediaTextureResource* MediaResource = static_cast<FMediaTextureResource*>(GetResource()))
 			{
 				MediaResource->FlushPendingData();
 			}
@@ -501,4 +590,15 @@ float UMediaTexture::GetCurrentAspectRatio() const
 MediaTextureOrientation UMediaTexture::GetCurrentOrientation() const
 {
 	return CurrentOrientation;
+}
+
+float UMediaTexture::GetMipMapBias() const
+{
+	// Clamped to the legal DirectX range.
+	return FMath::Clamp(MipMapBias, -16.0f, 15.99f);
+}
+
+void UMediaTexture::SetMipMapBias(float InMipMapBias)
+{
+	MipMapBias = InMipMapBias;
 }

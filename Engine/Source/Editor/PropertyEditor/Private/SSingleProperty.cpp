@@ -1,26 +1,33 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SSingleProperty.h"
-#include "UObject/UnrealType.h"
+
 #include "AssetThumbnail.h"
+#include "DetailPropertyRow.h"
 #include "IPropertyUtilities.h"
-#include "PropertyNode.h"
-#include "Widgets/Text/STextBlock.h"
-#include "EngineGlobals.h"
-#include "Engine/Engine.h"
-#include "Presentation/PropertyEditor/PropertyEditor.h"
+#include "Modules/ModuleManager.h"
 #include "ObjectPropertyNode.h"
 #include "PropertyEditorHelpers.h"
-#include "UserInterface/PropertyEditor/SResetToDefaultPropertyEditor.h"
+#include "PropertyEditorModule.h"
+#include "PropertyNode.h"
+#include "SResetToDefaultPropertyEditor.h"
+#include "SStandaloneCustomizedValueWidget.h"
+#include "Engine/Engine.h"
+#include "Presentation/PropertyEditor/PropertyEditor.h"
+#include "ThumbnailRendering/ThumbnailManager.h"
+#include "UObject/UnrealType.h"
 #include "Widgets/Colors/SColorPicker.h"
+#include "Widgets/Text/STextBlock.h"
+#include "StructurePropertyNode.h"
 
 
 class FSinglePropertyUtilities : public IPropertyUtilities
 {
 public:
 
-	FSinglePropertyUtilities( const TWeakPtr< SSingleProperty >& InView )
+	FSinglePropertyUtilities( const TWeakPtr< SSingleProperty >& InView, bool bInShouldDisplayThumbnail )
 		: View( InView )
+		, bShouldHideAssetThumbnail(bInShouldDisplayThumbnail)
 	{
 	}
 
@@ -65,10 +72,11 @@ public:
 
 	virtual void RequestRefresh() override {}
 
+	virtual void RequestForceRefresh() override {}
+
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const override
 	{
-		// not implemented
-		return NULL;
+		return bShouldHideAssetThumbnail ? nullptr : UThumbnailManager::Get().GetSharedThumbnailPool();
 	}
 
 	virtual void NotifyFinishedChangingProperties(const FPropertyChangedEvent& PropertyChangedEvent) override
@@ -77,6 +85,13 @@ public:
 	virtual bool DontUpdateValueWhileEditing() const override
 	{
 		return false;
+	}
+
+	virtual const TArray<TSharedRef<class IClassViewerFilter>>& GetClassViewerFilters() const override
+	{
+		// not implemented
+		static TArray<TSharedRef<class IClassViewerFilter>> NotImplemented;
+		return NotImplemented;
 	}
 
 	const TArray<TWeakObjectPtr<UObject>>& GetSelectedObjects() const override
@@ -90,13 +105,9 @@ public:
 		return false;
 	}
 
-	virtual TSharedPtr<FEditConditionParser> GetEditConditionParser() const override
-	{
-		return nullptr;
-	}
-
 private:
 	TWeakPtr< SSingleProperty > View;
+	bool bShouldHideAssetThumbnail = false;
 };
 
 void SSingleProperty::Construct( const FArguments& InArgs )
@@ -107,28 +118,72 @@ void SSingleProperty::Construct( const FArguments& InArgs )
 	NotifyHook = InArgs._NotifyHook;
 	PropertyFont = InArgs._PropertyFont;
 
-	PropertyUtilities = MakeShareable( new FSinglePropertyUtilities( SharedThis( this ) ) );
+	PropertyUtilities = MakeShareable( new FSinglePropertyUtilities( SharedThis( this ), InArgs._bShouldHideAssetThumbnail ) );
 
-	SetObject( InArgs._Object );
+	if (InArgs._Object != nullptr)
+	{
+		SetObject( InArgs._Object );
+	}
+	else if(InArgs._StructData.IsValid())
+	{
+		SetStruct(InArgs._StructData);
+	}
 }
 
 void SSingleProperty::SetObject( UObject* InObject )
 {
-	DestroyColorPicker();
-
-	if( !RootPropertyNode.IsValid() )
+	if( !RootPropertyNode.IsValid() || RootPropertyNode->GetPropertyType() != FComplexPropertyNode::EPT_Object)
 	{
 		RootPropertyNode = MakeShareable( new FObjectPropertyNode );
 	}
 
-	RootPropertyNode->RemoveAllObjects();
+	FObjectPropertyNode* RootObjectPropertyNode = static_cast<FObjectPropertyNode*>(RootPropertyNode.Get());
+
+	RootObjectPropertyNode->RemoveAllObjects();
 	ValueNode.Reset();
 
 	if( InObject )
 	{
-		RootPropertyNode->AddObject( InObject );
+		RootObjectPropertyNode->AddObject( InObject );
 	}
 
+	if( !GeneratePropertyCustomization() )
+	{
+		// invalid or missing property
+		RootObjectPropertyNode->RemoveAllObjects();
+		RootPropertyNode.Reset();
+	}
+}
+
+void SSingleProperty::SetStruct(const TSharedPtr<IStructureDataProvider>& InStruct)
+{
+	if (!RootPropertyNode.IsValid() || RootPropertyNode->GetPropertyType() != FComplexPropertyNode::EPT_StandaloneStructure)
+	{
+		RootPropertyNode = MakeShareable(new FStructurePropertyNode);
+		RootPropertyNode->SetNodeFlags(EPropertyNodeFlags::RequiresValidation, true);
+	}
+
+	FStructurePropertyNode* RootStructPropertyNode = (FStructurePropertyNode*)RootPropertyNode.Get();
+
+	RootStructPropertyNode->RemoveStructure();
+	ValueNode.Reset();
+
+	if (InStruct)
+	{
+		RootStructPropertyNode->SetStructure(InStruct);
+	}
+
+	if( !GeneratePropertyCustomization() )
+	{
+		// invalid or missing property
+		RootStructPropertyNode->RemoveStructure();
+		RootPropertyNode.Reset();
+	}
+}
+
+bool SSingleProperty::GeneratePropertyCustomization()
+{
+	DestroyColorPicker();
 
 	FPropertyNodeInitParams InitParams;
 	InitParams.ParentNode = NULL;
@@ -144,12 +199,14 @@ void SSingleProperty::SetObject( UObject* InObject )
 	ValueNode = RootPropertyNode->GenerateSingleChild( PropertyName );
 
 	bool bIsAcceptableProperty = false;
+	FProperty* Property = nullptr; 
 	// valid criteria for standalone properties 
 	if( ValueNode.IsValid() )
 	{
-		FProperty* Property = ValueNode->GetProperty();
-	//TODO MaterialLayers: Remove below commenting
+		//TODO MaterialLayers: Remove below commenting
 		bIsAcceptableProperty = true;
+		Property = ValueNode->GetProperty();
+		check(Property);
 		// not an array property (dynamic or static)
 		//bIsAcceptableProperty &= !( Property->IsA( FArrayProperty::StaticClass() ) || (Property->ArrayDim > 1 && ValueNode->GetArrayIndex() == INDEX_NONE) );
 		// not a struct property unless its a built in type like a vector
@@ -179,17 +236,39 @@ void SSingleProperty::SetObject( UObject* InObject )
 			.VAlign( VAlign_Center )
 			[
 				SNew( SPropertyNameWidget, PropertyEditor )
-				.DisplayResetToDefault( false )
 			];
 		}
 
-		HorizontalBox->AddSlot()
-		.Padding( 4.0f, 0.0f)
-		.FillWidth(1.0f)
-		.VAlign( VAlign_Center )
-		[
-			SNew( SPropertyValueWidget, PropertyEditor, PropertyUtilities.ToSharedRef() )
-		];
+		// For structs and other properties with a customized header
+		FPropertyEditorModule& PropertyEditorModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+
+		if (const FPropertyTypeLayoutCallback LayoutCallback =
+				PropertyEditorModule.GetPropertyTypeCustomization(
+					Property, *PropertyHandle, FCustomPropertyTypeLayoutMap()
+				); LayoutCallback.IsValid()
+			)
+		{
+			TSharedRef<IPropertyTypeCustomization> CustomizationInstance = LayoutCallback.GetCustomizationInstance();
+			
+			HorizontalBox->AddSlot()
+			.Padding( 4.0f, 0.0f)
+			.FillWidth(1.0f)
+			.VAlign( VAlign_Center )
+			[
+				SNew( SStandaloneCustomizedValueWidget, CustomizationInstance, PropertyHandle.ToSharedRef())
+			];
+		}
+		else // For properties without customization
+		{
+
+			HorizontalBox->AddSlot()
+			.Padding( 4.0f, 0.0f)
+			.FillWidth(1.0f)
+			.VAlign( VAlign_Center )
+			[
+				SNew( SPropertyValueWidget, PropertyEditor, PropertyUtilities.ToSharedRef() )
+			];			
+		}
 
 		if (!PropertyEditor->GetPropertyHandle()->HasMetaData(TEXT("NoResetToDefault")))
 		{
@@ -212,12 +291,12 @@ void SSingleProperty::SetObject( UObject* InObject )
 			.ToolTipText(NSLOCTEXT("PropertyEditor", "SinglePropertyInvalidType_Tooltip", "Properties of this type cannot be edited inline; edit it elsewhere"))
 		];
 
-		// invalid or missing property
-		RootPropertyNode->RemoveAllObjects();
 		ValueNode.Reset();
-		RootPropertyNode.Reset();
 	}
+
+	return bIsAcceptableProperty;
 }
+
 
 void SSingleProperty::SetOnPropertyValueChanged( FSimpleDelegate& InOnPropertyValueChanged )
 {
@@ -229,15 +308,17 @@ void SSingleProperty::SetOnPropertyValueChanged( FSimpleDelegate& InOnPropertyVa
 
 void SSingleProperty::ReplaceObjects( const TMap<UObject*, UObject*>& OldToNewObjectMap )
 {
-	if( HasValidProperty() )
+	if( HasValidProperty() && RootPropertyNode->GetPropertyType() == FComplexPropertyNode::EPT_Object )
 	{
 		TArray<UObject*> NewObjectList;
 		bool bObjectsReplaced = false;
 
+		FObjectPropertyNode* RootObjectPropertyNode = static_cast<FObjectPropertyNode*>(RootPropertyNode.Get());
+
 		// Scan all objects and look for objects which need to be replaced
-		for ( TPropObjectIterator Itor( RootPropertyNode->ObjectIterator() ); Itor; ++Itor )
+		for ( TPropObjectIterator Itor(RootObjectPropertyNode->ObjectIterator() ); Itor; ++Itor )
 		{
-			UObject* Replacement = OldToNewObjectMap.FindRef( Itor->Get() );
+			UObject* Replacement = OldToNewObjectMap.FindRef( Itor->Get(true) );
 			if( Replacement )
 			{
 				bObjectsReplaced = true;
@@ -260,10 +341,12 @@ void SSingleProperty::ReplaceObjects( const TMap<UObject*, UObject*>& OldToNewOb
 void SSingleProperty::RemoveDeletedObjects( const TArray<UObject*>& DeletedObjects )
 {
 
-	if( HasValidProperty() )
+	if( HasValidProperty() && RootPropertyNode->GetPropertyType() == FComplexPropertyNode::EPT_Object )
 	{
+		FObjectPropertyNode* RootObjectPropertyNode = static_cast<FObjectPropertyNode*>(RootPropertyNode.Get());
+
 		// Scan all objects and look for objects which need to be replaced
-		for ( TPropObjectIterator Itor( RootPropertyNode->ObjectIterator() ); Itor; ++Itor )
+		for ( TPropObjectIterator Itor(RootObjectPropertyNode->ObjectIterator() ); Itor; ++Itor )
 		{
 			if( DeletedObjects.Contains( Itor->Get() ) )
 			{
@@ -278,7 +361,7 @@ void SSingleProperty::CreateColorPickerWindow( const TSharedRef< class FProperty
 {
 	if( HasValidProperty() )
 	{
-		auto Node = PropertyEditor->GetPropertyNode();
+		TSharedRef<FPropertyNode> Node = PropertyEditor->GetPropertyNode();
 		check( &Node.Get() == ValueNode.Get() );
 		FProperty* Property = Node->GetProperty();
 		check(Property);
@@ -286,8 +369,9 @@ void SSingleProperty::CreateColorPickerWindow( const TSharedRef< class FProperty
 		FReadAddressList ReadAddresses;
 		Node->GetReadAddress( false, ReadAddresses, false );
 
-		TArray<FLinearColor*> LinearColor;
-		TArray<FColor*> DWORDColor;
+		// Use the first address for the initial color
+		TOptional<FLinearColor> DefaultColor;
+		bool bClampValue = false;
 		if( ReadAddresses.Num() ) 
 		{
 			const uint8* Addr = ReadAddresses.GetAddress(0);
@@ -295,25 +379,27 @@ void SSingleProperty::CreateColorPickerWindow( const TSharedRef< class FProperty
 			{
 				if( CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_Color )
 				{
-					DWORDColor.Add((FColor*)Addr);
+					DefaultColor = *reinterpret_cast<const FColor*>(Addr);
+					bClampValue = true;
 				}
 				else
 				{
 					check( CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_LinearColor );
-					LinearColor.Add((FLinearColor*)Addr);
+					DefaultColor = *reinterpret_cast<const FLinearColor*>(Addr);
 				}
 			}
 		}
 
-		FColorPickerArgs PickerArgs;
-		PickerArgs.ParentWidget = AsShared();
-		PickerArgs.bUseAlpha = bUseAlpha;
-		PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
-		PickerArgs.ColorArray = &DWORDColor;
-		PickerArgs.LinearColorArray = &LinearColor;
-		PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP( this, &SSingleProperty::SetColorPropertyFromColorPicker);
+		if (DefaultColor.IsSet())
+		{
+			FColorPickerArgs PickerArgs = FColorPickerArgs(DefaultColor.GetValue(), FOnLinearColorValueChanged::CreateSP(this, &SSingleProperty::SetColorPropertyFromColorPicker));
+			PickerArgs.ParentWidget = AsShared();
+			PickerArgs.bUseAlpha = bUseAlpha;
+			PickerArgs.bClampValue = bClampValue;
+			PickerArgs.DisplayGamma = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma));
 
-		OpenColorPicker(PickerArgs);
+			OpenColorPicker(PickerArgs);
+		}
 	}
 }
 
@@ -323,11 +409,17 @@ void SSingleProperty::SetColorPropertyFromColorPicker(FLinearColor NewColor)
 	{
 		FProperty* NodeProperty = ValueNode->GetProperty();
 		check(NodeProperty);
+		check(GetPropertyHandle());
 
-		//@todo if multiple objects we need to iterate
-		ValueNode->NotifyPreChange(NodeProperty, GetNotifyHook());
-
-		FPropertyChangedEvent ChangeEvent(NodeProperty, EPropertyChangeType::ValueSet);
-		ValueNode->NotifyPostChange( ChangeEvent, GetNotifyHook() );
+		if (CastField<FStructProperty>(NodeProperty)->Struct->GetFName() == NAME_Color)
+		{
+			const bool bSRGB = true;
+			FColor NewFColor = NewColor.ToFColor(bSRGB);
+			ensure(GetPropertyHandle()->SetValueFromFormattedString(NewFColor.ToString(), EPropertyValueSetFlags::DefaultFlags) == FPropertyAccess::Result::Success);
+		}
+		else
+		{
+			ensure(GetPropertyHandle()->SetValueFromFormattedString(NewColor.ToString(), EPropertyValueSetFlags::DefaultFlags) == FPropertyAccess::Result::Success);
+		}
 	}
 }

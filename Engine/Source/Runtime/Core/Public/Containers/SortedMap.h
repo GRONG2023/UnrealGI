@@ -15,14 +15,15 @@
  * removing elements is O(n), and finding is O(Log n). In practice it is faster than TMap for low element
  * counts, and slower as n increases, This map is always kept sorted by the key type so cannot be sorted manually.
  */
-template <typename KeyType, typename ValueType, typename ArrayAllocator /*= FDefaultAllocator*/, typename SortPredicate /*= TLess<KeyType>*/ >
+template <typename InKeyType, typename InValueType, typename ArrayAllocator /*= FDefaultAllocator*/, typename SortPredicate /*= TLess<KeyType>*/ >
 class TSortedMap
 {
 	template <typename OtherKeyType, typename OtherValueType, typename OtherArrayAllocator, typename OtherSortPredicate>
 	friend class TSortedMap;
-	friend struct TContainerTraits<TSortedMap>;
 
 public:
+	typedef InKeyType      KeyType;
+	typedef InValueType    ValueType;
 	typedef typename TTypeTraits<KeyType  >::ConstPointerType KeyConstPointerType;
 	typedef typename TTypeTraits<KeyType  >::ConstInitType    KeyInitType;
 	typedef typename TTypeTraits<ValueType>::ConstInitType    ValueInitType;
@@ -48,6 +49,16 @@ public:
 	{
 	}
 
+	/** Constructor which gets its elements from a native initializer list */
+	TSortedMap(std::initializer_list<TPairInitializer<const KeyType&, const ValueType&>> InitList)
+	{
+		this->Reserve((int32)InitList.size());
+		for (const TPairInitializer<const KeyType&, const ValueType&>& Element : InitList)
+		{
+			this->Add(Element.Key, Element.Value);
+		}
+	}
+
 	/** Assignment operator for moving elements from a TSortedMap with a different ArrayAllocator. */
 	template<typename OtherArrayAllocator>
 	TSortedMap& operator=(TSortedMap<KeyType, ValueType, OtherArrayAllocator, SortPredicate>&& Other)
@@ -61,6 +72,17 @@ public:
 	TSortedMap& operator=(const TSortedMap<KeyType, ValueType, OtherArrayAllocator, SortPredicate>& Other)
 	{
 		Pairs = Other.Pairs;
+		return *this;
+	}
+
+	/** Assignment operator which gets its elements from a native initializer list */
+	TSortedMap& operator=(std::initializer_list<TPairInitializer<const KeyType&, const ValueType&>> InitList)
+	{
+		this->Empty((int32)InitList.size());
+		for (const TPairInitializer<const KeyType&, const ValueType&>& Element : InitList)
+		{
+			this->Add(Element.Key, Element.Value);
+		}
 		return *this;
 	}
 
@@ -102,6 +124,17 @@ public:
 	FORCEINLINE void Reserve(int32 Number)
 	{
 		Pairs.Reserve(Number);
+	}
+
+	/**
+	 * Returns true if the map is empty and contains no elements. 
+	 *
+	 * @returns True if the map is empty.
+	 * @see Num
+	 */
+	bool IsEmpty() const
+	{
+		return Pairs.IsEmpty();
 	}
 
 	/** @return The number of elements in the map. */
@@ -155,7 +188,7 @@ public:
 	 * @param InValue - The value to associate with the key.
 	 * @return A reference to the value as stored in the map (only valid until the next change to any key in the map).
 	 */
-	template <typename InitKeyType, typename InitValueType>
+	template <typename InitKeyType = KeyType, typename InitValueType = ValueType>
 	ValueType& Emplace(InitKeyType&& InKey, InitValueType&& InValue)
 	{
 		ElementType* DataPtr = AllocateMemoryForEmplace(InKey);
@@ -171,7 +204,7 @@ public:
 	 * @param InKey The key to associate the value with.
 	 * @return A reference to the value as stored in the map (only valid until the next change to any key in the map).
 	 */
-	template <typename InitKeyType>
+	template <typename InitKeyType = KeyType>
 	ValueType& Emplace(InitKeyType&& InKey)
 	{
 		ElementType* DataPtr = AllocateMemoryForEmplace(InKey);
@@ -289,6 +322,23 @@ public:
 	}
 
 	/**
+	 * Returns the value associated with a specified key.
+	 *
+	 * @param Key The key to search for.
+	 * @param DefaultValue The fallback value if the key is not found.
+	 * @return The value associated with the specified key, or DefaultValue if the key isn't contained in this map.
+	 */
+	FORCEINLINE ValueType FindRef(KeyConstPointerType Key, ValueType DefaultValue) const
+	{
+		if (const ValueType* Value = Find(Key))
+		{
+			return *Value;
+		}
+
+		return DefaultValue;
+	}
+
+	/**
 	 * Checks if map contains the specified key.
 	 *
 	 * @param Key The key to check for.
@@ -313,7 +363,7 @@ public:
 	{
 		for (typename ElementArrayType::TConstIterator PairIt(Pairs); PairIt; ++PairIt)
 		{
-			new(OutKeys) KeyType(PairIt->Key);
+			OutKeys.Add(PairIt->Key);
 		}
 
 		return OutKeys.Num();
@@ -327,7 +377,7 @@ public:
 		OutArray.Empty(Pairs.Num());
 		for(typename ElementArrayType::TConstIterator PairIt(Pairs);PairIt;++PairIt)
 		{
-			new(OutArray) KeyType(PairIt->Key);
+			OutArray.Add(PairIt->Key);
 		}
 	}
 
@@ -339,21 +389,8 @@ public:
 		OutArray.Empty(Pairs.Num());
 		for(typename ElementArrayType::TConstIterator PairIt(Pairs);PairIt;++PairIt)
 		{
-			new(OutArray) ValueType(PairIt->Value);
+			OutArray.Add(PairIt->Value);
 		}
-	}
-
-	/** Serializer. */
-	FORCEINLINE friend FArchive& operator<<(FArchive& Ar, TSortedMap& Map)
-	{
-		Ar << Map.Pairs;
-
-		if (Ar.IsLoading())
-		{
-			// We need to resort, in case the sorting is not consistent with what it was before
-			Algo::SortBy(Map.Pairs, FKeyForward(), SortPredicate());
-		}
-		return Ar;
 	}
 
 	/**
@@ -438,6 +475,36 @@ public:
 	FORCEINLINE       ValueType& operator[](KeyConstPointerType Key)       { return this->FindChecked(Key); }
 	FORCEINLINE const ValueType& operator[](KeyConstPointerType Key) const { return this->FindChecked(Key); }
 
+	// Interface functions to match TMap/TSet
+
+	/** @return The max valid index of the elements in the sparse storage. */
+	[[nodiscard]] FORCEINLINE int32 GetMaxIndex() const
+	{
+		return Pairs.Num() - 1;
+	}
+
+	/**
+	 * Checks whether an element id is valid.
+	 * @param Id - The element id to check.
+	 * @return true if the element identifier refers to a valid element in this map.
+	 */
+	[[nodiscard]] FORCEINLINE bool IsValidId(FSetElementId Id) const
+	{
+		return Pairs.IsValidIndex(Id.AsInteger());
+	}
+
+	/** Return a mapped pair by internal identifier. Element must be valid (see @IsValidId). */
+	[[nodiscard]] FORCEINLINE ElementType& Get(FSetElementId Id)
+	{
+		return Pairs[Id.AsInteger()];
+	}
+
+	/** Return a mapped pair by internal identifier.  Element must be valid (see @IsValidId).*/
+	[[nodiscard]] FORCEINLINE const ElementType& Get(FSetElementId Id) const
+	{
+		return Pairs[Id.AsInteger()];
+	}
+
 private:
 	typedef TArray<ElementType, ArrayAllocator> ElementArrayType;
 
@@ -454,7 +521,7 @@ private:
 	}
 
 	/** Find index of key */
-	FORCEINLINE int32 FindIndex(KeyConstPointerType Key)
+	FORCEINLINE int32 FindIndex(KeyConstPointerType Key) const
 	{
 		return Algo::BinarySearchBy(Pairs, Key, FKeyForward(), SortPredicate());
 	}
@@ -498,12 +565,12 @@ private:
 	class TBaseIterator
 	{
 	public:
-		typedef typename TChooseClass<bConst,typename ElementArrayType::TConstIterator,typename ElementArrayType::TIterator>::Result PairItType;
+		typedef std::conditional_t<bConst,typename ElementArrayType::TConstIterator,typename ElementArrayType::TIterator> PairItType;
 	private:
-		typedef typename TChooseClass<bConst,const TSortedMap,TSortedMap>::Result MapType;
-		typedef typename TChooseClass<bConst,const KeyType,KeyType>::Result ItKeyType;
-		typedef typename TChooseClass<bConst,const ValueType,ValueType>::Result ItValueType;
-		typedef typename TChooseClass<bConst,const typename ElementArrayType::ElementType, typename ElementArrayType::ElementType>::Result PairType;
+		typedef std::conditional_t<bConst,const TSortedMap,TSortedMap> MapType;
+		typedef std::conditional_t<bConst,const KeyType,KeyType> ItKeyType;
+		typedef std::conditional_t<bConst,const ValueType,ValueType> ItValueType;
+		typedef std::conditional_t<bConst,const typename ElementArrayType::ElementType, typename ElementArrayType::ElementType> PairType;
 
 	protected:
 		FORCEINLINE TBaseIterator(const PairItType& InElementIt)
@@ -524,11 +591,16 @@ private:
 			return !!PairIt; 
 		}
 
-		FORCEINLINE friend bool operator==(const TBaseIterator& Lhs, const TBaseIterator& Rhs) { return Lhs.PairIt == Rhs.PairIt; }
-		FORCEINLINE friend bool operator!=(const TBaseIterator& Lhs, const TBaseIterator& Rhs) { return Lhs.PairIt != Rhs.PairIt; }
+		FORCEINLINE bool operator==(const TBaseIterator& Rhs) const { return PairIt == Rhs.PairIt; }
+		FORCEINLINE bool operator!=(const TBaseIterator& Rhs) const { return PairIt != Rhs.PairIt; }
 
 		FORCEINLINE ItKeyType&   Key()   const { return PairIt->Key; }
 		FORCEINLINE ItValueType& Value() const { return PairIt->Value; }
+
+		[[nodiscard]] FORCEINLINE FSetElementId GetId() const
+		{
+			return FSetElementId::FromInteger(PairIt.GetIndex());
+		}
 
 		FORCEINLINE PairType& operator* () const { return  *PairIt; }
 		FORCEINLINE PairType* operator->() const { return &*PairIt; }
@@ -543,13 +615,13 @@ private:
 	{
 		// Once we add reverse iterator to TArray, this class and TBaseIterator could be merged with a template parameter for forward vs reverse.
 	private:
-		typedef typename TChooseClass<bConst, const TSortedMap, TSortedMap>::Result MapType;
-		typedef typename TChooseClass<bConst, const KeyType, KeyType>::Result ItKeyType;
-		typedef typename TChooseClass<bConst, const ValueType, ValueType>::Result ItValueType;
+		typedef std::conditional_t<bConst, const TSortedMap, TSortedMap> MapType;
+		typedef std::conditional_t<bConst, const KeyType, KeyType> ItKeyType;
+		typedef std::conditional_t<bConst, const ValueType, ValueType> ItValueType;
 		typedef typename ElementArrayType::SizeType SizeType;
 
 	public:
-		typedef typename TChooseClass<bConst, const typename ElementArrayType::ElementType, typename ElementArrayType::ElementType>::Result PairType;
+		typedef std::conditional_t<bConst, const typename ElementArrayType::ElementType, typename ElementArrayType::ElementType> PairType;
 
 	protected:
 		FORCEINLINE TBaseReverseIterator(PairType* InData, SizeType InNum)
@@ -571,11 +643,16 @@ private:
 			return Index != static_cast<SizeType>(-1);
 		}
 
-		FORCEINLINE friend bool operator==(const TBaseReverseIterator& Lhs, const TBaseReverseIterator& Rhs) { return Lhs.Index == Rhs.Index; }
-		FORCEINLINE friend bool operator!=(const TBaseReverseIterator& Lhs, const TBaseReverseIterator& Rhs) { return Lhs.Index != Rhs.Index; }
+		FORCEINLINE bool operator==(const TBaseReverseIterator& Rhs) const { return Index == Rhs.Index; }
+		FORCEINLINE bool operator!=(const TBaseReverseIterator& Rhs) const { return Index != Rhs.Index; }
 
 		FORCEINLINE ItKeyType& Key()   const { return Data[Index].Key; }
 		FORCEINLINE ItValueType& Value() const { return Data[Index].Value; }
+
+		[[nodiscard]] FORCEINLINE FSetElementId GetId() const
+		{
+			return FSetElementId::FromInteger(Index);
+		}
 
 		FORCEINLINE PairType& operator* () const { return  Data[Index]; }
 		FORCEINLINE PairType* operator->() const { return &Data[Index]; }
@@ -654,25 +731,27 @@ public:
 	/** Iterates over values associated with a specified key in a const map. This will be at most one value because keys must be unique */
 	class TConstKeyIterator : public TBaseIterator<true>
 	{
+		using Super = TBaseIterator<true>;
+
 	public:
 		FORCEINLINE TConstKeyIterator(const TSortedMap& InMap, KeyInitType InKey)
-			: TBaseIterator<true>(InMap.Pairs.CreateIterator())
+			: Super(InMap.Pairs.CreateConstIterator())
 		{
-			int32 NewIndex = FindIndex(InKey);
+			int32 NewIndex = InMap.FindIndex(InKey);
 		
 			if (NewIndex != INDEX_NONE)
 			{
-				TBaseIterator<true>::PairIt += NewIndex;
+				Super::PairIt += NewIndex;
 			}
 			else
 			{
-				TBaseIterator<true>::PairIt.SetToEnd();
+				Super::PairIt.SetToEnd();
 			}
 		}
 
 		FORCEINLINE TConstKeyIterator& operator++()
 		{
-			TBaseIterator<true>::PairIt.SetToEnd();
+			Super::PairIt.SetToEnd();
 			return *this;
 		}
 	};
@@ -680,33 +759,35 @@ public:
 	/** Iterates over values associated with a specified key in a map. This will be at most one value because keys must be unique */
 	class TKeyIterator : public TBaseIterator<false>
 	{
+		using Super = TBaseIterator<false>;
+
 	public:
 		FORCEINLINE TKeyIterator(TSortedMap& InMap, KeyInitType InKey)
-			: TBaseIterator<false>(InMap.Pairs.CreateConstIterator())
+			: Super(InMap.Pairs.CreateIterator())
 		{
-			int32 NewIndex = FindIndex(InKey);
+			int32 NewIndex = InMap.FindIndex(InKey);
 
 			if (NewIndex != INDEX_NONE)
 			{
-				TBaseIterator<true>::PairIt += NewIndex;
+				Super::PairIt += NewIndex;
 			}
 			else
 			{
-				TBaseIterator<true>::PairIt.SetToEnd();
+				Super::PairIt.SetToEnd();
 			}
 		}
 
 		FORCEINLINE TKeyIterator& operator++()
 		{
-			TBaseIterator<false>::PairIt.SetToEnd();
+			Super::PairIt.SetToEnd();
 			return *this;
 		}
 
 		/** Removes the current key-value pair from the map. */
 		FORCEINLINE void RemoveCurrent()
 		{
-			TBaseIterator<false>::PairIt.RemoveCurrent();
-			TBaseIterator<false>::PairIt.SetToEnd();
+			Super::PairIt.RemoveCurrent();
+			Super::PairIt.SetToEnd();
 		}
 	};
 
@@ -747,12 +828,32 @@ public:
 	FORCEINLINE RangedForConstIteratorType	begin() const { return Pairs.begin(); }
 	FORCEINLINE RangedForIteratorType		end()         { return Pairs.end(); }
 	FORCEINLINE RangedForConstIteratorType	end() const   { return Pairs.end(); }
+
+	friend struct TSortedMapPrivateFriend;
 };
 
 DECLARE_TEMPLATE_INTRINSIC_TYPE_LAYOUT((template <typename KeyType, typename ValueType, typename ArrayAllocator, typename SortPredicate>), (TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>));
 
-template <typename KeyType, typename ValueType, typename ArrayAllocator, typename SortPredicate>
-struct TContainerTraits<TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>> : public TContainerTraitsBase<TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>>
+struct TSortedMapPrivateFriend
 {
-	enum { MoveWillEmptyContainer = TContainerTraits<typename TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>::ElementArrayType>::MoveWillEmptyContainer };
+	template <typename KeyType, typename ValueType, typename ArrayAllocator, typename SortPredicate>
+	static void Serialize(FArchive& Ar, TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>& Map)
+	{
+		Ar << Map.Pairs;
+
+		if (Ar.IsLoading())
+		{
+			// We need to resort, in case the sorting is not consistent with what it was before
+			Algo::SortBy(Map.Pairs, typename TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>::FKeyForward(), SortPredicate());
+		}
+	}
 };
+
+/** Serializer. */
+template <typename KeyType, typename ValueType, typename ArrayAllocator, typename SortPredicate>
+FORCEINLINE FArchive& operator<<(FArchive& Ar, TSortedMap<KeyType, ValueType, ArrayAllocator, SortPredicate>& Map)
+{
+	TSortedMapPrivateFriend::Serialize(Ar, Map);
+	return Ar;
+}
+

@@ -12,10 +12,27 @@
 
 class FIOSTargetDevice;
 
+static FString GetLibImobileDeviceExe(const FString& ExeName)
+{
+	FString ToReturn;
+#if PLATFORM_WINDOWS
+	ToReturn = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Extras/ThirdPartyNotUE/libimobiledevice/x64/"));
+#elif PLATFORM_MAC
+	ToReturn = FPaths::ConvertRelativePathToFull(FPaths::EngineDir() / TEXT("Extras/ThirdPartyNotUE/libimobiledevice/Mac/"));
+#else
+	UE_LOG(LogIOSDeviceHelper, Error, TEXT("The current platform is unsupported by Libimobile library."));
+#endif
+	ToReturn += ExeName;
+#if PLATFORM_WINDOWS
+	ToReturn += TEXT(".exe");
+#endif
+	return FPaths::FileExists(ToReturn) ? ToReturn : TEXT("");
+}
+
 class FIOSDeviceOutputReaderRunnable : public FRunnable
 {
 public:
-	FIOSDeviceOutputReaderRunnable(const FTargetDeviceId InDeviceId, FOutputDevice* Output);
+	FIOSDeviceOutputReaderRunnable(const FString& InDeviceUDID, FOutputDevice* Output);
 	
 	// FRunnable interface.
 	virtual bool Init(void) override;
@@ -24,16 +41,16 @@ public:
 	virtual uint32 Run(void) override;
 
 private:
-	bool StartDSCommander();
+	bool StartSyslogProcess(void);
 
-private:
 	// > 0 if we've been asked to abort work in progress at the next opportunity
 	FThreadSafeCounter	StopTaskCounter;
 	
-	FTargetDeviceId		DeviceId;
+	FString				DeviceUDID;
 	FOutputDevice*		Output;
-	TQueue<FString>		OutputQueue;
-	FTcpDSCommander*	DSCommander;
+	void*				SyslogReadPipe;
+	void*				SyslogWritePipe;
+	FProcHandle			SyslogProcHandle;
 };
 
 /**
@@ -43,12 +60,9 @@ class FIOSTargetDeviceOutput : public ITargetDeviceOutput
 {
 public:
 	bool Init(const FIOSTargetDevice& TargetDevice, FOutputDevice* Output);
-
-	static int ExecuteDSCommand(const char *CommandLine, FString* OutStdOut);
 	
 private:
 	TUniquePtr<FRunnableThread>						DeviceOutputThread;
-	FTargetDeviceId									DeviceId;
 	FString											DeviceName;
 };
 

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Fonts/SlateFontInfo.h"
 #include "ITargetDeviceService.h"
 #include "Misc/Paths.h"
@@ -261,10 +261,10 @@ private:
 	{
 		if (DeviceService.IsValid())
 		{
-			const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(DeviceService->GetDevicePlatformName());
+			const PlatformInfo::FTargetPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(DeviceService->GetDevicePlatformName());
 			if(PlatformInfo)
 			{
-				return FEditorStyle::GetBrush(PlatformInfo->GetIconStyleName(PlatformInfo::EPlatformIconSize::XLarge));
+				return FAppStyle::GetBrush(PlatformInfo->GetIconStyleName(EPlatformIconSize::XLarge));
 			}
 		}
 

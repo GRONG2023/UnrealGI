@@ -9,18 +9,12 @@ class AActor;
 class UCanvas;
 struct FLogEntryItem;
 
-
-#if ENABLE_VISUAL_LOG
-#define DEFINE_ENUM_TO_STRING(EnumType) FString EnumToString(const EnumType Value) \
+#define DEFINE_ENUM_TO_STRING(EnumType, EnumPackage) FString EnumToString(const EnumType Value) \
 { \
-	static const UEnum* TypeEnum = FindObject<UEnum>(ANY_PACKAGE, TEXT(#EnumType)); \
+	static const UEnum* TypeEnum = FindObject<UEnum>(nullptr, TEXT(EnumPackage) TEXT(".") TEXT(#EnumType)); \
 	return TypeEnum->GetNameStringByIndex(static_cast<int32>(Value)); \
 }
 #define DECLARE_ENUM_TO_STRING(EnumType) FString EnumToString(const EnumType Value)
-#else
-#define DEFINE_ENUM_TO_STRING(EnumType) 
-#define DECLARE_ENUM_TO_STRING(EnumType)
-#endif // ENABLE_VISUAL_LOG
 
 enum class ECreateIfNeeded : int8
 {
@@ -44,23 +38,30 @@ namespace EVisualLoggerDeviceFlags
 enum class EVisualLoggerShapeElement : uint8
 {
 	Invalid = 0,
-	SinglePoint, // individual points. 
+	SinglePoint, // individual points, rendered as plain spheres
+	Sphere, 
+	WireSphere,
 	Segment, // pairs of points 
 	Path,	// sequence of point
 	Box,
+	WireBox,
 	Cone,
+	WireCone,
 	Cylinder,
+	WireCylinder,
 	Capsule,
+	WireCapsule,
 	Polygon,
 	Mesh,
 	NavAreaMesh, // convex based mesh with min and max Z values
-	Arrow, 
+	Arrow,
+	Circle,
 	// note that in order to remain backward compatibility in terms of log
 	// serialization new enum values need to be added at the end
 };
 
 #if ENABLE_VISUAL_LOG
-struct ENGINE_API FVisualLogEventBase
+struct FVisualLogEventBase
 {
 	const FString Name;
 	const FString FriendlyDesc;
@@ -72,7 +73,7 @@ struct ENGINE_API FVisualLogEventBase
 	}
 };
 
-struct ENGINE_API FVisualLogEvent
+struct FVisualLogEvent
 {
 	FString Name;
 	FString UserFriendlyDesc;
@@ -83,11 +84,16 @@ struct ENGINE_API FVisualLogEvent
 	FName TagName;
 
 	FVisualLogEvent() : Counter(1) { /* Empty */ }
-	FVisualLogEvent(const FVisualLogEventBase& Event);
-	FVisualLogEvent& operator=(const FVisualLogEventBase& Event);
+	ENGINE_API FVisualLogEvent(const FVisualLogEventBase& Event);
+	ENGINE_API FVisualLogEvent& operator=(const FVisualLogEventBase& Event);
+
+	friend inline bool operator==(const FVisualLogEvent& Left, const FVisualLogEvent& Right) 
+	{ 
+		return Left.Name == Right.Name; 
+	}
 };
 
-struct ENGINE_API FVisualLogLine
+struct FVisualLogLine
 {
 	FString Line;
 	FName Category;
@@ -97,29 +103,29 @@ struct ENGINE_API FVisualLogLine
 	FName TagName;
 
 	FVisualLogLine() { /* Empty */ }
-	FVisualLogLine(const FName& InCategory, ELogVerbosity::Type InVerbosity, const FString& InLine);
-	FVisualLogLine(const FName& InCategory, ELogVerbosity::Type InVerbosity, const FString& InLine, int64 InUserData);
+	ENGINE_API FVisualLogLine(const FName& InCategory, ELogVerbosity::Type InVerbosity, const FString& InLine);
+	ENGINE_API FVisualLogLine(const FName& InCategory, ELogVerbosity::Type InVerbosity, const FString& InLine, int64 InUserData);
 };
 
-struct ENGINE_API FVisualLogStatusCategory
+struct FVisualLogStatusCategory
 {
 	TArray<FString> Data;
 	FString Category;
 	int32 UniqueId;
 	TArray<FVisualLogStatusCategory> Children;
 
-	FVisualLogStatusCategory();
+	ENGINE_API FVisualLogStatusCategory();
 	explicit FVisualLogStatusCategory(const FString& InCategory/* = TEXT("")*/)
 		: Category(InCategory)
 	{
 	}
 
-	void Add(const FString& Key, const FString& Value);
-	bool GetDesc(int32 Index, FString& Key, FString& Value) const;
-	void AddChild(const FVisualLogStatusCategory& Child);
+	ENGINE_API void Add(const FString& Key, const FString& Value);
+	ENGINE_API bool GetDesc(int32 Index, FString& Key, FString& Value) const;
+	ENGINE_API void AddChild(const FVisualLogStatusCategory& Child);
 };
 
-struct ENGINE_API FVisualLogShapeElement
+struct FVisualLogShapeElement
 {
 	FString Description;
 	FName Category;
@@ -135,15 +141,15 @@ struct ENGINE_API FVisualLogShapeElement
 		uint16 Radius;
 	};
 
-	FVisualLogShapeElement(EVisualLoggerShapeElement InType = EVisualLoggerShapeElement::Invalid);
-	FVisualLogShapeElement(const FString& InDescription, const FColor& InColor, uint16 InThickness, const FName& InCategory);
-	void SetColor(const FColor& InColor);
-	EVisualLoggerShapeElement GetType() const;
-	void SetType(EVisualLoggerShapeElement InType);
-	FColor GetFColor() const;
+	ENGINE_API FVisualLogShapeElement(EVisualLoggerShapeElement InType = EVisualLoggerShapeElement::Invalid);
+	ENGINE_API FVisualLogShapeElement(const FString& InDescription, const FColor& InColor, uint16 InThickness, const FName& InCategory);
+	ENGINE_API void SetColor(const FColor& InColor);
+	ENGINE_API EVisualLoggerShapeElement GetType() const;
+	ENGINE_API void SetType(EVisualLoggerShapeElement InType);
+	ENGINE_API FColor GetFColor() const;
 };
 
-struct ENGINE_API FVisualLogHistogramSample
+struct FVisualLogHistogramSample
 {
 	FName Category;
 	TEnumAsByte<ELogVerbosity::Type> Verbosity;
@@ -153,7 +159,7 @@ struct ENGINE_API FVisualLogHistogramSample
 	int32 UniqueId;
 };
 
-struct ENGINE_API FVisualLogDataBlock
+struct FVisualLogDataBlock
 {
 	FName TagName;
 	FName Category;
@@ -163,67 +169,114 @@ struct ENGINE_API FVisualLogDataBlock
 };
 #endif  //ENABLE_VISUAL_LOG
 
-struct ENGINE_API FVisualLogEntry
+struct FVisualLogEntry
 {
 #if ENABLE_VISUAL_LOG
-	float TimeStamp;
+	/** For absolute position of events along a timeline (can involve multiple worlds/game instances such as clients and server) */
+	double TimeStamp;
+	/** The time of the event according to its UWorld (can vary widely between game instances such as clients and server) */
+	double WorldTimeStamp;
 	FVector Location;
-	uint8 bIsClassWhitelisted : 1;
-	uint8 bIsObjectWhitelisted : 1;	
+	uint8 bPassedClassAllowList : 1;
+	uint8 bPassedObjectAllowList : 1;	
 	uint8 bIsAllowedToLog : 1;
+	uint8 bIsLocationValid : 1;
+	uint8 bIsInitialized : 1;
 
 	TArray<FVisualLogEvent> Events;
 	TArray<FVisualLogLine> LogLines;
 	TArray<FVisualLogStatusCategory> Status;
 	TArray<FVisualLogShapeElement> ElementsToDraw;
-	TArray<FVisualLogHistogramSample>	HistogramSamples;
+	TArray<FVisualLogHistogramSample> HistogramSamples;
 	TArray<FVisualLogDataBlock>	DataBlocks;
 
 	FVisualLogEntry() { Reset(); }
-	FVisualLogEntry(const FVisualLogEntry& Entry);
-	FVisualLogEntry(const AActor* InActor, TArray<TWeakObjectPtr<UObject> >* Children);
-	FVisualLogEntry(float InTimeStamp, FVector InLocation, const UObject* Object, TArray<TWeakObjectPtr<UObject> >* Children);
 
-	void Reset();
-	void UpdateAllowedToLog();
+	UE_DEPRECATED(5.4, "To be removed.  Build up the FVisualLogEntry manually or write your own helper function which doesn't rely on Children being IVisualLoggerDebugSnapshotInterface")
+	ENGINE_API FVisualLogEntry(const AActor* InActor, TArray<TWeakObjectPtr<UObject> >* Children);
+	
+	UE_DEPRECATED(5.4, "To be removed.  Build up the FVisualLogEntry manually or write your own helper function which doesn't rely on Children being IVisualLoggerDebugSnapshotInterface")
+	ENGINE_API FVisualLogEntry(double InTimeStamp, FVector InLocation, const UObject* Object, TArray<TWeakObjectPtr<UObject> >* Children);
 
-	void AddText(const FString& TextLine, const FName& CategoryName, ELogVerbosity::Type Verbosity);
+	bool ShouldLog(const ECreateIfNeeded ShouldCreate) const
+	{
+		// We serialize and reinitialize entries only when allowed to log and parameter
+		// indicates that new entry can be created.
+		return bIsAllowedToLog && ShouldCreate == ECreateIfNeeded::Create;
+	}
+
+	bool ShouldFlush(double InTimeStamp) const
+	{
+		//Same LogOwner can be used for logs at different time in the frame so need to flush entry right away
+		return bIsInitialized && InTimeStamp > TimeStamp;
+	}
+
+	ENGINE_API void InitializeEntry( const double InTimeStamp );
+	ENGINE_API void Reset();
+	ENGINE_API void SetPassedObjectAllowList(const bool bPassed);
+	ENGINE_API void UpdateAllowedToLog();
+
+	ENGINE_API void AddText(const FString& TextLine, const FName& CategoryName, ELogVerbosity::Type Verbosity);
 	// path
-	void AddElement(const TArray<FVector>& Points, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	UE_DEPRECATED(5.4, "Use AddPath")
+	ENGINE_API void AddElement(const TArray<FVector>& Points, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	ENGINE_API void AddPath(const TArray<FVector>& Points, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
 	// location
-	void AddElement(const FVector& Point, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	UE_DEPRECATED(5.4, "Use AddLocation")
+	ENGINE_API void AddElement(const FVector& Point, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	ENGINE_API void AddLocation(const FVector& Point, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);	// location
+	// sphere
+	ENGINE_API void AddSphere(const FVector& Center, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), bool bInUseWires = false);
 	// segment
-	void AddElement(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	UE_DEPRECATED(5.4, "Use AddSegment")
+	ENGINE_API void AddElement(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	ENGINE_API void AddSegment(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
 	// box
-	void AddElement(const FBox& Box, const FMatrix& Matrix, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
-	// Cone
-	void AddElement(const FVector& Orgin, const FVector& Direction, float Length, float AngleWidth, float AngleHeight, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
-	// Cylinder
-	void AddElement(const FVector& Start, const FVector& End, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0);
+	UE_DEPRECATED(5.4, "Use AddBox")
+	ENGINE_API void AddElement(const FBox& Box, const FMatrix& Matrix, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0, bool bInUseWires = false);
+	ENGINE_API void AddBox(const FBox& Box, const FMatrix& Matrix, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0, bool bInUseWires = false);
+	// cone
+	UE_DEPRECATED(5.4, "Use AddCone")
+	ENGINE_API void AddElement(const FVector& Origin, const FVector& Direction, float Length, float AngleWidth, float AngleHeight, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0, bool bInUseWires = false);
+	ENGINE_API void AddCone(const FVector& Origin, const FVector& Direction, float Length, float AngleWidth, float AngleHeight, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0, bool bInUseWires = false);
+	// cylinder
+	UE_DEPRECATED(5.4, "Use AddCylinder")
+	ENGINE_API void AddElement(const FVector& Start, const FVector& End, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0, bool bInUseWires = false);
+	ENGINE_API void AddCylinder(const FVector& Start, const FVector& End, float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), uint16 Thickness = 0, bool bInUseWires = false);
 	// capsule
-	void AddElement(const FVector& Center, float HalfHeight, float Radius, const FQuat & Rotation, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	UE_DEPRECATED(5.4, "Use AddCapsule")
+	ENGINE_API void AddElement(const FVector& Base, float HalfHeight, float Radius, const FQuat & Rotation, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), bool bInUseWires = false);
+	ENGINE_API void AddCapsule(const FVector& Base, float HalfHeight, float Radius, const FQuat & Rotation, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""), bool bInUseWires = false);
 	// custom element
-	void AddElement(const FVisualLogShapeElement& Element);
-	// NavAreaMesh
-	void AddElement(const TArray<FVector>& ConvexPoints, float MinZ, float MaxZ, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	ENGINE_API void AddElement(const FVisualLogShapeElement& Element);
+	// NavArea or vertically pulled convex shape
+	UE_DEPRECATED(5.4, "Use AddPulledConvex")
+	ENGINE_API void AddElement(const TArray<FVector>& ConvexPoints, FVector::FReal MinZ, FVector::FReal MaxZ, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	ENGINE_API void AddPulledConvex(const TArray<FVector>& ConvexPoints, FVector::FReal MinZ, FVector::FReal MaxZ, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
 	// 3d Mesh
-	void AddElement(const TArray<FVector>& Vertices, const TArray<int32>& Indices, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	UE_DEPRECATED(5.4, "Use AddMesh")
+	ENGINE_API void AddElement(const TArray<FVector>& Vertices, const TArray<int32>& Indices, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	ENGINE_API void AddMesh(const TArray<FVector>& Vertices, const TArray<int32>& Indices, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
 	// 2d convex
-	void AddConvexElement(const TArray<FVector>& Points, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	ENGINE_API void AddConvexElement(const TArray<FVector>& Points, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
 	// histogram sample
-	void AddHistogramData(const FVector2D& DataSample, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FName& GraphName, const FName& DataName);
+	ENGINE_API void AddHistogramData(const FVector2D& DataSample, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FName& GraphName, const FName& DataName);
 	// arrow
-	void AddArrow(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
+	ENGINE_API void AddArrow(const FVector& Start, const FVector& End, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White, const FString& Description = TEXT(""));
 	// boxes
-	void AddBoxes(const TArray<FBox>& Boxes, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White);
+	ENGINE_API void AddBoxes(const TArray<FBox>& Boxes, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color = FColor::White);
+	// circle
+	ENGINE_API void AddCircle(const FVector& Center, const FVector& UpAxis, const float Radius, const FName& CategoryName, ELogVerbosity::Type Verbosity, const FColor& Color, const FString& Description = TEXT(""), uint16 Thickness = 0);
 
 	// Custom data block
-	FVisualLogDataBlock& AddDataBlock(const FString& TagName, const TArray<uint8>& BlobDataArray, const FName& CategoryName, ELogVerbosity::Type Verbosity);
+	ENGINE_API FVisualLogDataBlock& AddDataBlock(const FString& TagName, const TArray<uint8>& BlobDataArray, const FName& CategoryName, ELogVerbosity::Type Verbosity);
 	// Event
-	int32 AddEvent(const FVisualLogEventBase& Event);
+	ENGINE_API int32 AddEvent(const FVisualLogEventBase& Event);
 	// find index of status category
-	int32 FindStatusIndex(const FString& CategoryName);
+	ENGINE_API int32 FindStatusIndex(const FString& CategoryName);
 
+	// Moves all content to provided entry and reseting our content.
+	ENGINE_API void MoveTo(FVisualLogEntry& Other);
 
 #endif // ENABLE_VISUAL_LOG
 };
@@ -233,7 +286,7 @@ struct ENGINE_API FVisualLogEntry
 /**
  * Interface for Visual Logger Device
  */
-class ENGINE_API FVisualLogDevice
+class FVisualLogDevice
 {
 public:
 	struct FVisualLogEntryItem
@@ -249,8 +302,12 @@ public:
 	virtual ~FVisualLogDevice() { }
 	virtual void Serialize(const UObject* LogOwner, FName OwnerName, FName InOwnerClassName, const FVisualLogEntry& LogEntry) = 0;
 	virtual void Cleanup(bool bReleaseMemory = false) { /* Empty */ }
-	virtual void StartRecordingToFile(float TImeStamp) { /* Empty */ }
-	virtual void StopRecordingToFile(float TImeStamp) { /* Empty */ }
+	virtual void StartRecordingToFile(double TimeStamp) { /* Empty */ }
+	virtual void StopRecordingToFile(double TimeStamp) { /* Empty */ }
+	UE_DEPRECATED(5.2, "Use the version which takes a double.")
+	virtual void StartRecordingToFile(float TimeStamp) final { StartRecordingToFile(static_cast<double>(TimeStamp)); }
+	UE_DEPRECATED(5.2, "Use the version which takes a double.")
+	virtual void StopRecordingToFile(float TimeStamp) final { StopRecordingToFile(static_cast<double>(TimeStamp)); }
 	virtual void DiscardRecordingToFile() { /* Empty */ }
 	virtual void SetFileName(const FString& InFileName) { /* Empty */ }
 	virtual void GetRecordedLogs(TArray<FVisualLogDevice::FVisualLogEntryItem>& OutLogs)  const { /* Empty */ }
@@ -261,28 +318,28 @@ protected:
 	FGuid SessionGUID;
 };
 
-struct ENGINE_API FVisualLoggerCategoryVerbosityPair
+struct FVisualLoggerCategoryVerbosityPair
 {
 	FVisualLoggerCategoryVerbosityPair(FName Category, ELogVerbosity::Type InVerbosity) : CategoryName(Category), Verbosity(InVerbosity) {}
 
 	FName CategoryName;
 	ELogVerbosity::Type Verbosity;
+
+	friend inline bool operator==(const FVisualLoggerCategoryVerbosityPair& A, const FVisualLoggerCategoryVerbosityPair& B)
+	{
+		return A.CategoryName == B.CategoryName
+			&& A.Verbosity == B.Verbosity;
+	}
 };
 
-inline bool operator==(const FVisualLoggerCategoryVerbosityPair& A, const FVisualLoggerCategoryVerbosityPair& B)
+struct FVisualLoggerHelpers
 {
-	return A.CategoryName == B.CategoryName
-		&& A.Verbosity == B.Verbosity;
-}
-
-struct ENGINE_API FVisualLoggerHelpers
-{
-	static FString GenerateTemporaryFilename(const FString& FileExt);
-	static FString GenerateFilename(const FString& TempFileName, const FString& Prefix, float StartRecordingTime, float EndTimeStamp);
-	static FArchive& Serialize(FArchive& Ar, FName& Name);
-	static FArchive& Serialize(FArchive& Ar, TArray<FVisualLogDevice::FVisualLogEntryItem>& RecordedLogs);
-	static void GetCategories(const FVisualLogEntry& RecordedLogs, TArray<FVisualLoggerCategoryVerbosityPair>& OutCategories);
-	static void GetHistogramCategories(const FVisualLogEntry& RecordedLogs, TMap<FString, TArray<FString> >& OutCategories);
+	static ENGINE_API FString GenerateTemporaryFilename(const FString& FileExt);
+	static ENGINE_API FString GenerateFilename(const FString& TempFileName, const FString& Prefix, double StartRecordingTime, double EndTimeStamp);
+	static ENGINE_API FArchive& Serialize(FArchive& Ar, FName& Name);
+	static ENGINE_API FArchive& Serialize(FArchive& Ar, TArray<FVisualLogDevice::FVisualLogEntryItem>& RecordedLogs);
+	static ENGINE_API void GetCategories(const FVisualLogEntry& RecordedLogs, TArray<FVisualLoggerCategoryVerbosityPair>& OutCategories);
+	static ENGINE_API void GetHistogramCategories(const FVisualLogEntry& RecordedLogs, TMap<FString, TArray<FString> >& OutCategories);
 };
 
 struct IVisualLoggerEditorInterface
@@ -311,7 +368,9 @@ public:
 
 	virtual void OnItemsSelectionChanged(IVisualLoggerEditorInterface* EdInterface) {};
 	virtual void OnLogLineSelectionChanged(IVisualLoggerEditorInterface* EdInterface, TSharedPtr<struct FLogEntryItem> SelectedItem, int64 UserData) {};
-	virtual void OnScrubPositionChanged(IVisualLoggerEditorInterface* EdInterface, float NewScrubPosition, bool bScrubbing) {}
+	UE_DEPRECATED(5.2, "Use the version which takes a double.")
+	virtual void OnScrubPositionChanged(IVisualLoggerEditorInterface* EdInterface, float NewScrubPosition, bool bScrubbing) final {}
+	virtual void OnScrubPositionChanged(IVisualLoggerEditorInterface* EdInterface, double NewScrubPosition, bool bScrubbing) {}
 };
 
 ENGINE_API  FArchive& operator<<(FArchive& Ar, FVisualLogDevice::FVisualLogEntryItem& FrameCacheItem);
@@ -322,12 +381,6 @@ ENGINE_API  FArchive& operator<<(FArchive& Ar, FVisualLogEvent& Event);
 ENGINE_API  FArchive& operator<<(FArchive& Ar, FVisualLogLine& LogLine);
 ENGINE_API  FArchive& operator<<(FArchive& Ar, FVisualLogStatusCategory& Status);
 ENGINE_API  FArchive& operator<<(FArchive& Ar, FVisualLogEntry& LogEntry);
-
-inline
-bool operator==(const FVisualLogEvent& Left, const FVisualLogEvent& Right) 
-{ 
-	return Left.Name == Right.Name; 
-}
 
 inline
 FVisualLogEvent::FVisualLogEvent(const FVisualLogEventBase& Event)
@@ -399,7 +452,7 @@ FVisualLogShapeElement::FVisualLogShapeElement(const FString& InDescription, con
 inline
 void FVisualLogShapeElement::SetColor(const FColor& InColor)
 {
-	Color = ((InColor.DWColor() >> 30) << 6)	| (((InColor.DWColor() & 0x00ff0000) >> 22) << 4)	| (((InColor.DWColor() & 0x0000ff00) >> 14) << 2)	| ((InColor.DWColor() & 0x000000ff) >> 6);
+	Color = (uint8)(((InColor.DWColor() >> 30) << 6)	| (((InColor.DWColor() & 0x00ff0000) >> 22) << 4)	| (((InColor.DWColor() & 0x0000ff00) >> 14) << 2)	| ((InColor.DWColor() & 0x000000ff) >> 6));
 }
 
 inline

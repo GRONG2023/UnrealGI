@@ -42,7 +42,7 @@ FString FNullHttpRequest::GetContentType() const
 	return GetHeader(TEXT("Content-Type"));
 }
 
-int32 FNullHttpRequest::GetContentLength() const
+uint64 FNullHttpRequest::GetContentLength() const
 {
 	return Payload.Num();
 }
@@ -79,9 +79,9 @@ void FNullHttpRequest::SetContent(TArray<uint8>&& ContentPayload)
 
 void FNullHttpRequest::SetContentAsString(const FString& ContentString)
 {
-	int32 Utf8Length = FTCHARToUTF8_Convert::ConvertedLength(*ContentString, ContentString.Len());
+	int32 Utf8Length = FPlatformString::ConvertedLength<UTF8CHAR>(*ContentString, ContentString.Len());
 	Payload.SetNumUninitialized(Utf8Length);
-	FTCHARToUTF8_Convert::Convert((ANSICHAR*)Payload.GetData(), Payload.Num(), *ContentString, ContentString.Len());
+	FPlatformString::Convert((UTF8CHAR*)Payload.GetData(), Payload.Num(), *ContentString, ContentString.Len());
 }
 
 bool FNullHttpRequest::SetContentAsStreamedFile(const FString& Filename)
@@ -94,6 +94,12 @@ bool FNullHttpRequest::SetContentFromStream(TSharedRef<FArchive, ESPMode::Thread
 {
 	// TODO: Not implemented.
 	UE_LOG(LogHttp, Warning, TEXT("FNullHttpRequest::SetContentFromStream is not implemented"));
+	return false;
+}
+
+bool FNullHttpRequest::SetResponseBodyReceiveStream(TSharedRef<FArchive> Stream)
+{
+	UE_LOG(LogHttp, Warning, TEXT("FNullHttpRequest::SetResponseBodyReceiveStream is not implemented"));
 	return false;
 }
 
@@ -124,8 +130,6 @@ bool FNullHttpRequest::ProcessRequest()
 	CompletionStatus = EHttpRequestStatus::Processing;
 
 	UE_LOG(LogHttp, Log, TEXT("Start request. %p %s url=%s"), this, *GetVerb(), *GetURL());
-
-	FHttpModule::Get().GetHttpManager().AddRequest(SharedThis(this));
 	return true;
 }
 
@@ -149,6 +153,16 @@ EHttpRequestStatus::Type FNullHttpRequest::GetStatus() const
 	return CompletionStatus;
 }
 
+EHttpFailureReason FNullHttpRequest::GetFailureReason() const
+{
+	return FailureReason;
+}
+
+const FString& FNullHttpRequest::GetEffectiveURL() const
+{
+	return EffectiveUrl;
+}
+
 const FHttpResponsePtr FNullHttpRequest::GetResponse() const
 {
 	return FHttpResponsePtr(nullptr);
@@ -159,7 +173,7 @@ void FNullHttpRequest::Tick(float DeltaSeconds)
 	if (CompletionStatus == EHttpRequestStatus::Processing)
 	{
 		ElapsedTime += DeltaSeconds;
-		const float HttpTimeout = GetTimeoutOrDefault();
+		const float HttpTimeout = GetTimeout().Get(FHttpModule::Get().GetHttpTotalTimeout());
 		if (HttpTimeout > 0 && ElapsedTime >= HttpTimeout)
 		{
 			UE_LOG(LogHttp, Warning, TEXT("Timeout processing Http request. %p"),
@@ -178,13 +192,44 @@ float FNullHttpRequest::GetElapsedTime() const
 void FNullHttpRequest::FinishedRequest()
 {
 	CompletionStatus = EHttpRequestStatus::Failed;
-	TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = SharedThis(this);
-	FHttpModule::Get().GetHttpManager().RemoveRequest(Request);
+	FailureReason = EHttpFailureReason::Other;
 
 	UE_LOG(LogHttp, Log, TEXT("Finished request %p. no response %s url=%s elapsed=%.3f"),
 		this, *GetVerb(), *GetURL(), ElapsedTime);
 
-	OnProcessRequestComplete().ExecuteIfBound(Request, NULL, false);
+	OnProcessRequestComplete().ExecuteIfBound(SharedThis(this), NULL, false);
+}
+
+void FNullHttpRequest::SetDelegateThreadPolicy(EHttpRequestDelegateThreadPolicy InThreadPolicy)
+{
+}
+
+EHttpRequestDelegateThreadPolicy FNullHttpRequest::GetDelegateThreadPolicy() const
+{
+	return EHttpRequestDelegateThreadPolicy::CompleteOnGameThread;
+}
+
+void FNullHttpRequest::SetTimeout(float InTimeoutSecs) 
+{
+	TimeoutSecs = InTimeoutSecs;
+}
+
+void FNullHttpRequest::ClearTimeout() 
+{
+	TimeoutSecs.Reset();
+}
+
+TOptional<float> FNullHttpRequest::GetTimeout() const 
+{ 
+	return TimeoutSecs; 
+}
+
+void FNullHttpRequest::SetActivityTimeout(float InTimeoutSecs)
+{
+}
+
+void FNullHttpRequest::ProcessRequestUntilComplete()
+{
 }
 
 // FNullHttpResponse
@@ -214,7 +259,7 @@ FString FNullHttpResponse::GetContentType() const
 	return FString();
 }
 
-int32 FNullHttpResponse::GetContentLength() const
+uint64 FNullHttpResponse::GetContentLength() const
 {
 	return 0;
 }
@@ -233,5 +278,3 @@ FString FNullHttpResponse::GetContentAsString() const
 {
 	return FString();
 }
-
-

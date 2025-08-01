@@ -17,14 +17,14 @@ class AReflectionCapture : public AActor
 private:
 	/** Reflection capture component. */
 	UPROPERTY(Category = DecalActor, VisibleAnywhere, BlueprintReadOnly, meta = (AllowPrivateAccess = "true"))
-	class UReflectionCaptureComponent* CaptureComponent;
+	TObjectPtr<class UReflectionCaptureComponent> CaptureComponent;
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 
 	UPROPERTY()
-	UBillboardComponent* CaptureOffsetComponent;
+	TObjectPtr<UBillboardComponent> CaptureOffsetComponent;
 #endif // WITH_EDITORONLY_DATA
 
 public:	
@@ -32,11 +32,11 @@ public:
 	virtual bool IsLevelBoundsRelevant() const override { return false; }
 
 	/** Returns CaptureComponent subobject **/
-	ENGINE_API class UReflectionCaptureComponent* GetCaptureComponent() const { return CaptureComponent; }
+	class UReflectionCaptureComponent* GetCaptureComponent() const { return CaptureComponent; }
 #if WITH_EDITORONLY_DATA
 	/** Returns SpriteComponent subobject **/
-	ENGINE_API UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
-	ENGINE_API UBillboardComponent* GetCaptureOffsetComponent() const { return CaptureOffsetComponent; }
+	UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
+	UBillboardComponent* GetCaptureOffsetComponent() const { return CaptureOffsetComponent; }
 #endif
 };
 

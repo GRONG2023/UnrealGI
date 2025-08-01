@@ -2,9 +2,12 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
+#include "Containers/Array.h"
+#include "HAL/Platform.h"
 #include "IPropertyTypeCustomization.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Templates/SharedPointer.h"
 
 class FDetailWidgetRow;
 class IDetailChildrenBuilder;
@@ -30,6 +33,8 @@ private:
 	/** Handle the user requesting that the specified index be cleared */
 	FReply OnClearPathClicked(int32 Index) const;
 
+	FReply OnClearAllPathsClicked() const;
+
 	/** Handle the user requesting that the Path use at Index - 1 will be replace the path at Index */
 	FReply OnPropagateFromAbovePathClicked(int32 Index) const;
 	bool IsPropagateFromAbovePathEnable(int32 Index) const;
@@ -38,11 +43,16 @@ private:
 	FReply OnPropagateFromBelowPathClicked(int32 Index) const;
 	bool IsPropagateFromBelowPathEnable(int32 Index) const;
 
-	/** Access the struct we are editing */
+	/** Access the struct we are editing - returns null if we have more than one. */
 	FAssetImportInfo* GetEditStruct() const;
+
+	/** Access all the structs we are editing */
+	TArray<FAssetImportInfo*> GetEditStructs() const;
 
 	/** Access the outer class that contains this struct */
 	UAssetImportData* GetOuterClass() const;
+
+	TArray<UAssetImportData*> GetAllAssetImportData() const;
 
 	/** Get text for the UI */
 	FText GetFilenameText(int32 Index) const;

@@ -8,6 +8,7 @@
 #include "GameFramework/Actor.h"
 #include "Engine/World.h"
 #include "Components/ActorComponent.h"
+#include "Components/SkeletalMeshComponent.h" // Needed because AnimInstance::GetOwningComponent. (this only fails on clang compilers)
 #include "Animation/AnimInstance.h"
 #include "Templates/UnrealTemplate.h"
 #include "UObject/Object.h"
@@ -21,7 +22,7 @@
 
 #if TRACE_FILTERING_ENABLED
 
-struct ENGINE_API FTraceFilter
+struct FTraceFilter
 {
 	struct TObjectFilter
 	{
@@ -76,17 +77,17 @@ struct ENGINE_API FTraceFilter
 	static void MarkObjectTraceable(const UObject* InObject);
 
 	/** Initializes any of the Filters which are part of the Engine */
-	static void Init();
+	static ENGINE_API void Init();
 
 	/** Destroys any of the Filters which are part of the Engine */
-	static void Destroy();
+	static ENGINE_API void Destroy();
 
 	/** Returns whether or not an object is eligible to be outputted (output trace data) */
 	template<bool bForceThreadSafe = true>
-	static bool IsObjectTraceable(const UObject* InObject);
+	static ENGINE_API bool IsObjectTraceable(const UObject* InObject);
 
-	static void Lock();
-	static void Unlock();
+	static ENGINE_API void Lock();
+	static ENGINE_API void Unlock();
 };
 
 #define CAN_TRACE_OBJECT(Object) \

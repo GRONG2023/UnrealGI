@@ -1,20 +1,52 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.IO;
 using System.Diagnostics;
+using System.IO;
+using System.Runtime.Versioning;
 using UnrealBuildTool;
 
 namespace AutomationTool
 {
 	class WindowsHostPlatform : HostPlatform
 	{
-		public override string GetMsBuildExe()
+		static string CachedFrameworkMsbuildTool = "";
+
+		[SupportedOSPlatform("windows")]
+		public override string GetFrameworkMsbuildExe()
 		{
-			return WindowsExports.GetMSBuildToolPath();
+			if (string.IsNullOrEmpty(CachedFrameworkMsbuildTool))
+			{
+				try
+				{
+					// Look for visual studio msbuild
+					FileReference msbuild = FileReference.FromString(WindowsExports.GetMSBuildToolPath());
+					if (msbuild != null && FileReference.Exists(msbuild))
+					{
+						CachedFrameworkMsbuildTool = msbuild.FullName;
+						Logger.LogInformation("Using {MsBuild}", CachedFrameworkMsbuildTool);
+						return CachedFrameworkMsbuildTool;
+					}
+				}
+				catch (BuildException)
+				{
+				}
+
+				FileReference dotnet = FileReference.FromString(CommandUtils.WhichApp("dotnet"));
+				if (dotnet != null && FileReference.Exists(dotnet))
+				{
+					Logger.LogInformation("Using {DotNet}", dotnet.FullName);
+					CachedFrameworkMsbuildTool = "dotnet msbuild";
+				}
+				else
+				{
+					throw new BuildException("Unable to find installation of MSBuild.");
+				}
+			}
+
+			return CachedFrameworkMsbuildTool;
 		}
 
 		public override string RelativeBinariesFolder
@@ -22,15 +54,15 @@ namespace AutomationTool
 			get { return @"Engine/Binaries/Win64/"; }
 		}
 
-		public override string GetUE4ExePath(string UE4Exe)
+		public override string GetUnrealExePath(string UnrealExe)
 		{
-			if(Path.IsPathRooted(UE4Exe))
+			if(Path.IsPathRooted(UnrealExe))
 			{
-				return CommandUtils.CombinePaths(UE4Exe);
+				return CommandUtils.CombinePaths(UnrealExe);
 			}
 			else
 			{
-				return CommandUtils.CombinePaths(CommandUtils.CmdEnv.LocalRoot, RelativeBinariesFolder, UE4Exe);
+				return CommandUtils.CombinePaths(CommandUtils.CmdEnv.LocalRoot, RelativeBinariesFolder, UnrealExe);
 			}
 		}
 
@@ -57,11 +89,6 @@ namespace AutomationTool
 		public override void SetConsoleCtrlHandler(ProcessManager.CtrlHandlerDelegate Handler)
 		{
 			ProcessManager.SetConsoleCtrlHandler(Handler, true);
-		}
-
-		public override bool IsScriptModuleSupported(string ModuleName)
-		{
-			return true;
 		}
 
 		public override UnrealTargetPlatform HostEditorPlatform

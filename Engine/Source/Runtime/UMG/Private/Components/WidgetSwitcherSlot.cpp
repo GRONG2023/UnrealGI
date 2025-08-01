@@ -4,33 +4,40 @@
 #include "SlateFwd.h"
 #include "Components/Widget.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(WidgetSwitcherSlot)
+
 /////////////////////////////////////////////////////
 // UWidgetSwitcherSlot
 
 UWidgetSwitcherSlot::UWidgetSwitcherSlot(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
-	, Slot(NULL)
+	, Slot(nullptr)
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	HorizontalAlignment = HAlign_Fill;
 	VerticalAlignment = VAlign_Fill;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UWidgetSwitcherSlot::ReleaseSlateResources(bool bReleaseChildren)
 {
 	Super::ReleaseSlateResources(bReleaseChildren);
 
-	Slot = NULL;
+	Slot = nullptr;
 }
 
 void UWidgetSwitcherSlot::BuildSlot(TSharedRef<SWidgetSwitcher> WidgetSwitcher)
 {
-	Slot = &WidgetSwitcher->AddSlot()
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	WidgetSwitcher->AddSlot()
+		.Expose(Slot)
 		.Padding(Padding)
 		.HAlign(HorizontalAlignment)
 		.VAlign(VerticalAlignment)
 		[
-			Content == NULL ? SNullWidget::NullWidget : Content->TakeWidget()
+			Content == nullptr ? SNullWidget::NullWidget : Content->TakeWidget()
 		];
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UWidgetSwitcherSlot::SetContent(UWidget* NewContent)
@@ -42,13 +49,24 @@ void UWidgetSwitcherSlot::SetContent(UWidget* NewContent)
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+FMargin UWidgetSwitcherSlot::GetPadding() const
+{
+	return Padding;
+}
+
 void UWidgetSwitcherSlot::SetPadding(FMargin InPadding)
 {
 	Padding = InPadding;
 	if ( Slot )
 	{
-		Slot->Padding(InPadding);
+		Slot->SetPadding(InPadding);
 	}
+}
+
+EHorizontalAlignment UWidgetSwitcherSlot::GetHorizontalAlignment() const
+{
+	return HorizontalAlignment;
 }
 
 void UWidgetSwitcherSlot::SetHorizontalAlignment(EHorizontalAlignment InHorizontalAlignment)
@@ -56,8 +74,13 @@ void UWidgetSwitcherSlot::SetHorizontalAlignment(EHorizontalAlignment InHorizont
 	HorizontalAlignment = InHorizontalAlignment;
 	if ( Slot )
 	{
-		Slot->HAlign(InHorizontalAlignment);
+		Slot->SetHorizontalAlignment(InHorizontalAlignment);
 	}
+}
+
+EVerticalAlignment UWidgetSwitcherSlot::GetVerticalAlignment() const
+{
+	return VerticalAlignment;
 }
 
 void UWidgetSwitcherSlot::SetVerticalAlignment(EVerticalAlignment InVerticalAlignment)
@@ -65,13 +88,17 @@ void UWidgetSwitcherSlot::SetVerticalAlignment(EVerticalAlignment InVerticalAlig
 	VerticalAlignment = InVerticalAlignment;
 	if ( Slot )
 	{
-		Slot->VAlign(InVerticalAlignment);
+		Slot->SetVerticalAlignment(InVerticalAlignment);
 	}
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UWidgetSwitcherSlot::SynchronizeProperties()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	SetPadding(Padding);
 	SetHorizontalAlignment(HorizontalAlignment);
 	SetVerticalAlignment(VerticalAlignment);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
+

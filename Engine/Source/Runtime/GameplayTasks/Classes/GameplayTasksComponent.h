@@ -12,6 +12,7 @@
 #include "GameplayTaskOwnerInterface.h"
 #include "GameplayTask.h"
 #include "GameplayTaskResource.h"
+#include "VisualLogger/VisualLoggerDebugSnapshotInterface.h"
 #include "GameplayTasksComponent.generated.h"
 
 class AActor;
@@ -53,13 +54,11 @@ struct FGameplayTaskEventData
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnClaimedResourcesChangeSignature, FGameplayResourceSet, NewlyClaimed, FGameplayResourceSet, FreshlyReleased);
 
-typedef TArray<UGameplayTask*>::TConstIterator FConstGameplayTaskIterator;
-
 /**
 *	The core ActorComponent for interfacing with the GameplayAbilities System
 */
-UCLASS(ClassGroup = GameplayTasks, hidecategories = (Object, LOD, Lighting, Transform, Sockets, TextureStreaming), editinlinenew, meta = (BlueprintSpawnableComponent))
-class GAMEPLAYTASKS_API UGameplayTasksComponent : public UActorComponent, public IGameplayTaskOwnerInterface
+UCLASS(ClassGroup = GameplayTasks, hidecategories = (Object, LOD, Lighting, Transform, Sockets, TextureStreaming), editinlinenew, meta = (BlueprintSpawnableComponent), MinimalAPI)
+class UGameplayTasksComponent : public UActorComponent, public IGameplayTaskOwnerInterface, public IVisualLoggerDebugSnapshotInterface
 {
 	GENERATED_BODY()
 
@@ -70,11 +69,6 @@ private:
 
 	uint8 bInEventProcessingInProgress : 1;
 
-public:
-	/** Set to indicate that GameplayTasksComponent needs immediate replication. @TODO could just use ForceReplication(), but this allows initial implementation to be game specific. */
-	UPROPERTY()
-	uint8 bIsNetDirty:1;
-
 protected:
 	/** Indicates what's the highest priority among currently running tasks */
 	uint8 TopActivePriority;
@@ -83,22 +77,25 @@ protected:
 	FGameplayResourceSet CurrentlyClaimedResources;
 
 	/** Tasks that run on simulated proxies */
-	UE_DEPRECATED(4.26, "This will be made private in future versions. Use GetSimulatedTasks, GetSimulatedTasks_Mutable, or SetSimulatedTasks instead.")
-	UPROPERTY(ReplicatedUsing = OnRep_SimulatedTasks)
-	TArray<UGameplayTask*> SimulatedTasks;
-
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	const TArray<UGameplayTask*>& GetSimulatedTasks()
 	{
 		return SimulatedTasks;
 	}
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
-	TArray<UGameplayTask*>& GetSimulatedTasks_Mutable();
-	void SetSimulatedTasks(const TArray<UGameplayTask*>& NewSimulatedTasks);
+	UE_DEPRECATED(5.1, "This will be removed in future versions. Use AddSimulatedTask or RemoveSimulatedTask to modify the array")
+	GAMEPLAYTASKS_API TArray<TObjectPtr<UGameplayTask>>& GetSimulatedTasks_Mutable();
+
+	/** Remove all current tasks and register the one in the passed array. It's optimal to use Add/Remove of single tasks directly if possible.*/
+	GAMEPLAYTASKS_API void SetSimulatedTasks(const TArray<UGameplayTask*>& NewSimulatedTasks);
+
+	/** Add a new simulated task. Returns true if the task was added to the list. Returns false if the task was already registered. */
+	GAMEPLAYTASKS_API bool AddSimulatedTask(UGameplayTask* NewTask);
+
+	/** Remove an existing simulated task */
+	GAMEPLAYTASKS_API void RemoveSimulatedTask(UGameplayTask* NewTask);
 
 	UPROPERTY()
-	TArray<UGameplayTask*> TaskPriorityQueue;
+	TArray<TObjectPtr<UGameplayTask>> TaskPriorityQueue;
 	
 	/** Transient array of events whose main role is to avoid
 	 *	long chain of recurrent calls if an activated/paused/removed task 
@@ -108,44 +105,44 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/** Array of currently active UGameplayTask that require ticking */
 	UPROPERTY()
-	TArray<UGameplayTask*> TickingTasks;
+	TArray<TObjectPtr<UGameplayTask>> TickingTasks;
 
 	/** All known tasks (processed by this component) referenced for GC */
 	UPROPERTY(transient)
-	TArray<UGameplayTask*> KnownTasks;
+	TArray<TObjectPtr<UGameplayTask>> KnownTasks;
 
 public:
 	UPROPERTY(BlueprintReadWrite, Category = "Gameplay Tasks")
 	FOnClaimedResourcesChangeSignature OnClaimedResourcesChange;
 
-	UGameplayTasksComponent(const FObjectInitializer& ObjectInitializer);
+	GAMEPLAYTASKS_API UGameplayTasksComponent(const FObjectInitializer& ObjectInitializer);
 	
 	UFUNCTION()
-	void OnRep_SimulatedTasks();
+	GAMEPLAYTASKS_API void OnRep_SimulatedTasks(const TArray<UGameplayTask*>& PreviousSimulatedTasks);
 
-	virtual void GetLifetimeReplicatedProps(TArray< FLifetimeProperty >& OutLifetimeProps) const override;
-	virtual bool ReplicateSubobjects(UActorChannel *Channel, FOutBunch* Bunch, FReplicationFlags* RepFlags) override;
+	GAMEPLAYTASKS_API virtual void GetLifetimeReplicatedProps(TArray< FLifetimeProperty >& OutLifetimeProps) const override;
+	GAMEPLAYTASKS_API virtual bool ReplicateSubobjects(UActorChannel *Channel, FOutBunch* Bunch, FReplicationFlags* RepFlags) override;
 
-	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
-	void UpdateShouldTick();
+	GAMEPLAYTASKS_API virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+	GAMEPLAYTASKS_API void UpdateShouldTick();
 
 	/** retrieves information whether this component should be ticking taken current
 	*	activity into consideration*/
-	virtual bool GetShouldTick() const;
+	GAMEPLAYTASKS_API virtual bool GetShouldTick() const;
 	
 	/** processes the task and figures out if it should get triggered instantly or wait
 	 *	based on task's RequiredResources, Priority and ResourceOverlapPolicy */
-	void AddTaskReadyForActivation(UGameplayTask& NewTask);
+	GAMEPLAYTASKS_API void AddTaskReadyForActivation(UGameplayTask& NewTask);
 
-	void RemoveResourceConsumingTask(UGameplayTask& Task);
-	void EndAllResourceConsumingTasksOwnedBy(const IGameplayTaskOwnerInterface& TaskOwner);
+	GAMEPLAYTASKS_API void RemoveResourceConsumingTask(UGameplayTask& Task);
+	GAMEPLAYTASKS_API void EndAllResourceConsumingTasksOwnedBy(const IGameplayTaskOwnerInterface& TaskOwner);
 
-	bool FindAllResourceConsumingTasksOwnedBy(const IGameplayTaskOwnerInterface& TaskOwner, TArray<UGameplayTask*>& FoundTasks) const;
+	GAMEPLAYTASKS_API bool FindAllResourceConsumingTasksOwnedBy(const IGameplayTaskOwnerInterface& TaskOwner, TArray<UGameplayTask*>& FoundTasks) const;
 	
 	/** finds first resource-consuming task of given name */
-	UGameplayTask* FindResourceConsumingTaskByName(const FName TaskInstanceName) const;
+	GAMEPLAYTASKS_API UGameplayTask* FindResourceConsumingTaskByName(const FName TaskInstanceName) const;
 
-	bool HasActiveTasks(UClass* TaskClass) const;
+	GAMEPLAYTASKS_API bool HasActiveTasks(UClass* TaskClass) const;
 
 	FORCEINLINE FGameplayResourceSet GetCurrentlyUsedResources() const { return CurrentlyClaimedResources; }
 
@@ -153,27 +150,33 @@ public:
 	virtual UGameplayTasksComponent* GetGameplayTasksComponent(const UGameplayTask& Task) const { return const_cast<UGameplayTasksComponent*>(this); }
 	virtual AActor* GetGameplayTaskOwner(const UGameplayTask* Task) const override { return GetOwner(); }
 	virtual AActor* GetGameplayTaskAvatar(const UGameplayTask* Task) const override { return GetOwner(); }
-	virtual void OnGameplayTaskActivated(UGameplayTask& Task) override;
-	virtual void OnGameplayTaskDeactivated(UGameplayTask& Task) override;
+	GAMEPLAYTASKS_API virtual void OnGameplayTaskActivated(UGameplayTask& Task) override;
+	GAMEPLAYTASKS_API virtual void OnGameplayTaskDeactivated(UGameplayTask& Task) override;
 	// END IGameplayTaskOwnerInterface
 
-	UFUNCTION(BlueprintCallable, DisplayName="Run Gameplay Task", meta=(ScriptName="RunGameplayTask"), Category = "Gameplay Tasks", meta = (AutoCreateRefTerm = "AdditionalRequiredResources, AdditionalClaimedResources", AdvancedDisplay = "AdditionalRequiredResources, AdditionalClaimedResources"))
-	static EGameplayTaskRunResult K2_RunGameplayTask(TScriptInterface<IGameplayTaskOwnerInterface> TaskOwner, UGameplayTask* Task, uint8 Priority, TArray<TSubclassOf<UGameplayTaskResource> > AdditionalRequiredResources, TArray<TSubclassOf<UGameplayTaskResource> > AdditionalClaimedResources);
+	// ActorComponent overrides
+	GAMEPLAYTASKS_API virtual void ReadyForReplication() override;
 
-	static EGameplayTaskRunResult RunGameplayTask(IGameplayTaskOwnerInterface& TaskOwner, UGameplayTask& Task, uint8 Priority, FGameplayResourceSet AdditionalRequiredResources, FGameplayResourceSet AdditionalClaimedResources);
+	UFUNCTION(BlueprintCallable, DisplayName="Run Gameplay Task", meta=(ScriptName="RunGameplayTask"), Category = "Gameplay Tasks", meta = (AutoCreateRefTerm = "AdditionalRequiredResources, AdditionalClaimedResources", AdvancedDisplay = "AdditionalRequiredResources, AdditionalClaimedResources"))
+	static GAMEPLAYTASKS_API EGameplayTaskRunResult K2_RunGameplayTask(TScriptInterface<IGameplayTaskOwnerInterface> TaskOwner, UGameplayTask* Task, uint8 Priority, TArray<TSubclassOf<UGameplayTaskResource> > AdditionalRequiredResources, TArray<TSubclassOf<UGameplayTaskResource> > AdditionalClaimedResources);
+
+	static GAMEPLAYTASKS_API EGameplayTaskRunResult RunGameplayTask(IGameplayTaskOwnerInterface& TaskOwner, UGameplayTask& Task, uint8 Priority, FGameplayResourceSet AdditionalRequiredResources, FGameplayResourceSet AdditionalClaimedResources);
 	
 #if WITH_GAMEPLAYTASK_DEBUG
-	FString GetTickingTasksDescription() const;
-	FString GetKnownTasksDescription() const;
-	FString GetTasksPriorityQueueDescription() const;
-	static FString GetTaskStateName(EGameplayTaskState Value);
+	GAMEPLAYTASKS_API FString GetTickingTasksDescription() const;
+	GAMEPLAYTASKS_API FString GetKnownTasksDescription() const;
+	GAMEPLAYTASKS_API FString GetTasksPriorityQueueDescription() const;
+	static GAMEPLAYTASKS_API FString GetTaskStateName(EGameplayTaskState Value);
 #endif // WITH_GAMEPLAYTASK_DEBUG
-	FConstGameplayTaskIterator GetTickingTaskIterator() const;
-	FConstGameplayTaskIterator GetKnownTaskIterator() const;
-	FConstGameplayTaskIterator GetPriorityQueueIterator() const;
+	using GameplayTaskContainerType = decltype(TickingTasks);
+	GAMEPLAYTASKS_API GameplayTaskContainerType::TConstIterator GetTickingTaskIterator() const;
+	GAMEPLAYTASKS_API GameplayTaskContainerType::TConstIterator GetKnownTaskIterator() const;
+	GAMEPLAYTASKS_API GameplayTaskContainerType::TConstIterator GetPriorityQueueIterator() const;
+	GAMEPLAYTASKS_API GameplayTaskContainerType::TConstIterator GetSimulatedTaskIterator() const;
 
 #if ENABLE_VISUAL_LOG
-	void DescribeSelfToVisLog(struct FVisualLogEntry* Snapshot) const;
+	GAMEPLAYTASKS_API virtual void GrabDebugSnapshot(FVisualLogEntry* Snapshot) const override;
+	GAMEPLAYTASKS_API void DescribeSelfToVisLog(struct FVisualLogEntry* Snapshot) const;
 #endif // ENABLE_VISUAL_LOG
 
 protected:
@@ -186,18 +189,27 @@ protected:
 		UGameplayTasksComponent* Owner;
 	};
 
-	void RequestTicking();
-	void ProcessTaskEvents();
-	void UpdateTaskActivations();
+	GAMEPLAYTASKS_API void RequestTicking();
+	GAMEPLAYTASKS_API void ProcessTaskEvents();
+	GAMEPLAYTASKS_API void UpdateTaskActivations();
 
-	void SetCurrentlyClaimedResources(FGameplayResourceSet NewClaimedSet);
+	GAMEPLAYTASKS_API void SetCurrentlyClaimedResources(FGameplayResourceSet NewClaimedSet);
 
 private:
 	/** called when a task gets ended with an external call, meaning not coming from UGameplayTasksComponent mechanics */
-	void OnTaskEnded(UGameplayTask& Task);
+	GAMEPLAYTASKS_API void OnTaskEnded(UGameplayTask& Task);
 
-	void AddTaskToPriorityQueue(UGameplayTask& NewTask);
-	void RemoveTaskFromPriorityQueue(UGameplayTask& Task);
+	GAMEPLAYTASKS_API void AddTaskToPriorityQueue(UGameplayTask& NewTask);
+	GAMEPLAYTASKS_API void RemoveTaskFromPriorityQueue(UGameplayTask& Task);
 
 	FORCEINLINE bool CanProcessEvents() const { return !bInEventProcessingInProgress && (EventLockCounter == 0); }
+
+	GAMEPLAYTASKS_API void SetSimulatedTasksNetDirty();
+
+	/** Tasks that run on simulated proxies */
+	UPROPERTY(ReplicatedUsing = OnRep_SimulatedTasks)
+	TArray<TObjectPtr<UGameplayTask>> SimulatedTasks;
+
 };
+
+typedef UGameplayTasksComponent::GameplayTaskContainerType::TConstIterator FConstGameplayTaskIterator;

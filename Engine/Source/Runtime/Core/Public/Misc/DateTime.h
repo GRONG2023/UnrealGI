@@ -2,9 +2,11 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include "Containers/StringFwd.h"
 #include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Misc/Timespan.h"
+#include "Serialization/Archive.h"
 #include "Serialization/StructuredArchive.h"
 #include "Templates/TypeHash.h"
 
@@ -74,8 +76,10 @@ struct FDateTime
 {
 public:
 
-	/** Default constructor (no initialization). */
-	FDateTime() { }
+	/** Default constructor (zero initialization). */
+	FDateTime()
+		: Ticks(0)
+	{ }
 
 	/**
 	 * Creates and initializes a new instance with the specified number of ticks.
@@ -125,17 +129,10 @@ public:
 		return *this;
 	}
 
-	/**
-	 * Adds the time from the given date to this date.
-	 *
-	 * @return This date.
-	 * @see FDateTime
-	 */
-	FDateTime& operator+(const FDateTime& Other)
+	UE_DEPRECATED(5.1, "Adding dates doesn't make sense. Please use FDateTime + FTimespan instead")
+	FDateTime operator+(const FDateTime& Other)
 	{
-		Ticks += Other.Ticks;
-
-		return *this;
+		return FDateTime(Ticks + Other.Ticks);
 	}
 
 	/**
@@ -330,7 +327,7 @@ public:
 	 */
 	double GetJulianDay() const
 	{
-		return (double)(1721425.5 + Ticks / ETimespan::TicksPerDay);
+		return 1721425.5 + double(Ticks / ETimespan::TicksPerDay) + GetTimeOfDay().GetTotalDays();
 	}
 
 	/**
@@ -509,11 +506,54 @@ public:
 	/**
 	 * Returns the string representation of this date.
 	 *
+	 * ToString uses a non-standard format syntax (see below). If you need strftime-like syntax, then use ToFormattedString:
+	 *		%a - am or pm
+	 *		%A - AM or PM
+	 *		%d - Day, 01-31
+	 *		%D - Day of the Year, 001-366
+	 *		%m - Month, 01-12
+	 *		%y - Year, YY
+	 *		%Y - Year, YYYY
+	 *		%h - 12h Hour, 01-12
+	 *		%H - 24h Hour, 00-23
+	 *		%M - Minute, 00-59
+	 *		%S - Second, 00-60
+	 *		%s - Millisecond, 000-999
+	 * 
 	 * @param Format The format of the returned string.
 	 * @return String representation.
 	 * @see Parse, ToIso8601
 	 */
 	CORE_API FString ToString(const TCHAR* Format) const;
+	CORE_API void ToString(const TCHAR* Format, FStringBuilderBase& Result) const;
+
+	/**
+	 * Returns the string representation of this date.
+	 *
+	 * Uses strftime-like syntax:
+	 *		%a - Weekday, eg) Sun
+	 *		%A - Weekday, eg) Sunday
+	 *		%w - Weekday, 0-6 (Sunday is 0)
+	 *		%y - Year, YY
+	 *		%Y - Year, YYYY
+	 *		%b - Month, eg) Jan
+	 *		%B - Month, eg) January
+	 *		%m - Month, 01-12
+	 *		%d - Day, 01-31
+	 *		%e - Day, 1-31
+	 *		%l - 12h Hour, 1-12
+	 *		%I - 12h Hour, 01-12
+	 *		%H - 24h Hour, 00-23
+	 *		%M - Minute, 00-59
+	 *		%S - Second, 00-60
+	 *		%p - AM or PM
+	 *		%P - am or PM
+	 *		%j - Day of the Year, 001-366
+	 * 
+	 * @param Format The format of the returned string.
+	 * @return String representation.
+	 */
+	CORE_API FString ToFormattedString(const TCHAR* Format) const;
 
 	/**
 	 * Returns this date as the number of seconds since the Unix Epoch (January 1st of 1970).
@@ -521,9 +561,20 @@ public:
 	 * @return Time of day.
 	 * @see FromUnixTimestamp
 	 */
-	CORE_API int64 ToUnixTimestamp() const
+	int64 ToUnixTimestamp() const
 	{
 		return (Ticks - FDateTime(1970, 1, 1).Ticks) / ETimespan::TicksPerSecond;
+	}
+
+	/**
+	 * Returns this date as the number of seconds since the Unix Epoch (January 1st of 1970).
+	 *
+	 * @return Time of day.
+	 * @see FromUnixTimestamp
+	 */
+	double ToUnixTimestampDecimal() const
+	{
+		return double(Ticks - FDateTime(1970, 1, 1).Ticks) / ETimespan::TicksPerSecond;
 	}
 
 public:
@@ -569,6 +620,18 @@ public:
 	static FDateTime FromUnixTimestamp(int64 UnixTime)
 	{
 		return FDateTime(1970, 1, 1) + FTimespan(UnixTime * ETimespan::TicksPerSecond);
+	}
+
+	/**
+	 * Returns the date from Unix time (seconds from midnight 1970-01-01)
+	 *
+	 * @param UnixTime Unix time (seconds from midnight 1970-01-01)
+	 * @return Gregorian date and time.
+	 * @see ToUnixTimestampDecimal
+	 */
+	static FDateTime FromUnixTimestampDecimal(double UnixTime)
+	{
+		return FDateTime(1970, 1, 1) + FTimespan(int64(UnixTime * ETimespan::TicksPerSecond));
 	}
 
 	/**
@@ -757,6 +820,14 @@ protected:
 
 	/** Holds the cumulative days per month in a non-leap year. */
 	static const int32 DaysToMonth[];
+
+	/** Holds the long and short day names. */
+	static const TCHAR* ShortDayNames[];
+	static const TCHAR* LongDayNames[];
+
+	/** Holds the long and short month names. */
+	static const TCHAR* ShortMonthNames[];
+	static const TCHAR* LongMonthNames[];
 
 private:
 	friend struct Z_Construct_UScriptStruct_FDateTime_Statics;

@@ -10,11 +10,20 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Animation/AnimSequenceBase.h"
+#include "HAL/IConsoleManager.h"
 #include "AnimCompositeBase.generated.h"
 
 class UAnimCompositeBase;
 class UAnimSequence;
 struct FCompactPose;
+
+#if WITH_EDITOR
+namespace UE { namespace Anim
+{
+	extern TAutoConsoleVariable<bool> CVarOutputMontageFrameRateWarning;
+}}
+
+#endif // WITH_EDITOR
 
 /** Struct defining a RootMotionExtractionStep.
  * When extracting RootMotion we can encounter looping animations (wrap around), or different animations.
@@ -28,7 +37,7 @@ struct FRootMotionExtractionStep
 
 	/** AnimSequence ref */
 	UPROPERTY()
-	UAnimSequence* AnimSequence;
+	TObjectPtr<UAnimSequence> AnimSequence;
 
 	/** Start position to extract root motion from. */
 	UPROPERTY()
@@ -39,7 +48,7 @@ struct FRootMotionExtractionStep
 	float EndPosition;
 
 	FRootMotionExtractionStep() 
-		: AnimSequence(NULL)
+		: AnimSequence(nullptr)
 		, StartPosition(0.f)
 		, EndPosition(0.f)
 		{
@@ -59,31 +68,65 @@ struct FAnimSegment
 {
 	GENERATED_USTRUCT_BODY()
 
-	/** Anim Reference to play - only allow AnimSequence or AnimComposite **/
-	UPROPERTY(EditAnywhere, Category=AnimSegment)
-	UAnimSequenceBase* AnimReference;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	FAnimSegment(const FAnimSegment&) = default;
+	FAnimSegment(FAnimSegment&&) = default;
+	FAnimSegment& operator=(const FAnimSegment&) = default;
+	FAnimSegment& operator=(FAnimSegment&&) = default;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+	UE_DEPRECATED(5.1, "Public access to AnimReference has been deprecated, use Set/Get-AnimReference instead")
+	/** Anim Reference to play - only allow AnimSequence or AnimComposite **/
+	UPROPERTY(EditAnywhere, Category=AnimSegment, meta=(DisplayName = "Animation Reference"))
+	TObjectPtr<UAnimSequenceBase> AnimReference;
+
+#if WITH_EDITORONLY_DATA
+	UPROPERTY(EditAnywhere, Category=AnimSegment, meta=(DisplayName = "Cached Animation Asset length"))
+	float CachedPlayLength = 0.f;
+#endif
+
+#if WITH_EDITOR
+	friend class UEditorAnimSegment;
+	friend class UEditorAnimCompositeSegment;
+	ENGINE_API void UpdateCachedPlayLength();
+#endif // WITH_EDITOR
+public:
+
+	ENGINE_API void SetAnimReference(UAnimSequenceBase* InAnimReference, bool bInitialize = false);
+	const TObjectPtr<UAnimSequenceBase>& GetAnimReference() const 
+	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		return AnimReference;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	}
+
+#if WITH_EDITOR
+	ENGINE_API bool IsPlayLengthOutOfDate() const;
+#endif // WITH_EDITOR
+	
 	/** Start Pos within this AnimCompositeBase */
-	UPROPERTY(VisibleAnywhere, Category=AnimSegment)
-	float	StartPos;
+	UPROPERTY(VisibleAnywhere, Category=AnimSegment, meta=(DisplayName = "Starting Position"))
+	float StartPos;
 
 	/** Time to start playing AnimSequence at. */
-	UPROPERTY(EditAnywhere, Category=AnimSegment)
-	float	AnimStartTime;
+	UPROPERTY(EditAnywhere, Category=AnimSegment, meta=(DisplayName = "Start Time"))
+	float AnimStartTime;
 
 	/** Time to end playing the AnimSequence at. */
-	UPROPERTY(EditAnywhere, Category=AnimSegment)
-	float	AnimEndTime;
+	UPROPERTY(EditAnywhere, Category=AnimSegment, meta=(DisplayName = "End Time"))
+	float AnimEndTime;
 
 	/** Playback speed of this animation. If you'd like to reverse, set -1*/
-	UPROPERTY(EditAnywhere, Category=AnimSegment)
-	float	AnimPlayRate;
+	UPROPERTY(EditAnywhere, Category=AnimSegment, meta=(DisplayName = "Play Rate"))
+	float AnimPlayRate;
 
-	UPROPERTY(EditAnywhere, Category=AnimSegment)
-	int32		LoopingCount;
+	UPROPERTY(EditAnywhere, Category=AnimSegment, meta=(DisplayName = "Loop Count"))
+	int32 LoopingCount;
 
 	FAnimSegment()
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		: AnimReference(nullptr)
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		, StartPos(0.f)
 		, AnimStartTime(0.f)
 		, AnimEndTime(0.f)
@@ -96,7 +139,9 @@ struct FAnimSegment
 	/** Ensures PlayRate is non Zero */
 	float GetValidPlayRate() const
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		float SeqPlayRate = AnimReference ? AnimReference->RateScale : 1.0f;
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		float FinalPlayRate = SeqPlayRate * AnimPlayRate;
 		return (FMath::IsNearlyZero(FinalPlayRate) ? 1.f : FinalPlayRate);
 	}
@@ -148,7 +193,7 @@ struct FAnimSegment
 
 	/** Converts 'Track Position' to position on AnimSequence.
 	 * Note: doesn't check that position is in valid range, must do that before calling this function! */
-	float ConvertTrackPosToAnimPos(const float& TrackPosition) const;
+	ENGINE_API float ConvertTrackPosToAnimPos(const float& TrackPosition) const;
 
 	/** 
 	 * Retrieves AnimNotifies between two Track time positions. ]PreviousTrackPosition, CurrentTrackPosition]
@@ -156,7 +201,7 @@ struct FAnimSegment
 	 * Supports playing backwards (CurrentTrackPosition<PreviousTrackPosition).
 	 * Only supports contiguous range, does NOT support looping and wrapping over.
 	 */
-	UE_DEPRECATED(4.19, "Use the GetAnimNotifiesFromTrackPositions that takes FAnimNotifyEventReferences instead")
+	UE_DEPRECATED(4.19, "Use the GetAnimNotifiesFromTrackPositions that takes FAnimNotifyContext instead")
 	void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, TArray<const FAnimNotifyEvent *> & OutActiveNotifies) const;
 	
 	/**
@@ -165,7 +210,10 @@ struct FAnimSegment
 	* Supports playing backwards (CurrentTrackPosition<PreviousTrackPosition).
 	* Only supports contiguous range, does NOT support looping and wrapping over.
 	*/
-	void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, TArray<FAnimNotifyEventReference> & OutActiveNotifies) const;
+	UE_DEPRECATED(5.0, "Use the GetAnimNotifiesFromTrackPositions that takes FAnimNotifyContext instead")
+	ENGINE_API void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, TArray<FAnimNotifyEventReference> & OutActiveNotifies) const;
+
+	ENGINE_API void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, FAnimNotifyContext& NotifyContext) const;
 
 	/** 
 	 * Given a Track delta position [StartTrackPosition, EndTrackPosition]
@@ -182,7 +230,9 @@ struct FAnimSegment
 	/** 
 	 * return true if anim notify is available 
 	 */
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	bool IsNotifyAvailable() const { return IsValid() && AnimReference && AnimReference->IsNotifyAvailable(); }
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 private:
 
 	/**
@@ -207,7 +257,7 @@ struct FAnimTrack
 
 	FAnimTrack() {}
 	ENGINE_API float GetLength() const;
-	bool IsAdditive() const;
+	ENGINE_API bool IsAdditive() const;
 	bool IsRotationOffsetAdditive() const;
 
 	ENGINE_API int32 GetTrackAdditiveType() const;
@@ -226,7 +276,7 @@ struct FAnimTrack
 	void ValidateSegmentTimes();
 
 	/** return true if valid to add */
-	ENGINE_API bool IsValidToAdd(const UAnimSequenceBase* SequenceBase) const;
+	ENGINE_API bool IsValidToAdd(const UAnimSequenceBase* SequenceBase, FText* OutReason = nullptr) const;
 
 	/** Gets the index of the segment at the given absolute montage time. */	
 	ENGINE_API int32 GetSegmentIndexAtTime(float InTime) const;
@@ -284,10 +334,21 @@ struct FAnimTrack
 	* Supports playing backwards (CurrentTrackPosition<PreviousTrackPosition).
 	* Only supports contiguous range, does NOT support looping and wrapping over.
 	*/
-	void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, TArray<FAnimNotifyEventReference> & OutActiveNotifies) const;
+	UE_DEPRECATED(5.0, "Use the GetAnimNotifiesFromTrackPositions that takes FAnimNotifyContext instead")
+	ENGINE_API void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, TArray<FAnimNotifyEventReference>& OutActiveNotifies) const;
+
+	/**
+	* Retrieves AnimNotifies between two Track time positions. ]PreviousTrackPosition, CurrentTrackPosition]
+	* Between PreviousTrackPosition (exclusive) and CurrentTrackPosition (inclusive).
+	* Supports playing backwards (CurrentTrackPosition<PreviousTrackPosition).
+	* Only supports contiguous range, does NOT support looping and wrapping over.
+	*/
+	ENGINE_API void GetAnimNotifiesFromTrackPositions(const float& PreviousTrackPosition, const float& CurrentTrackPosition, FAnimNotifyContext& NotifyContext) const;
 
 	/** return true if anim notify is available */
 	bool IsNotifyAvailable() const;
+
+	ENGINE_API int32 GetTotalBytesUsed() const;
 };
 
 UCLASS(abstract, MinimalAPI)
@@ -295,14 +356,13 @@ class UAnimCompositeBase : public UAnimSequenceBase
 {
 	GENERATED_UCLASS_BODY()
 
-#if WITH_EDITOR
-	/** Set Sequence Length */
-	ENGINE_API void SetSequenceLength(float InSequenceLength);
-#endif
-
 	//~ Begin UObject Interface
 	virtual void PostLoad() override;
 	//~ End UObject Interface
+	
+	//~ Begin UAnimSequenceBase Interface
+	virtual FFrameRate GetSamplingFrameRate() const override;
+	//~ End UAnimSequenceBase Interface
 
 	// Extracts root motion from the supplied FAnimTrack between the Start End range specified
 	ENGINE_API void ExtractRootMotionFromTrack(const FAnimTrack &SlotAnimTrack, float StartTrackPosition, float EndTrackPosition, FRootMotionMovementParams &RootMotion) const;
@@ -315,5 +375,18 @@ class UAnimCompositeBase : public UAnimSequenceBase
 	// and clear the reference if recursive is found. 
 	// We're going to remove the top reference if found
 	virtual bool ContainRecursive(TArray<UAnimCompositeBase*>& CurrentAccumulatedList) PURE_VIRTUAL(UAnimCompositeBase::ContainRecursive, return false; );
+
+	virtual void SetCompositeLength(float InLength) PURE_VIRTUAL(UAnimCompositeBase::SetCompositeLength, );
+
+#if WITH_EDITOR
+	virtual void PopulateWithExistingModel(TScriptInterface<IAnimationDataModel> ExistingDataModel) override;
+
+	virtual void UpdateCommonTargetFrameRate() PURE_VIRTUAL(UAnimCompositeBase::UpdateCommonTargetFrameRate, );	
+#endif // WITH_EDITOR
+	FFrameRate GetCommonTargetFrameRate() const { return CommonTargetFrameRate; }
+protected:
+	/** Frame-rate used to represent this Animation Montage (best fitting for placed Animation Sequences)*/
+	UPROPERTY(VisibleAnywhere, Category = AnimationComposite)
+	FFrameRate CommonTargetFrameRate;
 };
 

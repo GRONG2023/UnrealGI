@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -6,14 +6,19 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.IO;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 
 public abstract class BaseLinuxPlatform : Platform
 {
-	static string PScpPath = CombinePaths(CommandUtils.RootDirectory.FullName, "\\Engine\\Extras\\ThirdPartyNotUE\\putty\\PSCP.EXE");
-	static string PlinkPath = CombinePaths(CommandUtils.RootDirectory.FullName, "\\Engine\\Extras\\ThirdPartyNotUE\\putty\\PLINK.EXE");
+	// Matches strings of the form "DeviceName@IP Address" such as "WindowsServer@10.1.168.74"
+	static Regex DeviceRegex = new Regex(@"\w.+@([A-Za-z0-9\.\-]+)[\+]?");
+
+	static string PScpPath  = MakePathSafeToUseWithCommandLine(CombinePaths(Unreal.RootDirectory.FullName, "Engine", "Extras", "ThirdPartyNotUE", "putty", "PSCP.EXE"));
+	static string PlinkPath = MakePathSafeToUseWithCommandLine(CombinePaths(Unreal.RootDirectory.FullName, "Engine", "Extras", "ThirdPartyNotUE", "putty", "PLINK.EXE"));
 	static string LaunchOnHelperShellScriptName = "LaunchOnHelper.sh";
 
 	public BaseLinuxPlatform(UnrealTargetPlatform P)
@@ -21,11 +26,32 @@ public abstract class BaseLinuxPlatform : Platform
 	{
 	}
 
+	public override DeviceInfo[] GetDevices()
+	{
+		List<DeviceInfo> Devices = new List<DeviceInfo>();
+
+		if (HostPlatform.Current.HostEditorPlatform == TargetPlatformType)
+		{
+			DeviceInfo LocalMachine = new DeviceInfo(TargetPlatformType, Unreal.MachineName, Unreal.MachineName,
+				RuntimeInformation.OSDescription, "Computer", true, true);
+
+			Devices.Add(LocalMachine);
+		}
+
+		// only add for true Linux, not Arm64, etc
+		if (PlatformType == UnrealTargetPlatform.Linux)
+		{
+			Devices.AddRange(SteamDeckSupport.GetDevices(UnrealTargetPlatform.Linux));
+		}
+
+		return Devices.ToArray();
+	}
+
 	public override void GetFilesToDeployOrStage(ProjectParams Params, DeploymentContext SC)
 	{
 		if (SC.bStageCrashReporter)
 		{
-			FileReference ReceiptFileName = TargetReceipt.GetDefaultPath(CommandUtils.EngineDirectory, "CrashReportClient", SC.StageTargetPlatform.PlatformType, UnrealTargetConfiguration.Shipping, null);
+			FileReference ReceiptFileName = TargetReceipt.GetDefaultPath(Unreal.EngineDirectory, "CrashReportClient", SC.StageTargetPlatform.PlatformType, UnrealTargetConfiguration.Shipping, null);
 			if (FileReference.Exists(ReceiptFileName))
 			{
 				TargetReceipt Receipt = TargetReceipt.Read(ReceiptFileName);
@@ -89,9 +115,9 @@ public abstract class BaseLinuxPlatform : Platform
 						}
 
 						string Extension = ".sh";
-						if (Target.Receipt.Platform == UnrealTargetPlatform.LinuxAArch64)
+						if (Target.Receipt.Platform == UnrealTargetPlatform.LinuxArm64)
 						{
-								Extension = "-AArch64.sh";
+								Extension = "-Arm64.sh";
 						}
 
 						List<StagedFileReference> StagePaths = SC.FilesToStage.NonUFSFiles.Where(x => x.Value == Executable.Path).Select(x => x.Key).ToList();
@@ -125,17 +151,17 @@ public abstract class BaseLinuxPlatform : Platform
 		string EOL = "\n";
 		Script.Append("#!/bin/sh" + EOL);
 		// allow running from symlinks
-		Script.AppendFormat("UE4_TRUE_SCRIPT_NAME=$(echo \\\"$0\\\" | xargs readlink -f)" + EOL);
-		Script.AppendFormat("UE4_PROJECT_ROOT=$(dirname \"$UE4_TRUE_SCRIPT_NAME\")" + EOL);
-		Script.AppendFormat("chmod +x \"$UE4_PROJECT_ROOT/{0}\"" + EOL, StagedRelativeTargetPath);
-		Script.AppendFormat("\"$UE4_PROJECT_ROOT/{0}\" {1} \"$@\" " + EOL, StagedRelativeTargetPath, StagedArguments);
+		Script.AppendFormat("UE_TRUE_SCRIPT_NAME=$(echo \\\"$0\\\" | xargs readlink -f)" + EOL);
+		Script.AppendFormat("UE_PROJECT_ROOT=$(dirname \"$UE_TRUE_SCRIPT_NAME\")" + EOL);
+		Script.AppendFormat("chmod +x \"$UE_PROJECT_ROOT/{0}\"" + EOL, StagedRelativeTargetPath);
+		Script.AppendFormat("\"$UE_PROJECT_ROOT/{0}\" {1} \"$@\" " + EOL, StagedRelativeTargetPath, StagedArguments);
 
 		// write out the 
 		FileReference.WriteAllText(IntermediateFile, Script.ToString());
 
-		if (Utils.IsRunningOnMono)
+		if (!RuntimePlatform.IsWindows)
 		{
-			var Result = CommandUtils.Run("sh", string.Format("-c 'chmod +x \"{0}\"'", IntermediateFile.ToString().Replace("'", "'\"'\"'")));
+			var Result = CommandUtils.Run("env", string.Format("-- \"chmod\" \"+x\" \"{0}\"", IntermediateFile.ToString().Replace("'", "'\"'\"'")));
 			if (Result.ExitCode != 0)
 			{
 				throw new AutomationException(string.Format("Failed to chmod \"{0}\"", IntermediateFile));
@@ -147,10 +173,10 @@ public abstract class BaseLinuxPlatform : Platform
 
 	public override string GetCookPlatform(bool bDedicatedServer, bool bIsClientOnly)
 	{
-		const string NoEditorCookPlatform = "NoEditor";
+		const string NoEditorCookPlatform = "";
 		const string ServerCookPlatform = "Server";
 		const string ClientCookPlatform = "Client";
-		string PlatformStr = (TargetPlatformType == UnrealTargetPlatform.LinuxAArch64) ? "LinuxAArch64" : "Linux";
+		string PlatformStr = (TargetPlatformType == UnrealTargetPlatform.LinuxArm64) ? "LinuxArm64" : "Linux";
 
 		if (bDedicatedServer)
 		{
@@ -166,19 +192,19 @@ public abstract class BaseLinuxPlatform : Platform
 
 	public override string GetEditorCookPlatform()
 	{
-		if (TargetPlatformType == UnrealTargetPlatform.LinuxAArch64)
+		if (TargetPlatformType == UnrealTargetPlatform.LinuxArm64)
 		{
-			return "LinuxAArch64";
+			return "LinuxArm64Editor";
 		}
 
-		return "Linux";
+		return "LinuxEditor";
 	}
 
 	/// <summary>
 	/// return true if we need to change the case of filenames outside of pak files
 	/// </summary>
 	/// <returns></returns>
-	public override bool DeployLowerCaseFilenames()
+	public override bool DeployLowerCaseFilenames(StagedFileType FileType)
 	{
 		return false;
 	}
@@ -190,6 +216,13 @@ public abstract class BaseLinuxPlatform : Platform
 	/// <param name="SC"></param>
 	public override void Deploy(ProjectParams Params, DeploymentContext SC)
 	{
+		// We only care about deploying for SteamDeck
+		if (Params.Devices.Count == 1 && GetDevices().FirstOrDefault(x => x.Id == Params.DeviceNames[0])?.Type == "SteamDeck")
+		{
+			SteamDeckSupport.Deploy(UnrealTargetPlatform.Linux, Params, SC);
+			return;
+		}
+
 		if (BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Linux)
 		{
 			foreach (string DeviceAddress in Params.DeviceNames)
@@ -271,7 +304,7 @@ chmod +x {0}
 
 	public override bool CanHostPlatform(UnrealTargetPlatform Platform)
 	{
-		if (Platform == UnrealTargetPlatform.Mac || Platform == UnrealTargetPlatform.Win32 || Platform == UnrealTargetPlatform.Win64)
+		if (Platform == UnrealTargetPlatform.Mac || Platform == UnrealTargetPlatform.Win64)
 		{
 			return false;
 		}
@@ -291,50 +324,74 @@ chmod +x {0}
 	public override void PlatformSetupParams(ref ProjectParams ProjParams)
 	{
 		if ((ProjParams.Deploy || ProjParams.Run) && BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Linux)
-		{ 
-			// Prompt for username if not already set
-			while (String.IsNullOrEmpty(ProjParams.DeviceUsername))
+		{
+ 			Match ServerDeviceMatch = DeviceRegex.Match(ProjParams.ServerDevice);
+			if (ServerDeviceMatch.Success)
 			{
-				Console.Write("Username: ");
-				ProjParams.DeviceUsername = Console.ReadLine();
+				ProjParams.ServerDeviceAddress = ServerDeviceMatch.Groups[1].Value;
 			}
 
-			// Prompty for password if not already set
-			while (String.IsNullOrEmpty(ProjParams.DevicePassword))
+			// we don't need username/password if we are only targeting steamdeck devices
+			bool bNeedsUsernameAndPassword = false;
+			foreach (string DeviceId in ProjParams.DeviceNames)
 			{
-				ProjParams.DevicePassword = String.Empty;
-				Console.Write("Password: ");
-				ConsoleKeyInfo key;
-				do
+				if (SteamDeckSupport.GetDeviceInfo(UnrealTargetPlatform.Linux, ProjParams, out _, out _) == false)
 				{
-					key = Console.ReadKey(true);
-					if (key.Key != ConsoleKey.Backspace && key.Key != ConsoleKey.Enter)
-					{
-						ProjParams.DevicePassword += key.KeyChar;
-						Console.Write("*");
-					}
-					else
-					{
-						if (key.Key == ConsoleKey.Backspace && ProjParams.DevicePassword.Length > 0)
-						{
-							ProjParams.DevicePassword = ProjParams.DevicePassword.Substring(0, (ProjParams.DevicePassword.Length - 1));
-							Console.Write("\b \b");
-						}
-					}
-
-				} while (key.Key != ConsoleKey.Enter);
-				Console.WriteLine();
+					bNeedsUsernameAndPassword = true;
+				}
 			}
 
-			// try contacting the device(s) and cache the key(s)
-			foreach(string DeviceAddress in ProjParams.DeviceNames)
+			if (bNeedsUsernameAndPassword)
 			{
-				RunAndLog(CmdEnv, "cmd.exe", String.Format("/c \"echo y | {0} -P 22 -ssh -t -l {1} -pw {2} {3} echo All Ok\"", PlinkPath, ProjParams.DeviceUsername, ProjParams.DevicePassword, DeviceAddress));
+				// Prompt for username if not already set
+				while (String.IsNullOrEmpty(ProjParams.DeviceUsername))
+				{
+					Console.Write("Username: ");
+					ProjParams.DeviceUsername = Console.ReadLine();
+				}
+
+				// Prompty for password if not already set
+				while (String.IsNullOrEmpty(ProjParams.DevicePassword))
+				{
+					ProjParams.DevicePassword = String.Empty;
+					Console.Write("Password: ");
+					ConsoleKeyInfo key;
+					do
+					{
+						key = Console.ReadKey(true);
+						if (key.Key != ConsoleKey.Backspace && key.Key != ConsoleKey.Enter)
+						{
+							ProjParams.DevicePassword += key.KeyChar;
+							Console.Write("*");
+						}
+						else
+						{
+							if (key.Key == ConsoleKey.Backspace && ProjParams.DevicePassword.Length > 0)
+							{
+								ProjParams.DevicePassword = ProjParams.DevicePassword.Substring(0, (ProjParams.DevicePassword.Length - 1));
+								Console.Write("\b \b");
+							}
+						}
+
+					} while (key.Key != ConsoleKey.Enter);
+					Console.WriteLine();
+				}
+
+				// try contacting the device(s) and cache the key(s)
+				foreach (string DeviceAddress in ProjParams.DeviceNames)
+				{
+					RunAndLog(CmdEnv, "cmd.exe", String.Format("/c \'echo y | {0} -P 22 -ssh -t -l {1} -pw {2} {3} echo All Ok\'", PlinkPath, ProjParams.DeviceUsername, ProjParams.DevicePassword, DeviceAddress));
+				}
 			}
 		}
 	}
 	public override IProcessResult RunClient(ERunOptions ClientRunFlags, string ClientApp, string ClientCmdLine, ProjectParams Params)
 	{
+		if (Params.Devices.Count == 1 && GetDevices().FirstOrDefault(x => x.Id == Params.DeviceNames[0])?.Type == "SteamDeck")
+		{
+			return SteamDeckSupport.RunClient(UnrealTargetPlatform.Linux, ClientRunFlags, ClientApp, ClientCmdLine, Params);
+		}
+
 		if (BuildHostPlatform.Current.Platform != UnrealTargetPlatform.Linux)
 		{
 			IProcessResult Result = null;
@@ -362,7 +419,7 @@ chmod +x {0}
 
 	public override void StripSymbols(FileReference SourceFile, FileReference TargetFile)
 	{
-		LinuxExports.StripSymbols(SourceFile, TargetFile);
+		LinuxExports.StripSymbols(SourceFile, TargetFile, Log.Logger);
 	}
 }
 
@@ -375,10 +432,10 @@ public class GenericLinuxPlatform : BaseLinuxPlatform
 	}
 }
 
-public class GenericLinuxPlatformAArch64 : BaseLinuxPlatform
+public class GenericLinuxPlatformArm64 : BaseLinuxPlatform
 {
-	public GenericLinuxPlatformAArch64()
-		: base(UnrealTargetPlatform.LinuxAArch64)
+	public GenericLinuxPlatformArm64()
+		: base(UnrealTargetPlatform.LinuxArm64)
 	{
 	}
 }

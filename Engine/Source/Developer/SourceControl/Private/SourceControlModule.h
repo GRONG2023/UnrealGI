@@ -9,9 +9,11 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 #include "ISourceControlModule.h"
+#include "SourceControlAssetDataCache.h"
 #include "SourceControlSettings.h"
 #include "DefaultSourceControlProvider.h"
 
+class FSourceControlFileStatusMonitor;
 class SSourceControlLogin;
 class SWindow;
 
@@ -33,12 +35,32 @@ public:
 	virtual void QueueStatusUpdate(const FString& InFilename) override;
 	virtual bool IsEnabled() const override;
 	virtual ISourceControlProvider& GetProvider() const override;
+	virtual TUniquePtr<ISourceControlProvider> CreateProvider(const FName& ProviderName, const FStringView& OwnerName, const FSourceControlInitSettings& InitialSettings) const override;
+	virtual FSourceControlAssetDataCache& GetAssetDataCache() override;
 	virtual void SetProvider( const FName& InName ) override;
 	virtual void ShowLoginDialog(const FSourceControlLoginClosed& InOnSourceControlLoginClosed, ELoginWindowMode::Type InLoginWindowMode, EOnLoginWindowStartup::Type InOnLoginWindowStartup = EOnLoginWindowStartup::ResetProviderToNone) override;
 	virtual bool GetUseGlobalSettings() const override;
 	virtual void SetUseGlobalSettings(bool bIsUseGlobalSettings) override;
+	virtual FSourceControlProviderChanging& GetSourceControlProviderChanging() override;
 	virtual FDelegateHandle RegisterProviderChanged(const FSourceControlProviderChanged::FDelegate& SourceControlProviderChanged) override;
 	virtual void UnregisterProviderChanged(FDelegateHandle Handle) override;
+	virtual void RegisterPreSubmitDataValidation(const FSourceControlPreSubmitDataValidationDelegate& PreSubmitDataValidationDelegate) override;
+	virtual void UnregisterPreSubmitDataValidation() override;
+	virtual FSourceControlPreSubmitDataValidationDelegate GetRegisteredPreSubmitDataValidation() override;
+	
+	virtual FDelegateHandle RegisterPreSubmitFinalize(const FSourceControlPreSubmitFinalizeDelegate::FDelegate& Delegate) override;
+	virtual void UnregisterPreSubmitFinalize(FDelegateHandle Handle) override;
+	virtual const FSourceControlPreSubmitFinalizeDelegate& GetOnPreSubmitFinalize() const override;
+
+	virtual FDelegateHandle RegisterFilesDeleted(const FSourceControlFilesDeletedDelegate::FDelegate& InDelegate) override;
+	virtual void UnregisterFilesDeleted(FDelegateHandle InHandle) override;
+	virtual const FSourceControlFilesDeletedDelegate& GetOnFilesDeleted() const override;
+
+	virtual void RegisterSourceControlProjectDirDelegate(const FSourceControlProjectDirDelegate& SourceControlProjectDirDelegate) override;
+	virtual void UnregisterSourceControlProjectDirDelegate() override;
+	virtual FString GetSourceControlProjectDir() const override;
+	virtual bool UsesCustomProjectDir() const override;
+	virtual FSourceControlFileStatusMonitor& GetSourceControlFileStatusMonitor() override;
 
 	/** Save the settings to the ini file */
 	void SaveSettings();
@@ -108,6 +130,9 @@ private:
 	/** The login window control we may be using */
 	TSharedPtr<class SSourceControlLogin> SourceControlLoginPtr;
 
+	/** Monitor the source control status of a collection of files. */
+	TSharedPtr<class FSourceControlFileStatusMonitor> SourceControlFileStatusMonitor;
+
 	/** Files pending a status update */
 	TArray<FString> PendingStatusUpdateFiles;
 
@@ -117,6 +142,24 @@ private:
 	/** Active Provider name to track source control provider changes */
 	FString ActiveProviderName;
 
+	/** For notifying when the source provider is about to change */
+	FSourceControlProviderChanging OnSourceControlProviderChanging;
+
 	/** For notifying when the source provider is changed */
 	FSourceControlProviderChanged OnSourceControlProviderChanged;
+
+	/** To call when doing pre-submit data validation */
+	FSourceControlPreSubmitDataValidationDelegate OnSourceControlPreSubmitDataValidation;
+	
+	/** To be called right before files are submitted, allowing for additional last minute validation. @see FSourceControlPreSubmitFinalizeDelegate */
+	FSourceControlPreSubmitFinalizeDelegate OnPresubmitFinalize;
+
+	/** To be called after a source control operations deleted files */
+	FSourceControlFilesDeletedDelegate OnFilesDeleted;
+
+	/** Used to cache source controlled AssetData information */
+	FSourceControlAssetDataCache AssetDataCache;
+
+	/** Delegate used to return the current project base directory */
+	FSourceControlProjectDirDelegate SourceControlProjectDirDelegate;
 };

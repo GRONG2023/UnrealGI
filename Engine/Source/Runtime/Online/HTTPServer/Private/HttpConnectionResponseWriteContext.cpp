@@ -5,6 +5,7 @@
 #include "HttpServerHttpVersion.h"
 #include "HttpServerConstantsPrivate.h"
 #include "Sockets.h"
+#include "SocketSubsystem.h"
 
 DEFINE_LOG_CATEGORY(LogHttpConnectionResponseWriteContext);
 
@@ -27,7 +28,7 @@ void FHttpConnectionResponseWriteContext::ResetContext(TUniquePtr<FHttpServerRes
 	{
 		// Affix Content-Length Header
 		TArray<FString> ContentLengthValue = { FString::FromInt(Response->Body.Num()) };
-		Response->Headers.Add(FHttpServerHeaderKeys::CONTENT_LENGTH, MoveTemp(ContentLengthValue));
+		Response->Headers.Add(UE_HTTP_SERVER_HEADER_KEYS_CONTENT_LENGTH, MoveTemp(ContentLengthValue));
 
 		// Serialize Headers
 		HeaderBytes.Append(SerializeHeadersUtf8(Response->HttpVersion, Response->Code, Response->Headers));
@@ -46,7 +47,7 @@ EHttpConnectionContextState FHttpConnectionResponseWriteContext::WriteStream(flo
 		int32 DataLen = HeaderBytes.Num() - HeaderBytesWritten;
 		if (!WriteBytes(DataOffset, DataLen, BytesWritten))
 		{
-			AddError(FHttpServerErrorStrings::SocketSendFailure);
+			AddError(UE_HTTP_SERVER_ERROR_STR_SOCKET_SEND_FAILURE);
 			return EHttpConnectionContextState::Error;
 		}
 		HeaderBytesWritten += BytesWritten;
@@ -58,7 +59,7 @@ EHttpConnectionContextState FHttpConnectionResponseWriteContext::WriteStream(flo
 		int32 DataLen = Response->Body.Num() - BodyBytesWritten;
 		if (!WriteBytes(DataOffset, DataLen, BytesWritten))
 		{
-			AddError(FHttpServerErrorStrings::SocketSendFailure);
+			AddError(UE_HTTP_SERVER_ERROR_STR_SOCKET_SEND_FAILURE);
 			return EHttpConnectionContextState::Error;
 		}
 		BodyBytesWritten += BytesWritten;
@@ -79,12 +80,23 @@ bool FHttpConnectionResponseWriteContext::WriteBytes(const uint8* Bytes, int32 B
 	bool bWriteSuccess = Socket->Send(Bytes, BytesLen, OutBytesWritten);
 	if (!bWriteSuccess)
 	{
-		UE_LOG(LogHttpConnectionResponseWriteContext, Warning,
-			TEXT("WriteBytes sent %d/%d bytes"), OutBytesWritten, BytesLen);
+		ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+		const ESocketErrors Err = SocketSubsystem->GetLastErrorCode();
+		if (Err == SE_EWOULDBLOCK || Err == SE_TRY_AGAIN)
+		{
+			bWriteSuccess = true;
+			OutBytesWritten = 0;
+		}
+		else
+		{
+			UE_LOG(LogHttpConnectionResponseWriteContext, Warning, TEXT("WriteBytes sent %d/%d bytes"), OutBytesWritten, BytesLen);
+		}
 	}
 
 	if (OutBytesWritten > 0)
 	{
+		UE_LOG(LogHttpConnectionResponseWriteContext, Verbose,
+			TEXT("ElapsedIdleTime\t %f"), ElapsedIdleTime);
 		ElapsedIdleTime = 0.0f;
 	}
 

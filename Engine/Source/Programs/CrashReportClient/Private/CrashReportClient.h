@@ -9,6 +9,7 @@
 #include "Async/AsyncWork.h"
 #include "CrashReportClientApp.h"
 #include "CrashUpload.h"
+#include "Containers/Ticker.h"
 
 #if !CRASH_REPORT_UNATTENDED_ONLY
 
@@ -62,7 +63,7 @@ public:
 	 * Constructor: sets up background diagnosis
 	 * @param ErrorReport Error report to upload
 	 */
-	FCrashReportClient( const FPlatformErrorReport& InErrorReport );
+	FCrashReportClient( const FPlatformErrorReport& InErrorReport, bool bImplicitSend );
 
 	/** Destructor. */
 	virtual ~FCrashReportClient();
@@ -72,6 +73,14 @@ public:
 
 	/** Closes the crash report client without sending any data. Except the startup analytics. */
 	FReply CloseWithoutSending();
+
+	/** Closes the crash report client allowing data to finish being sent. */
+	FReply Close();
+	
+#if PLATFORM_WINDOWS
+	/** Copy report files to the clipboard for user to immediately request help with. */
+	FReply CopyFilesToClipboard();
+#endif
 
 	/**
 	 * Respond to the user pressing Submit
@@ -198,7 +207,7 @@ private:
 	bool bIsUploadComplete;
 
 	/** To know if the ticker was started.*/
-	FDelegateHandle TickHandle;
+	FTSTicker::FDelegateHandle TickHandle;
 
 };
 

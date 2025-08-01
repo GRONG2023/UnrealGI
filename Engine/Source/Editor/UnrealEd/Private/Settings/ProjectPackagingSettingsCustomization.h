@@ -14,7 +14,7 @@
 #include "Misc/Paths.h"
 #include "Styling/CoreStyle.h"
 #include "HAL/FileManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "IDetailCustomization.h"
 #include "PropertyHandle.h"
 #include "DetailLayoutBuilder.h"
@@ -147,10 +147,10 @@ protected:
 	{
 		TArray<EProjectPackagingBuildConfigurations> PackagingConfigurations = UProjectPackagingSettings::GetValidPackageConfigurations();
 
-		TSharedRef<FPropertyRestriction> BuildConfigurationRestriction = MakeShareable(new FPropertyRestriction(LOCTEXT("ConfigurationRestrictionReason", "This configuration is not valid for this project. DebugGame configurations require a code project, and client/server configurations require the appropriate targets.")));
+		TSharedRef<FPropertyRestriction> BuildConfigurationRestriction = MakeShareable(new FPropertyRestriction(LOCTEXT("ConfigurationRestrictionReason", "This configuration is not valid for this project. DebugGame configurations are not available in Content-Only or Launcher projects, and client/server configurations require the appropriate targets..")));
 
 		const UEnum* const ProjectPackagingBuildConfigurationsEnum = StaticEnum<EProjectPackagingBuildConfigurations>();
-		for (int Idx = 0; Idx < PPBC_MAX; Idx++)
+		for (int Idx = 0; Idx < (int)EProjectPackagingBuildConfigurations::PPBC_MAX; Idx++)
 		{
 			EProjectPackagingBuildConfigurations Configuration = (EProjectPackagingBuildConfigurations)Idx;
 			if (!PackagingConfigurations.Contains(Configuration))
@@ -195,7 +195,7 @@ protected:
 					.AutoWidth()
 					[
 						SNew(SImage)
-						.Image(FEditorStyle::GetBrush(TEXT("Icons.Error")))
+						.Image(FAppStyle::GetBrush(TEXT("Icons.Error")))
 						.ToolTipText(LOCTEXT("NoCulturesToStageSelectedError", "At least one culture must be selected or fatal errors may occur when launching games."))
 						.Visibility(this, &FProjectPackagingSettingsCustomization::HandleNoCulturesErrorIconVisibility)
 					]
@@ -220,7 +220,7 @@ protected:
 							SNew(SCheckBox)
 							.IsChecked(this, &FProjectPackagingSettingsCustomization::HandleShowCulturesCheckBoxIsChecked, EFilterCulturesChoices::AllAvailableCultures)
 							.OnCheckStateChanged(this, &FProjectPackagingSettingsCustomization::HandleShowCulturesCheckBoxCheckStateChanged, EFilterCulturesChoices::AllAvailableCultures)
-							.Style(FEditorStyle::Get(), "RadioButton")
+							.Style(FAppStyle::Get(), "RadioButton")
 							[
 								SNew(STextBlock)
 								.Text(LOCTEXT("AllCulturesCheckBoxText", "Show All"))
@@ -235,7 +235,7 @@ protected:
 							SNew(SCheckBox)
 							.IsChecked(this, &FProjectPackagingSettingsCustomization::HandleShowCulturesCheckBoxIsChecked, EFilterCulturesChoices::OnlyLocalizedCultures)
 							.OnCheckStateChanged(this, &FProjectPackagingSettingsCustomization::HandleShowCulturesCheckBoxCheckStateChanged, EFilterCulturesChoices::OnlyLocalizedCultures)
-							.Style(FEditorStyle::Get(), "RadioButton")
+							.Style(FAppStyle::Get(), "RadioButton")
 							[
 								SNew(STextBlock)
 								.Text(LOCTEXT("CookedCulturesCheckBoxText", "Show Localized"))
@@ -333,7 +333,7 @@ protected:
 		RawCultureStringArray->Add(CultureName);
 		if(!IsInBatchSelectOperation)
 		{
-			CulturesPropertyHandle->NotifyPostChange();
+			CulturesPropertyHandle->NotifyPostChange(EPropertyChangeType::ArrayAdd);
 		}
 	}
 
@@ -349,7 +349,7 @@ protected:
 		RawCultureStringArray->Remove(CultureName);
 		if(!IsInBatchSelectOperation)
 		{
-			CulturesPropertyHandle->NotifyPostChange();
+			CulturesPropertyHandle->NotifyPostChange(EPropertyChangeType::ArrayRemove);
 		}
 	}
 
@@ -366,7 +366,7 @@ protected:
 
 	void OnPostBatchSelect()
 	{
-		CulturesPropertyHandle->NotifyPostChange();
+		CulturesPropertyHandle->NotifyPostChange(EPropertyChangeType::ValueSet);
 		IsInBatchSelectOperation = false;
 	}
 

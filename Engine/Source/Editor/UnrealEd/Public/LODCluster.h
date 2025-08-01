@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Containers/Set.h"
 
 class AActor;
 class ALODActor;
@@ -23,6 +24,8 @@ struct FLODCluster
 {
 	// constructors
 	FLODCluster(const FLODCluster& Other);
+	FLODCluster(FLODCluster&& Other);
+
 	FLODCluster(AActor* Actor1);
 	FLODCluster(AActor* Actor1, AActor* Actor2);
 	FLODCluster();
@@ -33,6 +36,7 @@ struct FLODCluster
 	FLODCluster operator-(const FLODCluster& Other) const;
 	FLODCluster& operator-=(const FLODCluster& Other);
 	FLODCluster& operator=(const FLODCluster & Other);
+	FLODCluster& operator=(FLODCluster&& Other);
 
 	bool operator==(const FLODCluster& Other) const;
 
@@ -43,10 +47,13 @@ struct FLODCluster
 	inline bool IsValid() const { return bValid; }
 
 	/** Return cost of the cluster, lower is better */
-	inline const float GetCost() const
+	inline double GetCost() const
 	{
 		return ClusterCost;
 	}
+
+	/** Return cost of the union of this cluster & the other cluster, lower is better */
+	double GetMergedCost(const FLODCluster& Other) const;
 
 	/** Compare clusters and returns true when this contains any of Other's actors */
 	bool Contains(FLODCluster& Other) const;
@@ -56,13 +63,13 @@ struct FLODCluster
 	
 	// member variable
 	/** List of Actors that this cluster contains */
-	TArray<AActor*> Actors;
+	TSet<AActor*, DefaultKeyFuncs<AActor*>, TInlineSetAllocator<2>> Actors;
 	/** Cluster bounds */
 	FSphere	Bound;
 	/** Filling factor for this cluster, determines how much of the cluster's bounds/area is occupied by the contained actors*/
-	float FillingFactor;
+	double FillingFactor;
 	/** Cached cluster cost, FMath::Pow(Bound.W, 3) / FillingFactor */
-	float ClusterCost;
+	double ClusterCost;
 
 private:
 	/**

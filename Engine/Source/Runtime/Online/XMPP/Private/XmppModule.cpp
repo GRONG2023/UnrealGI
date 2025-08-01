@@ -10,9 +10,6 @@
 #include "XmppLog.h"
 #include "XmppTests.h"
 #include "XmppNull.h"
-#if WITH_XMPP_JINGLE
-#include "XmppJingle/XmppJingle.h"
-#endif
 #if WITH_XMPP_STROPHE
 #include "XmppStrophe/XmppStrophe.h"
 #include "WebSocketsModule.h"
@@ -35,9 +32,6 @@ void FXmppModule::StartupModule()
 
 	if (bEnabled)
 	{
-#if WITH_XMPP_JINGLE
-		FXmppJingle::Init();
-#endif
 #if WITH_XMPP_STROPHE
 		FXmppStrophe::Init();
 		FModuleManager::LoadModuleChecked<FWebSocketsModule>("WebSockets");
@@ -54,9 +48,6 @@ void FXmppModule::ShutdownModule()
 
 	if (bEnabled)
 	{
-#if WITH_XMPP_JINGLE
-		FXmppJingle::Cleanup();
-#endif
 #if WITH_XMPP_STROPHE
 		FXmppStrophe::Cleanup();
 #endif
@@ -606,16 +597,14 @@ bool FXmppModule::HandleXmppCommand( const TCHAR* Cmd, FOutputDevice& Ar )
 	}
 	else if (FParse::Command(&Cmd, TEXT("LogVerbosity")))
 	{
-		FString Verbosity = FParse::Token(Cmd, false);
+		FName Verbosity = *FParse::Token(Cmd, false);
 
-		const FString NAME_NoLogging(TEXT("NoLogging"));
-		const FString NAME_Fatal(TEXT("Fatal"));
-		const FString NAME_Error(TEXT("Error"));
-		const FString NAME_Warning(TEXT("Warning"));
-		const FString NAME_Display(TEXT("Display"));
-		const FString NAME_Log(TEXT("Log"));
-		const FString NAME_Verbose(TEXT("Verbose"));
-		const FString NAME_VeryVerbose(TEXT("VeryVerbose"));
+		const FName NAME_NoLogging(TEXT("NoLogging"));
+		const FName NAME_Fatal(TEXT("Fatal"));
+		const FName NAME_Display(TEXT("Display"));
+		const FName NAME_Log(TEXT("Log"));
+		const FName NAME_Verbose(TEXT("Verbose"));
+		const FName NAME_VeryVerbose(TEXT("VeryVerbose"));
 
 		if (Verbosity == NAME_NoLogging)
 		{
@@ -665,7 +654,7 @@ bool FXmppModule::HandleXmppCommand( const TCHAR* Cmd, FOutputDevice& Ar )
 	return false;
 }
 
-bool FXmppModule::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+bool FXmppModule::Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 {
 	// Ignore any execs that don't start with Xmpp
 	if (FParse::Command(&Cmd, TEXT("XMPP")))
@@ -700,37 +689,13 @@ TSharedRef<IXmppConnection> FXmppModule::CreateConnection(const FString& UserId)
 	}
 	else
 	{
-		bool bEnableWebsockets = false;
-		GConfig->GetBool(TEXT("XMPP"), TEXT("bEnableWebsockets"), bEnableWebsockets, GEngineIni);
-
-		bool bUseStrophe = WITH_XMPP_STROPHE && bEnableWebsockets;
-		bool bUseJingle = WITH_XMPP_JINGLE && !bUseStrophe;
-		if (!bUseJingle && !bUseStrophe)
-		{
-			// if not using websockets, use the previous default implementation (jingle if available, otherwise strophe)
-#if WITH_XMPP_JINGLE
-			bUseJingle = true;
-#elif WITH_XMPP_STROPHE
-			bUseStrophe = true;
-#endif
-		}
-
-		if (bEnabled && (bUseStrophe || bUseJingle))
-		{
 #if WITH_XMPP_STROPHE
-			if (bUseStrophe)
-			{
-				Connection = FXmppStrophe::CreateConnection();
-			}
-#endif
-#if WITH_XMPP_JINGLE
-			if (bUseJingle)
-			{
-				Connection = FXmppJingle::CreateConnection();
-			}
-#endif
+		if (bEnabled)
+		{
+			Connection = FXmppStrophe::CreateConnection();
 		}
 		else
+#endif
 		{
 			Connection = FXmppNull::CreateConnection();
 		}
@@ -815,68 +780,3 @@ void FXmppModule::OnXmppRoomConfigured(const TSharedRef<IXmppConnection>& Connec
 
 	UE_LOG(LogXmpp, Log, TEXT("FXmppModule::OnXmppRoomConfigured - entered - user(%s) room(%s)"), *Connection->GetUserJid().Id, *RoomId);
 }
-
-// temp until WebRTC linked w/OpenSSL
-#if 0 // PLATFORM_WINDOWS || PLATFORM_LINUX || PLATFORM_MAC
-
-// newer OpenSSL version have these as #defines
-// WebRTC was linked with boringSSL which does not use the following functions as #defined
-// so un-doing the #defines and making them live functions to get linking errors fixed...
-
-#include "openssl/bio.h"
-
-#undef BIO_set_retry_read
-extern "C" void BIO_set_retry_read(BIO *b)
-{
-	BIO_set_flags(  b, (BIO_FLAGS_READ | BIO_FLAGS_SHOULD_RETRY));
-}
-
-#undef BIO_set_retry_write
-extern "C" void BIO_set_retry_write(BIO *b)
-{
-	BIO_set_flags(b, (BIO_FLAGS_WRITE | BIO_FLAGS_SHOULD_RETRY));
-}
-
-#undef BIO_clear_retry_flags
-extern "C" void BIO_clear_retry_flags(BIO *b)
-{
-	BIO_clear_flags(b, (BIO_FLAGS_RWS | BIO_FLAGS_SHOULD_RETRY));
-}
-
-#include "openssl/evp.h"
-
-#undef OpenSSL_add_all_algorithms
-extern "C" void OpenSSL_add_all_algorithms(void)
-{
-	OPENSSL_add_all_algorithms_noconf();
-	//	OPENSSL_add_all_algorithms_conf(void);
-}
-
-#define DWORD uint32 // FUnusableType DWORD
-#include "openssl/ssl.h"
-
-#undef DTLSv1_get_timeout
-extern "C" long DTLSv1_get_timeout(SSL *ssl, void *parg)
-{
-	return SSL_ctrl(ssl, DTLS_CTRL_GET_TIMEOUT, 0, (void *)parg);
-}
-
-#undef DTLSv1_handle_timeout
-extern "C" long DTLSv1_handle_timeout(SSL *ssl)
-{
-	return SSL_ctrl(ssl, DTLS_CTRL_HANDLE_TIMEOUT, 0, NULL);
-}
-
-#undef SSL_set_mode
-extern "C" long SSL_set_mode(SSL *ssl, long larg)
-{
-	return SSL_ctrl((ssl), SSL_CTRL_MODE, (larg), NULL);
-}
-
-#undef SSL_CTX_set_read_ahead
-extern "C" long SSL_CTX_set_read_ahead(SSL_CTX *ctx, long larg)
-{
-	return SSL_CTX_ctrl(ctx, SSL_CTRL_SET_READ_AHEAD, larg, NULL);
-}
-
-#endif

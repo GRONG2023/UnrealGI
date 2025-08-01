@@ -6,7 +6,8 @@
 #include "CryptoPP/5.6.5/include/twofish.h"
 
 /* TwoFish Block Encryptor Module Interface */
-class FTwoFishBlockEncryptorModuleInterface : public FBlockEncryptorModuleInterface
+class UE_DEPRECATED(5.3, "This component is not supported for encryption.")
+FTwoFishBlockEncryptorModuleInterface : public FBlockEncryptorModuleInterface
 {
 	virtual BlockEncryptor* CreateBlockEncryptorInstance() override;
 };
@@ -14,7 +15,8 @@ class FTwoFishBlockEncryptorModuleInterface : public FBlockEncryptorModuleInterf
 /*
 * TwoFish Block encryption
 */
-class TWOFISHBLOCKENCRYPTOR_API TwoFishBlockEncryptor : public BlockEncryptor
+class UE_DEPRECATED(5.3, "This component is not supported for encryption.")
+TWOFISHBLOCKENCRYPTOR_API TwoFishBlockEncryptor : public BlockEncryptor
 {
 public:
 	/* Initialized the encryptor */

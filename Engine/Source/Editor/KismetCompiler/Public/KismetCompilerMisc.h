@@ -2,21 +2,49 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "BPTerminal.h"
 #include "BlueprintCompiledStatement.h"
+#include "Containers/Array.h"
+#include "Containers/IndirectArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
 
 class FCompilerResultsLog;
 class FKismetCompilerContext;
+class FProperty;
 class UBlueprint;
+class UClass;
 class UEdGraph;
+class UEdGraphNode;
+class UEdGraphPin;
 class UEdGraphSchema_K2;
+class UFunction;
 class UK2Node;
 class UK2Node_CallFunction;
+class UObject;
+class UStruct;
+struct FBPTerminal;
+struct FEdGraphPinType;
 struct FKismetFunctionContext;
+struct FMemberReference;
 
 //////////////////////////////////////////////////////////////////////////
 // FKismetCompilerUtilities
+
+// Used by DoSignaturesHaveConvertibleFloatTypes
+enum class ConvertibleSignatureMatchResult
+{
+	ExactMatch,					// The function signatures are an exact match
+	HasConvertibleFloatParams,	// The function signatures are identical, except for float/double mismatches, which can be converted
+	Different					// The function signatures are completely different
+};
 
 /** This is a loose collection of utilities used when 'compiling' a new UClass from a K2 graph. */
 class KISMETCOMPILER_API FKismetCompilerUtilities
@@ -42,10 +70,10 @@ public:
 	static bool IsTypeCompatibleWithProperty(UEdGraphPin* SourcePin, FProperty* Property, FCompilerResultsLog& MessageLog, const UEdGraphSchema_K2* Schema, UClass* SelfClass);
 
 	/** Finds a property by name, starting in the specified scope; Validates property type and returns NULL along with emitting an error if there is a mismatch. */
-	static FProperty* FindPropertyInScope(UStruct* Scope, UEdGraphPin* Pin, FCompilerResultsLog& MessageLog, const UEdGraphSchema_K2* Schema, UClass* SelfClass, bool& bIsSparseProperty, bool bSuppressMissingMemberErrors = false);
+	static FProperty* FindPropertyInScope(UStruct* Scope, UEdGraphPin* Pin, FCompilerResultsLog& MessageLog, const UEdGraphSchema_K2* Schema, UClass* SelfClass, bool& bIsSparseProperty);
 
 	// Finds a property by name, starting in the specified scope, returning NULL if it's not found
-	static FProperty* FindNamedPropertyInScope(UStruct* Scope, FName PropertyName, bool& bIsSparseProperty);
+	static FProperty* FindNamedPropertyInScope(UStruct* Scope, FName PropertyName, bool& bIsSparseProperty, const bool bAllowDeprecated = false);
 
 	/** return function, that overrides BlueprintImplementableEvent with given name in given class (super-classes are not considered) */
 	static const UFunction* FindOverriddenImplementableEvent(const FName& EventName, const UClass* Class);
@@ -77,7 +105,7 @@ public:
 	static void RemoveObjectRedirectorIfPresent(UObject* Package, const FString& ClassName, UObject* ObjectBeingMovedIn);
 
 	/* checks if enum variables from given object store proper indexes */
-	static void ValidateEnumProperties(UObject* DefaultObject, FCompilerResultsLog& MessageLog);
+	static void ValidateEnumProperties(const UObject* DefaultObject, FCompilerResultsLog& MessageLog);
 
 	/** checks if the specified pin can default to self */
 	static bool ValidateSelfCompatibility(const UEdGraphPin* Pin, FKismetFunctionContext& Context);
@@ -85,14 +113,23 @@ public:
 	/** Create 'set var by name' nodes and hook them up - used to set values when components are added or actor are created at run time. Returns the 'last then' pin of the assignment nodes */
 	static UEdGraphPin* GenerateAssignmentNodes( class FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UK2Node_CallFunction* CallBeginSpawnNode, UEdGraphNode* SpawnNode, UEdGraphPin* CallBeginResult, const UClass* ForClass );
 
-	/** Create Kismet assignment statement with proper object <-> interface cast */
-	static void CreateObjectAssignmentStatement(FKismetFunctionContext& Context, UEdGraphNode* Node, FBPTerminal* SrcTerm, FBPTerminal* DstTerm);
+	/** Create node that replace regular setter and use the SetPropertyValueAndBroadcast. */
+	static TTuple<UEdGraphPin*, UEdGraphPin*> GenerateFieldNotificationSetNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UEdGraphNode* SourceNode, UEdGraphPin* SelfPin, FProperty* VariableProperty, const FMemberReference& VariableReference, bool bHasLocalRepNotify, bool bShouldFlushDormancyOnSet, bool bIsNetProperty);
+	
+	/** Create node to broadcast a FieldNotification value changed */
+	static TTuple<UEdGraphPin*, UEdGraphPin*> GenerateBroadcastFieldNotificationNode(FKismetCompilerContext& CompilerContext, UEdGraph* SourceGraph, UEdGraphNode* SourceNode, FProperty* Property);
 
-	/** Checks if each execution path ends with a Return node */
+	/** Create Kismet assignment statement with proper object <-> interface cast */
+	static void CreateObjectAssignmentStatement(FKismetFunctionContext& Context, UEdGraphNode* Node, FBPTerminal* SrcTerm, FBPTerminal* DstTerm, UEdGraphPin* DstPin = nullptr);
+
+	UE_DEPRECATED(5.4, "ValidateProperEndExecutionPath is deprecated.")
 	static void ValidateProperEndExecutionPath(FKismetFunctionContext& Context);
 
 	/** Generate an error for non-const output parameters */
 	static void DetectValuesReturnedByRef(const UFunction* Func, const UK2Node * Node, FCompilerResultsLog& MessageLog);
+
+	/** @return true when the property is a BP user variable that should uses UFieldNotificationLibrary::SetPropertyValueAndBroadcast to set its value. */
+	static bool IsPropertyUsesFieldNotificationSetValueAndBroadcast(const FProperty* Property);
 
 	static bool IsStatementReducible(EKismetCompiledStatementType StatementType);
 
@@ -111,6 +148,19 @@ public:
 
 	/** Add this BP to any BPs that it in*/
 	static void UpdateDependentBlueprints(UBlueprint* BP);
+
+	// Check the passed-in function to verify its thread safety. This makes sure that it only uses/calls thread-safe functions/nodes.
+	static bool CheckFunctionThreadSafety(const FKismetFunctionContext& InContext, FCompilerResultsLog& InMessageLog, bool InbEmitErrors = true);
+
+	// Helper function used by CheckFunctionThreadSafety. Split out to allow the ability to examine individual compiled statement lists (e.g. for the ubergraph)
+	static bool CheckFunctionCompiledStatementsThreadSafety(const UEdGraphNode* InNode, const UEdGraph* InSourceGraph, const TArray<FBlueprintCompiledStatement*>& InStatements, FCompilerResultsLog& InMessageLog, bool InbEmitErrors = true, TSet<const FBPTerminal*>* InThreadSafeObjectTerms = nullptr);
+
+	/** Similar to UFunction::IsSignatureCompatibleWith, but also checks if the function signatures are convertible.
+	 *
+	 * For example, if a parameter in SourceFunction is of type float, but its corresponding type in OtherFunction is double, then the function is deemed "convertible".
+	 * This is primarily used for binding Blueprint functions with native delegate signatures that use float types.
+	 */
+	static ConvertibleSignatureMatchResult DoSignaturesHaveConvertibleFloatTypes(const UFunction* SourceFunction, const UFunction* OtherFunction);
 };
 
 //////////////////////////////////////////////////////////////////////////
@@ -147,8 +197,7 @@ public:
 	virtual ~FNodeHandlingFunctor() 
 	{
 	}
-
-	//virtual void Validate(FKismetFunctionContext& Context, UEdGraphNode* Node) {}
+	
 	virtual void Compile(FKismetFunctionContext& Context, UEdGraphNode* Node)
 	{
 	}

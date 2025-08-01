@@ -9,13 +9,14 @@
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "ISourceControlModule.h"
 #include "FileHelpers.h"
 #include "LevelEditorActions.h"
 #include "EditorBuildUtils.h"
 #include "Logging/MessageLog.h"
 #include "LightingBuildOptions.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Layout/SExpandableArea.h"
@@ -61,7 +62,7 @@ public:
 					.IsChecked(Item->Selected ? ECheckBoxState::Checked : ECheckBoxState::Unchecked)
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("BuildAndSubmit.NormalFont"))
+						.Font(FAppStyle::GetFontStyle("BuildAndSubmit.NormalFont"))
 						.Text(FText::FromString(Item->Name))
 						.ToolTipText(FText::FromString(Item->Name))
 					]
@@ -96,7 +97,7 @@ public:
 				.Padding(5, 0)
 				[
 					SNew(STextBlock)
-					.Font(FEditorStyle::GetFontStyle("BuildAndSubmit.SmallFont"))
+					.Font(FAppStyle::GetFontStyle("BuildAndSubmit.SmallFont"))
 					.Text(StateText)
 				];
 		}
@@ -241,7 +242,7 @@ void SLevelEditorBuildAndSubmit::Construct( const FArguments& InArgs, const TSha
 					.OnCheckStateChanged(this, &SLevelEditorBuildAndSubmit::OnShowPackagesNotInSCBoxChanged)
 					[
 						SNew(STextBlock)
-						.Text(LOCTEXT("ShowPackagesButtonLabel", "Show Files not in Source Control"))
+						.Text(LOCTEXT("ShowPackagesButtonLabel", "Show Files not in Revision Control"))
 					]
 				]
 				+SVerticalBox::Slot()
@@ -252,7 +253,7 @@ void SLevelEditorBuildAndSubmit::Construct( const FArguments& InArgs, const TSha
 					.IsChecked(ECheckBoxState::Checked)
 					[
 						SNew(STextBlock)
-						.Text(LOCTEXT("AddFilesButtonLabel", "Add Files to Source Control if Necessary"))
+						.Text(LOCTEXT("AddFilesButtonLabel", "Add Files to Revision Control if Necessary"))
 					]
 				]
 			]			
@@ -298,6 +299,8 @@ void SLevelEditorBuildAndSubmit::OnEditorPackageModified(UPackage* Package)
 
 void SLevelEditorBuildAndSubmit::OnSourceControlStateChanged()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(SLevelEditorBuildAndSubmit::OnSourceControlStateChanged);
+
 	if (bIsExtraPackagesSectionExpanded)
 	{
 		UpdatePackagesList();

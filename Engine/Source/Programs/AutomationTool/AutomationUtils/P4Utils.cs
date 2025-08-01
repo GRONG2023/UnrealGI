@@ -1,4 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
+
+using EpicGames.Core;
+using EpicGames.Perforce;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -9,13 +12,23 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using System.Reflection;
 using System.Collections;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
+	/// <summary>
+	/// Declares that the command type requires P4Environment.
+	/// </summary>
 	public class RequireP4Attribute : Attribute
 	{
 	}
 
+	/// <summary>
+	/// Declares that the command type does not access Changelist or CodeChangelist from P4Environment.
+	/// </summary>
 	public class DoesNotNeedP4CLAttribute : Attribute
 	{
 	}
@@ -65,6 +78,8 @@ namespace AutomationTool
         Locked = 512,
         ModTime = 1024,
         RmDir = 2048,
+        NoAltSync = 4096,
+        AltSync = 8192,
     }
 
 	public class P4ClientInfo
@@ -208,6 +223,20 @@ namespace AutomationTool
 		public string DepotFile;
 		public string ClientFile;
 		public string Path;
+	}
+
+	public class P4HaveRecord
+	{
+		public string DepotFile;
+		public string ClientFile;
+		public int    Revision;
+
+		public P4HaveRecord(string DepotFile, string ClientFile, int Revision)
+		{
+			this.DepotFile = DepotFile;
+			this.ClientFile = ClientFile;
+			this.Revision = Revision;
+		}
 	}
 
 	public class P4Spec
@@ -939,11 +968,8 @@ namespace AutomationTool
 	{
 		static private P4Connection PerforceConnection;
 		static private P4Environment PerforceEnvironment;
+		static private IPerforceSettings PerforceSettings;
 
-		/// <summary>
-		/// BuildEnvironment to use for this buildcommand. This is initialized by InitBuildEnvironment. As soon
-		/// as the script execution in ExecuteBuild begins, the BuildEnv is set up and ready to use.
-		/// </summary>
 		static public P4Connection P4
 		{
 			get
@@ -956,10 +982,6 @@ namespace AutomationTool
 			}
 		}
 
-		/// <summary>
-		/// BuildEnvironment to use for this buildcommand. This is initialized by InitBuildEnvironment. As soon
-		/// as the script execution in ExecuteBuild begins, the BuildEnv is set up and ready to use.
-		/// </summary>
 		static public P4Environment P4Env
 		{
 			get
@@ -972,6 +994,18 @@ namespace AutomationTool
 			}
 		}
 
+		static public IPerforceSettings P4Settings
+		{
+			get
+			{
+				if (PerforceSettings == null)
+				{
+					throw new AutomationException("Attempt to use P4Settings before it was initialized or P4 support is disabled.");
+				}
+				return PerforceSettings;
+			}
+		}
+
 		/// <summary>
 		/// Initializes build environment. If the build command needs a specific env-var mapping or
 		/// has an extended BuildEnvironment, it must implement this method accordingly.
@@ -980,6 +1014,11 @@ namespace AutomationTool
 		{
 			// Temporary connection - will use only the currently set env vars to connect to P4
 			PerforceEnvironment = new P4Environment(CmdEnv);
+
+			PerforceSettings Settings = new PerforceSettings(PerforceEnvironment.ServerAndPort, PerforceEnvironment.User);
+			Settings.PreferNativeClient = true;
+			Settings.ClientName = PerforceEnvironment.Client;
+			PerforceSettings = Settings;
 		}
 
 		/// <summary>
@@ -1061,7 +1100,7 @@ namespace AutomationTool
 			// Init AllowSubmit
 			// If we do not specify on the commandline if submitting is allowed or not, this is 
 			// depending on whether we run locally or on a build machine.
-			LogVerbose("Initializing AllowSubmit.");
+			Logger.LogDebug("Initializing AllowSubmit.");
 			if (GlobalCommandLine.Submit || GlobalCommandLine.NoSubmit)
 			{
 				AllowSubmit = GlobalCommandLine.Submit;
@@ -1070,10 +1109,10 @@ namespace AutomationTool
 			{
 				AllowSubmit = Automation.IsBuildMachine;
 			}
-			LogVerbose("AllowSubmit={0}", AllowSubmit);
+			Logger.LogDebug("AllowSubmit={AllowSubmit}", AllowSubmit);
 
 			// Init P4Enabled
-			LogVerbose("Initializing P4Enabled.");
+			Logger.LogDebug("Initializing P4Enabled.");
 			if (Automation.IsBuildMachine)
 			{
 				P4Enabled = !GlobalCommandLine.NoP4;
@@ -1088,8 +1127,8 @@ namespace AutomationTool
 				P4Enabled = GlobalCommandLine.P4 || bRequireP4;
 				P4CLRequired = GlobalCommandLine.P4 || bRequireCL;
 			}
-			LogVerbose("P4Enabled={0}", P4Enabled);
-			LogVerbose("P4CLRequired={0}", P4CLRequired);
+			Logger.LogDebug("P4Enabled={P4Enabled}", P4Enabled);
+			Logger.LogDebug("P4CLRequired={P4CLRequired}", P4CLRequired);
 		}
 
 		/// <summary>
@@ -1112,7 +1151,7 @@ namespace AutomationTool
 					{
 						if(!GlobalCommandLine.P4)
 						{
-							LogInformation("Command {0} requires P4 functionality.", Command.Name);
+							Logger.LogInformation("Command {CommandName} requires P4 functionality.", Command.Name);
 						}
 						bRequireP4 = true;
 
@@ -1209,6 +1248,27 @@ namespace AutomationTool
 		/// <returns>Exit code</returns>
 		public IProcessResult P4(string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true, bool SpewIsVerbose = false)
 		{
+			return P4("", CommandLine, Input, AllowSpew, WithClient, SpewIsVerbose);
+		}
+
+		/// <summary>
+		/// Shortcut to Run but with P4.exe as the program name.
+		/// </summary>
+		/// <param name="GlobalOptions">Extra global options just for this command</param>
+		/// <param name="CommandLine">Command line</param>
+		/// <param name="Input">Stdin</param>
+		/// <param name="AllowSpew">true for spew</param>
+		/// <returns>Exit code</returns>
+		public IProcessResult P4(string ExtraGlobalOptions, string CommandLine, string Input, bool AllowSpew = true, bool WithClient = true, bool SpewIsVerbose = false)
+		{
+			CommandLine = CommandLine.Trim();
+
+			// we need the first token to be a command ("files") and not a global option ("-c foo")
+			if (CommandLine.StartsWith("-"))
+			{
+				throw new AutomationException("Fix your call to P4 to put global options into the GlobalOptions parameter. The first token should be a p4 command: {0}", CommandLine);
+			}
+
 			CommandUtils.ERunOptions RunOptions = AllowSpew ? CommandUtils.ERunOptions.AllowSpew : CommandUtils.ERunOptions.NoLoggingOfRunCommand;
 			if( SpewIsVerbose )
 			{
@@ -1217,7 +1277,41 @@ namespace AutomationTool
 
 			var SpewDelegate = AllowSpew ? null : new ProcessResult.SpewFilterCallbackType(NoSpewFilter);
 
-			return CommandUtils.Run(HostPlatform.Current.P4Exe, (WithClient ? GlobalOptions : GlobalOptionsWithoutClient) + CommandLine, Input, Options:RunOptions, SpewFilterCallback:SpewDelegate);
+			IProcessResult Result;
+			// if there's a star anywhere in the commandline, p4.exe, when parsing command line on Windows, will internally perform a find-files to expand the *,
+			// and Windows thinks a p4 path is a UNC path (//Depot/Stream/Foo/*/bar.txt). It has been seen that this can stall for for seconds (over 20
+			// seconds potentially). This can be seen with just "dir \\fake\server" on a Windows command prompt, and some machines will take forever
+			if (CommandLine.Contains("*"))
+			{
+				// we can bypass the problem by putting the params for the command into a file, and using the -x <paramsfile> optjon. So:
+				//   p4 -c clientspec files //Depot/Stream/Foo/*/bar.txt
+				// would be converted to this awkward format (with params BEFORE the command):
+				//   p4 -c clientspec -x tempfile.txt files
+				// where tempfile.txt contains:
+				//   //Depot/Stream/Foo/*/bar.txt
+
+				// pull the command out ("files" in the above case)
+				string CommandToken = CommandLine.Trim().Split(" ".ToCharArray())[0];
+
+				// make a temp file, and write the params, minus the command, to it
+				string ParamsFile = Path.Combine(Path.GetTempPath(), Path.GetTempFileName());
+				File.WriteAllText(ParamsFile, CommandLine.Substring(CommandToken.Length + 1));
+
+				// run with -x
+				string FinalCommandline = string.Format("{0} {1} -x \"{3}\" {2}", (WithClient ? GlobalOptions : GlobalOptionsWithoutClient), ExtraGlobalOptions, CommandToken, ParamsFile).Trim();
+				Result = CommandUtils.Run(HostPlatform.Current.P4Exe, FinalCommandline, Input, Options: RunOptions, SpewFilterCallback: SpewDelegate);
+
+				// delete the temp file
+				File.Delete(ParamsFile);
+			}
+			else
+			{
+				string FinalCommandline = string.Format("{0} {1} {2}", (WithClient ? GlobalOptions : GlobalOptionsWithoutClient), ExtraGlobalOptions, CommandLine);
+				Result = CommandUtils.Run(HostPlatform.Current.P4Exe, FinalCommandline, Input, Options: RunOptions, SpewFilterCallback: SpewDelegate);
+			}
+
+
+			return Result;
 		}
 
 		/// <summary>
@@ -1228,11 +1322,11 @@ namespace AutomationTool
 		/// <param name="Input">Stdin input.</param>
 		/// <param name="AllowSpew">Whether the command should spew.</param>
 		/// <returns>True if succeeded, otherwise false.</returns>
-        public bool P4Output(out string Output, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true)
+        public bool P4Output(out string Output, string ExtraGlobalOptions, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true)
 		{
 			Output = "";
 
-            var Result = P4(CommandLine, Input, AllowSpew, WithClient);
+            var Result = P4(ExtraGlobalOptions, CommandLine, Input, AllowSpew, WithClient);
 
 			Output = Result.Output;
 			return Result.ExitCode == 0;
@@ -1246,10 +1340,10 @@ namespace AutomationTool
 		/// <param name="Input">Stdin input.</param>
 		/// <param name="AllowSpew">Whether the command should spew.</param>
 		/// <returns>True if succeeded, otherwise false.</returns>
-        public bool P4Output(out string[] OutputLines, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true)
+        public bool P4Output(out string[] OutputLines, string ExtraGlobalOptions, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true)
 		{
 			string Output;
-			bool bResult = P4Output(out Output, CommandLine, Input, AllowSpew, WithClient);
+			bool bResult = P4Output(out Output, ExtraGlobalOptions, CommandLine, Input, AllowSpew, WithClient);
 
 			List<string> Lines = new List<string>();
 			for(int Idx = 0; Idx < Output.Length; )
@@ -1283,10 +1377,10 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline to pass to p4.</param>
 		/// <param name="Input">Stdin input.</param>
 		/// <param name="AllowSpew">Whether the command is allowed to spew.</param>
-        public void LogP4(string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true, bool SpewIsVerbose = false)
+        public void LogP4(string ExtraGlobalOptions, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true, bool SpewIsVerbose = false)
 		{
 			string Output;
-            if (!LogP4Output(out Output, CommandLine, Input, AllowSpew, WithClient, SpewIsVerbose:SpewIsVerbose))
+            if (!LogP4Output(out Output, ExtraGlobalOptions, CommandLine, Input, AllowSpew, WithClient, SpewIsVerbose:SpewIsVerbose))
 			{
 				throw new P4Exception("p4.exe {0} failed. {1}", CommandLine, Output);
 			}
@@ -1300,17 +1394,17 @@ namespace AutomationTool
 		/// <param name="Input">Stdin input.</param>
 		/// <param name="AllowSpew">Whether the command should spew.</param>
 		/// <returns>True if succeeded, otherwise false.</returns>
-        public bool LogP4Output(out string Output, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true, bool SpewIsVerbose = false)
+        public bool LogP4Output(out string Output, string ExtraGlobalOptions, string CommandLine, string Input = null, bool AllowSpew = true, bool WithClient = true, bool SpewIsVerbose = false)
 		{
 			Output = "";
 
 			if (String.IsNullOrEmpty(LogPath))
 			{
-				CommandUtils.LogError("P4Utils.SetupP4() must be called before issuing Peforce commands");
+				Logger.LogError("P4Utils.SetupP4() must be called before issuing Peforce commands");
 				return false;
 			}
 
-            var Result = P4(CommandLine, Input, AllowSpew, WithClient, SpewIsVerbose:SpewIsVerbose);
+            var Result = P4(ExtraGlobalOptions, CommandLine, Input, AllowSpew, WithClient, SpewIsVerbose:SpewIsVerbose);
 
 			CommandUtils.WriteToFile(LogPath, CommandLine + "\n");
 			CommandUtils.WriteToFile(LogPath, Result.Output);
@@ -1461,8 +1555,13 @@ namespace AutomationTool
 			string AuthenticationToken = null;
 
 			string Output;
-            string P4Passwd = InternalUtils.GetEnvironmentVariable("uebp_PASS", "", true) + '\n';
-            P4Output(out Output, "login -a -p", P4Passwd);
+            string P4Passwd = InternalUtils.GetEnvironmentVariable("uebp_PASS", "", true);
+			if (Automation.IsBuildMachine && string.IsNullOrEmpty(P4Passwd))
+			{
+				return AuthenticationToken;
+			}
+
+            P4Output(out Output, "", "login -a -p", P4Passwd + '\n');
 
 			// Validate output.
 			const string PasswordPromptString = "Enter password: \r\n";
@@ -1522,7 +1621,7 @@ namespace AutomationTool
             }
             if (Result == "")
             {
-				CommandUtils.LogWarning("Could not find email for P4 user {0}", User);
+				Logger.LogWarning("Could not find email for P4 user {User}", User);
             }
             UserToEmailCache.Add(User, Result);
             return Result;
@@ -1550,7 +1649,7 @@ namespace AutomationTool
                 // Change 1999345 on 2014/02/16 by buildmachine@BuildFarm_BUILD-23_buildmachine_++depot+UE4 'GUBP Node Shadow_LabelPromotabl'
 
                 string Output;
-                if (!LogP4Output(out Output, "changes " + CommandLine, null, AllowSpew, WithClient: WithClient))
+                if (!LogP4Output(out Output, "", "changes " + CommandLine, null, AllowSpew, WithClient: WithClient))
                 {
                     throw new AutomationException("P4 returned failure.");
                 }
@@ -1655,8 +1754,8 @@ namespace AutomationTool
             }
 			catch (Exception Ex)
             {
-				CommandUtils.LogWarning("Unable to get P4 changes with {0}", CommandLine);
-				CommandUtils.LogWarning(" Exception was {0}", LogUtils.FormatException(Ex));
+				Logger.LogWarning("Unable to get P4 changes with {CommandLine}", CommandLine);
+				Logger.LogWarning(" Exception was {Arg0}", LogUtils.FormatException(Ex));
                 return false;
             }
             ChangeRecords.Sort((A, B) => ChangeRecord.Compare(A, B));
@@ -1767,7 +1866,7 @@ namespace AutomationTool
 					CommandLine += " " + Changelist.ToString();
 				}
 
-                if (!LogP4Output(out Output, "describe " + CommandLine, null, AllowSpew))
+                if (!LogP4Output(out Output, "", "describe " + CommandLine, null, AllowSpew))
                 {
                     return false;
                 }
@@ -1934,17 +2033,18 @@ namespace AutomationTool
 		{
 			string SyncCommandLine = "sync " + CommandLine;
 
+			string ExtraGlobalOptions = "";
 			if (MaxWait > 0)
 			{
-				SyncCommandLine = string.Format("-vnet.maxwait={0} {1}", MaxWait, SyncCommandLine);
+				ExtraGlobalOptions = string.Format("-vnet.maxwait={0} {1}", MaxWait, ExtraGlobalOptions);
 			}
 
 			if (Retries > 0)
 			{
-				SyncCommandLine = string.Format("-r{0} {1}", Retries, SyncCommandLine);
+				ExtraGlobalOptions = string.Format("-r{0} {1}", Retries, ExtraGlobalOptions);
 			}
 
-			LogP4(SyncCommandLine, null, AllowSpew, SpewIsVerbose:SpewIsVerbose);
+			LogP4(ExtraGlobalOptions, SyncCommandLine, null, AllowSpew, SpewIsVerbose:SpewIsVerbose);
 		}
 
 		/// <summary>
@@ -1960,7 +2060,7 @@ namespace AutomationTool
 			try
 			{
 				string Output;
-				LogP4Output(out Output, "sync -n " + CommandLine, null, AllowSpew, SpewIsVerbose: SpewIsVerbose);
+				LogP4Output(out Output, "", "sync -n " + CommandLine, null, AllowSpew, SpewIsVerbose: SpewIsVerbose);
 
 				string UpToDateOutput = String.Format("{0} - file(s) up-to-date.\r\n", CommandLine);
 				if (Output == UpToDateOutput)
@@ -1981,8 +2081,8 @@ namespace AutomationTool
 			}
 			catch (Exception Ex)
 			{
-				CommandUtils.LogWarning("Unable to preview sync P4 changes with {0}", CommandLine);
-				CommandUtils.LogWarning(" Exception was {0}", LogUtils.FormatException(Ex));
+				Logger.LogWarning("Unable to preview sync P4 changes with {CommandLine}", CommandLine);
+				Logger.LogWarning(" Exception was {Arg0}", LogUtils.FormatException(Ex));
 				return false;
 			}
 
@@ -1997,33 +2097,96 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Unshelve(int FromCL, int ToCL, string CommandLine = "", bool SpewIsVerbose = false)
 		{
-			LogP4("unshelve " + String.Format("-s {0} ", FromCL) + String.Format("-c {0} ", ToCL) + CommandLine, SpewIsVerbose: SpewIsVerbose);
+			LogP4("", "unshelve " + String.Format("-s {0} ", FromCL) + String.Format("-c {0} ", ToCL) + CommandLine, SpewIsVerbose: SpewIsVerbose);
 		}
 
-        /// <summary>
-        /// Invokes p4 unshelve command.
-        /// </summary>
-        /// <param name="FromCL">Changelist to unshelve.</param>
-        /// <param name="ToCL">Changelist where the checked out files should be added.</param>
-        /// <param name="CommandLine">Commandline for the command.</param>
-        public void Shelve(int FromCL, string CommandLine = "", bool AllowSpew = true)
-        {
-            LogP4("shelve " + String.Format("-r -c {0} ", FromCL) + CommandLine, AllowSpew: AllowSpew);
-        }
+		/// <summary>
+		/// Invokes p4 shelve command.
+		/// </summary>
+		/// <param name="FromCL">Changelist to unshelve.</param>
+		/// <param name="ToCL">Changelist where the checked out files should be added.</param>
+		/// <param name="CommandLine">Commandline for the command.</param>
+		public void Shelve(int FromCL, string CommandLine = "", bool AllowSpew = true)
+		{
+			LogP4("", "shelve " + String.Format("-r -c {0} ", FromCL) + CommandLine, AllowSpew: AllowSpew);
+		}
 
 		/// <summary>
-        /// Deletes shelved files from a changelist
+		/// Invokes p4 shelve command, without reverting existing shelf first (overwrites any existing shelved file)
+		/// This means that any files that are already shelved, but not in the FromCL being shelved, they will still exist
 		/// </summary>
-        /// <param name="FromCL">Changelist to unshelve.</param>
-        /// <param name="CommandLine">Commandline for the command.</param>
-        public void DeleteShelvedFiles(int FromCL, bool AllowSpew = true)
+		/// <param name="FromCL">Changelist to unshelve.</param>
+		/// <param name="ToCL">Changelist where the checked out files should be added.</param>
+		/// <param name="CommandLine">Commandline for the command.</param>
+		public void ShelveNoRevert(int FromCL, string CommandLine = "", bool AllowSpew = true)
+		{
+			LogP4("", "shelve " + String.Format("-f -c {0} ", FromCL) + CommandLine, AllowSpew: AllowSpew);
+		}
+
+		/// <summary>
+		/// Deletes shelved files from a changelist
+		/// </summary>
+		/// <param name="FromCL">Changelist to unshelve.</param>
+		/// <param name="CommandLine">Commandline for the command.</param>
+		public void DeleteShelvedFiles(int FromCL, bool AllowSpew = true)
         {
 			string Output;
-            if (!LogP4Output(out Output, String.Format("shelve -d -c {0}", FromCL), AllowSpew: AllowSpew) && !Output.StartsWith("No shelved files in changelist to delete."))
+            if (!LogP4Output(out Output, "", String.Format("shelve -d -c {0}", FromCL), AllowSpew: AllowSpew) && !Output.StartsWith("No shelved files in changelist to delete."))
 			{
 				throw new P4Exception("Couldn't unshelve files: {0}", Output);
 			}
         }
+
+		/// <summary>
+		/// Invoke a command on a list of files, breaking up into multiple commands so as not to blow the max commandline length
+		/// </summary>
+		/// <param name="Comand">The command, like "p4 edit -c 1000"</param>
+		/// <param name="Files"></param>
+		/// <param name="AllowSpew"></param>
+		public  void BatchedCommand(string Command, List<string> Files, bool AllowSpew = true)
+		{
+			// using the limit of ProcessStartInfo.Arguments
+			const int MaxCommandLineLength = 32699;
+
+			StringBuilder CommandLine = new StringBuilder();
+			for (int Idx = 0; Idx < Files.Count; Idx++)
+			{
+				if (CommandLine.Length + Files[Idx].Length + 3 > MaxCommandLineLength)
+				{
+					LogP4("", Command + CommandLine.ToString(), AllowSpew:AllowSpew);
+					CommandLine.Clear();
+				}
+				CommandLine.AppendFormat(" \"{0}\"", Files[Idx]);
+			}
+			if (CommandLine.Length > 0)
+			{
+				LogP4("", Command + CommandLine.ToString(), AllowSpew: AllowSpew);
+			}
+		}
+
+
+		/// <summary>
+		/// Invokes p4 reopen command.
+		/// </summary>
+		/// <param name="CL">Changelist where the checked out files should be moved to.</param>
+		/// <param name="CommandLine">Commandline for the command</param>
+		public void Reopen(int CL, string CommandLine, bool AllowSpew = true)
+		{
+			LogP4("", $"reopen -c {CL} {CommandLine}", AllowSpew: AllowSpew);
+		}
+
+		/// <summary>
+		/// Invokes p4 reopen command with a list of files. IMPORTANT: because of commandline limits
+		/// the file list will be broken up across multiple commands. This will fail if a "move" operation
+		/// (that is made up of two files) is split between commandlines - they must be moved in the
+		/// same operation
+		/// </summary>
+		/// <param name="CL">Changelist where the checked out files should be moved to.</param>
+		/// <param name="Files">List of files to be moved</param>
+		public void Reopen(int CL, List<string> Files, bool AllowSpew = true)
+		{
+			BatchedCommand($"reopen -c {CL}", Files, AllowSpew: AllowSpew);
+		}
 
 		/// <summary>
 		/// Invokes p4 edit command.
@@ -2032,7 +2195,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Edit(int CL, string CommandLine, bool AllowSpew = true)
 		{
-			LogP4("edit " + String.Format("-c {0} ", CL) + CommandLine, AllowSpew: AllowSpew);
+			LogP4("", "edit " + String.Format("-c {0} ", CL) + CommandLine, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2042,26 +2205,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Edit(int CL, List<string> Files, bool AllowSpew = true)
 		{
-			const int MaxCommandLineLength = 1024;
-
-			StringBuilder CommandLine = new StringBuilder();
-			for(int Idx = 0; Idx < Files.Count; Idx++)
-			{
-				if(CommandLine.Length + Files[Idx].Length + 3 > MaxCommandLineLength)
-				{
-					LogP4(String.Format("edit -c {0} {1}", CL, CommandLine.ToString()), AllowSpew: AllowSpew);
-					CommandLine.Clear();
-				}
-				if(CommandLine.Length > 0)
-				{
-					CommandLine.Append(" ");
-				}
-				CommandLine.AppendFormat("\"{0}\"", Files[Idx]);
-			}
-			if(CommandLine.Length > 0)
-			{
-				LogP4(String.Format("edit -c {0} {1}", CL, CommandLine.ToString()), AllowSpew: AllowSpew);
-			}
+			BatchedCommand($"edit -c {CL}", Files, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2074,7 +2218,7 @@ namespace AutomationTool
 			try
 			{
 				string Output;
-				if (!LogP4Output(out Output, "edit " + String.Format("-c {0} ", CL) + CommandLine, null, true))
+				if (!LogP4Output(out Output, "", "edit " + String.Format("-c {0} ", CL) + CommandLine, null, true))
 				{
 					return false;
 				}
@@ -2097,7 +2241,17 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Add(int CL, string CommandLine)
 		{
-			LogP4("add " + String.Format("-c {0} ", CL) + CommandLine);
+			LogP4("", "add " + String.Format("-c {0} ", CL) + CommandLine);
+		}
+
+		/// <summary>
+		/// Invokes p4 add command with a list of files.
+		/// </summary>
+		/// <param name="CL">Changelist where the checked out files should be added.</param>
+		/// <param name="Files">The list of files to add.</param>
+		public void Add(int CL, List<string> Files, bool AllowSpew = true)
+		{
+			BatchedCommand($"add -c {CL}", Files, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2107,7 +2261,17 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Delete(int CL, string CommandLine)
 		{
-			LogP4("delete " + String.Format("-c {0} ", CL) + CommandLine);
+			LogP4("", "delete " + String.Format("-c {0} ", CL) + CommandLine);
+		}
+
+		/// <summary>
+		/// Invokes p4 delete command with a list of files.
+		/// </summary>
+		/// <param name="CL">Changelist where the checked out files should be added.</param>
+		/// <param name="Files">List of files to be deleted.</param>
+		public void Delete(int CL, List<string> Files, bool AllowSpew = true)
+		{
+			BatchedCommand($"delete -c {CL}", Files, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2117,7 +2281,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Reconcile(int CL, string CommandLine, bool AllowSpew = true)
 		{
-			LogP4("reconcile " + String.Format("-c {0} -ead -f ", CL) + CommandLine, AllowSpew: AllowSpew);
+			LogP4("", "reconcile " + String.Format("-c {0} -ead -f ", CL) + CommandLine, AllowSpew: AllowSpew);
 		}
 
         /// <summary>
@@ -2127,7 +2291,7 @@ namespace AutomationTool
         /// <param name="CommandLine">Commandline for the command.</param>
         public void ReconcilePreview(string CommandLine)
         {
-            LogP4("reconcile " + String.Format("-ead -n ") + CommandLine);
+            LogP4("", "reconcile " + String.Format("-ead -n ") + CommandLine);
         }
 
 		/// <summary>
@@ -2138,7 +2302,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void ReconcileNoDeletes(int CL, string CommandLine, bool AllowSpew = true)
 		{
-			LogP4("reconcile " + String.Format("-c {0} -ea ", CL) + CommandLine, AllowSpew: AllowSpew);
+			LogP4("", "reconcile " + String.Format("-c {0} -ea ", CL) + CommandLine, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2149,7 +2313,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Resolve(int CL, string CommandLine)
 		{
-			LogP4("resolve -ay " + String.Format("-c {0} ", CL) + CommandLine);
+			LogP4("", "resolve -ay " + String.Format("-c {0} ", CL) + CommandLine);
 		}
 
 		/// <summary>
@@ -2158,7 +2322,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Revert(string CommandLine, bool AllowSpew = true)
 		{
-			LogP4("revert " + CommandLine, AllowSpew: AllowSpew);
+			LogP4("", "revert " + CommandLine, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2168,7 +2332,7 @@ namespace AutomationTool
 		/// <param name="CommandLine">Commandline for the command.</param>
 		public void Revert(int CL, string CommandLine = "", bool AllowSpew = true)
 		{
-			LogP4("revert " + String.Format("-c {0} ", CL) + CommandLine, AllowSpew: AllowSpew);
+			LogP4("", "revert " + String.Format("-c {0} ", CL) + CommandLine, AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2178,7 +2342,7 @@ namespace AutomationTool
 		public void RevertUnchanged(int CL)
 		{
 			// caution this is a really bad idea if you hope to force submit!!!
-			LogP4("revert -a " + String.Format("-c {0} ", CL));
+			LogP4("", "revert -a " + String.Format("-c {0} ", CL));
 		}
 
 		/// <summary>
@@ -2187,7 +2351,7 @@ namespace AutomationTool
 		/// <param name="CL">Changelist to revert.</param>
 		public void RevertAll(int CL, bool SpewIsVerbose = false)
 		{
-			LogP4("revert " + String.Format("-c {0} //...", CL), SpewIsVerbose: SpewIsVerbose);
+			LogP4("", "revert " + String.Format("-c {0} //...", CL), SpewIsVerbose: SpewIsVerbose);
 		}
 
 		/// <summary>
@@ -2233,19 +2397,19 @@ namespace AutomationTool
                 bool isClPending = false;
                 if (ChangeFiles(CL, out isClPending, false).Count == 0)
                 {
-					CommandUtils.LogInformation("No edits left to commit after brutal submit resolve. Assuming another build committed same changes already and exiting as success.");
+					Logger.LogInformation("No edits left to commit after brutal submit resolve. Assuming another build committed same changes already and exiting as success.");
                     DeleteChange(CL);
                     // No changes to submit, no need to retry.
                     return;
                 }
 				string CmdOutput;
-				if (!LogP4Output(out CmdOutput, String.Format("submit -c {0} -f submitunchanged", CL)))
+				if (!LogP4Output(out CmdOutput, "", String.Format("submit -c {0} -f submitunchanged", CL)))
 				{
 					if (!Force)
 					{
 						throw new P4Exception("Change {0} failed to submit.\n{1}", CL, CmdOutput);
 					}
-					CommandUtils.LogInformation("**** P4 Returned\n{0}\n*******", CmdOutput);
+					Logger.LogInformation("**** P4 Returned\n{CmdOutput}\n*******", CmdOutput);
 
 					LastCmdOutput = CmdOutput;
 					bool DidSomething = false;
@@ -2308,7 +2472,7 @@ namespace AutomationTool
                                 {
                                     continue;
                                 }
-								CommandUtils.LogInformation("Brutal 'resolve' on {0} to force submit.\n", File);
+								Logger.LogInformation("Brutal 'resolve' on {File} to force submit.\n", File);
 								Revert(CL, "-k " + CommandUtils.MakePathSafeToUseWithCommandLine(File));  // revert the file without overwriting the local one
 								Sync("-f -k " + CommandUtils.MakePathSafeToUseWithCommandLine(File + "#head"), false); // sync the file without overwriting local one
 								ReconcileNoDeletes(CL, CommandUtils.MakePathSafeToUseWithCommandLine(File));  // re-check out, if it changed, or add
@@ -2319,39 +2483,26 @@ namespace AutomationTool
                     }
 					if (!DidSomething)
 					{
-						CommandUtils.LogInformation("Change {0} failed to submit for reasons we do not recognize.\n{1}\nWaiting and retrying.", CL, CmdOutput);
+						Logger.LogInformation("Change {CL} failed to submit for reasons we do not recognize.\n{CmdOutput}\nWaiting and retrying.", CL, CmdOutput);
 					}
 					System.Threading.Thread.Sleep(30000);
 				}
 				else
 				{
 					LastCmdOutput = CmdOutput;
-					if (CmdOutput.Trim().EndsWith("submitted."))
-					{
-						if (CmdOutput.Trim().EndsWith(" and submitted."))
-						{
-							string EndStr = " and submitted.";
-							string ChangeStr = "renamed change ";
-							int Offset = CmdOutput.LastIndexOf(ChangeStr);
-							int EndOffset = CmdOutput.LastIndexOf(EndStr);
-							if (Offset >= 0 && Offset < EndOffset)
-							{
-								SubmittedCL = int.Parse(CmdOutput.Substring(Offset + ChangeStr.Length, EndOffset - Offset - ChangeStr.Length));
-							}
-						}
-						else
-						{
-							string EndStr = " submitted.";
-							string ChangeStr = "Change ";
-							int Offset = CmdOutput.LastIndexOf(ChangeStr);
-							int EndOffset = CmdOutput.LastIndexOf(EndStr);
-							if (Offset >= 0 && Offset < EndOffset)
-							{
-								SubmittedCL = int.Parse(CmdOutput.Substring(Offset + ChangeStr.Length, EndOffset - Offset - ChangeStr.Length));
-							}
-						}
 
-						CommandUtils.LogInformation("Submitted CL {0} which became CL {1}\n", CL, SubmittedCL);
+					Regex SubmitRegex = new Regex(@"Change \d+ renamed change (?<number>\d+) and submitted");
+					Match SubmitMatch = SubmitRegex.Match(CmdOutput);
+					if (!SubmitMatch.Success)
+					{
+						SubmitRegex = new Regex(@"Change (?<number>\d+) submitted");
+						SubmitMatch = SubmitRegex.Match(CmdOutput);
+					}
+
+					if (SubmitMatch.Success)
+					{
+						SubmittedCL = int.Parse(SubmitMatch.Groups["number"].Value);
+						Logger.LogInformation("Submitted CL {CL} which became CL {SubmittedCL}\n", CL, SubmittedCL);
 					}
 
 					if (SubmittedCL < CL)
@@ -2365,9 +2516,9 @@ namespace AutomationTool
 			}
 			if (RevertIfFail)
 			{
-				CommandUtils.LogError("Submit CL {0} failed, reverting files\n", CL);
+				Logger.LogError("Submit CL {CL} failed, reverting files\n", CL);
 				RevertAll(CL);
-				CommandUtils.LogError("Submit CL {0} failed, reverting files\n", CL);
+				Logger.LogError("Submit CL {CL} failed, reverting files\n", CL);
 			}
 			throw new P4Exception("Change {0} failed to submit after 48 retries??.\n{1}", CL, LastCmdOutput);
 		}
@@ -2395,9 +2546,9 @@ namespace AutomationTool
 			int CL = 0;
 			if(AllowSpew)
 			{
-				CommandUtils.LogInformation("Creating Change\n {0}\n", ChangeSpec);
+				Logger.LogInformation("Creating Change\n {ChangeSpec}\n", ChangeSpec);
 			}
-			if (LogP4Output(out CmdOutput, "change -i", Input: ChangeSpec, AllowSpew: AllowSpew))
+			if (LogP4Output(out CmdOutput, "", "change -i", Input: ChangeSpec, AllowSpew: AllowSpew))
 			{
 				string EndStr = " created.";
 				string ChangeStr = "Change ";
@@ -2414,7 +2565,7 @@ namespace AutomationTool
 			}
 			else if(AllowSpew)
 			{
-				CommandUtils.LogInformation("Returned CL {0}\n", CL);
+				Logger.LogInformation("Returned CL {CL}\n", CL);
 			}
 			return CL;
 		}
@@ -2424,32 +2575,49 @@ namespace AutomationTool
 		/// Updates a changelist with the given fields
 		/// </summary>
 		/// <param name="CL"></param>
-		/// <param name="NewOwner"></param>
+		/// <param name="NewClient"></param>
 		/// <param name="NewDescription"></param>
 		/// <param name="SpewIsVerbose"></param>
-		public void UpdateChange(int CL, string NewOwner, string NewDescription, bool SpewIsVerbose = false)
+		public void UpdateChange(int CL, string NewClient, string NewDescription, bool SpewIsVerbose = false)
+		{
+			UpdateChange(CL, null, NewClient, NewDescription, SpewIsVerbose);
+		}
+
+		/// <summary>
+		/// Updates a changelist with the given fields
+		/// </summary>
+		/// <param name="CL"></param>
+		/// <param name="NewUser"></param>
+		/// <param name="NewClient"></param>
+		/// <param name="NewDescription"></param>
+		/// <param name="SpewIsVerbose"></param>
+		public void UpdateChange(int CL, string NewUser, string NewClient, string NewDescription, bool SpewIsVerbose = false)
 		{
 			string CmdOutput;
-			if(!LogP4Output(out CmdOutput, String.Format("change -o {0}", CL), SpewIsVerbose: SpewIsVerbose))
+			if (!LogP4Output(out CmdOutput, "", String.Format("change -o {0}", CL), SpewIsVerbose: SpewIsVerbose))
 			{
 				throw new P4Exception("Couldn't describe changelist {0}", CL);
 			}
 
 			P4Spec Spec = P4Spec.FromString(CmdOutput);
-			if(NewOwner != null)
+			if (NewUser != null)
 			{
-				Spec.SetField("Client", NewOwner);
+				Spec.SetField("User", NewUser);
 			}
-			if(NewDescription != null)
+			if (NewClient != null)
+			{
+				Spec.SetField("Client", NewClient);
+			}			
+			if (NewDescription != null)
 			{
 				Spec.SetField("Description", NewDescription);
 			}
 
-			if(!LogP4Output(out CmdOutput, "change -i", Input: Spec.ToString(), SpewIsVerbose: SpewIsVerbose))
+			if (!LogP4Output(out CmdOutput, "", "change -i", Input: Spec.ToString(), SpewIsVerbose: SpewIsVerbose))
 			{
 				throw new P4Exception("Failed to update spec for changelist {0}", CL);
 			}
-			if(!CmdOutput.TrimEnd().EndsWith(String.Format("Change {0} updated.", CL)))
+			if (!CmdOutput.TrimEnd().EndsWith(String.Format("Change {0} updated.", CL)))
 			{
 				throw new P4Exception("Unexpected output from p4 change -i: {0}", CmdOutput);
 			}
@@ -2468,7 +2636,7 @@ namespace AutomationTool
 			}
 
 			string CmdOutput;
-			if (LogP4Output(out CmdOutput, String.Format("change -d {0}", CL), SpewIsVerbose: SpewIsVerbose, AllowSpew: AllowSpew))
+			if (LogP4Output(out CmdOutput, "", String.Format("change -d {0}", CL), SpewIsVerbose: SpewIsVerbose, AllowSpew: AllowSpew))
 			{
 				string EndStr = " deleted.";
 				string ChangeStr = "Change ";
@@ -2490,7 +2658,7 @@ namespace AutomationTool
 		public bool TryDeleteEmptyChange(int CL)
 		{
 			string CmdOutput;
-			if (LogP4Output(out CmdOutput, String.Format("change -d {0}", CL)))
+			if (LogP4Output(out CmdOutput, "", String.Format("change -d {0}", CL)))
 			{
 				string EndStr = " deleted.";
 				string ChangeStr = "Change ";
@@ -2513,7 +2681,7 @@ namespace AutomationTool
 		public string ChangeOutput(int CL, bool AllowSpew = true)
 		{
 			string CmdOutput;
-			if (LogP4Output(out CmdOutput, String.Format("change -o {0}", CL), AllowSpew: AllowSpew))
+			if (LogP4Output(out CmdOutput, "", String.Format("change -o {0}", CL), AllowSpew: AllowSpew))
 			{
 				return CmdOutput;
 			}
@@ -2538,7 +2706,10 @@ namespace AutomationTool
 				int EndOffset = CmdOutput.LastIndexOf(EndStr);
 				if (Offset == 0 && Offset < EndOffset)
 				{
-					CommandUtils.LogInformation("Change {0} does not exist", CL);
+					if (AllowSpew)
+					{
+						Logger.LogInformation("Change {CL} does not exist", CL);
+					}
 					return false;
 				}
 
@@ -2547,16 +2718,19 @@ namespace AutomationTool
 
 				if (StatusOffset < 1)
 				{
-					CommandUtils.LogError("Change {0} could not be parsed\n{1}", CL, CmdOutput);
+					Logger.LogError("Change {CL} could not be parsed\n{CmdOutput}", CL, CmdOutput);
 					return false;
 				}
 
 				string Status = CmdOutput.Substring(StatusOffset + StatusStr.Length).TrimStart().Split('\n')[0].TrimEnd();
-				CommandUtils.LogInformation("Change {0} exists ({1})", CL, Status);
+				if (AllowSpew)
+				{
+					Logger.LogInformation("Change {CL} exists ({Status})", CL, Status);
+				}
 				Pending = (Status == "pending");
 				return true;
 			}
-			CommandUtils.LogError("Change exists failed {0} no output?", CL, CmdOutput);
+			Logger.LogError("Change exists failed {CL} no output?", CL);
 			return false;
 		}
 
@@ -2623,7 +2797,7 @@ namespace AutomationTool
         public string OpenedOutput()
         {
             string CmdOutput;
-            if (LogP4Output(out CmdOutput, "opened"))
+            if (LogP4Output(out CmdOutput, "", "opened"))
             {
                 return CmdOutput;
             }
@@ -2639,9 +2813,9 @@ namespace AutomationTool
 
 			// NOTE: We don't throw exceptions when trying to delete a label
 			string Output;
-			if (!LogP4Output(out Output, CommandLine, null, AllowSpew))
+			if (!LogP4Output(out Output, "", CommandLine, null, AllowSpew))
 			{
-				CommandUtils.LogInformation("Couldn't delete label '{0}'.  It may not have existed in the first place.", LabelName);
+				Logger.LogInformation("Couldn't delete label '{LabelName}'.  It may not have existed in the first place.", LabelName);
 			}
 		}
 
@@ -2672,8 +2846,8 @@ namespace AutomationTool
 			LabelSpec += "View: \n";
 			LabelSpec += " " + View;
 
-			CommandUtils.LogInformation("Creating Label\n {0}\n", LabelSpec);
-			LogP4("label -i", Input: LabelSpec);
+			Logger.LogInformation("Creating Label\n {LabelSpec}\n", LabelSpec);
+			LogP4("", "label -i", Input: LabelSpec);
 		}
 
 		/// <summary>
@@ -2685,7 +2859,7 @@ namespace AutomationTool
 		/// <param name="AllowSpew">Whether the command is allowed to spew.</param>
 		public void Tag(string LabelName, string FilePath, bool AllowSpew = true)
 		{
-			LogP4("tag -l " + LabelName + " " + FilePath, null, AllowSpew);
+			LogP4("", "tag -l " + LabelName + " " + FilePath, null, AllowSpew);
 		}
 
 		/// <summary>
@@ -2702,11 +2876,11 @@ namespace AutomationTool
 			}
 			if (FileToLabel == "")
 			{
-				LogP4("labelsync " + Quiet + "-l " + LabelName);
+				LogP4("", "labelsync " + Quiet + "-l " + LabelName);
 			}
 			else
 			{
-				LogP4("labelsync " + Quiet + "-l" + LabelName + " " + FileToLabel);
+				LogP4("", "labelsync " + Quiet + "-l" + LabelName + " " + FileToLabel);
 			}
 		}
 
@@ -2723,7 +2897,7 @@ namespace AutomationTool
 			{
 				Quiet = "-q ";
 			}
-			LogP4("labelsync -a " + Quiet + "-l " + ToLabelName + " //...@" + FromLabelName);
+			LogP4("", "labelsync -a " + Quiet + "-l " + ToLabelName + " //...@" + FromLabelName);
 		}
 
 		/// <summary>
@@ -2734,7 +2908,7 @@ namespace AutomationTool
 		public bool LabelExistsAndHasFiles(string Name)
 		{
 			string Output;
-			return LogP4Output(out Output, "files -m 1 //...@" + Name);
+			return LogP4Output(out Output, "", "files -m 1 //...@" + Name);
 		}
 
 		/// <summary>
@@ -2748,7 +2922,7 @@ namespace AutomationTool
 		{
 			string Output;
 			Description = "";
-			if (LogP4Output(out Output, "label -o " + Name, AllowSpew: AllowSpew))
+			if (LogP4Output(out Output, "", "label -o " + Name, AllowSpew: AllowSpew))
 			{
 				string Desc = "Description:";
 				int Start = Output.LastIndexOf(Desc);
@@ -2775,7 +2949,7 @@ namespace AutomationTool
 		public P4Spec ReadLabelSpec(string Name, bool AllowSpew = true)
 		{
 			string LabelSpec;
-			if(!LogP4Output(out LabelSpec, "label -o " + Name, AllowSpew: AllowSpew))
+			if(!LogP4Output(out LabelSpec, "", "label -o " + Name, AllowSpew: AllowSpew))
 			{
 				throw new P4Exception("Couldn't describe existing label '{0}', output was:\n", Name, LabelSpec);
 			}
@@ -2789,7 +2963,7 @@ namespace AutomationTool
 		/// <param name="AllowSpew">Whether to allow log spew</param>
 		public void UpdateLabelSpec(P4Spec Spec, bool AllowSpew = true)
 		{
-			LogP4("label -i", Input: Spec.ToString(), AllowSpew: AllowSpew);
+			LogP4("", "label -i", Input: Spec.ToString(), AllowSpew: AllowSpew);
 		}
 
 		/// <summary>
@@ -2801,7 +2975,7 @@ namespace AutomationTool
 		public void UpdateLabelDescription(string Name, string NewDescription, bool AllowSpew = true)
 		{
 			string LabelSpec;
-			if(!LogP4Output(out LabelSpec, "label -o " + Name, AllowSpew: AllowSpew))
+			if(!LogP4Output(out LabelSpec, "", "label -o " + Name, AllowSpew: AllowSpew))
 			{
 				throw new P4Exception("Couldn't describe existing label '{0}', output was:\n", Name, LabelSpec);
 			}
@@ -2828,7 +3002,7 @@ namespace AutomationTool
 			LabelSpec = String.Join("\n", Lines);
 
 			// Update the label
-			LogP4("label -i", Input: LabelSpec, AllowSpew: AllowSpew);
+			LogP4("", "label -i", Input: LabelSpec, AllowSpew: AllowSpew);
 		}
 
 		/* Pattern to parse P4 changes command output. */
@@ -2841,7 +3015,7 @@ namespace AutomationTool
 		public int GetLatestCLNumber()
 		{
 			string Output;
-			if (!LogP4Output(out Output, "changes -s submitted -m1") || string.IsNullOrWhiteSpace(Output))
+			if (!LogP4Output(out Output, "", "changes -s submitted -m1") || string.IsNullOrWhiteSpace(Output))
 			{
 				throw new InvalidOperationException("The depot should have at least one submitted changelist. Brand new depot?");
 			}
@@ -2870,7 +3044,7 @@ namespace AutomationTool
 			var LabelList = new List<P4Label>();
 
 			string Output;
-			if (P4Output(out Output, "labels -t " + (bCaseSensitive ? "-e" : "-E") + Filter, null, false))
+			if (P4Output(out Output, "", "labels -t " + (bCaseSensitive ? "-e" : "-E") + Filter, null, false))
 			{
 				foreach (Match LabelMatch in LabelsListOutputPattern.Matches(Output))
 				{
@@ -2892,7 +3066,7 @@ namespace AutomationTool
 		public bool ValidateLabelContent(string LabelName)
 		{
 			string Output;
-			if (P4Output(out Output, "files -m 1 @" + LabelName, null, false))
+			if (P4Output(out Output, "", "files -m 1 @" + LabelName, null, false))
 			{
 				if (Output.StartsWith("//depot"))
 				{
@@ -2916,11 +3090,11 @@ namespace AutomationTool
         public string DepotToLocalPath(string DepotFile, bool AllowSpew = true)
         {
 			//  P4 where outputs missing entries 
-			string Command = String.Format("-z tag fstat \"{0}\"", DepotFile);
+			string Command = String.Format("fstat \"{0}\"", DepotFile);
 
 			// Run the command.
 			string[] Lines;
-			if (!P4Output(out Lines, Command, AllowSpew: AllowSpew))
+			if (!P4Output(out Lines, "-z tag", Command, AllowSpew: AllowSpew))
 			{
 				throw new P4Exception("p4.exe {0} failed.", Command);
 			}
@@ -2951,7 +3125,7 @@ namespace AutomationTool
 			for(int Idx = 0; Idx < DepotFiles.Length; Idx += BatchSize)
 			{
 				// Build the argument list
-				StringBuilder Command = new StringBuilder("-z tag fstat ");
+				StringBuilder Command = new StringBuilder("fstat ");
 				for(int ArgIdx = Idx; ArgIdx < Idx + BatchSize && ArgIdx < DepotFiles.Length; ArgIdx++)
 				{
 					Command.AppendFormat(" {0}", CommandUtils.MakePathSafeToUseWithCommandLine(DepotFiles[ArgIdx]));
@@ -2959,7 +3133,7 @@ namespace AutomationTool
 
 				// Run the command.
 				string[] Output;
-				if (!P4Output(out Output, Command.ToString(), AllowSpew: AllowSpew))
+				if (!P4Output(out Output, "-z tag", Command.ToString(), AllowSpew: AllowSpew))
 				{
 					throw new P4Exception("p4.exe {0} failed.", Command);
 				}
@@ -3025,11 +3199,11 @@ namespace AutomationTool
 		public P4WhereRecord[] Where(string DepotFile, bool AllowSpew = true)
 		{
 			//  P4 where outputs missing entries 
-			string Command = String.Format("-z tag where \"{0}\"", DepotFile);
+			string Command = String.Format("where \"{0}\"", DepotFile);
 
 			// Run the command.
 			string Output;
-			if (!LogP4Output(out Output, Command, AllowSpew: AllowSpew))
+			if (!LogP4Output(out Output, "-z tag", Command, AllowSpew: AllowSpew))
 			{
 				throw new P4Exception("p4.exe {0} failed.", Command);
 			}
@@ -3093,10 +3267,10 @@ namespace AutomationTool
 		/// <returns>List of records describing the file's mapping. Usually just one, but may be more.</returns>
 		public bool FileExistsInDepot(string DepotFile, bool AllowSpew = true)
 		{
-			string CommandLine = String.Format("-z tag fstat {0}", CommandUtils.MakePathSafeToUseWithCommandLine(DepotFile));
+			string CommandLine = String.Format("fstat {0}", CommandUtils.MakePathSafeToUseWithCommandLine(DepotFile));
 
 			string Output;
-			if(!LogP4Output(out Output, CommandLine, AllowSpew: false) || !Output.Contains("headRev"))
+			if(!LogP4Output(out Output, "-z tag", CommandLine, AllowSpew: false) || !Output.Contains("headRev"))
 
 			{
 				return false;
@@ -3114,7 +3288,7 @@ namespace AutomationTool
 		{
 			string Output;
 			string Command = "fstat " + CommandUtils.MakePathSafeToUseWithCommandLine(Filename);
-			if (!LogP4Output(out Output, Command))
+			if (!LogP4Output(out Output, "", Command))
 			{
 				throw new P4Exception("p4.exe {0} failed.", Command);
 			}
@@ -3167,7 +3341,7 @@ namespace AutomationTool
 		/// <param name="Attributes">Attributes to set.</param>
 		public void ChangeFileType(string Filename, P4FileAttributes Attributes, string Changelist = null)
 		{
-			CommandUtils.LogLog("ChangeFileType({0}, {1}, {2})", Filename, Attributes, String.IsNullOrEmpty(Changelist) ? "null" : Changelist);
+			Logger.LogDebug("ChangeFileType({Filename}, {Attributes}, {Arg2})", Filename, Attributes, String.IsNullOrEmpty(Changelist) ? "null" : Changelist);
 
 			var Stat = FStat(Filename);
 			if (String.IsNullOrEmpty(Changelist))
@@ -3180,7 +3354,7 @@ namespace AutomationTool
 				var CmdLine = String.Format("{0} -c {1} -t {2} {3}",
 					(Stat.Action != P4Action.None) ? "reopen" : "open",
 					Changelist, FileAttributesToString(Attributes | Stat.Attributes), CommandUtils.MakePathSafeToUseWithCommandLine(Filename));
-				LogP4(CmdLine);
+				LogP4("", CmdLine);
 			}
 		}
 
@@ -3275,10 +3449,10 @@ namespace AutomationTool
 		{
 			if(!Quiet)
 			{
-				CommandUtils.LogLog("Checking if client {0} exists", ClientName);
+				Logger.LogDebug("Checking if client {ClientName} exists", ClientName);
 			}
 
-            var P4Result = P4(String.Format("-c {0} where //...", ClientName), AllowSpew: false, WithClient: false);
+            var P4Result = P4(String.Format("-c {0}", ClientName), "where //...", Input: null, AllowSpew: false, WithClient: false);
             return P4Result.Output.IndexOf("unknown - use 'client' command", StringComparison.InvariantCultureIgnoreCase) < 0 && P4Result.Output.IndexOf("doesn't exist", StringComparison.InvariantCultureIgnoreCase) < 0;
 		}
 
@@ -3291,7 +3465,7 @@ namespace AutomationTool
 		{
 			if(!Quiet)
 			{
-				CommandUtils.LogLog("Getting info for client {0}", ClientName);
+				Logger.LogDebug("Getting info for client {ClientName}", ClientName);
 			}
 			if (!DoesClientExist(ClientName, Quiet))
 			{
@@ -3390,12 +3564,20 @@ namespace AutomationTool
 		/// </summary>
 		/// <param name="UserName"></param>
 		/// <returns>List of clients owned by the user.</returns>
-		public P4ClientInfo[] GetClientsForUser(string UserName, string PathUnderClientRoot = null)
+		public P4ClientInfo[] GetClientsForUser(string UserName, string PathUnderClientRoot = null, string AllowedStream = null)
 		{
 			var ClientList = new List<P4ClientInfo>();
 
 			// Get all clients for this user
-            var P4Result = P4(String.Format("clients -u {0}", UserName), AllowSpew: false, WithClient: false);
+			string P4Command = String.Format("clients -u {0}", UserName);
+
+			// filter by Stream if desired
+			if (AllowedStream != null)
+			{
+				P4Command += " -S " + AllowedStream;
+			}
+
+			var P4Result = P4(P4Command, AllowSpew: false, WithClient: false);
 			if (P4Result.ExitCode != 0)
 			{
 				throw new AutomationException("p4 clients -u {0} failed.", UserName);
@@ -3455,7 +3637,7 @@ namespace AutomationTool
 		/// <param name="Force">Forces the operation (-f)</param>
 		public void DeleteClient(string Name, bool Force = false, bool AllowSpew = true)
         {
-            LogP4(String.Format("client -d {0} {1}", (Force ? "-f" : ""), Name), WithClient: false, AllowSpew: AllowSpew);
+            LogP4("", String.Format("client -d {0} {1}", (Force ? "-f" : ""), Name), WithClient: false, AllowSpew: AllowSpew);
         }
 
         /// <summary>
@@ -3469,8 +3651,11 @@ namespace AutomationTool
             SpecInput += "Owner: " + ClientSpec.Owner + Environment.NewLine;
             SpecInput += "Host: " + ClientSpec.Host + Environment.NewLine;
             SpecInput += "Root: " + ClientSpec.RootPath + Environment.NewLine;
-            SpecInput += "Options: " + ClientSpec.Options.ToString().ToLowerInvariant().Replace(",", "") + Environment.NewLine;
-            SpecInput += "SubmitOptions: " + ClientSpec.SubmitOptions.ToString().ToLowerInvariant().Replace(", ", "+") + Environment.NewLine;
+			if (ClientSpec.Options != P4ClientOption.None)
+			{
+				SpecInput += "Options: " + ClientSpec.Options.ToString().ToLowerInvariant().Replace(",", "") + Environment.NewLine;
+			}
+			SpecInput += "SubmitOptions: " + ClientSpec.SubmitOptions.ToString().ToLowerInvariant().Replace(", ", "+") + Environment.NewLine;
             SpecInput += "LineEnd: " + ClientSpec.LineEnd.ToString().ToLowerInvariant() + Environment.NewLine;
 			if(ClientSpec.Stream != null)
 			{
@@ -3484,8 +3669,8 @@ namespace AutomationTool
 					SpecInput += "\t" + Mapping.Key + " //" + ClientSpec.Name + Mapping.Value + Environment.NewLine;
 				}
 			}
-			if (AllowSpew) CommandUtils.LogLog(SpecInput);
-            LogP4("client -i", SpecInput, AllowSpew: AllowSpew, WithClient: false);
+			Logger.LogDebug("{Text}", SpecInput);
+            LogP4("", "client -i", SpecInput, AllowSpew: AllowSpew, WithClient: false);
             return ClientSpec;
         }
 
@@ -3516,7 +3701,33 @@ namespace AutomationTool
 		}
 
 		/// <summary>
-		/// Lists files of the specified directory non-recursively.
+		/// Takes P4 output from files or opened and returns a dictionary of paths/actions
+		/// </summary>
+		/// <param name="P4Output"></param>
+		/// <returns></returns>
+		protected Dictionary<string,string> MapFileOutputToActions(string P4Output)
+		{
+			Dictionary<string, string> Results = new Dictionary<string, string>();
+
+			string[] Lines = P4Output.Split(new string[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
+			// <path>#<have> - <action> change 16479539 (text)
+			Regex OutputSplitter = new Regex(@"(?<filename>.+)#(?<have>\d+|none) \- (?<action>[a-zA-Z/]+) .+");
+			foreach (string Line in Lines)
+			{
+				if (!Line.Contains("no such file") && OutputSplitter.IsMatch(Line))
+				{
+					Match RegexMatch = OutputSplitter.Match(Line);
+					string Filename = RegexMatch.Groups["filename"].Value;
+					string Action = RegexMatch.Groups["action"].Value;
+					Results.Add(Filename, Action);
+				}
+			}
+
+			return Results;
+		}
+
+		/// <summary>
+		/// Run 'p4 files [cmdline]'and return a list of the files in the changelist (files being deleted are excluded)
 		/// </summary>
 		/// <param name="CommandLine"></param>
 		/// <returns>List of files in the specified directory.</returns>
@@ -3530,19 +3741,41 @@ namespace AutomationTool
 				throw new AutomationException("{0} failed.", FilesCmdLine);
 			}
 			List<string> Result = new List<string>();
-			string[] Lines = P4Result.Output.Split(new string[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries);
-			Regex OutputSplitter = new Regex(@"(?<filename>.+)#\d+ \- (?<action>[a-zA-Z/]+) .+");
-			foreach (string Line in Lines)
+			Dictionary<string, string> FileActions = MapFileOutputToActions(P4Result.Output);
+
+			foreach (var KV in FileActions)
 			{
-				if (!Line.Contains("no such file") && OutputSplitter.IsMatch(Line))
+				if (!DeleteActions.Contains(KV.Value))
 				{
-					Match RegexMatch = OutputSplitter.Match(Line);
-					string Filename = RegexMatch.Groups["filename"].Value;
-					string Action = RegexMatch.Groups["action"].Value;
-					if (!DeleteActions.Contains(Action))
-					{
-						Result.Add(Filename);
-					}
+					Result.Add(KV.Key);
+				}
+			}
+			return Result;
+		}
+
+		/// <summary>
+		/// Run 'p4 opened [cmdline]'and return a list of the files in the changelist (files being deleted are excluded)
+		/// </summary>
+		/// <param name="CommandLine"></param>
+		/// <returns>List of files in the specified directory.</returns>
+		public List<string> Opened(string CommandLine)
+		{
+			List<string> DeleteActions = new List<string> { "delete", "move/delete", "archive", "purge" };
+			string FilesCmdLine = String.Format("opened {0}", CommandLine);
+			IProcessResult P4Result = P4(FilesCmdLine, AllowSpew: false);
+			if (P4Result.ExitCode != 0)
+			{
+				throw new AutomationException("{0} failed.", FilesCmdLine);
+			}
+
+			List<string> Result = new List<string>();
+			Dictionary<string, string> FileActions = MapFileOutputToActions(P4Result.Output);
+
+			foreach (var KV in FileActions)
+			{
+				if (!DeleteActions.Contains(KV.Value))
+				{
+					Result.Add(KV.Key);
 				}
 			}
 			return Result;
@@ -3556,7 +3789,7 @@ namespace AutomationTool
 		public string Print(string DepotPath, bool AllowSpew = true)
 		{
 			string Output;
-			if(!P4Output(out Output, "print -q " + DepotPath, AllowSpew: AllowSpew, WithClient: false))
+			if(!P4Output(out Output, "", "print -q " + DepotPath, AllowSpew: AllowSpew, WithClient: false))
 			{
 				throw new AutomationException("p4 print {0} failed", DepotPath);
 			}
@@ -3576,7 +3809,7 @@ namespace AutomationTool
 		public void PrintToFile(string DepotPath, string FileName, bool AllowSpew = true)
 		{
 			string Output;
-			if(!P4Output(out Output, "print -q -o \"" + FileName + "\" " + DepotPath, AllowSpew: AllowSpew, WithClient: false))
+			if(!P4Output(out Output, "", "print -q -o \"" + FileName + "\" " + DepotPath, AllowSpew: AllowSpew, WithClient: false))
 			{
 				throw new AutomationException("p4 print {0} failed{1}{2}", DepotPath, Environment.NewLine, Output);
 			}
@@ -3595,7 +3828,7 @@ namespace AutomationTool
 		public List<int> StreamInterchanges(string StreamName, bool bReverse)
 		{
 			string Output;
-			if(!P4Output(out Output, String.Format("interchanges {0}-S {1} -F", bReverse? "-r " : "", StreamName), Input:null, AllowSpew:false))
+			if(!P4Output(out Output, "", String.Format("interchanges {0}-S {1} -F", bReverse? "-r " : "", StreamName), Input:null, AllowSpew:false))
 			{
 				throw new AutomationException("Couldn't get unintegrated stream changes from {0}", StreamName);
 			}
@@ -3805,7 +4038,7 @@ namespace AutomationTool
 		/// <summary>
 		/// Enumerates all streams in a depot
 		/// </summary>
-		/// <param name="StreamPath">The path for streams to enumerate (eg. "//UE4/...")</param>
+		/// <param name="StreamPath">The path for streams to enumerate (eg. "//UE5/...")</param>
 		/// <returns>List of streams matching the given criteria</returns>
 		public List<P4StreamRecord> Streams(string StreamPath)
 		{
@@ -3815,7 +4048,7 @@ namespace AutomationTool
 		/// <summary>
 		/// Enumerates all streams in a depot
 		/// </summary>
-		/// <param name="StreamPath">The path for streams to enumerate (eg. "//UE4/...")</param>
+		/// <param name="StreamPath">The path for streams to enumerate (eg. "//UE5/...")</param>
 		/// <param name="MaxResults">Maximum number of results to return</param>
 		/// <param name="Filter">Additional filter to be applied to the results</param>
 		/// <param name="bUnloaded">Whether to enumerate unloaded workspaces</param>
@@ -3871,6 +4104,58 @@ namespace AutomationTool
 				Records.Add(new P4StreamRecord(Stream, Update, Access, Owner, Name, Parent, Type, Description, Options, FirmerThanParent, ChangeFlowsToParent, ChangeFlowsFromParent, BaseParent));
 			}
 			return Records;
+		}
+
+		static readonly Regex HaveFilesOutputPattern = new Regex(@"(?<depot>.+)#(?<revision>\d+) - (?<client>.+)", RegexOptions.Compiled);
+
+		/// <summary>
+		/// Get a information about synced files (p4 have) matching the given pattern.
+		/// The information for each file includes the local path, depot path and the synced revision number.
+		/// </summary>
+		/// <param name="Pattern">Local or depot path e.g. .../Source/...</param>
+		/// <returns>Collection of information about synced files.</returns>
+		public List<P4HaveRecord> HaveFiles(string Pattern)
+		{
+			List<P4HaveRecord> Files = new ();
+
+			string CommandToRun = $"have \"{Pattern}\"";
+			string CommandLine  = $"{GlobalOptions} {CommandToRun}";
+
+			// We run the process manually because 'p4 have' may generate a very long output (even hundreds of MB)
+			// and gathering all of this into a single string is wasteful. Instead, we process the output line by line
+			// as it arrives. Neither P4Output nor CommandUtils.Run allow achieving this.
+			Process Process = new Process();
+
+			Process.StartInfo.FileName = HostPlatform.Current.P4Exe;
+			Process.StartInfo.Arguments = CommandLine;
+			Process.StartInfo.UseShellExecute = false;
+			Process.StartInfo.RedirectStandardOutput = true;
+			Process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+			Process.StartInfo.RedirectStandardError = false;
+			Process.StartInfo.RedirectStandardInput = false;
+			Process.StartInfo.CreateNoWindow = true;
+			Process.OutputDataReceived += (s, e) =>
+			{
+				if (e.Data != null)
+				{
+					Match Match = HaveFilesOutputPattern.Match(e.Data);
+
+					if (Match.Success)
+					{
+						Files.Add(new P4HaveRecord(Match.Groups["depot"].Value, Match.Groups["client"].Value, Int32.Parse(Match.Groups["revision"].Value)));
+					}
+				}
+			};
+			Process.Start();
+			Process.BeginOutputReadLine();
+			Process.WaitForExit();
+
+			if (Process.ExitCode != 0)
+			{
+				throw new P4Exception($"p4.exe {CommandLine} failed with code {Process.ExitCode}.");
+			}
+
+			return Files;
 		}
 
 		/// <summary>
@@ -3984,7 +4269,7 @@ namespace AutomationTool
 		public string GetIntegrationSource(string DepotPath)
 		{
 			string Output;
-			if(P4Output(out Output, "filelog -m 1 \"" + DepotPath + "\"", Input:null, AllowSpew:false))
+			if(P4Output(out Output, "", "filelog -m 1 \"" + DepotPath + "\"", Input:null, AllowSpew:false))
 			{
 				foreach(string Line in Output.Split('\n').Select(x => x.Trim()))
 				{
@@ -4134,6 +4419,28 @@ namespace AutomationTool
 				Text = "+" + Text;
 			}
 			return Text;
+		}
+
+		public bool CheckClientHasPendingChanges(string P4Client = null)
+		{
+			if (P4Client == null)
+			{
+				P4Client = P4Env.Client;
+			}
+
+			if (String.IsNullOrEmpty(P4Client))
+			{
+				Logger.LogWarning("No Perforce client found.");
+				return false;
+			}
+
+			List<ChangeRecord> PendingChanges;
+			string P4GetPendingChangesArgs = $"-s pending -c {P4Client}";
+
+			Logger.LogInformation("Checking for pending changes...");
+			Changes(out PendingChanges, P4GetPendingChangesArgs);
+
+			return PendingChanges.Count > 0;
 		}
 	}
 }

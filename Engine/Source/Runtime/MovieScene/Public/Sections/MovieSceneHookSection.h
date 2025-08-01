@@ -2,18 +2,29 @@
 
 #pragma once
 
+#include "Containers/ArrayView.h"
 #include "CoreTypes.h"
-#include "MovieSceneSection.h"
 #include "EntitySystem/IMovieSceneEntityProvider.h"
 #include "Evaluation/IMovieSceneEvaluationHook.h"
+#include "MovieSceneSection.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneHookSection.generated.h"
+
+class UMovieSceneEntitySystemLinker;
+class UObject;
+struct FFrameNumber;
+struct FMovieSceneEntityComponentFieldBuilder;
+struct FMovieSceneEvaluationFieldEntityMetaData;
+template <typename ElementType> class TRange;
 
 
 /**
  * 
  */
-UCLASS()
-class MOVIESCENE_API UMovieSceneHookSection
+UCLASS(MinimalAPI)
+class UMovieSceneHookSection
 	: public UMovieSceneSection
 	, public IMovieSceneEntityProvider
 	, public IMovieSceneEvaluationHook
@@ -22,7 +33,7 @@ public:
 
 	GENERATED_BODY()
 
-	UMovieSceneHookSection(const FObjectInitializer&);
+	MOVIESCENE_API UMovieSceneHookSection(const FObjectInitializer&);
 
 	virtual TArrayView<const FFrameNumber> GetTriggerTimes() const { return TArrayView<const FFrameNumber>(); }
 
@@ -38,11 +49,11 @@ protected:
 
 	*/
 
-	virtual void ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
-	virtual bool PopulateEvaluationFieldImpl(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder) override;
+	MOVIESCENE_API virtual void ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
+	MOVIESCENE_API virtual bool PopulateEvaluationFieldImpl(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder) override;
 
-	void ImportRangedEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
-	void ImportTriggerEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+	MOVIESCENE_API void ImportRangedEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
+	MOVIESCENE_API void ImportTriggerEntity(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity);
 
 protected:
 

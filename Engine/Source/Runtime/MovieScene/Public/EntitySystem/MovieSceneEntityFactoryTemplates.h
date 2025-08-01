@@ -106,6 +106,12 @@ struct TDuplicateChildEntityInitializer : FChildEntityInitializer
 
 struct FObjectFactoryBatch : FChildEntityFactory
 {
+	enum class EResolveError
+	{
+		None              = 0x0,
+		UnresolvedBinding = 0x1,
+	};
+
 	void Add(int32 EntityIndex, UObject* BoundObject);
 
 	virtual void GenerateDerivedType(FComponentMask& OutNewEntityType) override;
@@ -114,7 +120,7 @@ struct FObjectFactoryBatch : FChildEntityFactory
 
 	virtual void PostInitialize(UMovieSceneEntitySystemLinker* InLinker) override;
 
-	virtual void ResolveObjects(FInstanceRegistry* InstanceRegistry, FInstanceHandle InstanceHandle, int32 InEntityIndex, const FGuid& ObjectBinding) = 0;
+	virtual EResolveError ResolveObjects(FInstanceRegistry* InstanceRegistry, FInstanceHandle InstanceHandle, int32 InEntityIndex, const FGuid& ObjectBinding) = 0;
 
 	TMap<TTuple<UObject*, FMovieSceneEntityID>, FMovieSceneEntityID>* StaleEntitiesToPreserve;
 
@@ -122,23 +128,32 @@ private:
 	TSortedMap<FMovieSceneEntityID, FMovieSceneEntityID> PreservedEntities;
 	TArray<UObject*> ObjectsToAssign;
 };
+ENUM_CLASS_FLAGS(FObjectFactoryBatch::EResolveError)
 
 struct FBoundObjectTask
 {
 	FBoundObjectTask(UMovieSceneEntitySystemLinker* InLinker);
 	virtual ~FBoundObjectTask(){}
 
-	virtual FObjectFactoryBatch& AddBatch(const FEntityAllocation* Parent) = 0;
+	virtual FObjectFactoryBatch& AddBatch(FEntityAllocationProxy ParentProxy) = 0;
 	virtual void Apply() = 0;
 
-	void ForEachAllocation(const FEntityAllocation* Allocation, FReadEntityIDs EntityIDs, TRead<FInstanceHandle> Instances, TRead<FGuid> ObjectBindings);
+	void ForEachAllocation(FEntityAllocationProxy AllocationProxy, FReadEntityIDs EntityIDs, TRead<FInstanceHandle> Instances, TRead<FGuid> ObjectBindings);
 
 	void PostTask();
 
 private:
 
+	struct FEntityMutationData
+	{
+		FMovieSceneEntityID EntityID;
+		FComponentTypeID ComponentTypeID;
+		bool bAddComponent;
+	};
+
 	TMap<TTuple<UObject*, FMovieSceneEntityID>, FMovieSceneEntityID> StaleEntitiesToPreserve;
 	TArray<FMovieSceneEntityID> EntitiesToDiscard;
+	TArray<FEntityMutationData> EntityMutations;
 
 protected:
 
@@ -154,50 +169,24 @@ struct TBoundObjectTask : FBoundObjectTask
 
 private:
 
-	virtual FObjectFactoryBatch& AddBatch(const FEntityAllocation* Parent) override
+	virtual FObjectFactoryBatch& AddBatch(FEntityAllocationProxy ParentProxy) override
 	{
-		return Batches.Add(Parent);
+		return Batches.Add(ParentProxy);
 	}
 
 	virtual void Apply() override
 	{
-		for (TTuple<const FEntityAllocation*, BatchType>& Pair : Batches)
+		for (TTuple<FEntityAllocationProxy, BatchType>& Pair : Batches)
 		{
 			// Determine the type for the new entities
-			const FEntityAllocation* ParentAllocation = Pair.Key;
 			if (Pair.Value.Num() != 0)
 			{
-				Pair.Value.Apply(Linker, ParentAllocation);
+				Pair.Value.Apply(Linker, Pair.Key);
 			}
 		}
 	}
 
-	TMap<const FEntityAllocation*, BatchType> Batches;
-};
-
-
-
-template<typename ComponentTypeA, typename ComponentTypeB>
-struct TMutualEntityInitializer : FMutualEntityInitializer
-{
-	using CallbackType = void (*)(ComponentTypeA* ComponentsA, ComponentTypeB* ComponentsB, int32 Num);
-
-	explicit TMutualEntityInitializer(TComponentTypeID<ComponentTypeA> InComponentA, TComponentTypeID<ComponentTypeB> InComponentB, CallbackType InCallback)
-		: FMutualEntityInitializer(InComponentA, InComponentB)
-		, Callback(InCallback)
-	{}
-
-private:
-
-	virtual void Run(const FEntityRange& Range) override
-	{
-		TComponentLock<TWrite<ComponentTypeA>> A = Range.Allocation->WriteComponents(ComponentA.ReinterpretCast<ComponentTypeA>(), FEntityAllocationWriteContext::NewAllocation());
-		TComponentLock<TWrite<ComponentTypeB>> B = Range.Allocation->WriteComponents(ComponentB.ReinterpretCast<ComponentTypeB>(), FEntityAllocationWriteContext::NewAllocation());
-
-		Callback(&A[Range.ComponentStartOffset], &B[Range.ComponentStartOffset], Range.Num);
-	}
-
-	CallbackType Callback;
+	TMap<FEntityAllocationProxy, BatchType> Batches;
 };
 
 
@@ -217,16 +206,8 @@ inline void FEntityFactories::DefineChildComponent(TComponentTypeID<ParentCompon
 	ChildInitializers.Add(FInitializer(InParentType, InChildType, Forward<InitializerCallback>(InInitializer)));
 }
 
-template<typename... ComponentTypes>
-inline void FEntityFactories::DefineComplexInclusiveComponents(const FComplexInclusivityFilter& InFilter, ComponentTypes... InComponents)
-{
-	FComponentMask ComponentsToInclude { InComponents... };
-	FComplexInclusivity NewComplexInclusivity { InFilter, ComponentsToInclude };
-	DefineComplexInclusiveComponents(NewComplexInclusivity);
-}
-
 template<typename T>
-TComponentTypeID<T> FComponentRegistry::NewComponentType(const TCHAR* const DebugName, EComponentTypeFlags Flags)
+FComponentTypeInfo FComponentRegistry::MakeComponentTypeInfoWithoutComponentOps(const TCHAR* const DebugName, const FNewComponentTypeParams& Params)
 {
 	static const uint32 ComponentTypeSize = sizeof(T);
 	static_assert(ComponentTypeSize < TNumericLimits<decltype(FComponentTypeInfo::Sizeof)>::Max(), "Type too large to be used as component data");
@@ -236,24 +217,38 @@ TComponentTypeID<T> FComponentRegistry::NewComponentType(const TCHAR* const Debu
 
 	FComponentTypeInfo NewTypeInfo;
 
-	NewTypeInfo.Sizeof                     = ComponentTypeSize;
-	NewTypeInfo.Alignment                  = Alignment;
-	NewTypeInfo.bIsZeroConstructType       = TIsZeroConstructType<T>::Value;
-	NewTypeInfo.bIsTriviallyDestructable   = TIsTriviallyDestructible<T>::Value;
+	NewTypeInfo.Sizeof = ComponentTypeSize;
+	NewTypeInfo.Alignment = Alignment;
+	NewTypeInfo.bIsZeroConstructType = TIsZeroConstructType<T>::Value;
+	NewTypeInfo.bIsTriviallyDestructable = TIsTriviallyDestructible<T>::Value;
 	NewTypeInfo.bIsTriviallyCopyAssignable = TIsTriviallyCopyAssignable<T>::Value;
-	NewTypeInfo.bIsPreserved               = EnumHasAnyFlags(Flags, EComponentTypeFlags::Preserved);
-	NewTypeInfo.bIsMigratedToOutput        = EnumHasAnyFlags(Flags, EComponentTypeFlags::MigrateToOutput);
-	NewTypeInfo.bIsCopiedToOutput          = EnumHasAnyFlags(Flags, EComponentTypeFlags::CopyToOutput);
-	NewTypeInfo.bHasReferencedObjects      = !TIsSame< FNotImplemented*, decltype( AddReferencedObjectForComponent((FReferenceCollector*)0, (T*)0) ) >::Value;
+	NewTypeInfo.bIsPreserved = EnumHasAnyFlags(Params.Flags, EComponentTypeFlags::Preserved);
+	NewTypeInfo.bIsCopiedToOutput = EnumHasAnyFlags(Params.Flags, EComponentTypeFlags::CopyToOutput);
+	NewTypeInfo.bIsMigratedToOutput = EnumHasAnyFlags(Params.Flags, EComponentTypeFlags::MigrateToOutput);
+	NewTypeInfo.bHasReferencedObjects = false;
 
 #if UE_MOVIESCENE_ENTITY_DEBUG
-	NewTypeInfo.DebugInfo                = MakeUnique<FComponentTypeDebugInfo>();
-	NewTypeInfo.DebugInfo->DebugName     = DebugName;
+	NewTypeInfo.DebugInfo = MakeUnique<FComponentTypeDebugInfo>();
+	NewTypeInfo.DebugInfo->DebugName = DebugName;
 	NewTypeInfo.DebugInfo->DebugTypeName = GetGeneratedTypeName<T>();
-	NewTypeInfo.DebugInfo->Type          = TComponentDebugType<T>::Type;
+	NewTypeInfo.DebugInfo->Type = TComponentDebugType<T>::Type;
 #endif
 
-	if (!NewTypeInfo.bIsZeroConstructType || !NewTypeInfo.bIsTriviallyDestructable || !NewTypeInfo.bIsTriviallyCopyAssignable || NewTypeInfo.bHasReferencedObjects)
+	return NewTypeInfo;
+}
+
+template<typename T>
+TComponentTypeID<T> FComponentRegistry::NewComponentType(const TCHAR* const DebugName, const FNewComponentTypeParams& Params)
+{
+	FComponentTypeInfo NewTypeInfo = FComponentRegistry::MakeComponentTypeInfoWithoutComponentOps<T>(DebugName, Params);
+
+	NewTypeInfo.bHasReferencedObjects = Params.ReferenceCollectionCallback != nullptr || THasAddReferencedObjectForComponent<T>::Value;
+
+	if (Params.ReferenceCollectionCallback)
+	{
+		NewTypeInfo.MakeComplexComponentOps<T>(Params.ReferenceCollectionCallback);
+	}
+	else if (!NewTypeInfo.bIsZeroConstructType || !NewTypeInfo.bIsTriviallyDestructable || !NewTypeInfo.bIsTriviallyCopyAssignable || NewTypeInfo.bHasReferencedObjects)
 	{
 		NewTypeInfo.MakeComplexComponentOps<T>();
 	}
@@ -261,7 +256,29 @@ TComponentTypeID<T> FComponentRegistry::NewComponentType(const TCHAR* const Debu
 	FComponentTypeID    NewTypeID = NewComponentTypeInternal(MoveTemp(NewTypeInfo));
 	TComponentTypeID<T> TypedTypeID = NewTypeID.ReinterpretCast<T>();
 
-	if (EnumHasAnyFlags(Flags, EComponentTypeFlags::CopyToChildren))
+	if (EnumHasAnyFlags(Params.Flags, EComponentTypeFlags::CopyToChildren))
+	{
+		Factories.DefineChildComponent(TDuplicateChildEntityInitializer<T>(TypedTypeID));
+	}
+
+	return TypedTypeID;
+}
+
+template<typename T>
+TComponentTypeID<T> FComponentRegistry::NewComponentTypeNoAddReferencedObjects(const TCHAR* const DebugName, const FNewComponentTypeParams& Params)
+{
+	FComponentTypeInfo NewTypeInfo = FComponentRegistry::MakeComponentTypeInfoWithoutComponentOps<T>(DebugName, Params);
+
+	NewTypeInfo.bHasReferencedObjects = false;
+	if (!NewTypeInfo.bIsZeroConstructType || !NewTypeInfo.bIsTriviallyDestructable || !NewTypeInfo.bIsTriviallyCopyAssignable)
+	{
+		NewTypeInfo.MakeComplexComponentOpsNoAddReferencedObjects<T>();
+	}
+
+	FComponentTypeID    NewTypeID = NewComponentTypeInternal(MoveTemp(NewTypeInfo));
+	TComponentTypeID<T> TypedTypeID = NewTypeID.ReinterpretCast<T>();
+
+	if (EnumHasAnyFlags(Params.Flags, EComponentTypeFlags::CopyToChildren))
 	{
 		Factories.DefineChildComponent(TDuplicateChildEntityInitializer<T>(TypedTypeID));
 	}

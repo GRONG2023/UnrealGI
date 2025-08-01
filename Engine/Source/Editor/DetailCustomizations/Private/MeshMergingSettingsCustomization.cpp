@@ -1,14 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MeshMergingSettingsCustomization.h"
-#include "Engine/MeshMerging.h"
-#include "Misc/Attribute.h"
-#include "UObject/UnrealType.h"
-#include "PropertyHandle.h"
-#include "DetailLayoutBuilder.h"
-#include "IDetailPropertyRow.h"
+
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Engine/MeshMerging.h"
+#include "IDetailChildrenBuilder.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PropertyHandle.h"
 #include "PropertyRestriction.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealType.h"
 
 #define LOCTEXT_NAMESPACE "FMeshMergingSettingCustomization"
 
@@ -90,6 +100,39 @@ bool FMeshMergingSettingsObjectCustomization::AreMaterialPropertiesEnabled() con
 	EnumProperty->GetValue(CurrentEnumValue);
 
 	return !(CurrentEnumValue == (uint8)EMeshLODSelectionType::AllLODs);
+}
+
+TSharedRef<IPropertyTypeCustomization> FMeshMergingSettingsCustomization::MakeInstance()
+{
+	return MakeShareable(new FMeshMergingSettingsCustomization);
+}
+
+void FMeshMergingSettingsCustomization::CustomizeHeader(TSharedRef<IPropertyHandle> StructPropertyHandle, FDetailWidgetRow& HeaderRow, IPropertyTypeCustomizationUtils& StructCustomizationUtils)
+{
+	HeaderRow
+	.NameContent()
+	[
+			StructPropertyHandle->CreatePropertyNameWidget(StructPropertyHandle->GetPropertyDisplayName())
+	]
+	.ValueContent()
+	[
+			StructPropertyHandle->CreatePropertyValueWidget(false)
+	];
+}
+
+void FMeshMergingSettingsCustomization::CustomizeChildren(TSharedRef<IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& ChildBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils)
+{
+	uint32 NumChildren = 0;
+	
+	StructPropertyHandle->GetNumChildren(NumChildren);
+
+	for (uint32 ChildIndex = 0; ChildIndex < NumChildren; ++ChildIndex)
+	{
+		TSharedRef<IPropertyHandle> ChildHandle = StructPropertyHandle->GetChildHandle(ChildIndex).ToSharedRef();
+		IDetailPropertyRow& NewRow = ChildBuilder.AddProperty(ChildHandle);
+
+		AddResetToDefaultOverrides(NewRow);
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

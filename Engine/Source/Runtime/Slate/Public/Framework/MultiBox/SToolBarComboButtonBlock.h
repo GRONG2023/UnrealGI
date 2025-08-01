@@ -10,6 +10,8 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Framework/MultiBox/MultiBox.h"
 
+class SComboButton;
+
 /**
  * Tool bar combo button MultiBlock
  */
@@ -45,7 +47,7 @@ public:
 	/** Set whether this toolbar should always use small icons, regardless of the current settings */
 	void SetForceSmallIcons( const bool InForceSmallIcons ) { bForceSmallIcons = InForceSmallIcons; }
 
-
+	bool IsSimpleComboBox() const { return bSimpleComboBox; }
 private:
 
 	/**
@@ -88,7 +90,7 @@ private:
 /**
  * Tool bar button MultiBlock widget
  */
-class SLATE_API SToolBarComboButtonBlock
+class SToolBarComboButtonBlock
 	: public SMultiBlockBaseWidget
 {
 
@@ -113,7 +115,7 @@ public:
 	/**
 	 * Builds this MultiBlock widget up from the MultiBlock associated with it
 	 */
-	virtual void BuildMultiBlockWidget(const ISlateStyle* StyleSet, const FName& StyleName) override;
+	SLATE_API virtual void BuildMultiBlockWidget(const ISlateStyle* StyleSet, const FName& StyleName) override;
 
 
 	/**
@@ -121,7 +123,7 @@ public:
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
 protected:
 
@@ -130,7 +132,7 @@ protected:
 	 *
 	 * @return	The widget to use for the menu content
 	 */
-	TSharedRef<SWidget> OnGetMenuContent();
+	SLATE_API TSharedRef<SWidget> OnGetMenuContent();
 
 
 	/**
@@ -138,32 +140,50 @@ protected:
 	 * 
 	 * @return True if the menu entry is enabled, false otherwise
 	 */
-	bool IsEnabled() const;
+	SLATE_API bool IsEnabled() const;
 
 	/**
 	 * Called by Slate to determine if this button is visible
 	 *
 	 * @return EVisibility::Visible or EVisibility::Collapsed, depending on if the button should be displayed
 	 */
-	EVisibility GetVisibility() const;
+	SLATE_API EVisibility GetVisibility() const;
 private:
 	/** @return True if this toolbar button is using a dynamically set icon */
 	bool HasDynamicIcon() const;
 
+	/** Gets the icon brush for the toolbar block widget */
+	const FSlateBrush* GetIconBrush() const;
+
 	/** @return The icon for the toolbar button; may be dynamic, so check HasDynamicIcon */
-	const FSlateBrush* GetIcon() const;
+	const FSlateBrush* GetNormalIconBrush() const;
 
 	/** @return The small icon for the toolbar button; may be dynamic, so check HasDynamicIcon */
-	const FSlateBrush* GetSmallIcon() const;
+	const FSlateBrush* GetSmallIconBrush() const;
 
 	/** Called by Slate to determine whether icons/labels are visible */
 	EVisibility GetIconVisibility(bool bIsASmallIcon) const;
+
+	FSlateColor GetIconForegroundColor() const;
+
+	const FSlateBrush* GetOverlayIconBrush() const;
+
+	FSlateColor OnGetForegroundColor() const;
+
+private:
+	/** Overrides the visibility of the of label. This is used to set up the LabelVisibility attribute */
+	TOptional<EVisibility> LabelVisibilityOverride;
 
 	/** Controls the visibility of the of label, defaults to GetIconVisibility */
 	TAttribute< EVisibility > LabelVisibility;
 
 	/** Optional overridden icon for this tool bar button.  IF not set, then the action's icon will be used instead. */
 	TAttribute<FSlateIcon> Icon;
+
+	TSharedPtr<SComboButton> ComboButtonWidget;
+
+	/** The foreground color for button when the combo button is open */
+	FSlateColor OpenForegroundColor;
 
 	/** Whether this toolbar should always use small icons, regardless of the current settings */
 	bool bForceSmallIcons;

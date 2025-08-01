@@ -10,10 +10,11 @@
 #include "UObject/ObjectMacros.h"
 #include "DeviceProfileFragment.generated.h"
 
-UCLASS(config=DeviceProfiles, perObjectConfig)
-class ENGINE_API UDeviceProfileFragment : public UObject
+UCLASS(config=DeviceProfiles, perObjectConfig, MinimalAPI)
+class UDeviceProfileFragment : public UObject
 {
 	GENERATED_UCLASS_BODY()
 public:
+	UPROPERTY()
 	TArray<FString> CVars;
 };

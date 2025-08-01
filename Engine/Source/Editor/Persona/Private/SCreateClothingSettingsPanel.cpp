@@ -76,18 +76,18 @@ void SCreateClothingSettingsPanel::Construct(const FArguments& InArgs)
 
 			+SVerticalBox::Slot()
 			.MaxHeight(500.0f)
-			.Padding(2)
+			.Padding(2.f)
 			[
 				StructureDetailsView->GetWidget()->AsShared()
 			]
 
 			+SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(2)
+			.Padding(2.f)
 			.HAlign(HAlign_Right)
 			[
 				SNew(SUniformGridPanel)
-				.SlotPadding(2)
+				.SlotPadding(2.f)
 				+SUniformGridPanel::Slot(0, 0)
 				[
 					SNew(SButton)
@@ -334,15 +334,15 @@ void FClothCreateSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& D
 		[
 			SNew(SComboButton)
 			.OnGetMenuContent(this, &FClothCreateSettingsCustomization::OnGetTargetAssetMenu)
-			.ContentPadding(2)
-			.ButtonStyle(FEditorStyle::Get(), "PropertyEditor.AssetComboStyle")
-			.ForegroundColor(FEditorStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
+			.ContentPadding(2.f)
+			.ButtonStyle(FAppStyle::Get(), "PropertyEditor.AssetComboStyle")
+			.ForegroundColor(FAppStyle::GetColor("PropertyEditor.AssetName.ColorAndOpacity"))
 			.CollapseMenuOnParentFocus(true)
 			.ButtonContent()
 			[
 				SNew(STextBlock)
 				.Text(this, &FClothCreateSettingsCustomization::GetTargetAssetText)
-				.TextStyle(FEditorStyle::Get(), "PropertyEditor.AssetClass")
+				.TextStyle(FAppStyle::Get(), "PropertyEditor.AssetClass")
 				.Font(DetailBuilder.GetDetailFont())
 			]
 		];
@@ -358,7 +358,7 @@ void FClothCreateSettingsCustomization::CustomizeDetails(IDetailLayoutBuilder& D
 			SNew(SComboButton)
 			.IsEnabled(this, &FClothCreateSettingsCustomization::CanSelectLod)
 			.OnGetMenuContent(this, &FClothCreateSettingsCustomization::OnGetTargetLodMenu)
-			.ContentPadding(2)
+			.ContentPadding(2.f)
 			.CollapseMenuOnParentFocus(true)
 			.ButtonContent()
 			[

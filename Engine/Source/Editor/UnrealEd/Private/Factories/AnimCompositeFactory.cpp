@@ -9,7 +9,7 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Animation/Skeleton.h"
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimCompositeBase.h"
@@ -40,7 +40,7 @@ bool UAnimCompositeFactory::ConfigureProperties()
 	FAssetPickerConfig AssetPickerConfig;
 	
 	/** The asset picker will only show skeletons */
-	AssetPickerConfig.Filter.ClassNames.Add(USkeleton::StaticClass()->GetFName());
+	AssetPickerConfig.Filter.ClassPaths.Add(USkeleton::StaticClass()->GetClassPathName());
 	AssetPickerConfig.Filter.bRecursiveClasses = true;
 
 	/** The delegate that fires when an asset was selected */
@@ -55,7 +55,7 @@ bool UAnimCompositeFactory::ConfigureProperties()
 	.SupportsMinimize(false) .SupportsMaximize(false)
 	[
 		SNew(SBorder)
-		.BorderImage( FEditorStyle::GetBrush("Menu.Background") )
+		.BorderImage( FAppStyle::GetBrush("Menu.Background") )
 		[
 			ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
 		]
@@ -81,15 +81,10 @@ UObject* UAnimCompositeFactory::FactoryCreateNew(UClass* Class, UObject* InParen
 			TargetSkeleton = SourceSkeleton;
 
 			FAnimSegment NewSegment;
-			NewSegment.AnimReference = SourceAnimation;
-			NewSegment.AnimStartTime = 0.f;
-			NewSegment.AnimEndTime = SourceAnimation->SequenceLength;
-			NewSegment.AnimPlayRate = 1.f;
-			NewSegment.LoopingCount = 1;
-			NewSegment.StartPos = 0.f;
+			NewSegment.SetAnimReference(SourceAnimation, true);
 
 			AnimComposite->AnimationTrack.AnimSegments.Add(NewSegment);
-			AnimComposite->SetSequenceLength( AnimComposite->AnimationTrack.GetLength() );
+			AnimComposite->SetCompositeLength(AnimComposite->AnimationTrack.GetLength());
 		}
 		
 		AnimComposite->SetSkeleton( TargetSkeleton );

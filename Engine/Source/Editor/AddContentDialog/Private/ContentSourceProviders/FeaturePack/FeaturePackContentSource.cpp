@@ -1,26 +1,44 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "FeaturePackContentSource.h"
-#include "HAL/PlatformFilemanager.h"
+
+#include "AssetCompilingManager.h"
+#include "AssetToolsModule.h"
+#include "Containers/Map.h"
+#include "Containers/StringFwd.h"
+#include "Containers/StringView.h"
+#include "ContentBrowserModule.h"
+#include "ContentSourceProviderManager.h"
+#include "CoreGlobals.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "FileHelpers.h"
+#include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformFileManager.h"
+#include "IAddContentDialogModule.h"
+#include "IAssetTools.h"
+#include "IContentBrowserSingleton.h"
+#include "IContentSource.h"
+#include "IContentSourceProvider.h"
+#include "IPlatformFilePak.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Internationalization/Culture.h"
-#include "Misc/ConfigCacheIni.h"
 #include "Modules/ModuleManager.h"
-#include "Serialization/JsonTypes.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
-#include "IAddContentDialogModule.h"
-#include "ContentSourceProviderManager.h"
+#include "Serialization/JsonTypes.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectGlobals.h"
 
-#include "IAssetTools.h"
-#include "AssetToolsModule.h"
-#include "IContentBrowserSingleton.h"
-#include "ContentBrowserModule.h"
-#include "IPlatformFilePak.h"
-#include "FileHelpers.h"
-#include "Editor/MainFrame/Public/Interfaces/IMainFrameModule.h"
+class UPackage;
 
 #define LOCTEXT_NAMESPACE "ContentFeaturePacks"
 
@@ -41,13 +59,13 @@ bool TryValidateTranslatedValue(TSharedPtr<FJsonValue> TranslatedValue, TSharedP
 		return false;
 	}
 
-	if ((*TranslatedObject)->HasTypedField<EJson::String>("Language") == false)
+	if ((*TranslatedObject)->HasTypedField<EJson::String>(TEXT("Language")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Translated value missing 'Language' field"));
 		return false;
 	}
 
-	if ((*TranslatedObject)->HasTypedField<EJson::String>("Text") == false)
+	if ((*TranslatedObject)->HasTypedField<EJson::String>(TEXT("Text")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Translated value missing 'Text' field"));
 		return false;
@@ -64,13 +82,13 @@ bool TryValidateManifestObject(TSharedPtr<FJsonObject> ManifestObject, TSharedPt
 		return false;
 	}
 
-	if (ManifestObject->HasTypedField<EJson::Array>("Name") == false)
+	if (ManifestObject->HasTypedField<EJson::Array>(TEXT("Name")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'Names' field"));
 		return false;
 	}
 
-	for (TSharedPtr<FJsonValue> NameValue : ManifestObject->GetArrayField("Name"))
+	for (TSharedPtr<FJsonValue> NameValue : ManifestObject->GetArrayField(TEXT("Name")))
 	{
 		if (TryValidateTranslatedValue(NameValue, ErrorMessage) == false)
 		{
@@ -78,13 +96,13 @@ bool TryValidateManifestObject(TSharedPtr<FJsonObject> ManifestObject, TSharedPt
 		}
 	}
 
-	if (ManifestObject->HasTypedField<EJson::Array>("Description") == false)
+	if (ManifestObject->HasTypedField<EJson::Array>(TEXT("Description")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'Description' field"));
 		return false;
 	}
 
-	for (TSharedPtr<FJsonValue> DescriptionValue : ManifestObject->GetArrayField("Description"))
+	for (TSharedPtr<FJsonValue> DescriptionValue : ManifestObject->GetArrayField(TEXT("Description")))
 	{
 		if (TryValidateTranslatedValue(DescriptionValue, ErrorMessage) == false)
 		{
@@ -92,13 +110,13 @@ bool TryValidateManifestObject(TSharedPtr<FJsonObject> ManifestObject, TSharedPt
 		}
 	}
 
-	if (ManifestObject->HasTypedField<EJson::Array>("AssetTypes") == false)
+	if (ManifestObject->HasTypedField<EJson::Array>(TEXT("AssetTypes")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'AssetTypes' field"));
 		return false;
 	}
 
-	for (TSharedPtr<FJsonValue> AssetTypesValue : ManifestObject->GetArrayField("AssetTypes"))
+	for (TSharedPtr<FJsonValue> AssetTypesValue : ManifestObject->GetArrayField(TEXT("AssetTypes")))
 	{
 		if (TryValidateTranslatedValue(AssetTypesValue, ErrorMessage) == false)
 		{
@@ -106,40 +124,40 @@ bool TryValidateManifestObject(TSharedPtr<FJsonObject> ManifestObject, TSharedPt
 		}
 	}
 
-	if (ManifestObject->HasTypedField<EJson::String>("ClassTypes") == false)
+	if (ManifestObject->HasTypedField<EJson::String>(TEXT("ClassTypes")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'ClassTypes' field"));
 		return false;
 	}
 
-	if (ManifestObject->HasTypedField<EJson::String>("Category") == false)
+	if (ManifestObject->HasTypedField<EJson::Array>(TEXT("Category")) == false && ManifestObject->HasTypedField<EJson::String>(TEXT("Category")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'Category' field"));
 		return false;
 	}
 		
-	if (ManifestObject->HasTypedField<EJson::String>("Thumbnail") == false)
+	if (ManifestObject->HasTypedField<EJson::String>(TEXT("Thumbnail")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'Thumbnail' field"));
 		return false;
 	}
 
-	if (ManifestObject->HasTypedField<EJson::Array>("Screenshots") == false)
+	if (ManifestObject->HasTypedField<EJson::Array>(TEXT("Screenshots")) == false)
 	{
 		ErrorMessage = MakeShareable(new FString("Manifest object missing 'Screenshots' field"));
 		return false;
 	}
 
 	// If we have an additional files entry check its valid
-	if (ManifestObject->HasTypedField<EJson::Object>("AdditionalFiles") == true)
+	if (ManifestObject->HasTypedField<EJson::Object>(TEXT("AdditionalFiles")) == true)
 	{
-		TSharedPtr<FJsonObject> AdditionalFileObject = ManifestObject->GetObjectField("AdditionalFiles");
-		if (AdditionalFileObject->HasTypedField<EJson::String>("DestinationFilesFolder") == false )
+		TSharedPtr<FJsonObject> AdditionalFileObject = ManifestObject->GetObjectField(TEXT("AdditionalFiles"));
+		if (AdditionalFileObject->HasTypedField<EJson::String>(TEXT("DestinationFilesFolder")) == false )
 		{
 			ErrorMessage = MakeShareable(new FString("Manifest has an AdditionalFiles object but no DestinationFilesFolder"));
 			return false;
 		}
-		if (AdditionalFileObject->HasTypedField<EJson::Array>("AdditionalFilesList") == false)
+		if (AdditionalFileObject->HasTypedField<EJson::Array>(TEXT("AdditionalFilesList")) == false)
 		{
 			ErrorMessage = MakeShareable(new FString("Manifest has an AdditionalFiles object but no AdditionalFilesList"));
 			return false;
@@ -154,20 +172,25 @@ FFeaturePackContentSource::FFeaturePackContentSource(FString InFeaturePackPath)
 	bPackValid = false;
 	
 	FString ManifestString;
-	Category = EContentSourceCategory::Unknown;
+	Categories = { EContentSourceCategory::Unknown };
 	if( InFeaturePackPath.EndsWith(TEXT(".upack") ) == true )
 	{
 		bContentsInPakFile = true;
-		MountPoint = "root:/";
-		// Create a pak platform file and mount the feature pack file.
-		FPakPlatformFile PakPlatformFile;
-		PakPlatformFile.Initialize(&FPlatformFileManager::Get().GetPlatformFile(), TEXT(""));
-		
-		PakPlatformFile.Mount(*InFeaturePackPath, 0, *MountPoint);
+		MountPoint = FPaths::GameFeatureRootPrefix();
+
+		const FString PakFileName = TEXT("PakFile");
+		FPakPlatformFile* PakPlatformFile = static_cast<FPakPlatformFile*>(FPlatformFileManager::Get().FindPlatformFile(*PakFileName));
+		if (!PakPlatformFile)
+		{
+			// Create a pak platform file and mount the feature pack file.
+			PakPlatformFile = static_cast<FPakPlatformFile*>(FPlatformFileManager::Get().GetPlatformFile(*PakFileName));
+			PakPlatformFile->Initialize(&FPlatformFileManager::Get().GetPlatformFile(), TEXT(""));
+		}
+		PakPlatformFile->Mount(*InFeaturePackPath, 0, *MountPoint);
 
 		// Gets the manifest file as a JSon string
 		TArray<uint8> ManifestBuffer;
-		if (LoadPakFileToBuffer(PakPlatformFile, FPaths::Combine(*MountPoint, TEXT("manifest.json")), ManifestBuffer) == false)
+		if (LoadPakFileToBuffer(*PakPlatformFile, FPaths::Combine(*MountPoint, TEXT("manifest.json")), ManifestBuffer) == false)
 		{
 			RecordAndLogError(FString::Printf(TEXT("Error in Feature pack %s. Cannot find manifest."), *FeaturePackPath));
 			return;
@@ -177,8 +200,9 @@ FFeaturePackContentSource::FFeaturePackContentSource(FString InFeaturePackPath)
 
 		if (ParseManifestString(ManifestString) == true)
 		{
-			LoadFeaturePackImageDataFromPackFile(PakPlatformFile);			
+			LoadFeaturePackImageDataFromPackFile(*PakPlatformFile);			
 		}
+		PakPlatformFile->Unmount(*InFeaturePackPath);
 	}
 	else
 	{
@@ -216,30 +240,30 @@ bool FFeaturePackContentSource::LoadPakFileToBuffer(FPakPlatformFile& PakPlatfor
 	return bResult;
 }
 
-TArray<FLocalizedText> FFeaturePackContentSource::GetLocalizedNames() const
+const TArray<FLocalizedText>& FFeaturePackContentSource::GetLocalizedNames() const
 {
 	return LocalizedNames;
 }
 
-TArray<FLocalizedText> FFeaturePackContentSource::GetLocalizedDescriptions() const
+const TArray<FLocalizedText>& FFeaturePackContentSource::GetLocalizedDescriptions() const
 {
 	return LocalizedDescriptions;
 }
 
-TArray<FLocalizedText> FFeaturePackContentSource::GetLocalizedAssetTypes() const
+const TArray<FLocalizedText>& FFeaturePackContentSource::GetLocalizedAssetTypes() const
 {
 	return LocalizedAssetTypesList;
 }
 
 
-FString FFeaturePackContentSource::GetClassTypesUsed() const
+const FString& FFeaturePackContentSource::GetClassTypesUsed() const
 {
 	return ClassTypes;
 }
 
-EContentSourceCategory FFeaturePackContentSource::GetCategory() const
+const TArray<EContentSourceCategory>& FFeaturePackContentSource::GetCategories() const
 {
-	return Category;
+	return Categories;
 }
 
 TSharedPtr<FImageData> FFeaturePackContentSource::GetIconData() const
@@ -247,7 +271,7 @@ TSharedPtr<FImageData> FFeaturePackContentSource::GetIconData() const
 	return IconData;
 }
 
-TArray<TSharedPtr<FImageData>> FFeaturePackContentSource::GetScreenshotData() const
+const TArray<TSharedPtr<FImageData>>& FFeaturePackContentSource::GetScreenshotData() const
 {
 	return ScreenshotData;
 }
@@ -287,7 +311,7 @@ bool FFeaturePackContentSource::InstallToProject(FString InstallPath)
 			{
 				// Save any imported assets.
 				TArray<UPackage*> ToSave;
-				for (auto ImportedObject : ImportedObjects)
+				for (UObject* ImportedObject : ImportedObjects)
 				{
 					ToSave.AddUnique(ImportedObject->GetOutermost());
 				}
@@ -328,17 +352,17 @@ bool FFeaturePackContentSource::IsDataValid() const
 	return true;	
 }
 
-FString FFeaturePackContentSource::GetFocusAssetName() const
+const FString& FFeaturePackContentSource::GetFocusAssetName() const
 {
 	return FocusAssetIdent;
 }
 
-FString FFeaturePackContentSource::GetSortKey() const
+const FString& FFeaturePackContentSource::GetSortKey() const
 {
 	return SortKey;
 }
 
-FString FFeaturePackContentSource::GetIdent() const
+const FString& FFeaturePackContentSource::GetIdent() const
 {
 	return Identity;
 }
@@ -420,8 +444,8 @@ bool FFeaturePackContentSource::GetAdditionalFilesForPack(TArray<FString>& FileL
 bool FFeaturePackContentSource::ExtractListOfAdditionalFiles(const FString& InConfigFileAsString,TArray<FString>& InFileList, bool& bContainsSource)
 {
 	FConfigFile PackConfig;
-	PackConfig.ProcessInputFileContents(InConfigFileAsString);
-	FConfigSection* AdditionalFilesSection = PackConfig.Find("AdditionalFilesToAdd");
+	PackConfig.ProcessInputFileContents(InConfigFileAsString, TEXT("Uknown, see FFeaturePackContentSource::ExtractListOfAdditionalFiles"));
+	const FConfigSection* AdditionalFilesSection = PackConfig.FindSection("AdditionalFilesToAdd");
 	
 	bContainsSource = false;
 	bool bParsedAdditionFiles = false;
@@ -430,7 +454,7 @@ bool FFeaturePackContentSource::ExtractListOfAdditionalFiles(const FString& InCo
 		TArray<FString> AdditionalFilesMap;
 		
 		bParsedAdditionFiles = true;
-		for (auto FilePair : *AdditionalFilesSection)
+		for (auto& FilePair : *AdditionalFilesSection)
 		{
 			if (FilePair.Key.ToString().Contains("Files"))
 			{
@@ -443,9 +467,9 @@ bool FFeaturePackContentSource::ExtractListOfAdditionalFiles(const FString& InCo
 	return bParsedAdditionFiles;
 }
 
-void FFeaturePackContentSource::BuildListOfAdditionalFiles(TArray<FString>& AdditionalFileSourceList,TArray<FString>& FileList, bool& bContainsSourceFiles)
+void FFeaturePackContentSource::BuildListOfAdditionalFiles(TArray<FString>& AdditionalFileSourceList, TArray<FString>& FileList, bool& bContainsSourceFiles)
 {
-	for (auto FileSource : AdditionalFileSourceList)
+	for (const FString& FileSource : AdditionalFileSourceList)
 	{
 		FString Filename = FPaths::GetCleanFilename(FileSource);
 		FString Directory = FPaths::RootDir() / FPaths::GetPath(FileSource);
@@ -545,16 +569,20 @@ void FFeaturePackContentSource::ParseAndImportPacks()
 			{
 				// Save any imported assets.
 				TArray<UPackage*> ToSave;
-				for (auto ImportedObject : EachPackData.ImportedObjects)
+				for (UObject* ImportedObject : EachPackData.ImportedObjects)
 				{
 					ToSave.AddUnique(ImportedObject->GetOutermost());
 				}
+
+				// Make sure any async compilation kicked off during ImportAssets is completed before we save.
+				FAssetCompilingManager::Get().FinishAllCompilation();
+
 				FEditorFileUtils::PromptForCheckoutAndSave(ToSave, /*bCheckDirty=*/ false, /*bPromptToSave=*/ false);
 				PacksInserted++;
 			}
 		}
 	}
-	UE_LOG(LogFeaturePack, Warning, TEXT("Inserted %d feature packs"), PacksInserted++);
+	UE_LOG(LogFeaturePack, Log, TEXT("Inserted %d feature packs"), PacksInserted);
 }
 
 void FFeaturePackContentSource::RecordAndLogError(const FString& ErrorString)
@@ -629,16 +657,16 @@ bool FFeaturePackContentSource::InsertAdditionalResources(TArray<FFeaturePackLev
 	// Build a map of feature packs we have (This would probably be better elsewhere and stored in 2 arrays - one listing .upack packs and one non-upack packs)
 	IAddContentDialogModule& AddContentDialogModule = FModuleManager::LoadModuleChecked<IAddContentDialogModule>("AddContentDialog");
 	TMap<FString, FFeaturePackContentSource*> PackMap;
-	for (auto& ContentSourceProvider : *AddContentDialogModule.GetContentSourceProviderManager()->GetContentSourceProviders())
+	for (const TSharedRef<IContentSourceProvider>& ContentSourceProvider : *AddContentDialogModule.GetContentSourceProviderManager()->GetContentSourceProviders())
 	{
 		const TArray<TSharedRef<IContentSource>> ProviderSources = ContentSourceProvider->GetContentSources();
-		for (auto& EachSourceProvider : ProviderSources)
+		for (const TSharedRef<IContentSource>& EachSourceProvider : ProviderSources)
 		{
-			FFeaturePackContentSource* Source = (FFeaturePackContentSource*)&EachSourceProvider.Get();
-			FString ID = EachSourceProvider->GetIdent();
-			if( ID.IsEmpty() == false )
+			FFeaturePackContentSource* Source = (FFeaturePackContentSource*) &EachSourceProvider.Get();
+			FStringView ID = EachSourceProvider->GetIdent();
+			if (!ID.IsEmpty())
 			{
-				PackMap.Add(ID, Source);
+				PackMap.Add(FString(ID), Source);
 			}
 		}
 	}
@@ -690,98 +718,113 @@ bool FFeaturePackContentSource::ParseManifestString(const FString& ManifestStrin
 	if (ManifestReader->GetErrorMessage().IsEmpty() == false)
 	{
 		RecordAndLogError(FString::Printf(TEXT("Error in Feature pack %s. Failed to parse manifest: %s"), *FeaturePackPath, *ManifestReader->GetErrorMessage()));
-		Category = EContentSourceCategory::Unknown;
+		Categories = { EContentSourceCategory::Unknown };
 		return false;
 	}
 
-	if (ManifestObject->HasTypedField<EJson::String>("Version") == true)
+	if (ManifestObject->HasTypedField<EJson::String>(TEXT("Version")) == true)
 	{
-		VersionNumber = ManifestObject->GetStringField("Version");
+		VersionNumber = ManifestObject->GetStringField(TEXT("Version"));
 	}
-	if (ManifestObject->HasTypedField<EJson::String>("Ident") == true)
+	if (ManifestObject->HasTypedField<EJson::String>(TEXT("Ident")) == true)
 	{
-		Identity = ManifestObject->GetStringField("Ident");
+		Identity = ManifestObject->GetStringField(TEXT("Ident"));
 	}
 
 	TSharedPtr<FString> ManifestObjectErrorMessage;
 	if (TryValidateManifestObject(ManifestObject, ManifestObjectErrorMessage) == false)
 	{
 		RecordAndLogError(FString::Printf(TEXT("Error in Feature pack %s. Manifest object error: %s"), *FeaturePackPath, **ManifestObjectErrorMessage));
-		Category = EContentSourceCategory::Unknown;
+		Categories = { EContentSourceCategory::Unknown };
 		return false;
 	}
 
-	for (TSharedPtr<FJsonValue> NameValue : ManifestObject->GetArrayField("Name"))
+	for (TSharedPtr<FJsonValue> NameValue : ManifestObject->GetArrayField(TEXT("Name")))
 	{
 		TSharedPtr<FJsonObject> LocalizedNameObject = NameValue->AsObject();
 		LocalizedNames.Add(FLocalizedText(
-			LocalizedNameObject->GetStringField("Language"),
-			FText::FromString(LocalizedNameObject->GetStringField("Text"))));
+			LocalizedNameObject->GetStringField(TEXT("Language")),
+			FText::FromString(LocalizedNameObject->GetStringField(TEXT("Text")))));
 	}
 
-	for (TSharedPtr<FJsonValue> DescriptionValue : ManifestObject->GetArrayField("Description"))
+	for (TSharedPtr<FJsonValue> DescriptionValue : ManifestObject->GetArrayField(TEXT("Description")))
 	{
 		TSharedPtr<FJsonObject> LocalizedDescriptionObject = DescriptionValue->AsObject();
 		LocalizedDescriptions.Add(FLocalizedText(
-			LocalizedDescriptionObject->GetStringField("Language"),
-			FText::FromString(LocalizedDescriptionObject->GetStringField("Text"))));
+			LocalizedDescriptionObject->GetStringField(TEXT("Language")),
+			FText::FromString(LocalizedDescriptionObject->GetStringField(TEXT("Text")))));
 	}
 
 	// Parse asset types field
-	for (TSharedPtr<FJsonValue> AssetTypesValue : ManifestObject->GetArrayField("AssetTypes"))
+	for (TSharedPtr<FJsonValue> AssetTypesValue : ManifestObject->GetArrayField(TEXT("AssetTypes")))
 	{
 		TSharedPtr<FJsonObject> LocalizedAssetTypesObject = AssetTypesValue->AsObject();
 		LocalizedAssetTypesList.Add(FLocalizedText(
-			LocalizedAssetTypesObject->GetStringField("Language"),
-			FText::FromString(LocalizedAssetTypesObject->GetStringField("Text"))));
+			LocalizedAssetTypesObject->GetStringField(TEXT("Language")),
+			FText::FromString(LocalizedAssetTypesObject->GetStringField(TEXT("Text")))));
 	}
 
 	// Parse search tags field
-	if (ManifestObject->HasField("SearchTags") == true)
+	if (ManifestObject->HasField(TEXT("SearchTags")) == true)
 	{
-		for (TSharedPtr<FJsonValue> AssetTypesValue : ManifestObject->GetArrayField("SearchTags"))
+		for (TSharedPtr<FJsonValue> AssetTypesValue : ManifestObject->GetArrayField(TEXT("SearchTags")))
 		{
 			TSharedPtr<FJsonObject> LocalizedAssetTypesObject = AssetTypesValue->AsObject();
 			LocalizedSearchTags.Add(FLocalizedTextArray(
-				LocalizedAssetTypesObject->GetStringField("Language"),
-				LocalizedAssetTypesObject->GetStringField("Text")));
+				LocalizedAssetTypesObject->GetStringField(TEXT("Language")),
+				LocalizedAssetTypesObject->GetStringField(TEXT("Text"))));
 		}
 	}
 
 	// Parse class types field
-	ClassTypes = ManifestObject->GetStringField("ClassTypes");
+	ClassTypes = ManifestObject->GetStringField(TEXT("ClassTypes"));
 
 	// Parse initial focus asset if we have one - this is not required
-	if (ManifestObject->HasTypedField<EJson::String>("FocusAsset") == true)
+	if (ManifestObject->HasTypedField<EJson::String>(TEXT("FocusAsset")) == true)
 	{
-		FocusAssetIdent = ManifestObject->GetStringField("FocusAsset");
+		FocusAssetIdent = ManifestObject->GetStringField(TEXT("FocusAsset"));
 	}
 
 	// Use the path as the sort key - it will be alphabetical that way
 	SortKey = FeaturePackPath;
-	ManifestObject->TryGetStringField("SortKey", SortKey);
+	ManifestObject->TryGetStringField(TEXT("SortKey"), SortKey);
 
-	FString CategoryString = ManifestObject->GetStringField("Category");
-	UEnum* Enum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("EContentSourceCategory"));
-	int32 EnumValue = Enum->GetValueByName(FName(*CategoryString));
-	Category = EnumValue != INDEX_NONE ? (EContentSourceCategory)EnumValue : EContentSourceCategory::Unknown;
+	TArray<FString> CategoryStrings;
+	if (!ManifestObject->TryGetStringArrayField(TEXT("Category"), CategoryStrings))
+	{
+		FString CategoryString = ManifestObject->GetStringField(TEXT("Category"));
+		if (!CategoryString.IsEmpty())
+		{
+			CategoryStrings.Add(CategoryString);
+		}
+	}
+
+	UEnum* Enum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/AddContentDialog.EContentSourceCategory"));
+	for (const FString& CategoryString : CategoryStrings)
+	{
+		int32 EnumValue = Enum->GetValueByName(FName(*CategoryString));
+		if (EnumValue != INDEX_NONE)
+		{
+			Categories.Add((EContentSourceCategory) EnumValue);
+		}
+	}
 
 	// Thumbnail filename
-	IconFilename = ManifestObject->GetStringField("Thumbnail");
+	IconFilename = ManifestObject->GetStringField(TEXT("Thumbnail"));
 
 	// Screenshots filenames
-	ScreenshotFilenameArray = ManifestObject->GetArrayField("Screenshots");
+	ScreenshotFilenameArray = ManifestObject->GetArrayField(TEXT("Screenshots"));
 	
 	// Parse additional files data
-	if (ManifestObject->HasTypedField<EJson::Object>("AdditionalFiles") == true)
+	if (ManifestObject->HasTypedField<EJson::Object>(TEXT("AdditionalFiles")) == true)
 	{
-		TSharedPtr<FJsonObject> AdditionalFileObject = ManifestObject->GetObjectField("AdditionalFiles");
-		if( AdditionalFileObject->HasTypedField<EJson::String>("DestinationFilesFolder") == true )
+		TSharedPtr<FJsonObject> AdditionalFileObject = ManifestObject->GetObjectField(TEXT("AdditionalFiles"));
+		if( AdditionalFileObject->HasTypedField<EJson::String>(TEXT("DestinationFilesFolder")) == true )
 		{
-			AdditionalFilesForPack.DestinationFilesFolder = AdditionalFileObject->GetStringField("DestinationFilesFolder");
-			if (AdditionalFileObject->HasTypedField<EJson::Array>("AdditionalFilesList") == true)
+			AdditionalFilesForPack.DestinationFilesFolder = AdditionalFileObject->GetStringField(TEXT("DestinationFilesFolder"));
+			if (AdditionalFileObject->HasTypedField<EJson::Array>(TEXT("AdditionalFilesList")) == true)
 			{
-				for (TSharedPtr<FJsonValue> FileEntryValue : AdditionalFileObject->GetArrayField("AdditionalFilesList"))
+				for (TSharedPtr<FJsonValue> FileEntryValue : AdditionalFileObject->GetArrayField(TEXT("AdditionalFilesList")))
 				{
 					const FString FileSpecString = FileEntryValue->AsString();
 					AdditionalFilesForPack.AdditionalFilesList.AddUnique(FileSpecString);
@@ -791,16 +834,16 @@ bool FFeaturePackContentSource::ParseManifestString(const FString& ManifestStrin
 	}
 
 	// Parse additional packs data
-	if (ManifestObject->HasTypedField<EJson::Array>("AdditionalFeaturePacks") == true)
+	if (ManifestObject->HasTypedField<EJson::Array>(TEXT("AdditionalFeaturePacks")) == true)
 	{
-		UEnum* DetailEnum = FindObjectChecked<UEnum>(ANY_PACKAGE, TEXT("EFeaturePackDetailLevel"));
-		for (TSharedPtr<FJsonValue> AdditionalFeaturePackValue : ManifestObject->GetArrayField("AdditionalFeaturePacks"))
+		UEnum* DetailEnum = FindObjectChecked<UEnum>(nullptr, TEXT("/Script/AddContentDialog.EFeaturePackDetailLevel"));
+		for (TSharedPtr<FJsonValue> AdditionalFeaturePackValue : ManifestObject->GetArrayField(TEXT("AdditionalFeaturePacks")))
 		{
 			TSharedPtr<FJsonObject> EachAdditionalPack = AdditionalFeaturePackValue->AsObject();
-			FString MountName = EachAdditionalPack->GetStringField("MountName");
+			FString MountName = EachAdditionalPack->GetStringField(TEXT("MountName"));
 
 			TArray<EFeaturePackDetailLevel>	Levels;
-			for (TSharedPtr<FJsonValue> DetailValue : EachAdditionalPack->GetArrayField("DetailLevels"))
+			for (TSharedPtr<FJsonValue> DetailValue : EachAdditionalPack->GetArrayField(TEXT("DetailLevels")))
 			{
 				const FString DetailString = DetailValue->AsString();
 				int32 eValue = DetailEnum->GetValueByName(FName(*DetailString));

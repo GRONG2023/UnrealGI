@@ -10,8 +10,11 @@
 namespace NotificationManagerConstants
 {
 	// Offsets from the bottom-left corner of the work area
-	const FVector2D NotificationOffset( 15.0f, 15.0f );
+	const FVector2D NotificationOffset( 15.0f, 20.0f );
 }
+
+int32 FSlateNotificationManager::ProgressHandleCounter = 0;
+
 
 FSlateNotificationManager::FRegionalNotificationList::FRegionalNotificationList(const FSlateRect& InRectangle)
 	: Region(InRectangle)
@@ -39,30 +42,36 @@ void FSlateNotificationManager::FRegionalNotificationList::RemoveDeadNotificatio
 
 void FSlateNotificationManager::FRegionalNotificationList::Arrange()
 {
+	// If the app has a status bar push up notifications so that they don't overlap the status bar
+	static const float StausBarHeight = FAppStyle::Get().GetFloat("StatusBar.Height", nullptr, 0.0f);
+
+	const FVector2D ScaledOffset = NotificationManagerConstants::NotificationOffset;
 	FVector2D AnchorPoint(
-		Region.Right - NotificationManagerConstants::NotificationOffset.X,
-		Region.Bottom - NotificationManagerConstants::NotificationOffset.Y );
+		Region.Right - ScaledOffset.X,
+		Region.Bottom - (ScaledOffset.Y + StausBarHeight));
 
 	for (int32 ListIndex = Notifications.Num() - 1; ListIndex >= 0; --ListIndex)
 	{
 		TSharedPtr<SWindow> PinnedWindow = Notifications[ListIndex]->ParentWindowPtr.Pin();
 		if( PinnedWindow.IsValid() )
 		{
+			const float StackOffset = ScaledOffset.Y * ((Notifications.Num() - 1) - ListIndex);
 			const FVector2D DesiredSize = PinnedWindow->GetDesiredSize();
-			const FVector2D NewPosition(AnchorPoint.X - DesiredSize.X, AnchorPoint.Y - DesiredSize.Y);
-			if( NewPosition != PinnedWindow->GetPositionInScreen() && DesiredSize != PinnedWindow->GetSizeInScreen() )
+			const FVector2D NewPosition(AnchorPoint.X - DesiredSize.X, AnchorPoint.Y - DesiredSize.Y - StackOffset);
+
+			if( NewPosition != PinnedWindow->GetPositionInScreen() && DesiredSize != PinnedWindow->GetSizeInScreen())
 			{
 				PinnedWindow->ReshapeWindow( NewPosition, DesiredSize );
 			}
-			else if( NewPosition != PinnedWindow->GetPositionInScreen() )
+			else if (NewPosition != PinnedWindow->GetPositionInScreen())
 			{
-				float StackOffset = NotificationManagerConstants::NotificationOffset.Y * ((Notifications.Num()-1) - ListIndex);
-				PinnedWindow->MoveWindowTo(NewPosition - FVector2D(0, StackOffset));
+				PinnedWindow->MoveWindowTo(NewPosition);
 			}
 			AnchorPoint.Y -= DesiredSize.Y;
 		}
 	}
 }
+
 
 FSlateNotificationManager& FSlateNotificationManager::Get()
 {
@@ -83,6 +92,10 @@ void FSlateNotificationManager::ShutdownOnPreExit()
 	FCoreDelegates::OnPreExit.RemoveAll(this);
 
 	RegionalLists.Empty();
+
+	FScopeLock Lock(&StagedNotificationCS);
+	StagedNotifications.Empty();
+
 }
 
 void FSlateNotificationManager::SetRootWindow( const TSharedRef<SWindow> InRootWindow )
@@ -90,25 +103,67 @@ void FSlateNotificationManager::SetRootWindow( const TSharedRef<SWindow> InRootW
 	RootWindowPtr = InRootWindow;
 }
 
-TSharedRef<SNotificationList> FSlateNotificationManager::CreateStackForArea(const FSlateRect& InRectangle)
+TSharedRef<SNotificationList> FSlateNotificationManager::CreateStackForArea(const FSlateRect& InRectangle, TSharedPtr<SWindow> Window)
 {
+	// Doesn't work, per-pixel transparency on windows is required which is broken
+#define ONE_WINDOW_FOR_NOTIFICATIONS 0
+#if ONE_WINDOW_FOR_NOTIFICATIONS 
+	for (FRegionalNotificationList& List : RegionalLists)
+	{
+		if (FSlateRect::IsRectangleContained(List.Region, InRectangle))
+		{
+			return List.Notifications[0];
+		}
+	}
+
+	TSharedRef<SNotificationList> NewNotificationList = SNew(SNotificationList);
+	TSharedRef<SWindow> NotificationWindow = SWindow::MakeNotificationWindow();
+	NotificationWindow->SetContent(NewNotificationList);
+	NewNotificationList->ParentWindowPtr = NotificationWindow;
+
+	if (Window.IsValid())
+	{
+		FSlateApplication::Get().AddWindowAsNativeChild(NotificationWindow, Window.ToSharedRef());
+	}
+	else
+	{
+		FSlateApplication::Get().AddWindow(NotificationWindow);
+	}
+
+	if (!FSlateApplication::Get().GetActiveModalWindow().IsValid())
+	{
+		if (NotificationWindow->IsActive() || NotificationWindow->HasActiveParent())
+		{
+			NotificationWindow->BringToFront();
+		}
+	}
+
+
+	FRegionalNotificationList NewList(FSlateApplication::Get().GetWorkArea(InRectangle));
+	NewList.Notifications.Add(NewNotificationList);
+	RegionalLists.Add(NewList);
+
+	return NewNotificationList;
+#else
 	TSharedRef<SNotificationList> NotificationList = SNew(SNotificationList);
 	TSharedRef<SWindow> NotificationWindow = SWindow::MakeNotificationWindow();
 	NotificationWindow->SetContent(NotificationList);
 	NotificationList->ParentWindowPtr = NotificationWindow;
 
-	if( RootWindowPtr.IsValid() )
+	// Prevent tying a notification to a window that is minimized because a minimized window isn't painted
+	// and therefore the notification wouldn't be either.
+	if (Window.IsValid() && Window->IsVisible() && !Window->IsWindowMinimized())
 	{
-		FSlateApplication::Get().AddWindowAsNativeChild( NotificationWindow, RootWindowPtr.Pin().ToSharedRef() );
+		FSlateApplication::Get().AddWindowAsNativeChild(NotificationWindow, Window.ToSharedRef());
 	}
 	else
 	{
-		FSlateApplication::Get().AddWindow( NotificationWindow );
+		FSlateApplication::Get().AddWindow(NotificationWindow);
 	}
 
-	if( !FSlateApplication::Get().GetActiveModalWindow().IsValid() )
+	if (!FSlateApplication::Get().GetActiveModalWindow().IsValid())
 	{
-		if ( NotificationWindow->IsActive() || NotificationWindow->HasActiveParent() )
+		if (NotificationWindow->IsActive() || NotificationWindow->HasActiveParent())
 		{
 			NotificationWindow->BringToFront();
 		}
@@ -132,19 +187,26 @@ TSharedRef<SNotificationList> FSlateNotificationManager::CreateStackForArea(cons
 	}
 
 	return NotificationList;
+#endif // ONE_WINDOW_FOR_NOTIFICATIONS
+
+	
 }
 
 TSharedPtr<SNotificationItem> FSlateNotificationManager::AddNotification(const FNotificationInfo& Info)
 {
-	check(IsInGameThread() || !"FSlateNotificationManager::AddNotification must be called on game thread. Use QueueNotification if necessary.");
+	checkf(IsInGameThread(), TEXT("FSlateNotificationManager::AddNotification must be called on game thread. Use QueueNotification if necessary."));
 
 	// Early calls of this function can happen before Slate is initialized.
 	if( FSlateApplication::IsInitialized() )
 	{
 		FSlateRect PreferredWorkArea;
-		// Retrieve the main editor window to display the notication in, otherwise use the preferred work area
-		if (RootWindowPtr.IsValid())
+		if (Info.ForWindow.IsValid())
 		{
+			PreferredWorkArea = FSlateApplication::Get().GetWorkArea(Info.ForWindow->GetRectInScreen());
+		}
+		else if (RootWindowPtr.IsValid())
+		{
+			// Retrieve the main editor window to display the notification in, otherwise use the preferred work area
 			PreferredWorkArea = FSlateApplication::Get().GetWorkArea(RootWindowPtr.Pin()->GetRectInScreen());
 		}
 		else
@@ -152,7 +214,7 @@ TSharedPtr<SNotificationItem> FSlateNotificationManager::AddNotification(const F
 			PreferredWorkArea = FSlateApplication::Get().GetPreferredWorkArea();
 		}
 
-		TSharedRef<SNotificationList> List = CreateStackForArea(PreferredWorkArea);
+		TSharedRef<SNotificationList> List = CreateStackForArea(PreferredWorkArea, Info.ForWindow.IsValid() ? Info.ForWindow : RootWindowPtr.Pin());
 
 		return List->AddNotification(Info);
 	}
@@ -164,6 +226,41 @@ void FSlateNotificationManager::QueueNotification(FNotificationInfo* Info)
 {
 	PendingNotifications.Push(Info);
 }
+
+FProgressNotificationHandle FSlateNotificationManager::StartProgressNotification(FText DisplayText, int32 TotalWorkToDo)
+{
+	if (ProgressNotificationHandler)
+	{
+		FProgressNotificationHandle NewHandle(++ProgressHandleCounter);
+		ProgressNotificationHandler->StartProgressNotification(NewHandle, DisplayText, TotalWorkToDo);
+
+		return NewHandle;
+	}
+
+	return FProgressNotificationHandle();
+}
+
+void FSlateNotificationManager::UpdateProgressNotification(FProgressNotificationHandle InHandle, int32 TotalWorkDone, int32 UpdatedTotalWorkToDo, FText UpdatedDisplayText)
+{
+	if (ProgressNotificationHandler)
+	{
+		ProgressNotificationHandler->UpdateProgressNotification(InHandle, TotalWorkDone, UpdatedTotalWorkToDo, UpdatedDisplayText);
+	}
+}
+
+void FSlateNotificationManager::CancelProgressNotification(FProgressNotificationHandle InHandle)
+{
+	if (ProgressNotificationHandler)
+	{
+		ProgressNotificationHandler->CancelProgressNotification(InHandle);
+	}
+}
+
+void FSlateNotificationManager::SetProgressNotificationHandler(IProgressNotificationHandler* NewHandler)
+{
+	ProgressNotificationHandler = NewHandler;
+}
+
 
 void FSlateNotificationManager::GetWindows(TArray< TSharedRef<SWindow> >& OutWindows) const
 {
@@ -184,7 +281,7 @@ void FSlateNotificationManager::Tick()
 {
 	// Ensure that the region rectangles still match the screen work areas.
 	// This is necessary if the desktop configuration has changed
-	for (auto& RegionList : RegionalLists)
+	for (FRegionalNotificationList& RegionList : RegionalLists)
 	{
 		RegionList.Region = FSlateApplication::Get().GetWorkArea(RegionList.Region);
 	}
@@ -252,5 +349,20 @@ void FSlateNotificationManager::ForceNotificationsInFront( const TSharedRef<SWin
 		}
 	}
 }
+
+void FSlateNotificationManager::RegisterStagedNotification(TSharedPtr<IAsyncTaskNotificationImpl> InNotification)
+{
+	FScopeLock Lock(&StagedNotificationCS);
+
+	StagedNotifications.Add(InNotification);
+}
+
+void FSlateNotificationManager::UnregisterStagedNotification(TSharedPtr<IAsyncTaskNotificationImpl> InNotification)
+{
+	FScopeLock Lock(&StagedNotificationCS);
+
+	StagedNotifications.Remove(InNotification);
+}
+
 
 #undef LOCTEXT_NAMESPACE

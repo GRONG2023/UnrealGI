@@ -1,12 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SoftObjectPathCustomization.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Engine/GameViewportClient.h"
-#include "AssetData.h"
+
+#include "Containers/UnrealString.h"
+#include "DetailWidgetRow.h"
 #include "EditorClassUtils.h"
-#include "PropertyHandle.h"
+#include "HAL/PlatformCrt.h"
 #include "PropertyCustomizationHelpers.h"
+#include "PropertyHandle.h"
+#include "UObject/Object.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+
+class IDetailChildrenBuilder;
+class UClass;
 
 void FSoftObjectPathCustomization::CustomizeHeader( TSharedRef<IPropertyHandle> InStructPropertyHandle, FDetailWidgetRow& HeaderRow, IPropertyTypeCustomizationUtils& StructCustomizationUtils )
 {
@@ -17,20 +23,25 @@ void FSoftObjectPathCustomization::CustomizeHeader( TSharedRef<IPropertyHandle> 
 		? FEditorClassUtils::GetClassFromString(MetaClassName)
 		: UObject::StaticClass();
 
+	TSharedRef<SObjectPropertyEntryBox> ObjectPropertyEntryBox = SNew(SObjectPropertyEntryBox)
+		.AllowedClass(MetaClass)
+		.PropertyHandle(InStructPropertyHandle)
+		.ThumbnailPool(StructCustomizationUtils.GetThumbnailPool());
+
+	float MinDesiredWidth, MaxDesiredWidth;
+	ObjectPropertyEntryBox->GetDesiredWidth(MinDesiredWidth, MaxDesiredWidth);
+
 	HeaderRow
 	.NameContent()
 	[
 		InStructPropertyHandle->CreatePropertyNameWidget()
 	]
 	.ValueContent()
-	.MinDesiredWidth(250.0f)
-	.MaxDesiredWidth(0.0f)
+	.MinDesiredWidth(MinDesiredWidth)
+	.MaxDesiredWidth(MaxDesiredWidth)
 	[
 		// Add an object entry box.  Even though this isn't an object entry, we will simulate one
-		SNew(SObjectPropertyEntryBox)
-		.AllowedClass(MetaClass)
-		.PropertyHandle(InStructPropertyHandle)
-		.ThumbnailPool(StructCustomizationUtils.GetThumbnailPool())
+		ObjectPropertyEntryBox
 	];
 
 	// This avoids making duplicate reset boxes

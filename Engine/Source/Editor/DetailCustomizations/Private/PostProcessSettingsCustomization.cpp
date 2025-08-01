@@ -1,29 +1,59 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PostProcessSettingsCustomization.h"
-#include "UObject/UnrealType.h"
-#include "Framework/Commands/UIAction.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Engine/BlendableInterface.h"
-#include "Factories/Factory.h"
-#include "UObject/UObjectHash.h"
-#include "UObject/UObjectIterator.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Materials/Material.h"
-#include "Materials/MaterialInstanceConstant.h"
 
-#include "IDetailGroup.h"
-#include "IDetailChildrenBuilder.h"
-#include "PropertyCustomizationHelpers.h"
-#include "ObjectEditorUtils.h"
-#include "Widgets/Layout/SWidgetSwitcher.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
-#include "Subsystems/AssetEditorSubsystem.h"
+#include "DetailWidgetRow.h"
 #include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/BlendableInterface.h"
+#include "Factories/Factory.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMath.h"
+#include "IDetailChildrenBuilder.h"
+#include "IDetailGroup.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "ObjectEditorUtils.h"
+#include "PropertyCustomizationHelpers.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SlotBase.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "Templates/Tuple.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectIterator.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SWidgetSwitcher.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+class IDetailPropertyRow;
+class SWidget;
+class UPackage;
 
 #define LOCTEXT_NAMESPACE "PostProcessSettingsCustomization"
 
@@ -99,7 +129,6 @@ struct FPostProcessGroup
 	{}
 };
 
-PRAGMA_DISABLE_OPTIMIZATION
 void FPostProcessSettingsCustomization::CustomizeChildren( TSharedRef<IPropertyHandle> StructPropertyHandle, class IDetailChildrenBuilder& StructBuilder, IPropertyTypeCustomizationUtils& StructCustomizationUtils )
 {
 	uint32 NumChildren = 0;
@@ -116,16 +145,6 @@ void FPostProcessSettingsCustomization::CustomizeChildren( TSharedRef<IPropertyH
 
 	TMap<FString, FCategoryOrGroup> NameToCategoryBuilderMap;
 	TMap<FString, FPostProcessGroup> NameToGroupMap;
-
-	static const auto VarTonemapperFilm = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.TonemapperFilm"));
-	static const auto VarMobileTonemapperFilm = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Mobile.TonemapperFilm"));
-	static const FName LegacyTonemapperName("LegacyTonemapper");
-	static const FName TonemapperCategory("Film");
-	static const FName MobileTonemapperCategory("Mobile Tonemapper");
-	const bool bDesktopTonemapperFilm = VarTonemapperFilm->GetValueOnGameThread() == 1;
-	const bool bMobileTonemapperFilm = VarMobileTonemapperFilm->GetValueOnGameThread() == 1;
-	const bool bUsingFilmTonemapper = bDesktopTonemapperFilm || bMobileTonemapperFilm;		// Are any platforms use film tonemapper
-	const bool bUsingLegacyTonemapper = !bDesktopTonemapperFilm || !bMobileTonemapperFilm;	// Are any platforms use legacy tonemapper
 
 	static const auto VarDefaultAutoExposureExtendDefaultLuminanceRange = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.DefaultFeature.AutoExposure.ExtendDefaultLuminanceRange"));
 	const bool bExtendedLuminanceRange = VarDefaultAutoExposureExtendDefaultLuminanceRange->GetValueOnGameThread() == 1;
@@ -147,28 +166,7 @@ void FPostProcessSettingsCustomization::CustomizeChildren( TSharedRef<IPropertyH
 
 				FName CategoryFName = FObjectEditorUtils::GetCategoryFName(Property);
 					
-				if (CategoryFName == TonemapperCategory)
-				{
-					bool bIsLegacyTonemapperPropery = ChildHandle->HasMetaData(LegacyTonemapperName);
-
-					// Hide in case no platforms use legacy tonemapper
-					// Hide in case no platforms use film tonemapper
-					if ((bIsLegacyTonemapperPropery && !bUsingLegacyTonemapper) || (!bIsLegacyTonemapperPropery && !bUsingFilmTonemapper))
-					{
-						ChildHandle->MarkHiddenByCustomization();
-						continue;
-					}
-
-					// In case platforms use different tonemappers, place mobile settings into separate category
-					if (bMobileTonemapperFilm != bDesktopTonemapperFilm)
-					{
-						if (bMobileTonemapperFilm == !bIsLegacyTonemapperPropery)
-						{
-							CategoryFName = MobileTonemapperCategory;
-						}
-					}
-				}
-				else if (CategoryFName == ExposureCategory && bExtendedLuminanceRange)
+				if (CategoryFName == ExposureCategory && bExtendedLuminanceRange)
 				{
 					if (Property->GetName() == TEXT("AutoExposureMinBrightness"))
 					{
@@ -278,8 +276,6 @@ void FPostProcessSettingsCustomization::CustomizeChildren( TSharedRef<IPropertyH
 		}
 	}
 }
-PRAGMA_ENABLE_OPTIMIZATION
-
 
 void FPostProcessSettingsCustomization::CustomizeHeader( TSharedRef<IPropertyHandle> StructPropertyHandle, class FDetailWidgetRow& HeaderRow, IPropertyTypeCustomizationUtils& StructCustomizationUtils )
 {

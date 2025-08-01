@@ -1,10 +1,92 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "UserInterface/PropertyEditor/SPropertyEditorArrayItem.h"
-#include "UObject/UnrealType.h"
-#include "PropertyNode.h"
-#include "Widgets/Text/STextBlock.h"
+
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
 #include "Presentation/PropertyEditor/PropertyEditor.h"
+#include "PropertyHandle.h"
+#include "PropertyNode.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Text/STextBlock.h"
+
+/*static*/ TSharedPtr<FTitleMetadataFormatter> FTitleMetadataFormatter::TryParse(TSharedPtr<IPropertyHandle> RootProperty, const FString& TitlePropertyRaw)
+{
+	if (RootProperty.IsValid() && !TitlePropertyRaw.IsEmpty())
+	{
+		TSharedRef<FTitleMetadataFormatter> TitleFormatter = MakeShared<FTitleMetadataFormatter>();
+
+		// Simple solution to quickly discover if we need to do the more complex scan for FText formatting, or if
+		// we can just take what's there and use it directly.
+		if (TitlePropertyRaw.Contains(TEXT("{")))
+		{
+			TitleFormatter->Format = FText::FromString(TitlePropertyRaw);
+
+			TArray<FString> OutParameterNames;
+			FText::GetFormatPatternParameters(TitleFormatter->Format, OutParameterNames);
+			for (const FString& ParameterName : OutParameterNames)
+			{
+				TSharedPtr<IPropertyHandle> Handle = RootProperty->GetChildHandle(FName(*ParameterName), true);
+				if (Handle.IsValid())
+				{
+					TitleFormatter->PropertyHandles.Add(Handle);
+				}
+				else
+				{
+					// title property doesn't exist, display an error message
+					TitleFormatter->PropertyHandles.Empty();
+					TitleFormatter->Format = FText::FromString(TEXT("Invalid Title Property!"));
+					break;
+				}
+			}
+		}
+		else // Support the old style where it was just a name of a property with no formatting.
+		{
+			TSharedPtr<IPropertyHandle> Handle = RootProperty->GetChildHandle(FName(*TitlePropertyRaw), true);
+			if (Handle.IsValid())
+			{
+				TitleFormatter->PropertyHandles.Add(Handle);
+				TitleFormatter->Format = FText::FromString(TEXT("{") + TitlePropertyRaw + TEXT("}"));
+			}
+			else
+			{
+				// title property doesn't exist, display an error message
+				TitleFormatter->Format = FText::FromString(TEXT("Invalid Title Property!"));
+			}
+		}
+
+		return TitleFormatter;
+	}
+
+	return TSharedPtr<FTitleMetadataFormatter>();
+}
+
+FPropertyAccess::Result FTitleMetadataFormatter::GetDisplayText(FText& OutText) const
+{
+	FFormatNamedArguments FormatArgs;
+	for(TSharedPtr<IPropertyHandle> PropertyHandle : PropertyHandles)
+	{
+		FText ReplaceValue;
+		FPropertyAccess::Result Result = PropertyHandle->GetValueAsDisplayText(ReplaceValue);
+		if (Result == FPropertyAccess::Success)
+		{
+			FormatArgs.Add(PropertyHandle->GetProperty()->GetName(), ReplaceValue);
+		}
+		else
+		{
+			return Result;
+		}
+	}
+
+	OutText = FText::Format(Format, FormatArgs);
+
+	return FPropertyAccess::Success;
+}
 
 void SPropertyEditorArrayItem::Construct( const FArguments& InArgs, const TSharedRef< class FPropertyEditor>& InPropertyEditor )
 {
@@ -29,12 +111,7 @@ void SPropertyEditorArrayItem::Construct( const FArguments& InArgs, const TShare
 		const FProperty* ArrayProperty = MainProperty ? MainProperty->GetOwner<const FProperty>() : nullptr;
 		if (ArrayProperty) // should always be true
 		{
-			// see if this structure has a TitleProperty we can use to summarize
-			const FString& RepPropertyName = ArrayProperty->GetMetaData(TitlePropertyFName);
-			if (!RepPropertyName.IsEmpty())
-			{
-				TitlePropertyHandle = PropertyEditor->GetPropertyHandle()->GetChildHandle(FName(*RepPropertyName), false);
-			}
+			TitlePropertyFormatter = FTitleMetadataFormatter::TryParse(PropertyEditor->GetPropertyHandle(), ArrayProperty->GetMetaData(TitlePropertyFName));
 		}
 	}
 }
@@ -69,10 +146,10 @@ bool SPropertyEditorArrayItem::Supports( const TSharedRef< class FPropertyEditor
 
 FText SPropertyEditorArrayItem::GetValueAsString() const
 {
-	if (TitlePropertyHandle.IsValid())
+	if (TitlePropertyFormatter.IsValid())
 	{
 		FText TextOut;
-		if (FPropertyAccess::Success == TitlePropertyHandle->GetValueAsDisplayText(TextOut))
+		if (FPropertyAccess::Success == TitlePropertyFormatter->GetDisplayText(TextOut))
 		{
 			return TextOut;
 		}

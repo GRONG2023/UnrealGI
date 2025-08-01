@@ -8,21 +8,24 @@
 #include "DefaultManagerInstanceTracker.h"
 
 #if WITH_EDITOR
-#include "Developer/AssetTools/Public/IAssetTools.h"
-#include "Developer/AssetTools/Public/AssetToolsModule.h"
+#include "IAssetTools.h"
+#include "AssetToolsModule.h"
 #if ENABLE_VISUAL_LOG
 	#include "VisualLoggerExtension.h"
 #endif // ENABLE_VISUAL_LOG
-#endif
+#endif // WITH_EDITOR
 
+#if WITH_GAMEPLAY_DEBUGGER_CORE
+#include "GameplayDebugger.h"
+#endif // WITH_GAMEPLAY_DEBUGGER_CORE
 
 #if WITH_GAMEPLAY_DEBUGGER
-#include "GameplayDebugger.h"
 #include "GameplayDebugger/GameplayDebuggerCategory_AI.h"
 #include "GameplayDebugger/GameplayDebuggerCategory_BehaviorTree.h"
 #include "GameplayDebugger/GameplayDebuggerCategory_EQS.h"
 #include "GameplayDebugger/GameplayDebuggerCategory_Navmesh.h"
 #include "GameplayDebugger/GameplayDebuggerCategory_Perception.h"
+#include "GameplayDebugger/GameplayDebuggerCategory_PerceptionSystem.h"
 #include "GameplayDebugger/GameplayDebuggerCategory_NavLocalGrid.h"
 #endif // WITH_GAMEPLAY_DEBUGGER
 
@@ -78,9 +81,10 @@ void FAIModule::StartupModule()
 	GameplayDebuggerModule.RegisterCategory("EQS", IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_EQS::MakeInstance));
 	GameplayDebuggerModule.RegisterCategory("Navmesh", IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_Navmesh::MakeInstance), EGameplayDebuggerCategoryState::Disabled, 0);
 	GameplayDebuggerModule.RegisterCategory("Perception", IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_Perception::MakeInstance));
+	GameplayDebuggerModule.RegisterCategory("PerceptionSystem", IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_PerceptionSystem::MakeInstance));
 	GameplayDebuggerModule.RegisterCategory("NavGrid", IGameplayDebugger::FOnGetCategory::CreateStatic(&FGameplayDebuggerCategory_NavLocalGrid::MakeInstance), EGameplayDebuggerCategoryState::Hidden);
 	GameplayDebuggerModule.NotifyCategoriesChanged();
-#endif
+#endif // WITH_GAMEPLAY_DEBUGGER
 }
 
 void FAIModule::ShutdownModule()
@@ -103,12 +107,12 @@ void FAIModule::ShutdownModule()
 		GameplayDebuggerModule.UnregisterCategory("NavGrid");
 		GameplayDebuggerModule.NotifyCategoriesChanged();
 	}
-#endif
+#endif // WITH_GAMEPLAY_DEBUGGER
 }
 
 UAISystemBase* FAIModule::CreateAISystemInstance(UWorld* World)
 {
-	UE_LOG(LogAIModule, Log, TEXT("Creating AISystem for world %s"), *GetNameSafe(World));
+	UE_LOG(LogAIModule, Verbose, TEXT("Creating AISystem for world %s"), *GetNameSafe(World));
 	
 	FSoftClassPath AISystemClassName = UAISystemBase::GetAISystemClassName();
 

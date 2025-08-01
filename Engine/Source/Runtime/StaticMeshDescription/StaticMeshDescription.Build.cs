@@ -6,9 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
 		public StaticMeshDescription(ReadOnlyTargetRules Target) : base(Target)
 		{
-            PrivateIncludePaths.Add("Runtime/StaticMeshDescription/Private");
-            PublicIncludePaths.Add("Runtime/StaticMeshDescription/Public");
-
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
@@ -25,6 +22,23 @@ namespace UnrealBuildTool.Rules
 					"RawMesh",
 				}
 			);
+
+			if (Target.bBuildEditor == true)
+			{
+				PrivateIncludePathModuleNames.AddRange(
+					new string[]
+					{
+						"GeometryProcessingInterfaces"
+					}
+				);
+
+				DynamicallyLoadedModuleNames.AddRange(
+					new string[]
+					{
+						"GeometryProcessingInterfaces"
+					}
+				);
+			}
 
 			AddEngineThirdPartyPrivateStaticDependencies(Target, "MikkTSpace");
 		}

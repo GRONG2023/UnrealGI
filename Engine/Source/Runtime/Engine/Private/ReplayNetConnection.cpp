@@ -1,13 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ReplayNetConnection.h"
+#include "Engine/Level.h"
 #include "Net/NetworkProfiler.h"
 #include "Net/NetworkGranularMemoryLogging.h"
 #include "Engine/LevelStreaming.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Engine/ActorChannel.h"
 #include "Engine/NetworkObjectList.h"
-#include "GameFramework/PlayerController.h"
+#include "NetworkReplayStreaming.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ReplayNetConnection)
 
 static const int32 MAX_REPLAY_PACKET = 1024 * 2;
 
@@ -17,6 +21,7 @@ UReplayNetConnection::UReplayNetConnection(const FObjectInitializer& ObjectIniti
 	SetInternalAck(true);
 	SetReplay(true);
 	SetAutoFlush(true);
+	SetUnlimitedBunchSizeAllowed(true);
 }
 
 void UReplayNetConnection::InitConnection(UNetDriver* InDriver, EConnectionState InState, const FURL& InURL, int32 InConnectionSpeed, int32 InMaxPacket)
@@ -29,10 +34,12 @@ void UReplayNetConnection::InitConnection(UNetDriver* InDriver, EConnectionState
 	SetInternalAck(true);
 	SetReplay(true);
 	SetAutoFlush(true);
+	SetUnlimitedBunchSizeAllowed(true);
 
 	InitSendBuffer();
 
 	ReplayHelper.Init(InURL);
+	ReplayHelper.bRecording = true;
 }
 
 void UReplayNetConnection::CleanUp()
@@ -127,14 +134,6 @@ void UReplayNetConnection::LowLevelSend(void* Data, int32 CountBits, FOutPacketT
 
 		if (AActor* Actor = GetRepContextActor())
 		{
-			//@todo: do we still call this during checkpoints?
-			if (!Actor->IsPendingKillPending())
-			{
-				//@todo: unique this in tick?
-				// RepChangedPropertyTrackerMap.Find is expensive
-				ReplayHelper.UpdateExternalDataForActor(this, Actor);
-			}
-
 			if (!bCheckpoint && ReplayHelper.bHasDeltaCheckpoints && Driver)
 			{
 				Driver->GetNetworkObjectList().MarkDirtyForReplay(Actor);
@@ -217,9 +216,9 @@ TSharedPtr<const FInternetAddr> UReplayNetConnection::GetRemoteAddr()
 	return FInternetAddrDemo::DemoInternetAddr;
 }
 
-bool UReplayNetConnection::ClientHasInitializedLevelFor(const AActor* TestActor) const
+bool UReplayNetConnection::ClientHasInitializedLevel(const ULevel* TestLevel) const
 {
-	return (DemoFrameNum > 2 || Super::ClientHasInitializedLevelFor(TestActor));
+	return (DemoFrameNum > 2 || Super::ClientHasInitializedLevel(TestLevel));
 }
 
 void UReplayNetConnection::AddEvent(const FString& Group, const FString& Meta, const TArray<uint8>& Data)
@@ -252,42 +251,12 @@ void UReplayNetConnection::OnSeamlessTravelStart(UWorld* CurrentWorld, const FSt
 
 void UReplayNetConnection::NotifyActorDestroyed(AActor* Actor, bool IsSeamlessTravel /* = false */)
 {
+	if (!IsSeamlessTravel)
+	{
+		ReplayHelper.NotifyActorDestroyed(this, Actor);
+	}
+
 	Super::NotifyActorDestroyed(Actor, IsSeamlessTravel);
-
-	check(Actor != nullptr);
-
-	const bool bNetStartup = Actor->IsNetStartupActor();
-	const bool bActorRewindable = Actor->bReplayRewindable;
-	const bool bDeltaCheckpoint = ReplayHelper.HasDeltaCheckpoints();
-
-	if (bNetStartup)
-	{
-		if (!IsSeamlessTravel)
-		{
-			const FString FullName = Actor->GetFullName();
-
-			// This was deleted due to a game interaction, which isn't supported for Rewindable actors (while recording).
-			// However, since the actor is going to be deleted imminently, we need to track it.
-			UE_CLOG(bActorRewindable, LogDemo, Warning, TEXT("Replay Rewindable Actor destroyed during recording. Replay may show artifacts (%s)"), *FullName);
-
-			UE_LOG(LogDemo, VeryVerbose, TEXT("NotifyActorDestroyed: adding actor to deleted startup list: %s"), *FullName);
-			ReplayHelper.DeletedNetStartupActors.Add(FullName);
-
-			if (bDeltaCheckpoint)
-			{
-				ReplayHelper.RecordingDeltaCheckpointData.DestroyedNetStartupActors.Add(FullName);
-			}
-		}
-	}
-
-	if (!bNetStartup && bDeltaCheckpoint)
-	{
-		FNetworkGUID NetGUID = Driver->GuidCache->NetGUIDLookup.FindRef(Actor);
-		if (NetGUID.IsValid())
-		{
-			ReplayHelper.RecordingDeltaCheckpointData.DestroyedDynamicActors.Add(NetGUID);
-		}
-	}
 }
 
 void UReplayNetConnection::SetAnalyticsProvider(TSharedPtr<IAnalyticsProvider> InProvider)
@@ -311,4 +280,14 @@ void UReplayNetConnection::NotifyActorChannelCleanedUp(UActorChannel* Channel, E
 			ReplayHelper.RecordingDeltaCheckpointData.ChannelsToClose.Add(Channel->ActorNetGUID, CloseReason);
 		}
 	}
+}
+
+void UReplayNetConnection::RequestCheckpoint()
+{
+	ReplayHelper.RequestCheckpoint();
+}
+
+bool UReplayNetConnection::SetExternalDataForObject(UObject* OwningObject, const uint8* Src, const int32 NumBits)
+{
+	return ReplayHelper.SetExternalDataForObject(this, OwningObject, Src, NumBits);
 }

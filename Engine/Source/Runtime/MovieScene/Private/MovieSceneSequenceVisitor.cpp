@@ -34,6 +34,11 @@ void VisitSubTrackImpl(const FSequenceVisitParams& InParams, UMovieSceneSubTrack
 
 	for (const FMovieSceneTrackEvaluationFieldEntry& Entry : SubTrack->GetEvaluationField().Entries)
 	{
+		if (EnumHasAnyFlags(Entry.Flags, ESectionEvaluationFlags::PreRoll) || EnumHasAnyFlags(Entry.Flags, ESectionEvaluationFlags::PostRoll))
+		{
+			continue;
+		}
+
 		UMovieSceneSubSection* SubSection  = Cast<UMovieSceneSubSection>(Entry.Section);
 	
 		if (SubSection && SubTrack->IsRowEvalDisabled(SubSection->GetRowIndex()) && !InParams.bVisitDisabledSubSequences)
@@ -47,7 +52,7 @@ void VisitSubTrackImpl(const FSequenceVisitParams& InParams, UMovieSceneSubTrack
 			continue;
 		}
 
-		TRange<FFrameNumber> EffectiveRange = TRange<FFrameNumber>::Intersection(Entry.Range * SubSequenceSpace->RootToSequenceTransform.InverseLinearOnly(), SubSequenceSpace->RootClampRange);
+		TRange<FFrameNumber> EffectiveRange = TRange<FFrameNumber>::Intersection(SubSequenceSpace->RootToSequenceTransform.InverseNoLooping().TransformRangeConstrained(Entry.Range), SubSequenceSpace->RootClampRange);
 		if (EffectiveRange.IsEmpty())
 		{
 			continue;
@@ -85,7 +90,7 @@ void VisitTrackImpl(const FSequenceVisitParams& InParams, UMovieSceneTrack* InTr
 		}
 	}
 
-	if (InParams.bVisitTracks || InParams.bVisitMasterTracks)
+	if (InParams.bVisitTracks || InParams.bVisitRootTracks)
 	{
 		InVisitor.VisitTrack(InTrack, ObjectBinding, *SubSequenceSpace);
 	}
@@ -112,14 +117,14 @@ void VisitSequenceImpl(UMovieSceneSequence* Sequence, const FSequenceVisitParams
 		return;
 	}
 
-	if (InParams.bVisitMasterTracks)
+	if (InParams.bVisitRootTracks)
 	{
 		if (UMovieSceneTrack* Track = MovieScene->GetCameraCutTrack())
 		{
 			VisitTrackImpl(InParams, Track, InVisitor, FGuid(), InOutRootPath, SubSequenceSpace);
 		}
 
-		for (UMovieSceneTrack* Track : MovieScene->GetMasterTracks())
+		for (UMovieSceneTrack* Track : MovieScene->GetTracks())
 		{
 			VisitTrackImpl(InParams, Track, InVisitor, FGuid(), InOutRootPath, SubSequenceSpace);
 		}

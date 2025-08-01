@@ -2,7 +2,7 @@
 
 #include "PendingReports.h"
 #include "CrashReportCoreModule.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Logging/LogMacros.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
@@ -40,7 +40,7 @@ void FPendingReports::Forget(const FString& ReportDirectoryName)
 
 	if (Index != INDEX_NONE)
 	{
-		Reports.RemoveAt(Index, 1 /* single item */, false /* no need to shrink */);
+		Reports.RemoveAt(Index, 1 /* single item */, EAllowShrinking::No);
 	}
 }
 

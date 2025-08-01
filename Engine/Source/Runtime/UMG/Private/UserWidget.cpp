@@ -1,10 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Blueprint/UserWidget.h"
+
+#include "Engine/GameInstance.h"
 #include "Rendering/DrawElements.h"
 #include "Sound/SoundBase.h"
 #include "Sound/SlateSound.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Trace/SlateMemoryTags.h"
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Layout/SConstraintCanvas.h"
 #include "Components/NamedSlot.h"
@@ -13,21 +16,29 @@
 #include "Blueprint/WidgetBlueprintGeneratedClass.h"
 #include "Animation/UMGSequencePlayer.h"
 #include "Animation/UMGSequenceTickManager.h"
+#include "Extensions/UserWidgetExtension.h"
+#include "Extensions/WidgetBlueprintGeneratedClassExtension.h"
 #include "UObject/UnrealType.h"
 #include "Blueprint/WidgetNavigation.h"
 #include "Animation/WidgetAnimation.h"
 #include "MovieScene.h"
 #include "Interfaces/ITargetPlatform.h"
+#include "Blueprint/GameViewportSubsystem.h"
 #include "Blueprint/WidgetBlueprintLibrary.h"
-#include "Blueprint/WidgetLayoutLibrary.h"
+#include "Blueprint/WidgetChild.h"
 #include "UObject/EditorObjectVersion.h"
 #include "UMGPrivate.h"
+#include "UObject/ObjectSaveContext.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/PropertyPortFlags.h"
 #include "TimerManager.h"
 #include "UObject/Package.h"
 #include "Editor/WidgetCompilerLog.h"
 #include "GameFramework/InputSettings.h"
+#include "Engine/InputDelegateBinding.h"
+#include "ProfilingDebugging/AssetMetadataTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(UserWidget)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
@@ -68,16 +79,17 @@ UUserWidget::UUserWidget(const FObjectInitializer& ObjectInitializer)
 	, bHasScriptImplementedTick(true)
 	, bHasScriptImplementedPaint(true)
 	, bInitialized(false)
+	, bAreExtensionsConstructed(false)
 	, bStoppingAllAnimations(false)
 	, TickFrequency(EWidgetTickFrequency::Auto)
 {
-	ViewportAnchors = FAnchors(0, 0, 1, 1);
-	Visibility = ESlateVisibility::SelfHitTestInvisible;
+	SetVisibilityInternal(ESlateVisibility::SelfHitTestInvisible);
 
-	bSupportsKeyboardFocus_DEPRECATED = true;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	bIsFocusable = false;
 	ColorAndOpacity = FLinearColor::White;
 	ForegroundColor = FSlateColor::UseForeground();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	MinimumDesiredSize = FVector2D(0, 0);
 
@@ -111,8 +123,6 @@ bool UUserWidget::Initialize()
 	// If it's not initialized initialize it, as long as it's not the CDO, we never initialize the CDO.
 	if (!bInitialized && !HasAnyFlags(RF_ClassDefaultObject))
 	{
-		bInitialized = true;
-
 		// If this is a sub-widget of another UserWidget, default designer flags and player context to match those of the owning widget
 		if (UUserWidget* OwningUserWidget = GetTypedOuter<UUserWidget>())
 		{
@@ -123,11 +133,6 @@ bool UUserWidget::Initialize()
 		}
 
 		UWidgetBlueprintGeneratedClass* BGClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass());
-		if (BGClass)
-		{
-			BGClass = GetWidgetTreeOwningClass();
-		}
-
 		// Only do this if this widget is of a blueprint class
 		if (BGClass)
 		{
@@ -146,22 +151,24 @@ bool UUserWidget::Initialize()
 		{
 			WidgetTree->SetFlags(RF_Transient);
 
-			const bool bReparentToWidgetTree = false;
-			InitializeNamedSlots(bReparentToWidgetTree);
+			InitializeNamedSlots();
 		}
 
-		if (!IsDesignTime() && PlayerContext.IsValid())
+		// For backward compatibility, run the initialize event on widget that doesn't have a player context only when the class authorized it.
+		bool bClassWantsToRunInitialized = BGClass && BGClass->bCanCallInitializedWithoutPlayerContext;
+		if (!IsDesignTime() && (PlayerContext.IsValid() || bClassWantsToRunInitialized))
 		{
 			NativeOnInitialized();
 		}
 
+		bInitialized = true;
 		return true;
 	}
 
 	return false;
 }
 
-void UUserWidget::InitializeNamedSlots(bool bReparentToWidgetTree)
+void UUserWidget::InitializeNamedSlots()
 {
 	for (const FNamedSlotBinding& Binding : NamedSlotBindings )
 	{
@@ -179,40 +186,103 @@ void UUserWidget::InitializeNamedSlots(bool bReparentToWidgetTree)
 				{
 					NamedSlot->ClearChildren();
 					NamedSlot->AddChild(BindingContent);
-
-					//if ( bReparentToWidgetTree )
-					//{
-					//	FName NewName = MakeUniqueObjectName(WidgetTree, BindingContent->GetClass(), BindingContent->GetFName());
-					//	BindingContent->Rename(*NewName.ToString(), WidgetTree, REN_DontCreateRedirectors | REN_DoNotDirty);
-					//}
 				}
 			}
 		}
 	}
 }
 
-void UUserWidget::DuplicateAndInitializeFromWidgetTree(UWidgetTree* InWidgetTree)
+void UUserWidget::DuplicateAndInitializeFromWidgetTree(UWidgetTree* InWidgetTree, const TMap<FName, UWidget*>& NamedSlotContentToMerge)
 {
 	TScopeCounter<uint32> ScopeInitializingFromWidgetTree(bInitializingFromWidgetTree);
 
-	if ( ensure(InWidgetTree) )
+	if ( ensure(InWidgetTree) && !HasAnyFlags(RF_NeedPostLoad))
 	{
 		FObjectInstancingGraph ObjectInstancingGraph;
-		WidgetTree = NewObject<UWidgetTree>(this, InWidgetTree->GetClass(), TEXT("WidgetTree"), RF_Transactional, InWidgetTree, false, &ObjectInstancingGraph);
+		WidgetTree = NewObject<UWidgetTree>(this, InWidgetTree->GetClass(), NAME_None, RF_Transactional, InWidgetTree, false, &ObjectInstancingGraph);
 		WidgetTree->SetFlags(RF_Transient | RF_DuplicateTransient);
 
 		// After using the widget tree as a template, we need to loop over the instanced sub-objects and
 		// initialize any UserWidgets, so that they can repeat the process for their children.
 		ObjectInstancingGraph.ForEachObjectInstance([this](UObject* Instanced) {
+			// Make sure all widgets inherit the designer flags.
+#if WITH_EDITOR
+			if (UWidget* InstancedWidget = Cast<UWidget>(Instanced))
+			{
+				InstancedWidget->SetDesignerFlags(GetDesignerFlags());
+			}
+#endif
+
 			if (UUserWidget* InstancedSubUserWidget = Cast<UUserWidget>(Instanced))
 			{
-#if WITH_EDITOR
-				InstancedSubUserWidget->SetDesignerFlags(GetDesignerFlags());
-#endif
 				InstancedSubUserWidget->SetPlayerContext(GetPlayerContext());
 				InstancedSubUserWidget->Initialize();
 			}
 		});
+
+		TArray<UWidget*> AllNamedSlotContentWidgets;
+		NamedSlotContentToMerge.GenerateValueArray(AllNamedSlotContentWidgets);
+
+		auto SetContentWidgetForNamedSlot = [this](FName NamedSlotName, UWidget* TemplateSlotContent)
+		{
+			FObjectInstancingGraph NamedSlotInstancingGraph;
+			// We need to add a mapping from the template's widget tree to the new widget tree, that way
+			// as we instance the widget hierarchy it's grafted onto the new widget tree.
+			NamedSlotInstancingGraph.AddNewObject(WidgetTree, TemplateSlotContent->GetTypedOuter<UWidgetTree>());
+
+			// Instance the new widget from the foreign tree, but do it in a way that grafts it onto the tree we're instancing.
+			UWidget* Content = NewObject<UWidget>(WidgetTree, TemplateSlotContent->GetClass(), TemplateSlotContent->GetFName(), RF_Transactional, TemplateSlotContent, false, &NamedSlotInstancingGraph);
+			Content->SetFlags(RF_Transient | RF_DuplicateTransient);
+
+			// Insert the newly constructed widget into the named slot that corresponds.  The above creates
+			// it as if it was always part of the widget tree, but this actually puts it into a widget's
+			// slot for the named slot.
+			SetContentForSlot(NamedSlotName, Content);
+		};
+
+		// This block controls merging named slot content specified in a child class for the widget we're templated after.
+		for (const TPair<FName, UWidget*>& KVP_SlotContent : NamedSlotContentToMerge)
+		{
+			// Don't insert the named slot content if the named slot is filled already.  This is a problematic
+			// scenario though, if someone inserted content, but we have class default instances, we sorta leave
+			// ourselves in a strange situation, because there are now potentially class variables that won't
+			// have an instance assigned.
+			if (!GetContentForSlot(KVP_SlotContent.Key))
+			{
+				if (UWidget* TemplateSlotContent = KVP_SlotContent.Value)
+				{
+					TArray<TPair<FName, UWidget*>> NamedSlotContentCreationStack;
+					FName OwningNamedSlot = KVP_SlotContent.Key;
+					NamedSlotContentCreationStack.Add(TTuple<FName, UWidget*>(OwningNamedSlot, TemplateSlotContent));
+
+					// Search for the owning Namedslot to see if it is the content of another Namedslot itself.
+					// If so, we need to ensure it is added to the widget tree prior to its content.
+					// Repeat until the owning Namedslot is no longer found as the content of another.
+					while (UWidget** FoundContentWidget = AllNamedSlotContentWidgets.FindByPredicate([OwningNamedSlot](const UWidget* Content) {return Content ? Content->GetFName() == OwningNamedSlot : false;}))
+					{
+						UWidget* NestedNamedSlotContent = *FoundContentWidget;
+						OwningNamedSlot = *NamedSlotContentToMerge.FindKey(NestedNamedSlotContent);
+
+						// Make sure we have not already iterated on this Namedslot.
+						if (!GetContentForSlot(OwningNamedSlot) && !NamedSlotContentCreationStack.ContainsByPredicate([OwningNamedSlot](const TTuple<FName, UWidget*>& Content) {return Content.Key == OwningNamedSlot;}))
+						{
+							NamedSlotContentCreationStack.Add(TPair<FName, UWidget*>(OwningNamedSlot, NestedNamedSlotContent));
+						}
+						else 
+						{
+							break;
+						}
+					}
+
+					// Go through the namedslot/content pair in hierarchy order and add them to the widget tree.
+					for (int32 Index = NamedSlotContentCreationStack.Num() - 1; Index >= 0; Index--)
+					{
+						TPair<FName, UWidget*>& KVP = NamedSlotContentCreationStack[Index];
+						SetContentWidgetForNamedSlot(KVP.Key, KVP.Value);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -284,15 +354,18 @@ void UUserWidget::SynchronizeProperties()
 	TSharedPtr<SObjectWidget> SafeGCWidget = MyGCWidget.Pin();
 	if ( SafeGCWidget.IsValid() )
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		TAttribute<FLinearColor> ColorBinding = PROPERTY_BINDING(FLinearColor, ColorAndOpacity);
 		TAttribute<FSlateColor> ForegroundColorBinding = PROPERTY_BINDING(FSlateColor, ForegroundColor);
 
 		SafeGCWidget->SetColorAndOpacity(ColorBinding);
 		SafeGCWidget->SetForegroundColor(ForegroundColorBinding);
 		SafeGCWidget->SetPadding(Padding);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UUserWidget::SetColorAndOpacity(FLinearColor InColorAndOpacity)
 {
 	ColorAndOpacity = InColorAndOpacity;
@@ -302,6 +375,11 @@ void UUserWidget::SetColorAndOpacity(FLinearColor InColorAndOpacity)
 	{
 		SafeGCWidget->SetColorAndOpacity(ColorAndOpacity);
 	}
+}
+
+const FLinearColor& UUserWidget::GetColorAndOpacity() const
+{
+	return ColorAndOpacity;
 }
 
 void UUserWidget::SetForegroundColor(FSlateColor InForegroundColor)
@@ -315,6 +393,11 @@ void UUserWidget::SetForegroundColor(FSlateColor InForegroundColor)
 	}
 }
 
+const FSlateColor& UUserWidget::GetForegroundColor() const
+{
+	return ForegroundColor;
+}
+
 void UUserWidget::SetPadding(FMargin InPadding)
 {
 	Padding = InPadding;
@@ -325,6 +408,12 @@ void UUserWidget::SetPadding(FMargin InPadding)
 		SafeGCWidget->SetPadding(Padding);
 	}
 }
+
+FMargin UUserWidget::GetPadding() const
+{
+	return Padding;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 UWorld* UUserWidget::GetWorld() const
 {
@@ -371,10 +460,10 @@ UWorld* UUserWidget::GetWorld() const
 
 UUMGSequencePlayer* UUserWidget::GetSequencePlayer(const UWidgetAnimation* InAnimation) const
 {
-	UUMGSequencePlayer*const* FoundPlayer = ActiveSequencePlayers.FindByPredicate(
+	TObjectPtr<UUMGSequencePlayer> const* FoundPlayer = ActiveSequencePlayers.FindByPredicate(
 		[&](const UUMGSequencePlayer* Player)
 	{
-		return Player->GetAnimation() == InAnimation;
+		return Player->GetAnimation() == InAnimation && !Player->IsStopping();
 	});
 
 	return FoundPlayer ? *FoundPlayer : nullptr;
@@ -387,8 +476,11 @@ UUMGSequencePlayer* UUserWidget::GetOrAddSequencePlayer(UWidgetAnimation* InAnim
 		if (!AnimationTickManager)
 		{
 			AnimationTickManager = UUMGSequenceTickManager::Get(this);
-			AnimationTickManager->AddWidget(this);
 		}
+
+		// Always ensure that this widget's animations are ticked for at least the first frame
+		// If this widget is currently offscreen it would very well not be being tracked by the tick manager
+		AnimationTickManager->AddWidget(this);
 
 		// @todo UMG sequencer - Restart animations which have had Play called on them?
 		UUMGSequencePlayer* FoundPlayer = nullptr;
@@ -396,7 +488,7 @@ UUMGSequencePlayer* UUserWidget::GetOrAddSequencePlayer(UWidgetAnimation* InAnim
 		{
 			// We need to make sure we haven't stopped the animation, otherwise it'll get canceled on the next frame.
 			if (Player->GetAnimation() == InAnimation
-			 && !StoppedSequencePlayers.Contains(Player))
+			 && !StoppedSequencePlayers.Contains(Player) && !Player->IsStopping())
 			{
 				FoundPlayer = Player;
 				break;
@@ -421,6 +513,81 @@ UUMGSequencePlayer* UUserWidget::GetOrAddSequencePlayer(UWidgetAnimation* InAnim
 	return nullptr;
 }
 
+void UUserWidget::ExecuteQueuedAnimationTransitions()
+{
+	// In case any users queue animations in respose to animation transitions, operate on a copy array
+	TArray<FQueuedWidgetAnimationTransition, TInlineAllocator<8>> CurrentWidgetAnimationTransitions(QueuedWidgetAnimationTransitions);
+
+	for (FQueuedWidgetAnimationTransition& QueuedWidgetAnimationTransition : CurrentWidgetAnimationTransitions)
+	{
+		switch (QueuedWidgetAnimationTransition.TransitionMode)
+		{
+		case EQueuedWidgetAnimationMode::Play:
+			PlayAnimation(QueuedWidgetAnimationTransition.WidgetAnimation
+				, QueuedWidgetAnimationTransition.StartAtTime.GetValue()
+				, QueuedWidgetAnimationTransition.NumLoopsToPlay.GetValue()
+				, QueuedWidgetAnimationTransition.PlayMode.GetValue()
+				, QueuedWidgetAnimationTransition.PlaybackSpeed.GetValue()
+				, QueuedWidgetAnimationTransition.bRestoreState.GetValue());
+			break;
+		case EQueuedWidgetAnimationMode::PlayTo:
+			PlayAnimationTimeRange(QueuedWidgetAnimationTransition.WidgetAnimation
+				, QueuedWidgetAnimationTransition.StartAtTime.GetValue()
+				, QueuedWidgetAnimationTransition.EndAtTime.GetValue()
+				, QueuedWidgetAnimationTransition.NumLoopsToPlay.GetValue()
+				, QueuedWidgetAnimationTransition.PlayMode.GetValue()
+				, QueuedWidgetAnimationTransition.PlaybackSpeed.GetValue()
+				, QueuedWidgetAnimationTransition.bRestoreState.GetValue());
+			break;
+		case EQueuedWidgetAnimationMode::Forward:
+			PlayAnimationForward(QueuedWidgetAnimationTransition.WidgetAnimation
+				, QueuedWidgetAnimationTransition.PlaybackSpeed.GetValue()
+				, QueuedWidgetAnimationTransition.bRestoreState.GetValue());
+			break;
+		case EQueuedWidgetAnimationMode::Reverse:
+			PlayAnimationReverse(QueuedWidgetAnimationTransition.WidgetAnimation
+				, QueuedWidgetAnimationTransition.PlaybackSpeed.GetValue()
+				, QueuedWidgetAnimationTransition.bRestoreState.GetValue());
+			break;
+		case EQueuedWidgetAnimationMode::Stop:
+			StopAnimation(QueuedWidgetAnimationTransition.WidgetAnimation);
+			break;
+		case EQueuedWidgetAnimationMode::Pause:
+			PauseAnimation(QueuedWidgetAnimationTransition.WidgetAnimation);
+			break;
+		}
+	}
+
+	if (QueuedWidgetAnimationTransitions.Num() > 0)
+	{
+		QueuedWidgetAnimationTransitions.Empty();
+		UpdateCanTick();
+	}
+}
+
+void UUserWidget::ConditionalTearDownAnimations()
+{
+	for (auto It = ActiveSequencePlayers.CreateIterator(); It; ++It)
+	{
+		UUMGSequencePlayer* Player = *It;
+		if (!Player)
+		{
+			It.RemoveCurrent();
+		}
+		else if (!Player->IsStopping())
+		{
+			Player->TearDown();
+			It.RemoveCurrent();
+		}
+	}
+
+	for (UUMGSequencePlayer* Player : StoppedSequencePlayers)
+	{
+		Player->TearDown();
+	}
+	StoppedSequencePlayers.Empty();
+}
+
 void UUserWidget::TearDownAnimations()
 {
 	for (UUMGSequencePlayer* Player : ActiveSequencePlayers)
@@ -440,9 +607,15 @@ void UUserWidget::TearDownAnimations()
 	StoppedSequencePlayers.Empty();
 }
 
-void UUserWidget::Invalidate()
+void UUserWidget::DisableAnimations()
 {
-	Invalidate(EInvalidateWidgetReason::LayoutAndVolatility);
+	for (UUMGSequencePlayer* Player : ActiveSequencePlayers)
+	{
+		if (Player)
+		{
+			Player->RemoveEvaluationData();
+		}
+	}
 }
 
 void UUserWidget::Invalidate(EInvalidateWidgetReason InvalidateReason)
@@ -454,12 +627,140 @@ void UUserWidget::Invalidate(EInvalidateWidgetReason InvalidateReason)
 	}
 }
 
-void UUserWidget::InvalidateFullScreenWidget(EInvalidateWidgetReason InvalidateReason)
+void UUserWidget::QueuePlayAnimation(UWidgetAnimation* InAnimation, float StartAtTime, int32 NumLoopsToPlay, EUMGSequencePlayMode::Type PlayMode, float PlaybackSpeed, bool bRestoreState)
 {
-	if (TSharedPtr<SWidget> FullScreenWidgetPinned = FullScreenWidget.Pin())
+	if (!InAnimation)
 	{
-		FullScreenWidgetPinned->Invalidate(InvalidateReason);
+		return;
 	}
+
+	FQueuedWidgetAnimationTransition* QueuedTransitionPtr = QueuedWidgetAnimationTransitions.FindByPredicate([&](const FQueuedWidgetAnimationTransition& QueuedTransition) { return QueuedTransition.WidgetAnimation == InAnimation; });
+	FQueuedWidgetAnimationTransition& QueuedTransition = QueuedTransitionPtr ? *QueuedTransitionPtr : QueuedWidgetAnimationTransitions.AddDefaulted_GetRef();
+
+	QueuedTransition = FQueuedWidgetAnimationTransition();
+	QueuedTransition.WidgetAnimation = InAnimation;
+	QueuedTransition.TransitionMode = EQueuedWidgetAnimationMode::Play;
+	QueuedTransition.StartAtTime = StartAtTime;
+	QueuedTransition.NumLoopsToPlay = NumLoopsToPlay;
+	QueuedTransition.PlayMode = PlayMode;
+	QueuedTransition.PlaybackSpeed = PlaybackSpeed;
+	QueuedTransition.bRestoreState = bRestoreState;
+
+	UpdateCanTick();
+}
+
+void UUserWidget::QueuePlayAnimationTimeRange(UWidgetAnimation* InAnimation, float StartAtTime, float EndAtTime, int32 NumLoopsToPlay, EUMGSequencePlayMode::Type PlayMode, float PlaybackSpeed, bool bRestoreState)
+{
+	if (!InAnimation)
+	{
+		return;
+	}
+
+	FQueuedWidgetAnimationTransition* QueuedTransitionPtr = QueuedWidgetAnimationTransitions.FindByPredicate([&](const FQueuedWidgetAnimationTransition& QueuedTransition) { return QueuedTransition.WidgetAnimation == InAnimation; });
+	FQueuedWidgetAnimationTransition& QueuedTransition = QueuedTransitionPtr ? *QueuedTransitionPtr : QueuedWidgetAnimationTransitions.AddDefaulted_GetRef();
+
+	QueuedTransition.WidgetAnimation = InAnimation;
+	QueuedTransition.TransitionMode = EQueuedWidgetAnimationMode::PlayTo;
+	QueuedTransition.StartAtTime = StartAtTime;
+	QueuedTransition.EndAtTime = EndAtTime;
+	QueuedTransition.NumLoopsToPlay = NumLoopsToPlay;
+	QueuedTransition.PlayMode = PlayMode;
+	QueuedTransition.PlaybackSpeed = PlaybackSpeed;
+	QueuedTransition.bRestoreState = bRestoreState;
+
+	UpdateCanTick();
+}
+
+void UUserWidget::QueuePlayAnimationForward(UWidgetAnimation* InAnimation, float PlaybackSpeed, bool bRestoreState)
+{
+	if (!InAnimation)
+	{
+		return;
+	}
+
+	FQueuedWidgetAnimationTransition* QueuedTransitionPtr = QueuedWidgetAnimationTransitions.FindByPredicate([&](const FQueuedWidgetAnimationTransition& QueuedTransition) { return QueuedTransition.WidgetAnimation == InAnimation; });
+	FQueuedWidgetAnimationTransition& QueuedTransition = QueuedTransitionPtr ? *QueuedTransitionPtr : QueuedWidgetAnimationTransitions.AddDefaulted_GetRef();
+
+	QueuedTransition.WidgetAnimation = InAnimation;
+	QueuedTransition.TransitionMode = EQueuedWidgetAnimationMode::Forward;
+	QueuedTransition.PlaybackSpeed = PlaybackSpeed;
+	QueuedTransition.bRestoreState = bRestoreState;
+
+	UpdateCanTick();
+}
+
+void UUserWidget::QueuePlayAnimationReverse(UWidgetAnimation* InAnimation, float PlaybackSpeed, bool bRestoreState)
+{
+	if (!InAnimation)
+	{
+		return;
+	}
+
+	FQueuedWidgetAnimationTransition* QueuedTransitionPtr = QueuedWidgetAnimationTransitions.FindByPredicate([&](const FQueuedWidgetAnimationTransition& QueuedTransition) { return QueuedTransition.WidgetAnimation == InAnimation; });
+	FQueuedWidgetAnimationTransition& QueuedTransition = QueuedTransitionPtr ? *QueuedTransitionPtr : QueuedWidgetAnimationTransitions.AddDefaulted_GetRef();
+
+	QueuedTransition.WidgetAnimation = InAnimation;
+	QueuedTransition.TransitionMode = EQueuedWidgetAnimationMode::Reverse;
+	QueuedTransition.PlaybackSpeed = PlaybackSpeed;
+	QueuedTransition.bRestoreState = bRestoreState;
+
+	UpdateCanTick();
+}
+
+void UUserWidget::QueueStopAnimation(const UWidgetAnimation* InAnimation)
+{
+	if (!InAnimation)
+	{
+		return;
+	}
+
+	FQueuedWidgetAnimationTransition* QueuedTransitionPtr = QueuedWidgetAnimationTransitions.FindByPredicate([&](const FQueuedWidgetAnimationTransition& QueuedTransition) { return QueuedTransition.WidgetAnimation == InAnimation; });
+	FQueuedWidgetAnimationTransition& QueuedTransition = QueuedTransitionPtr ? *QueuedTransitionPtr : QueuedWidgetAnimationTransitions.AddDefaulted_GetRef();
+
+	QueuedTransition.WidgetAnimation = const_cast<UWidgetAnimation*>(InAnimation);
+	QueuedTransition.TransitionMode = EQueuedWidgetAnimationMode::Stop;
+
+	UpdateCanTick();
+}
+
+void UUserWidget::QueueStopAllAnimations()
+{
+	for (FQueuedWidgetAnimationTransition& QueuedWidgetAnimationTransition : QueuedWidgetAnimationTransitions)
+	{
+		QueuedWidgetAnimationTransition.TransitionMode = EQueuedWidgetAnimationMode::Stop;
+	}
+
+	TArray<UUMGSequencePlayer*, TInlineAllocator<8>> CurrentActivePlayers(ActiveSequencePlayers);
+	for (UUMGSequencePlayer* FoundPlayer : ActiveSequencePlayers)
+	{
+		if (FoundPlayer->GetPlaybackStatus() == EMovieScenePlayerStatus::Playing)
+		{
+			QueueStopAnimation(FoundPlayer->GetAnimation());
+		}
+	}
+
+	UpdateCanTick();
+}
+
+float UUserWidget::QueuePauseAnimation(const UWidgetAnimation* InAnimation)
+{
+	if (InAnimation)
+	{
+		FQueuedWidgetAnimationTransition* QueuedTransitionPtr = QueuedWidgetAnimationTransitions.FindByPredicate([&](const FQueuedWidgetAnimationTransition& QueuedTransition) { return QueuedTransition.WidgetAnimation == InAnimation; });
+		FQueuedWidgetAnimationTransition& QueuedTransition = QueuedTransitionPtr ? *QueuedTransitionPtr : QueuedWidgetAnimationTransitions.AddDefaulted_GetRef();
+
+		QueuedTransition.WidgetAnimation = const_cast<UWidgetAnimation*>(InAnimation);
+		QueuedTransition.TransitionMode = EQueuedWidgetAnimationMode::Pause;
+
+		UpdateCanTick();
+
+		if (UUMGSequencePlayer* FoundPlayer = GetSequencePlayer(InAnimation))
+		{
+			return (float)FoundPlayer->GetCurrentTime().AsSeconds();
+		}
+	}
+
+	return 0;
 }
 
 UUMGSequencePlayer* UUserWidget::PlayAnimation(UWidgetAnimation* InAnimation, float StartAtTime, int32 NumberOfLoops, EUMGSequencePlayMode::Type PlayMode, float PlaybackSpeed, bool bRestoreState)
@@ -500,7 +801,11 @@ UUMGSequencePlayer* UUserWidget::PlayAnimationForward(UWidgetAnimation* InAnimat
 {
 	// Don't create the player, only search for it.
 	UUMGSequencePlayer* Player = GetSequencePlayer(InAnimation);
-	if (Player)
+
+	// Just return the player if it's already playing. GetSequencePlayers should only be returning players that are NOT stopped. 
+	// However, there is the possibility that Stop() has been called on a player, but its status has not been changed to Stopped. 
+	// In that case, this check will be bypassed and PlayAnimation will be called so that the animation will play.
+	if (Player && Player->GetPlaybackStatus() == EMovieScenePlayerStatus::Playing)
 	{
 		if (!Player->IsPlayingForward())
 		{
@@ -511,14 +816,18 @@ UUMGSequencePlayer* UUserWidget::PlayAnimationForward(UWidgetAnimation* InAnimat
 		return Player;
 	}
 
-	return PlayAnimation(InAnimation, 0.0f, 1.0f, EUMGSequencePlayMode::Forward, PlaybackSpeed, bRestoreState);
+	return PlayAnimation(InAnimation, 0.0f, 1, EUMGSequencePlayMode::Forward, PlaybackSpeed, bRestoreState);
 }
 
 UUMGSequencePlayer* UUserWidget::PlayAnimationReverse(UWidgetAnimation* InAnimation, float PlaybackSpeed, bool bRestoreState)
 {
 	// Don't create the player, only search for it.
 	UUMGSequencePlayer* Player = GetSequencePlayer(InAnimation);
-	if (Player)
+
+	// Just return the player if it's already playing. GetSequencePlayers should only be returning players that are NOT stopped. 
+	// However, there is the possibility that Stop() has been called on a player, but its status has not been changed to Stopped. 
+	// In that case, this check will be bypassed and PlayAnimation will be called so that the animation will play.
+	if (Player && Player->GetPlaybackStatus() == EMovieScenePlayerStatus::Playing)
 	{
 		if (Player->IsPlayingForward())
 		{
@@ -529,7 +838,7 @@ UUMGSequencePlayer* UUserWidget::PlayAnimationReverse(UWidgetAnimation* InAnimat
 		return Player;
 	}
 
-	return PlayAnimation(InAnimation, 0.0f, 1.0f, EUMGSequencePlayMode::Reverse, PlaybackSpeed, bRestoreState);
+	return PlayAnimation(InAnimation, 0.0f, 1, EUMGSequencePlayMode::Reverse, PlaybackSpeed, bRestoreState);
 }
 
 void UUserWidget::StopAnimation(const UWidgetAnimation* InAnimation)
@@ -640,7 +949,7 @@ void UUserWidget::SetPlaybackSpeed(const UWidgetAnimation* InAnimation, float Pl
 void UUserWidget::ReverseAnimation(const UWidgetAnimation* InAnimation)
 {
 	if (UUMGSequencePlayer* FoundPlayer = GetSequencePlayer(InAnimation))
-		{
+	{
 		FoundPlayer->Reverse();
 	}
 }
@@ -656,7 +965,7 @@ bool UUserWidget::IsAnimationPlayingForward(const UWidgetAnimation* InAnimation)
 {
 	if (InAnimation)
 	{
-		UUMGSequencePlayer** FoundPlayer = ActiveSequencePlayers.FindByPredicate([&](const UUMGSequencePlayer* Player) { return Player->GetAnimation() == InAnimation; });
+		TObjectPtr<UUMGSequencePlayer>* FoundPlayer = ActiveSequencePlayers.FindByPredicate([&](const UUMGSequencePlayer* Player) { return Player->GetAnimation() == InAnimation; });
 
 		if (FoundPlayer)
 		{
@@ -677,7 +986,13 @@ void UUserWidget::OnAnimationFinishedPlaying(UUMGSequencePlayer& Player)
 
 	if ( Player.GetPlaybackStatus() == EMovieScenePlayerStatus::Stopped )
 	{
-		StoppedSequencePlayers.Add(&Player);
+		//ensureAlways(!StoppedSequencePlayers.Contains(&Player));
+		StoppedSequencePlayers.AddUnique(&Player);
+
+		if (AnimationTickManager)
+		{
+			AnimationTickManager->AddLatentAction(FMovieSceneSequenceLatentActionDelegate::CreateUObject(this, &UUserWidget::ClearStoppedSequencePlayers));
+		}
 	}
 
 	UpdateCanTick();
@@ -711,6 +1026,39 @@ void UUserWidget::PlaySound(USoundBase* SoundToPlay)
 		NewSound.SetResourceObject(SoundToPlay);
 		FSlateApplication::Get().PlaySound(NewSound);
 	}
+}
+
+bool UUserWidget::SetDesiredFocusWidget(FName WidgetName)
+{
+	DesiredFocusWidget = FWidgetChild(this, WidgetName);
+	return DesiredFocusWidget.GetWidget() != nullptr;
+}
+
+bool UUserWidget::SetDesiredFocusWidget(UWidget* Widget)
+{
+	if (Widget && WidgetTree)
+	{
+		TArray<UWidget*> AllWidgets;
+		WidgetTree->GetAllWidgets(AllWidgets);
+
+		if (AllWidgets.Contains(Widget))
+		{
+			DesiredFocusWidget = FWidgetChild(this, Widget->GetFName());
+			return DesiredFocusWidget.GetWidget() != nullptr;
+		}
+	}
+	return false;
+}
+
+
+FName UUserWidget::GetDesiredFocusWidgetName() const
+{
+	return DesiredFocusWidget.GetFName();
+}
+
+UWidget* UUserWidget::GetDesiredFocusWidget() const
+{
+	return DesiredFocusWidget.GetWidget();
 }
 
 UWidget* UUserWidget::GetWidgetHandle(TSharedRef<SWidget> InWidget)
@@ -794,12 +1142,14 @@ UWidget* UUserWidget::GetWidgetFromName(const FName& Name) const
 void UUserWidget::GetSlotNames(TArray<FName>& SlotNames) const
 {
 	// Only do this if this widget is of a blueprint class
-	if (UWidgetBlueprintGeneratedClass* BGClass = GetWidgetTreeOwningClass())
+	if (const UWidgetBlueprintGeneratedClass* BGClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass()))
 	{
-		SlotNames.Append(BGClass->NamedSlots);
+		SlotNames.Append(BGClass->InstanceNamedSlots);
 	}
 	else if (WidgetTree) // For non-blueprint widget blueprints we have to go through the widget tree to locate the named slots dynamically.
 	{
+		// TODO: This code is probably defunct now, that we always have a BPGC?
+		
 		WidgetTree->ForEachWidget([&SlotNames] (UWidget* Widget) {
 			if ( Widget && Widget->IsA<UNamedSlot>() )
 			{
@@ -861,8 +1211,9 @@ void UUserWidget::SetContentForSlot(FName SlotName, UWidget* Content)
 	// Dynamically insert the new widget into the hierarchy if it exists.
 	if ( WidgetTree )
 	{
-		UNamedSlot* NamedSlot = Cast<UNamedSlot>(WidgetTree->FindWidget(SlotName));
-		if ( NamedSlot )
+		ensureMsgf(!HasAnyFlags(RF_ClassDefaultObject), TEXT("The Widget CDO is not expected to ever have a valid widget tree."));
+		
+		if ( UNamedSlot* NamedSlot = Cast<UNamedSlot>(WidgetTree->FindWidget(SlotName)))
 		{
 			NamedSlot->ClearChildren();
 
@@ -886,88 +1237,39 @@ UWidget* UUserWidget::GetRootWidget() const
 
 void UUserWidget::AddToViewport(int32 ZOrder)
 {
-	AddToScreen(nullptr, ZOrder);
+	if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
+	{
+		FGameViewportWidgetSlot ViewportSlot;
+		if (bIsManagedByGameViewportSubsystem)
+		{
+			ViewportSlot = Subsystem->GetWidgetSlot(this);
+		}
+		ViewportSlot.ZOrder = ZOrder;
+		Subsystem->AddWidget(this, ViewportSlot);
+	}
 }
 
 bool UUserWidget::AddToPlayerScreen(int32 ZOrder)
 {
-	if ( ULocalPlayer* LocalPlayer = GetOwningLocalPlayer() )
+	if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
 	{
-		AddToScreen(LocalPlayer, ZOrder);
-		return true;
-	}
-
-	FMessageLog("PIE").Error(LOCTEXT("AddToPlayerScreen_NoPlayer", "AddToPlayerScreen Failed.  No Owning Player!"));
-	return false;
-}
-
-void UUserWidget::AddToScreen(ULocalPlayer* Player, int32 ZOrder)
-{
-	if ( !FullScreenWidget.IsValid() )
-	{
-		if ( UPanelWidget* ParentPanel = GetParent() )
+		if (ULocalPlayer* LocalPlayer = GetOwningLocalPlayer())
 		{
-			FMessageLog("PIE").Error(FText::Format(LOCTEXT("WidgetAlreadyHasParent", "The widget '{0}' already has a parent widget.  It can't also be added to the viewport!"),
-				FText::FromString(GetClass()->GetName())));
-			return;
-		}
-
-		// First create and initialize the variable so that users calling this function twice don't
-		// attempt to add the widget to the viewport again.
-		TSharedRef<SConstraintCanvas> FullScreenCanvas = SNew(SConstraintCanvas);
-		FullScreenWidget = FullScreenCanvas;
-
-		TSharedRef<SWidget> UserSlateWidget = TakeWidget();
-
-		FullScreenCanvas->AddSlot()
-			.Offset(BIND_UOBJECT_ATTRIBUTE(FMargin, GetFullScreenOffset))
-			.Anchors(BIND_UOBJECT_ATTRIBUTE(FAnchors, GetAnchorsInViewport))
-			.Alignment(BIND_UOBJECT_ATTRIBUTE(FVector2D, GetAlignmentInViewport))
-			[
-				UserSlateWidget
-			];
-
-		// If this is a game world add the widget to the current worlds viewport.
-		UWorld* World = GetWorld();
-		if ( World && World->IsGameWorld() )
-		{
-			if ( UGameViewportClient* ViewportClient = World->GetGameViewport() )
+			FGameViewportWidgetSlot ViewportSlot;
+			if (bIsManagedByGameViewportSubsystem)
 			{
-				if ( Player )
-				{
-					ViewportClient->AddViewportWidgetForPlayer(Player, FullScreenCanvas, ZOrder);
-				}
-				else
-				{
-					// We add 10 to the zorder when adding to the viewport to avoid 
-					// displaying below any built-in controls, like the virtual joysticks on mobile builds.
-					ViewportClient->AddViewportWidgetContent(FullScreenCanvas, ZOrder + 10);
-				}
-
-				// Just in case we already hooked this delegate, remove the handler.
-				FWorldDelegates::LevelRemovedFromWorld.RemoveAll(this);
-
-				// Widgets added to the viewport are automatically removed if the persistent level is unloaded.
-				FWorldDelegates::LevelRemovedFromWorld.AddUObject(this, &UUserWidget::OnLevelRemovedFromWorld);
+				ViewportSlot = Subsystem->GetWidgetSlot(this);
 			}
+			ViewportSlot.ZOrder = ZOrder;
+			Subsystem->AddWidgetForPlayer(this, GetOwningLocalPlayer(), ViewportSlot);
+			return true;
+		}
+		else
+		{
+			FMessageLog("PIE").Error(LOCTEXT("AddToPlayerScreen_NoPlayer", "AddToPlayerScreen Failed.  No Owning Player!"));
 		}
 	}
-	else
-	{
-		FMessageLog("PIE").Warning(FText::Format(LOCTEXT("WidgetAlreadyOnScreen", "The widget '{0}' was already added to the screen."),
-			FText::FromString(GetClass()->GetName())));
-	}
-}
-
-void UUserWidget::OnLevelRemovedFromWorld(ULevel* InLevel, UWorld* InWorld)
-{
-	// If the InLevel is null, it's a signal that the entire world is about to disappear, so
-	// go ahead and remove this widget from the viewport, it could be holding onto too many
-	// dangerous actor references that won't carry over into the next world.
-	if ( InLevel == nullptr && InWorld == GetWorld() )
-	{
-		RemoveFromParent();
-	}
+	return false;
 }
 
 void UUserWidget::RemoveFromViewport()
@@ -975,60 +1277,28 @@ void UUserWidget::RemoveFromViewport()
 	RemoveFromParent();
 }
 
-void UUserWidget::RemoveFromParent()
-{
-	if (!HasAnyFlags(RF_BeginDestroyed))
-	{
-		if (FullScreenWidget.IsValid())
-		{
-			TSharedPtr<SWidget> WidgetHost = FullScreenWidget.Pin();
-
-			// If this is a game world remove the widget from the current world's viewport.
-			UWorld* World = GetWorld();
-			if (World && World->IsGameWorld())
-			{
-				if (UGameViewportClient* ViewportClient = World->GetGameViewport())
-				{
-					TSharedRef<SWidget> WidgetHostRef = WidgetHost.ToSharedRef();
-
-					ViewportClient->RemoveViewportWidgetContent(WidgetHostRef);
-
-					if (ULocalPlayer* LocalPlayer = GetOwningLocalPlayer())
-					{
-						ViewportClient->RemoveViewportWidgetForPlayer(LocalPlayer, WidgetHostRef);
-					}
-
-					FWorldDelegates::LevelRemovedFromWorld.RemoveAll(this);
-				}
-			}
-		}
-		else
-		{
-			Super::RemoveFromParent();
-		}
-	}
-}
-
 bool UUserWidget::GetIsVisible() const
 {
-	return FullScreenWidget.IsValid();
+	return IsInViewport();
 }
 
 void UUserWidget::SetVisibility(ESlateVisibility InVisibility)
 {
-	Super::SetVisibility(InVisibility);
-	OnNativeVisibilityChanged.Broadcast(InVisibility);
-	OnVisibilityChanged.Broadcast(InVisibility);
-}
+	ESlateVisibility OldVisibility = GetVisibility();
 
-bool UUserWidget::IsInViewport() const
-{
-	return FullScreenWidget.IsValid();
+	Super::SetVisibility(InVisibility);
+
+	if (OldVisibility != GetVisibility())
+	{
+		OnNativeVisibilityChanged.Broadcast(InVisibility);
+		OnVisibilityChanged.Broadcast(InVisibility);
+	}
 }
 
 void UUserWidget::SetPlayerContext(const FLocalPlayerContext& InPlayerContext)
 {
 	PlayerContext = InPlayerContext;
+	CachedWorld.Reset();
 
 	if (WidgetTree)
 	{
@@ -1063,6 +1333,7 @@ void UUserWidget::SetOwningLocalPlayer(ULocalPlayer* LocalPlayer)
 	if ( LocalPlayer )
 	{
 		PlayerContext = FLocalPlayerContext(LocalPlayer, GetWorld());
+		CachedWorld.Reset();
 	}
 }
 
@@ -1076,6 +1347,7 @@ void UUserWidget::SetOwningPlayer(APlayerController* LocalPlayerController)
 	if (LocalPlayerController && LocalPlayerController->IsLocalController())
 	{
 		PlayerContext = FLocalPlayerContext(LocalPlayerController);
+		CachedWorld.Reset();
 	}
 }
 
@@ -1099,82 +1371,120 @@ APlayerCameraManager* UUserWidget::GetOwningPlayerCameraManager() const
 	return nullptr;
 }
 
-void UUserWidget::SetPositionInViewport(FVector2D Position, bool bRemoveDPIScale )
+void UUserWidget::SetPositionInViewport(FVector2D Position, bool bRemoveDPIScale)
 {
-	if (bRemoveDPIScale)
+	if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
 	{
-		const float Scale = UWidgetLayoutLibrary::GetViewportScale(this);
-		Position /= Scale;
-	}
-
-	FAnchors Zero{ 0.f, 0.f };
-	if (ViewportOffsets.Left != Position.X
-		|| ViewportOffsets.Top != Position.Y
-		|| ViewportAnchors != Zero)
-	{
-		ViewportOffsets.Left = Position.X;
-		ViewportOffsets.Top = Position.Y;
-		ViewportAnchors = Zero;
-		InvalidateFullScreenWidget(EInvalidateWidgetReason::Layout);
+		if (bIsManagedByGameViewportSubsystem)
+		{
+			FGameViewportWidgetSlot ViewportSlot = Subsystem->GetWidgetSlot(this);
+			ViewportSlot = UGameViewportSubsystem::SetWidgetSlotPosition(ViewportSlot, this, Position, bRemoveDPIScale);
+			Subsystem->SetWidgetSlot(this, ViewportSlot);
+		}
+		else
+		{
+			FGameViewportWidgetSlot ViewportSlot = UGameViewportSubsystem::SetWidgetSlotPosition(FGameViewportWidgetSlot(), this, Position, bRemoveDPIScale);
+			Subsystem->SetWidgetSlot(this, ViewportSlot);
+		}
 	}
 }
 
 void UUserWidget::SetDesiredSizeInViewport(FVector2D DesiredSize)
 {
-	FAnchors Zero{0.f, 0.f};
-	if (ViewportOffsets.Right != DesiredSize.X
-		|| ViewportOffsets.Bottom != DesiredSize.Y
-		|| ViewportAnchors != Zero)
+	if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
 	{
-		ViewportOffsets.Right = DesiredSize.X;
-		ViewportOffsets.Bottom = DesiredSize.Y;
-		ViewportAnchors = Zero;
-		InvalidateFullScreenWidget(EInvalidateWidgetReason::Layout);
+		if (bIsManagedByGameViewportSubsystem)
+		{
+			FGameViewportWidgetSlot ViewportSlot = Subsystem->GetWidgetSlot(this);
+			ViewportSlot = UGameViewportSubsystem::SetWidgetSlotDesiredSize(ViewportSlot, DesiredSize);
+			Subsystem->SetWidgetSlot(this, ViewportSlot);
+		}
+		else
+		{
+			FGameViewportWidgetSlot ViewportSlot = UGameViewportSubsystem::SetWidgetSlotDesiredSize(FGameViewportWidgetSlot(), DesiredSize);
+			Subsystem->SetWidgetSlot(this, ViewportSlot);
+		}
 	}
-
 }
 
 void UUserWidget::SetAnchorsInViewport(FAnchors Anchors)
 {
-	if (ViewportAnchors != Anchors)
+	if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
 	{
-		ViewportAnchors = Anchors;
-		InvalidateFullScreenWidget(EInvalidateWidgetReason::Layout);
+		if (bIsManagedByGameViewportSubsystem)
+		{
+			FGameViewportWidgetSlot ViewportSlot = Subsystem->GetWidgetSlot(this);
+			if (ViewportSlot.Anchors != Anchors)
+			{
+				ViewportSlot.Anchors = Anchors;
+				Subsystem->SetWidgetSlot(this, ViewportSlot);
+			}
+		}
+		else
+		{
+			FGameViewportWidgetSlot ViewportSlot;
+			ViewportSlot.Anchors = Anchors;
+			Subsystem->SetWidgetSlot(this, ViewportSlot);
+		}
 	}
 }
 
 void UUserWidget::SetAlignmentInViewport(FVector2D Alignment)
 {
-	if (ViewportAlignment != Alignment)
+	if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
 	{
-		ViewportAlignment = Alignment;
-		InvalidateFullScreenWidget(EInvalidateWidgetReason::Layout);
+		if (bIsManagedByGameViewportSubsystem)
+		{
+			FGameViewportWidgetSlot ViewportSlot = Subsystem->GetWidgetSlot(this);
+			if (ViewportSlot.Alignment != Alignment)
+			{
+				ViewportSlot.Alignment = Alignment;
+				Subsystem->SetWidgetSlot(this, ViewportSlot);
+			}
+		}
+		else
+		{
+			FGameViewportWidgetSlot ViewportSlot;
+			ViewportSlot.Alignment = Alignment;
+			Subsystem->SetWidgetSlot(this, ViewportSlot);
+		}
 	}
 }
 
 FMargin UUserWidget::GetFullScreenOffset() const
 {
-	// If the size is zero, and we're not stretched, then use the desired size.
-	FVector2D FinalSize = FVector2D(ViewportOffsets.Right, ViewportOffsets.Bottom);
-	if ( FinalSize.IsZero() && !ViewportAnchors.IsStretchedVertical() && !ViewportAnchors.IsStretchedHorizontal() )
+	if (bIsManagedByGameViewportSubsystem)
 	{
-		if (TSharedPtr<SWidget> CachedWidget = GetCachedWidget())
+		if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
 		{
-			FinalSize = CachedWidget->GetDesiredSize();
+			return Subsystem->GetWidgetSlot(this).Offsets;
 		}
 	}
-
-	return FMargin(ViewportOffsets.Left, ViewportOffsets.Top, FinalSize.X, FinalSize.Y);
+	return FGameViewportWidgetSlot().Offsets;
 }
 
 FAnchors UUserWidget::GetAnchorsInViewport() const
 {
-	return ViewportAnchors;
+	if (bIsManagedByGameViewportSubsystem)
+	{
+		if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
+		{
+			return Subsystem->GetWidgetSlot(this).Anchors;
+		}
+	}
+	return FGameViewportWidgetSlot().Anchors;
 }
 
 FVector2D UUserWidget::GetAlignmentInViewport() const
 {
-	return ViewportAlignment;
+	if (bIsManagedByGameViewportSubsystem)
+	{
+		if (UGameViewportSubsystem* Subsystem = UGameViewportSubsystem::Get(GetWorld()))
+		{
+			return Subsystem->GetWidgetSlot(this).Alignment;
+		}
+	}
+	return FGameViewportWidgetSlot().Alignment;
 }
 
 void UUserWidget::RemoveObsoleteBindings(const TArray<FName>& NamedSlots)
@@ -1238,6 +1548,21 @@ void UUserWidget::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedE
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
+	const FName PropertyName = PropertyChangedEvent.GetPropertyName();
+
+	static FName DesiredFocusWidgetPropertyName(GET_MEMBER_NAME_CHECKED(UUserWidget, DesiredFocusWidget));
+	if (PropertyName == DesiredFocusWidgetPropertyName)
+	{
+		if (UWidgetBlueprintGeneratedClass* BGClass = GetWidgetTreeOwningClass())
+		{
+			if (UUserWidget* UserWidgetCDO = BGClass->GetDefaultObject<UUserWidget>())
+			{
+				// We cannot use the Widget Ptr as we need to find the widget with the same name in the CDO
+				UserWidgetCDO->SetDesiredFocusWidget(DesiredFocusWidget.GetFName());
+			}
+		}
+	}
+
 	if ( PropertyChangedEvent.ChangeType != EPropertyChangeType::Interactive )
 	{
 		TSharedPtr<SWidget> SafeWidget = GetCachedWidget();
@@ -1250,6 +1575,37 @@ void UUserWidget::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedE
 	}
 }
 
+void UUserWidget::AssignGUIDToBindings()
+{
+	if (UWidgetBlueprintGeneratedClass* BGClass = GetWidgetTreeOwningClass())
+	{
+		for (int32 BindingIndex = 0; BindingIndex < NamedSlotBindings.Num(); BindingIndex++)
+		{
+			FNamedSlotBinding& Binding = NamedSlotBindings[BindingIndex];
+			if (BGClass->NamedSlotsWithID.Contains(Binding.Name))
+			{
+				Binding.Guid = BGClass->NamedSlotsWithID[Binding.Name];
+			}
+		}
+	}
+}
+
+void UUserWidget::UpdateBindingForSlot(FName SlotName)
+{
+	if (UWidgetBlueprintGeneratedClass* BGClass = GetWidgetTreeOwningClass())
+	{
+		if (BGClass->NamedSlotsWithID.Contains(SlotName))
+		{
+			for (FNamedSlotBinding& Binding : NamedSlotBindings)
+			{
+				if (BGClass->NamedSlotsWithID[SlotName] == Binding.Guid && !BGClass->NamedSlotsWithID.Contains(Binding.Name))
+				{
+					Binding.Name = SlotName;
+				}
+			}
+		}
+	}
+}
 #endif
 
 void UUserWidget::OnAnimationStarted_Implementation(const UWidgetAnimation* Animation)
@@ -1325,16 +1681,74 @@ void UUserWidget::BindToAnimationEvent(UWidgetAnimation* InAnimation, FWidgetAni
 
 void UUserWidget::NativeOnInitialized()
 {
+	// Bind any input delegates that may be on this widget to its owning player controller
+	if(APlayerController* PC = GetOwningPlayer())
+	{
+		UInputDelegateBinding::BindInputDelegates(GetClass(), PC->InputComponent, this);		
+	}
+	
+	if (UWidgetBlueprintGeneratedClass* BPClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass()))
+	{
+		BPClass->ForEachExtension([this](UWidgetBlueprintGeneratedClassExtension* Extension)
+			{
+				Extension->Initialize(this);
+			});
+	}
+
+	// Extension can add other extensions. Use index loop to initialize them all.
+	for (int32 Index = 0; Index < Extensions.Num(); ++Index)
+	{
+		UUserWidgetExtension* Extension = Extensions[Index];
+		check(Extension);
+		Extension->Initialize();
+	}
+
 	OnInitialized();
 }
 
 void UUserWidget::NativePreConstruct()
 {
-	PreConstruct(IsDesignTime());
+	LLM_SCOPE_BYTAG(UI_UMG);
+	const bool bIsDesignTime = IsDesignTime();
+	if (UWidgetBlueprintGeneratedClass* BPClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass()))
+	{
+		BPClass->ForEachExtension([this, bIsDesignTime](UWidgetBlueprintGeneratedClassExtension* Extension)
+			{
+				Extension->PreConstruct(this, bIsDesignTime);
+			});
+	}
+
+	DesiredFocusWidget.Resolve(WidgetTree);
+
+	PreConstruct(bIsDesignTime);
 }
 
 void UUserWidget::NativeConstruct()
 {
+	LLM_SCOPE_BYTAG(UI_UMG);
+
+	if (UWidgetBlueprintGeneratedClass* BPClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass()))
+	{
+		BPClass->ForEachExtension([this](UWidgetBlueprintGeneratedClassExtension* Extension)
+			{
+				Extension->Construct(this);
+			});
+	}
+
+	// Extension can add other extensions.
+	//check(bAreExtensionsConstructed == false);
+	bAreExtensionsConstructed = true;
+	if (Extensions.Num() > 0)
+	{
+		TArray<UUserWidgetExtension*, TInlineAllocator<32>> LocalExtensions;
+		LocalExtensions.Append(Extensions);
+		for (UUserWidgetExtension* Extension : LocalExtensions)
+		{
+			check(Extension);
+			Extension->Construct();
+		}
+	}
+
 	Construct();
 	UpdateCanTick();
 }
@@ -1342,7 +1756,30 @@ void UUserWidget::NativeConstruct()
 void UUserWidget::NativeDestruct()
 {
 	StopListeningForAllInputActions();
+	OnNativeDestruct.Broadcast(this);
+
 	Destruct();
+
+	// Extension can remove other extensions.
+	bAreExtensionsConstructed = false; // To prevent calling Destruct on the same extension if it's removed by another extension.
+	if (Extensions.Num() > 0)
+	{
+		TArray<UUserWidgetExtension*, TInlineAllocator<32>> LocalExtensions;
+		LocalExtensions.Append(Extensions);
+		for (UUserWidgetExtension* Extension : LocalExtensions)
+		{
+			check(Extension);
+			Extension->Destruct();
+		}
+	}
+
+	if (UWidgetBlueprintGeneratedClass* BPClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass()))
+	{
+		BPClass->ForEachExtension([this](UWidgetBlueprintGeneratedClassExtension* Extension)
+			{
+				Extension->Destruct(this);
+			});
+	}
 }
 
 void UUserWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -1352,6 +1789,13 @@ void UUserWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 	{
 		GInitRunaway();
 
+		// Extension can be added while ticking another extension.
+		//This loop does guarantee that they will all be updated this frame, if it's the case,  but it will not crash.
+		for (int32 Index = 0; Index < Extensions.Num(); ++Index)
+		{
+			Extensions[Index]->Tick(MyGeometry, InDeltaTime);
+		}
+
 #if WITH_EDITOR
 		const bool bTickAnimations = !IsDesignTime();
 #else
@@ -1359,6 +1803,13 @@ void UUserWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 #endif
 		if (bTickAnimations)
 		{
+			ExecuteQueuedAnimationTransitions();
+
+			if (AnimationTickManager)
+			{
+				AnimationTickManager->OnWidgetTicked(this);
+			}
+
 			if (!CVarUserWidgetUseParallelAnimation.GetValueOnGameThread())
 			{
 				TickActionsAndAnimation(InDeltaTime);
@@ -1401,24 +1852,6 @@ void UUserWidget::TickActionsAndAnimation(float InDeltaTime)
 
 void UUserWidget::PostTickActionsAndAnimation(float InDeltaTime)
 {
-	const bool bWasPlayingAnimation = IsPlayingAnimation();
-	if (bWasPlayingAnimation)
-	{ 
-		TSharedPtr<SWidget> CachedWidget = GetCachedWidget();
-		if (CachedWidget.IsValid())
-		{
-			CachedWidget->InvalidatePrepass();
-		}
-	}
-
-	// The process of ticking the players above can stop them so we remove them after all players have ticked
-	for (UUMGSequencePlayer* StoppedPlayer : StoppedSequencePlayers)
-	{
-		ActiveSequencePlayers.RemoveSwap(StoppedPlayer);
-		StoppedPlayer->TearDown();
-	}
-
-	StoppedSequencePlayers.Empty();
 }
 
 void UUserWidget::FlushAnimations()
@@ -1487,7 +1920,7 @@ void UUserWidget::StopListeningForAllInputActions()
 		UnregisterInputComponent();
 
 		InputComponent->ClearActionBindings();
-		InputComponent->MarkPendingKill();
+		InputComponent->MarkAsGarbage();
 		InputComponent = nullptr;
 	}
 }
@@ -1533,6 +1966,7 @@ void UUserWidget::UnregisterInputComponent()
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UUserWidget::SetInputActionPriority( int32 NewPriority )
 {
 	if ( InputComponent )
@@ -1540,6 +1974,11 @@ void UUserWidget::SetInputActionPriority( int32 NewPriority )
 		Priority = NewPriority;
 		InputComponent->Priority = Priority;
 	}
+}
+
+int32 UUserWidget::GetInputActionPriority() const
+{
+	return Priority;
 }
 
 void UUserWidget::SetInputActionBlocking( bool bShouldBlock )
@@ -1550,6 +1989,13 @@ void UUserWidget::SetInputActionBlocking( bool bShouldBlock )
 		InputComponent->bBlockInput = bStopAction;
 	}
 }
+
+bool UUserWidget::IsInputActionBlocking() const
+{
+	return bStopAction;
+}
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void UUserWidget::OnInputAction( FOnInputAction Callback )
 {
@@ -1563,9 +2009,15 @@ void UUserWidget::InitializeInputComponent()
 {
 	if ( APlayerController* Controller = GetOwningPlayer() )
 	{
-		InputComponent = NewObject< UInputComponent >( this, UInputSettings::GetDefaultInputComponentClass(), NAME_None, RF_Transient );
+		// Use the existing PC's input class, or fallback to the project default. We should use the existing class
+		// instead of just the default one because if you have a plugin that has a PC with a different default input
+		// class then this would fail
+		UClass* InputClass = Controller->InputComponent ? Controller->InputComponent->GetClass() : UInputSettings::GetDefaultInputComponentClass();
+		InputComponent = NewObject< UInputComponent >( this, InputClass, NAME_None, RF_Transient );
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		InputComponent->bBlockInput = bStopAction;
 		InputComponent->Priority = Priority;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		Controller->PushInputComponent( InputComponent );
 	}
 	else
@@ -1585,12 +2037,25 @@ void UUserWidget::UpdateCanTick()
 		bool bCanTick = false;
 		if (TickFrequency == EWidgetTickFrequency::Auto)
 		{
-			// Note: WidgetBPClass can be NULL in a cooked build, if the Blueprint has been nativized (in that case, it will be a UDynamicClass type).
+			// Note: WidgetBPClass can be NULL in a cooked build.
 			UWidgetBlueprintGeneratedClass* WidgetBPClass = Cast<UWidgetBlueprintGeneratedClass>(GetClass());
 			bCanTick |= !WidgetBPClass || WidgetBPClass->ClassRequiresNativeTick();
 			bCanTick |= bHasScriptImplementedTick;
 			bCanTick |= World->GetLatentActionManager().GetNumActionsForObject(this) != 0;
 			bCanTick |= ActiveSequencePlayers.Num() > 0;
+			bCanTick |= QueuedWidgetAnimationTransitions.Num() > 0;
+
+			if (!bCanTick && bAreExtensionsConstructed)
+			{
+				for(UUserWidgetExtension* Extension : Extensions)
+				{
+					if (Extension->RequiresTick())
+					{
+						bCanTick = true;
+						break;
+					}
+				}
+			}
 		}
 
 		SafeGCWidget->SetCanTick(bCanTick);
@@ -1624,14 +2089,35 @@ bool UUserWidget::NativeIsInteractable() const
 	return IsInteractable();
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool UUserWidget::NativeSupportsKeyboardFocus() const
 {
 	return bIsFocusable;
 }
 
+bool UUserWidget::IsFocusable() const
+{
+	return bIsFocusable;
+}
+
+void UUserWidget::SetIsFocusable(bool InIsFocusable)
+{
+	bIsFocusable = InIsFocusable;
+	Invalidate(EInvalidateWidgetReason::Paint);
+}
+
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 FReply UUserWidget::NativeOnFocusReceived( const FGeometry& InGeometry, const FFocusEvent& InFocusEvent )
 {
-	return OnFocusReceived( InGeometry, InFocusEvent ).NativeReply;
+	FReply Reply = OnFocusReceived( InGeometry, InFocusEvent ).NativeReply;
+
+	// Forward focus if Desired Focus is set
+	if (UWidget * WidgetToFocus = DesiredFocusWidget.Resolve(WidgetTree))
+	{
+		return FReply::Handled().SetUserFocus(WidgetToFocus->GetCachedWidget().ToSharedRef());
+	}
+	return Reply;
 }
 
 void UUserWidget::NativeOnFocusLost( const FFocusEvent& InFocusEvent )
@@ -1644,10 +2130,10 @@ void UUserWidget::NativeOnFocusChanging(const FWeakWidgetPath& PreviousFocusPath
 	TSharedPtr<SObjectWidget> SafeGCWidget = MyGCWidget.Pin();
 	if ( SafeGCWidget.IsValid() )
 	{
-		const bool bDecendantNewlyFocused = NewWidgetPath.ContainsWidget(SafeGCWidget.ToSharedRef());
+		const bool bDecendantNewlyFocused = NewWidgetPath.ContainsWidget(SafeGCWidget.Get());
 		if ( bDecendantNewlyFocused )
 		{
-			const bool bDecendantPreviouslyFocused = PreviousFocusPath.ContainsWidget(SafeGCWidget.ToSharedRef());
+			const bool bDecendantPreviouslyFocused = PreviousFocusPath.ContainsWidget(SafeGCWidget.Get());
 			if ( !bDecendantPreviouslyFocused )
 			{
 				NativeOnAddedToFocusPath( InFocusEvent );
@@ -1805,7 +2291,7 @@ FReply UUserWidget::NativeOnTouchForceChanged(const FGeometry& InGeometry, const
 FCursorReply UUserWidget::NativeOnCursorQuery( const FGeometry& InGeometry, const FPointerEvent& InCursorEvent )
 {
 	return (bOverride_Cursor)
-		? FCursorReply::Cursor(Cursor)
+		? FCursorReply::Cursor(GetCursor())
 		: FCursorReply::Unhandled();
 }
 
@@ -1825,15 +2311,20 @@ bool UUserWidget::IsAsset() const
 	return false;
 }
 
-void UUserWidget::PreSave(const class ITargetPlatform* TargetPlatform)
+void UUserWidget::PreSave(FObjectPreSaveContext ObjectSaveContext)
 {
+	if (WidgetTree)
+	{
+		WidgetTree->SetFlags(RF_Transient);
+	}
+
 	// Remove bindings that are no longer contained in the class.
 	if ( UWidgetBlueprintGeneratedClass* BGClass = GetWidgetTreeOwningClass())
 	{
 		RemoveObsoleteBindings(BGClass->NamedSlots);
 	}
 
-	Super::PreSave(TargetPlatform);
+	Super::PreSave(ObjectSaveContext);
 }
 
 void UUserWidget::PostLoad()
@@ -1848,21 +2339,6 @@ void UUserWidget::PostLoad()
 		bHasScriptImplementedPaint = DefaultWidget->bHasScriptImplementedPaint;
 	}
 #endif
-}
-
-void UUserWidget::Serialize(FArchive& Ar)
-{
-	Super::Serialize(Ar);
-
-	Ar.UsingCustomVersion(FEditorObjectVersion::GUID);
-
-	if ( Ar.IsLoading() )
-	{
-		if ( Ar.UE4Ver() < VER_UE4_USERWIDGET_DEFAULT_FOCUSABLE_FALSE )
-		{
-			bIsFocusable = bSupportsKeyboardFocus_DEPRECATED;
-		}
-	}
 }
 
 /////////////////////////////////////////////////////
@@ -1943,7 +2419,7 @@ UUserWidget* UUserWidget::CreateWidgetInstance(UWorld& World, TSubclassOf<UUserW
 
 UUserWidget* UUserWidget::CreateInstanceInternal(UObject* Outer, TSubclassOf<UUserWidget> UserWidgetClass, FName InstanceName, UWorld* World, ULocalPlayer* LocalPlayer)
 {
-	//CSV_SCOPED_TIMING_STAT(Slate, CreateWidget);
+	LLM_SCOPE_BYTAG(UI_UMG);
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
 	// Only do this on a non-shipping or test build.
@@ -1973,6 +2449,9 @@ UUserWidget* UUserWidget::CreateInstanceInternal(UObject* Outer, TSubclassOf<UUs
 		FMessageLog("PIE").Error(FText::Format(LOCTEXT("OuterNull", "Unable to create the widget {0}, no outer provided."), FText::FromName(UserWidgetClass->GetFName())));
 		return nullptr;
 	}
+	LLM_SCOPE_DYNAMIC_STAT_OBJECTPATH(Outer->GetPackage(), ELLMTagSet::Assets);
+	LLM_SCOPE_DYNAMIC_STAT_OBJECTPATH(UserWidgetClass, ELLMTagSet::AssetClasses);
+	UE_TRACE_METADATA_SCOPE_ASSET_FNAME(InstanceName, UserWidgetClass->GetFName(), Outer->GetPackage()->GetFName());
 
 	UUserWidget* NewWidget = NewObject<UUserWidget>(Outer, UserWidgetClass, InstanceName, RF_Transactional);
 	
@@ -1986,6 +2465,18 @@ UUserWidget* UUserWidget::CreateInstanceInternal(UObject* Outer, TSubclassOf<UUs
 	return NewWidget;
 }
 
+
+void UUserWidget::ClearStoppedSequencePlayers()
+{
+	// after all players have ticked, remove and tear down stopped players
+	for (UUMGSequencePlayer* StoppedPlayer : StoppedSequencePlayers)
+	{
+		ActiveSequencePlayers.RemoveSwap(StoppedPlayer);
+		StoppedPlayer->TearDown();
+	}
+
+	StoppedSequencePlayers.Empty();
+}
 
 void UUserWidget::OnLatentActionsChanged(UObject* ObjectWhichChanged, ELatentActionChangeType ChangeType)
 {
@@ -2003,6 +2494,99 @@ void UUserWidget::OnLatentActionsChanged(UObject* ObjectWhichChanged, ELatentAct
 				// If the widget can now tick, recache the volatility of the widget.
 				WidgetThatChanged->Invalidate(EInvalidateWidgetReason::LayoutAndVolatility);
 			}
+		}
+	}
+}
+
+UUserWidgetExtension* UUserWidget::GetExtension(TSubclassOf<UUserWidgetExtension> InExtensionType) const
+{
+	for (UUserWidgetExtension* Extension : Extensions)
+	{
+		if (Extension->IsA(InExtensionType))
+		{
+			return Extension;
+		}
+	}
+	return nullptr;
+}
+
+TArray<UUserWidgetExtension*> UUserWidget::GetExtensions(TSubclassOf<UUserWidgetExtension> InExtensionType) const
+{
+	TArray<UUserWidgetExtension*> Result;
+	for (UUserWidgetExtension* Extension : Extensions)
+	{
+		if (Extension->IsA(InExtensionType))
+		{
+			Result.Add(Extension);
+		}
+	}
+	return Result;
+}
+
+UUserWidgetExtension* UUserWidget::AddExtension(TSubclassOf<UUserWidgetExtension> InExtensionType)
+{
+	UUserWidgetExtension* Extension = NewObject<UUserWidgetExtension>(this, InExtensionType);
+	Extensions.Add(Extension);
+	if (bInitialized)
+	{
+		Extension->Initialize();
+	}
+	if (bAreExtensionsConstructed)
+	{
+		Extension->Construct();
+		if (Extension->RequiresTick())
+		{
+			UpdateCanTick();
+		}
+	}
+	return Extension;
+}
+
+void UUserWidget::RemoveExtension(UUserWidgetExtension* InExtension)
+{
+	if (InExtension)
+	{
+		if (Extensions.RemoveSingleSwap(InExtension))
+		{
+			if (bAreExtensionsConstructed)
+			{
+				bool bUpdateTick = InExtension->RequiresTick();
+				InExtension->Destruct();
+				if (bUpdateTick)
+				{
+					UpdateCanTick();
+				}
+			}
+		}
+	}
+}
+
+void UUserWidget::RemoveExtensions(TSubclassOf<UUserWidgetExtension> InExtensionType)
+{
+
+	TArray<UUserWidgetExtension*, TInlineAllocator<32>> LocalExtensions;
+	for (int32 Index = Extensions.Num() - 1; Index >= 0; --Index)
+	{
+		UUserWidgetExtension* Extension = Extensions[Index];
+		if (Extension->IsA(InExtensionType))
+		{
+			LocalExtensions.Add(Extension);
+			Extensions.RemoveAtSwap(Index);
+
+		}
+	}
+
+	if (bAreExtensionsConstructed)
+	{
+		bool bUpdateTick = false;
+		for (UUserWidgetExtension* Extension : LocalExtensions)
+		{
+			bUpdateTick = bUpdateTick || Extension->RequiresTick();
+			Extension->Destruct();
+		}
+		if (bUpdateTick)
+		{
+			UpdateCanTick();
 		}
 	}
 }
@@ -2040,3 +2624,4 @@ bool CreateWidgetHelpers::ValidateUserWidgetClass(const UClass* UserWidgetClass)
 }
 
 #undef LOCTEXT_NAMESPACE
+

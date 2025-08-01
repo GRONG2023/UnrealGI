@@ -202,6 +202,7 @@ void SDirectLinkStreamManager::Construct(const FArguments& InArgs, const TShared
 
 	DirectLinkCacheDirectory = InArgs._DefaultCacheDirectory;
 	OnCacheDirectoryChanged = InArgs._OnCacheDirectoryChanged;
+	OnCacheDirectoryReset = InArgs._OnCacheDirectoryReset;
 
 	TSharedRef<SHeaderRow> HeaderRow = SNew( SHeaderRow )
 		// Source
@@ -291,6 +292,24 @@ void SDirectLinkStreamManager::Construct(const FArguments& InArgs, const TShared
 					.IsReadOnly( true )
 					.Text( this, &SDirectLinkStreamManager::GetCacheDirectory )
 					.ToolTipText( this, &SDirectLinkStreamManager::GetCacheDirectory )
+				]
+			]
+			+ SHorizontalBox::Slot()
+			.Padding( 2.f )
+			.AutoWidth()
+			.HAlign( HAlign_Right )
+			[
+				SNew( SButton )
+				.OnClicked( this, &SDirectLinkStreamManager::OnResetCacheDirectoryClicked )
+				.ToolTipText( LOCTEXT("ResetCacheDirectory_Tooltip", "Reset cache directory") )
+				[
+					SNew( SVerticalBox )
+					+ SVerticalBox::Slot()
+					.VAlign( VAlign_Center )
+					[
+						SNew( STextBlock )
+						.Text( LOCTEXT("ResetCacheDirectory_Label", "Reset") )
+					]
 				]
 			]
 			+ SHorizontalBox::Slot()
@@ -402,7 +421,9 @@ void SDirectLinkStreamManager::UpdateData(const DirectLink::FRawInfo& RawInfo)
 	for ( const FRawInfo::FStreamInfo& StreamInfo : RawInfo.StreamsInfo )
 	{
 		TSharedPtr<FDestinationData> DestinationData;
-		if ( StreamInfo.bIsActive )
+		const bool bIsActive = StreamInfo.ConnectionState == EStreamConnectionState::Active;
+
+		if ( bIsActive )
 		{
 			if ( DestinationsMap.Contains( StreamInfo.Destination ) )
 			{
@@ -417,18 +438,18 @@ void SDirectLinkStreamManager::UpdateData(const DirectLink::FRawInfo& RawInfo)
 			TSharedRef<FStreamData>& StreamData = *StreamDataPtr;
 
 			// Made with the assumption that the source and destionation data can't change
-			if ( StreamData->bIsActive != StreamInfo.bIsActive )
+			if ( StreamData->bIsActive != bIsActive )
 			{
-				StreamData->bIsActive = StreamInfo.bIsActive;
+				StreamData->bIsActive = bIsActive;
 				bDirtyStreamList = true;
 			}
 		}
-		else if ( StreamInfo.bIsActive )
+		else if ( bIsActive )
 		{
 			TSharedRef<FSourceData>* SourceData = SourcesMap.Find( StreamInfo.Source );
 			if ( DestinationData.IsValid() && SourceData != nullptr )
 			{
-				TSharedRef<FStreamData> StreamData = MakeShared<FStreamData>( StreamInfo.bIsActive, *SourceData, DestinationData.ToSharedRef() );
+				TSharedRef<FStreamData> StreamData = MakeShared<FStreamData>( bIsActive, *SourceData, DestinationData.ToSharedRef() );
 				StreamMap.AddByHash( StreamIdHash, StreamId, StreamData );
 				bDirtyStreamList = true;
 			}
@@ -443,7 +464,7 @@ void SDirectLinkStreamManager::UpdateData(const DirectLink::FRawInfo& RawInfo)
 			TSharedRef<FStreamData>& Stream = Streams[Index];
 			if ( !Stream->bIsActive )
 			{
-				Streams.RemoveAtSwap( Index, 1, false );
+				Streams.RemoveAtSwap( Index, 1, EAllowShrinking::No );
 				--Index;
 			}
 		}
@@ -506,6 +527,16 @@ void SDirectLinkStreamManager::SortStreamList()
 FText SDirectLinkStreamManager::GetCacheDirectory() const
 {
 	return FText::FromString( DirectLinkCacheDirectory );
+}
+
+FReply SDirectLinkStreamManager::OnResetCacheDirectoryClicked()
+{
+	if( OnCacheDirectoryReset.IsBound() )
+	{
+		DirectLinkCacheDirectory = OnCacheDirectoryReset.Execute();
+	}
+
+	return FReply::Handled();
 }
 
 FReply SDirectLinkStreamManager::OnChangeCacheDirectoryClicked()

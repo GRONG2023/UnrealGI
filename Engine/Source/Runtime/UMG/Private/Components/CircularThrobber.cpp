@@ -5,32 +5,37 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Widgets/Images/SThrobber.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CircularThrobber)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // UCircularThrobber
 
-static FSlateBrush* DefaultCircularThrobberBrushStyle = nullptr;
-
 UCircularThrobber::UCircularThrobber(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, bEnableRadius(true)
 {
-	if (DefaultCircularThrobberBrushStyle == nullptr)
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	Image = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetCircularThrobberBrushStyle();
+	
+#if WITH_EDITOR 
+	if (IsEditorWidget())
 	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultCircularThrobberBrushStyle = new FSlateBrush(*FCoreStyle::Get().GetBrush("Throbber.CircleChunk"));
+		Image = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetCircularThrobberBrushStyle();
 
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultCircularThrobberBrushStyle->UnlinkColors();
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
 	}
-
-	Image = *DefaultCircularThrobberBrushStyle;
+#endif // WITH_EDITOR
 
 	NumberOfPieces = 6;
 	Period = 0.75f;
 	Radius = 16.f;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UCircularThrobber::ReleaseSlateResources(bool bReleaseChildren)
@@ -42,11 +47,13 @@ void UCircularThrobber::ReleaseSlateResources(bool bReleaseChildren)
 
 TSharedRef<SWidget> UCircularThrobber::RebuildWidget()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyCircularThrobber = SNew(SCircularThrobber)
 		.PieceImage(&Image)
 		.NumPieces(FMath::Clamp(NumberOfPieces, 1, 25))
 		.Period(FMath::Max(Period, SCircularThrobber::MinimumPeriodValue))
 		.Radius(Radius);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	return MyCircularThrobber.ToSharedRef();
 }
@@ -55,9 +62,18 @@ void UCircularThrobber::SynchronizeProperties()
 {
 	Super::SynchronizeProperties();
 
+	if (!MyCircularThrobber.IsValid())
+	{
+		return;
+	}
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyCircularThrobber->SetNumPieces(FMath::Clamp(NumberOfPieces, 1, 25));
 	MyCircularThrobber->SetPeriod(FMath::Max(Period, SCircularThrobber::MinimumPeriodValue));
 	MyCircularThrobber->SetRadius(Radius);
+	MyCircularThrobber->SetPieceImage(&Image);
+	MyCircularThrobber->InvalidatePieceImage();
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	// If widget is child of Canvas Panel and 'Size to Content' is enabled, we allow user to modify radius.
 	bEnableRadius = true;
@@ -70,6 +86,7 @@ void UCircularThrobber::SynchronizeProperties()
 	}
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void UCircularThrobber::SetNumberOfPieces(int32 InNumberOfPieces)
 {
 	NumberOfPieces = InNumberOfPieces;
@@ -77,6 +94,11 @@ void UCircularThrobber::SetNumberOfPieces(int32 InNumberOfPieces)
 	{
 		MyCircularThrobber->SetNumPieces(FMath::Clamp(NumberOfPieces, 1, 25));
 	}
+}
+
+int32 UCircularThrobber::GetNumberOfPieces() const
+{
+	return NumberOfPieces;
 }
 
 void UCircularThrobber::SetPeriod(float InPeriod)
@@ -88,6 +110,11 @@ void UCircularThrobber::SetPeriod(float InPeriod)
 	}
 }
 
+float UCircularThrobber::GetPeriod() const
+{
+	return Period;
+}
+
 void UCircularThrobber::SetRadius(float InRadius)
 {
 	Radius = InRadius;
@@ -97,19 +124,25 @@ void UCircularThrobber::SetRadius(float InRadius)
 	}
 }
 
-void UCircularThrobber::PostLoad()
+float UCircularThrobber::GetRadius() const
 {
-	Super::PostLoad();
+	return Radius;
+}
 
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS )
+void UCircularThrobber::SetImage(const FSlateBrush& InImage)
+{
+	Image = InImage;
+	if (MyCircularThrobber.IsValid())
 	{
-		if ( PieceImage_DEPRECATED != nullptr )
-		{
-			Image = PieceImage_DEPRECATED->Brush;
-			PieceImage_DEPRECATED = nullptr;
-		}
+		MyCircularThrobber->InvalidatePieceImage();
 	}
 }
+
+const FSlateBrush& UCircularThrobber::GetImage() const
+{
+	return Image;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 
@@ -123,3 +156,4 @@ const FText UCircularThrobber::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

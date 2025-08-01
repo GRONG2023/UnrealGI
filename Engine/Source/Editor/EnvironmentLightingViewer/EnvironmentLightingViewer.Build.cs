@@ -8,9 +8,7 @@ public class EnvironmentLightingViewer : ModuleRules
 	{
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"AssetRegistry",
-                "AssetTools",
-				"EditorWidgets",
+				"WorkspaceMenuStructure"
 			}
 		);
 
@@ -22,7 +20,6 @@ public class EnvironmentLightingViewer : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
 				"UnrealEd",
                 "Settings",
             }

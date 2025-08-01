@@ -9,7 +9,7 @@
 #include "Widgets/Layout/SBox.h"
 #include "Components/SceneComponent.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Editor/UnrealEdEngine.h"
 #include "GameFramework/Character.h"
@@ -17,21 +17,39 @@
 #include "LevelEditorViewport.h"
 #include "UnrealEdGlobals.h"
 #include "ISectionLayoutBuilder.h"
-#include "MatineeImportTools.h"
 #include "IKeyArea.h"
-#include "Matinee/InterpTrackMove.h"
-#include "Matinee/InterpTrackMoveAxis.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
 #include "Editor.h"
-#include "TransformPropertySection.h"
+#include "Sections/TransformPropertySection.h"
 #include "SequencerUtilities.h"
+#include "MVVM/Views/ViewUtilities.h"
+#include "MVVM/ViewModels/OutlinerColumns/OutlinerColumnTypes.h"
+#include "MVVM/ViewModels/ObjectBindingModel.h"
 #include "MovieSceneToolHelpers.h"
+#include "Animation/AnimData/IAnimationDataModel.h"
 
 #include "EntitySystem/Interrogation/MovieSceneInterrogationLinker.h"
 #include "EntitySystem/Interrogation/MovieSceneInterrogatedPropertyInstantiator.h"
 #include "Systems/MovieScenePropertyInstantiator.h"
 #include "MovieSceneTracksComponentTypes.h"
+
+#include "Tracks/IMovieSceneTransformOrigin.h"
+#include "IMovieScenePlaybackClient.h"
+#include "Animation/AnimData/AnimDataModel.h"
+
+#include "Editor.h"
+#include "LevelEditorViewport.h"
+#include "TransformConstraint.h"
+#include "TransformableHandle.h"
+#include "Constraints/MovieSceneConstraintChannelHelper.h"
+#include "Constraints/TransformConstraintChannelInterface.h"
+#include "Misc/TransactionObjectEvent.h"
+#include "Engine/Selection.h"
+#include "PropertyHandle.h"
+#include "IDetailKeyframeHandler.h"
+#include "ISequencerObjectChangeListener.h"
+#include "ISequencerPropertyKeyedStatus.h"
 
 #define LOCTEXT_NAMESPACE "MovieScene_TransformTrack"
 
@@ -62,17 +80,73 @@ F3DTransformTrackEditor::F3DTransformTrackEditor( TSharedRef<ISequencer> InSeque
 	// Listen for actor/component movement
 	FCoreUObjectDelegates::OnPreObjectPropertyChanged.AddRaw(this, &F3DTransformTrackEditor::OnPrePropertyChanged);
 	FCoreUObjectDelegates::OnObjectPropertyChanged.AddRaw(this, &F3DTransformTrackEditor::OnPostPropertyChanged);
-}
+	if (GEditor != nullptr)
+	{
+		GEditor->RegisterForUndo(this);
+	}
 
+	if (TSharedPtr<ISequencer> SequencerPtr = FMovieSceneTrackEditor::GetSequencer())
+	{
+	    const FProperty* LocationProperty = FindFProperty<FProperty>(USceneComponent::StaticClass(), USceneComponent::GetRelativeLocationPropertyName());
+		const FProperty* RotationProperty = FindFProperty<FProperty>(USceneComponent::StaticClass(), USceneComponent::GetRelativeRotationPropertyName());
+		const FProperty* Scale3DProperty = FindFProperty<FProperty>(USceneComponent::StaticClass(), USceneComponent::GetRelativeScale3DPropertyName());
+
+		ISequencerObjectChangeListener& ObjectChangeListener = SequencerPtr->GetObjectChangeListener();
+		ISequencerPropertyKeyedStatusHandler& PropertyKeyedStatusHandler = SequencerPtr->GetPropertyKeyedStatusHandler();
+
+		auto AddTransformProperty = [this, &ObjectChangeListener, &PropertyKeyedStatusHandler](const FProperty* Property, EMovieSceneTransformChannel TransformChannel)
+		{
+			if (Property)
+			{
+				TransformProperties.Add({ Property, TransformChannel });
+				ObjectChangeListener.GetOnAnimatablePropertyChanged(Property)
+					.AddRaw(this, &F3DTransformTrackEditor::OnTransformPropertyChanged, TransformChannel);
+
+				PropertyKeyedStatusHandler.GetExternalHandler(Property)
+					.BindRaw(this, &F3DTransformTrackEditor::GetPropertyKeyedStatus, TransformChannel);
+			}
+		};
+
+		AddTransformProperty(LocationProperty, EMovieSceneTransformChannel::Translation);
+		AddTransformProperty(RotationProperty, EMovieSceneTransformChannel::Rotation);
+		AddTransformProperty(Scale3DProperty, EMovieSceneTransformChannel::Scale);
+	}
+}
 
 F3DTransformTrackEditor::~F3DTransformTrackEditor()
 {
+	if (GEditor != nullptr)
+	{
+		GEditor->UnregisterForUndo(this);
+	}
+
+	if (TSharedPtr<ISequencer> SequencerPtr = FMovieSceneTrackEditor::GetSequencer())
+	{
+		ISequencerObjectChangeListener& ObjectChangeListener = SequencerPtr->GetObjectChangeListener();
+		ISequencerPropertyKeyedStatusHandler& PropertyKeyedStatusHandler = SequencerPtr->GetPropertyKeyedStatusHandler();
+		for (const FTransformPropertyInfo& TransformProperty : TransformProperties)
+		{
+			ObjectChangeListener.GetOnAnimatablePropertyChanged(TransformProperty.Property).RemoveAll(this);
+			PropertyKeyedStatusHandler.GetExternalHandler(TransformProperty.Property).Unbind();
+		}
+	}
 }
+//for 5.2 we will move this over to the header
+static TSet<TWeakObjectPtr<UMovieScene3DTransformSection>> SectionsToClear;
 
 void F3DTransformTrackEditor::OnRelease()
 {
+	ClearOutConstraintDelegates();
 	FCoreUObjectDelegates::OnPreObjectPropertyChanged.RemoveAll(this);
 	FCoreUObjectDelegates::OnObjectPropertyChanged.RemoveAll(this);
+
+	if (OnSceneComponentConstrainedHandle.IsValid())
+	{
+		UWorld* World = GCurrentLevelEditingViewportClient ? GCurrentLevelEditingViewportClient->GetWorld() : nullptr;
+		FConstraintsManagerController& Controller = FConstraintsManagerController::Get(World);
+		Controller.OnSceneComponentConstrained().Remove(OnSceneComponentConstrainedHandle);
+		OnSceneComponentConstrainedHandle.Reset();
+	}
 
 	for(FLevelEditorViewportClient* LevelVC : GEditor->GetLevelViewportClients())
 	{
@@ -82,7 +156,6 @@ void F3DTransformTrackEditor::OnRelease()
 		}
 	}
 }
-
 
 TSharedRef<ISequencerTrackEditor> F3DTransformTrackEditor::CreateTrackEditor( TSharedRef<ISequencer> InSequencer )
 {
@@ -97,72 +170,22 @@ bool F3DTransformTrackEditor::SupportsType( TSubclassOf<UMovieSceneTrack> Type )
 }
 
 
-void CopyInterpMoveTrack(TSharedRef<ISequencer> Sequencer, UInterpTrackMove* MoveTrack, UMovieScene3DTransformTrack* TransformTrack)
-{
-	if (FMatineeImportTools::CopyInterpMoveTrack(MoveTrack, TransformTrack))
-	{
-		Sequencer.Get().NotifyMovieSceneDataChanged( EMovieSceneDataChangeType::MovieSceneStructureItemAdded );
-	}
-}
-
-
-bool CanCopyInterpMoveTrack(UInterpTrackMove* MoveTrack, UMovieScene3DTransformTrack* TransformTrack)
-{
-	if (!MoveTrack || !TransformTrack)
-	{
-		return false;
-	}
-
-	bool bHasKeyframes = MoveTrack->GetNumKeyframes() != 0;
-
-	for (auto SubTrack : MoveTrack->SubTracks)
-	{
-		if (SubTrack->IsA(UInterpTrackMoveAxis::StaticClass()))
-		{
-			UInterpTrackMoveAxis* MoveSubTrack = Cast<UInterpTrackMoveAxis>(SubTrack);
-			if (MoveSubTrack)
-			{
-				if (MoveSubTrack->FloatTrack.Points.Num() > 0)
-				{
-					bHasKeyframes = true;
-					break;
-				}
-			}
-		}
-	}
-		
-	return bHasKeyframes;
-}
-
 void F3DTransformTrackEditor::BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track )
 {
-	UInterpTrackMove* MoveTrack = nullptr;
-	for ( UObject* CopyPasteObject : GUnrealEd->MatineeCopyPasteBuffer )
-	{
-		MoveTrack = Cast<UInterpTrackMove>( CopyPasteObject );
-		if ( MoveTrack != nullptr )
-		{
-			break;
-		}
-	}
 	UMovieScene3DTransformTrack* TransformTrack = Cast<UMovieScene3DTransformTrack>( Track );
-	MenuBuilder.AddMenuEntry(
-		NSLOCTEXT("Sequencer", "PasteMatineeMoveTrack", "Paste Matinee Move Track"),
-		NSLOCTEXT("Sequencer", "PasteMatineeMoveTrackTooltip", "Pastes keys from a Matinee move track into this track."),
-		FSlateIcon(),
-		FUIAction(
-			FExecuteAction::CreateStatic(&CopyInterpMoveTrack, GetSequencer().ToSharedRef(), MoveTrack, TransformTrack),
-			FCanExecuteAction::CreateStatic(&CanCopyInterpMoveTrack, MoveTrack, TransformTrack)));
-
-	//		FCanExecuteAction::CreateLambda( [=]()->bool { return MoveTrack != nullptr && MoveTrack->GetNumKeys() > 0 && TransformTrack != nullptr; } ) ) );
 
 	auto AnimSubMenuDelegate = [](FMenuBuilder& InMenuBuilder, TSharedRef<ISequencer> InSequencer, UMovieScene3DTransformTrack* InTransformTrack)
 	{
+		UMovieSceneSequence* Sequence = InSequencer->GetFocusedMovieSceneSequence();
+
 		FAssetPickerConfig AssetPickerConfig;
+		AssetPickerConfig.bAddFilterUI = true;
 		AssetPickerConfig.SelectionMode = ESelectionMode::Single;
-		AssetPickerConfig.Filter.ClassNames.Add(UAnimSequence::StaticClass()->GetFName());
+		AssetPickerConfig.Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
 		AssetPickerConfig.OnAssetSelected = FOnAssetSelected::CreateStatic(&F3DTransformTrackEditor::ImportAnimSequenceTransforms, InSequencer, InTransformTrack);
 		AssetPickerConfig.OnAssetEnterPressed = FOnAssetEnterPressed::CreateStatic(&F3DTransformTrackEditor::ImportAnimSequenceTransformsEnterPressed, InSequencer, InTransformTrack);
+		AssetPickerConfig.SaveSettingsName = TEXT("SequencerAssetPicker");
+		AssetPickerConfig.AdditionalReferencingAssets.Add(FAssetData(Sequence));
 
 		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
 
@@ -190,6 +213,20 @@ void F3DTransformTrackEditor::BuildTrackContextMenu( FMenuBuilder& MenuBuilder, 
 TSharedRef<ISequencerSection> F3DTransformTrackEditor::MakeSectionInterface(UMovieSceneSection& SectionObject, UMovieSceneTrack& Track, FGuid ObjectBinding)
 {
 	check(SupportsType(SectionObject.GetOuter()->GetClass()));
+	UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(&SectionObject);
+	if (Section)
+	{
+		if (!Section->ConstraintChannelAdded().IsBoundToObject(this))
+		{
+			Section->ConstraintChannelAdded().AddRaw(this, &F3DTransformTrackEditor::HandleOnConstraintAdded);
+		}
+	}
+	//if there are channels already we need to act like they were added
+	TArray<FConstraintAndActiveChannel>& Channels = Section->GetConstraintsChannels();
+	for (FConstraintAndActiveChannel& Channel : Channels)
+	{
+		HandleOnConstraintAdded(Section, &Channel.ActiveChannel);
+	}
 	return MakeShared<FTransformSection>(SectionObject, GetSequencer());
 }
 
@@ -322,6 +359,7 @@ void F3DTransformTrackEditor::OnPrePropertyChanged(UObject* InObject, const FEdi
 
 	if (InObject && bTransformationToChange)
 	{
+		UE::MovieScene::FScopedSignedObjectModifyDefer ForceFlush(true);
 		OnPreTransformChanged(*InObject);
 	}
 }
@@ -336,14 +374,73 @@ void F3DTransformTrackEditor::OnPostPropertyChanged(UObject* InObject, FProperty
 
 	if (InObject && bTransformationChanged)
 	{
+		UE::MovieScene::FScopedSignedObjectModifyDefer ForceFlush(true);
 		OnTransformChanged(*InObject);
 	}
+}
+
+void F3DTransformTrackEditor::OnPreSaveWorld(UWorld* World)
+{
+	LockedCameraBindings.Reset();
+
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+
+	// Get the camera binding GUIDs.
+	TArray<FGuid> CameraBindingIDs;
+	SequencerPtr->GetCameraObjectBindings(CameraBindingIDs);
+
+	// Match the camera binding GUIDs with what actor they are bound to.
+	TArray<AActor*> CameraBindingActors;
+	for (const FGuid& CameraBindingID : CameraBindingIDs)
+	{
+		AActor* BoundActor = nullptr;
+		for (auto Object : SequencerPtr->FindObjectsInCurrentSequence(CameraBindingID))
+		{
+			AActor* Actor = Cast<AActor>(Object.Get());
+			if (Actor != nullptr)
+			{
+				BoundActor = Actor;
+				break;
+			}
+		}
+		CameraBindingActors.Add(BoundActor);
+	}
+
+	// Look at all the editor viewports and see if they're locked to one of our
+	// bound camera actors. If they are, associate them with the binding GUID.
+	for (FLevelEditorViewportClient* LevelVC : GEditor->GetLevelViewportClients())
+	{
+		if (LevelVC && LevelVC->GetViewMode() != VMI_Unknown)
+		{
+			AActor* ActorLock = LevelVC->GetActiveActorLock().Get();
+			if (!ActorLock)
+			{
+				continue;
+			}
+
+			int32 Index = CameraBindingActors.Find(ActorLock);
+			if (Index != INDEX_NONE)
+			{
+				LockedCameraBindings.Add(LevelVC, CameraBindingIDs[Index]);
+			}
+		}
+	}
+}
+
+void F3DTransformTrackEditor::OnPostSaveWorld(UWorld* World)
+{
+	for (const TPair<FLevelEditorViewportClient*, FGuid> Pair : LockedCameraBindings)
+	{
+		LockCameraBinding(true, Pair.Value, Pair.Key, false);
+	}
+
+	LockedCameraBindings.Reset();
 }
 
 bool F3DTransformTrackEditor::CanAddTransformKeysForSelectedObjects() const
 {
 	// WASD hotkeys to fly the viewport can conflict with hotkeys for setting keyframes (ie. s). 
-// If the viewport is moving, disregard setting keyframes.
+	// If the viewport is moving, disregard setting keyframes.
 	for (FLevelEditorViewportClient* LevelVC : GEditor->GetLevelViewportClients())
 	{
 		if (LevelVC && LevelVC->IsMovingCamera())
@@ -403,29 +500,51 @@ void F3DTransformTrackEditor::OnAddTransformKeysForSelectedObjects( EMovieSceneT
 	}
 }
 
-void F3DTransformTrackEditor::BuildObjectBindingEditButtons(TSharedPtr<SHorizontalBox> EditBox, const FGuid& ObjectGuid, const UClass* ObjectClass)
+void F3DTransformTrackEditor::BuildObjectBindingColumnWidgets(TFunctionRef<TSharedRef<SHorizontalBox>()> GetEditBox, const UE::Sequencer::TViewModelPtr<UE::Sequencer::FObjectBindingModel>& ObjectBinding, const UE::Sequencer::FCreateOutlinerViewParams& InParams, const FName& InColumnName)
 {
-	// If this is a camera track, add a button to lock the viewport to the camera
-	EditBox.Get()->AddSlot()
+	using namespace UE::Sequencer;
+
+	bool bAddCameraLock = false;
+	if (InColumnName == FCommonOutlinerNames::Nav)
+	{
+		bAddCameraLock = true;
+	}
+	else if (InColumnName == FCommonOutlinerNames::KeyFrame)
+	{
+		// Add the camera lock button to the keyframe column if Nav is disabled
+		bAddCameraLock = InParams.TreeViewRow->IsColumnVisible(FCommonOutlinerNames::Nav) == false;
+	}
+	else if (InColumnName == FCommonOutlinerNames::Edit)
+	{
+		// Add the camera lock button to the edit column if both Nav and KeyFrame are disabled
+		bAddCameraLock = InParams.TreeViewRow->IsColumnVisible(FCommonOutlinerNames::Nav) == false &&
+			InParams.TreeViewRow->IsColumnVisible(FCommonOutlinerNames::KeyFrame) == false;
+	}
+
+	if (bAddCameraLock)
+	{
+		const bool bEditColumn = InColumnName == FCommonOutlinerNames::Edit;
+		FGuid ObjectGuid = ObjectBinding->GetObjectGuid();
+		GetEditBox()->AddSlot()
 		.VAlign(VAlign_Center)
-		.HAlign(HAlign_Right)
+		.HAlign(bEditColumn ? HAlign_Left : HAlign_Center)
+		.Padding(bEditColumn ? FMargin(4.f, 0.f) : FMargin(0.f))
 		.AutoWidth()
-		.Padding(4, 0, 0, 0)
 		[
-			SNew(SCheckBox)		
-				.IsFocusable(false)
-				.Visibility(this, &F3DTransformTrackEditor::IsCameraVisible, ObjectGuid)
-				.IsChecked(this, &F3DTransformTrackEditor::IsCameraLocked, ObjectGuid)
-				.OnCheckStateChanged(this, &F3DTransformTrackEditor::OnLockCameraClicked, ObjectGuid)
-				.ToolTipText(this, &F3DTransformTrackEditor::GetLockCameraToolTip, ObjectGuid)
-				.ForegroundColor(FLinearColor::White)
-				.CheckedImage(FEditorStyle::GetBrush("Sequencer.LockCamera"))
-				.CheckedHoveredImage(FEditorStyle::GetBrush("Sequencer.LockCamera"))
-				.CheckedPressedImage(FEditorStyle::GetBrush("Sequencer.LockCamera"))
-				.UncheckedImage(FEditorStyle::GetBrush("Sequencer.UnlockCamera"))
-				.UncheckedHoveredImage(FEditorStyle::GetBrush("Sequencer.UnlockCamera"))
-				.UncheckedPressedImage(FEditorStyle::GetBrush("Sequencer.UnlockCamera"))
+			SNew(SCheckBox)
+			.Style(FAppStyle::Get(), "Sequencer.Outliner.ToggleButton")
+			.Type(ESlateCheckBoxType::ToggleButton)
+			.IsFocusable(false)
+			.Visibility(this, &F3DTransformTrackEditor::IsCameraVisible, ObjectGuid)
+			.IsChecked(this, &F3DTransformTrackEditor::IsCameraLocked, ObjectGuid)
+			.OnCheckStateChanged(this, &F3DTransformTrackEditor::OnLockCameraClicked, ObjectGuid)
+			.ToolTipText(this, &F3DTransformTrackEditor::GetLockCameraToolTip, ObjectGuid)
+			[
+				SNew(SImage)
+				.Image(FAppStyle::GetBrush("Sequencer.Outliner.CameraLock"))
+			]
 		];
+	}
 };
 void F3DTransformTrackEditor::BuildObjectBindingTrackMenu(FMenuBuilder& MenuBuilder, const TArray<FGuid>& ObjectBindings, const UClass* ObjectClass)
 {
@@ -468,10 +587,15 @@ EVisibility F3DTransformTrackEditor::IsCameraVisible(FGuid ObjectGuid) const
 		}
 	}
 
-	return EVisibility::Collapsed;
+	return EVisibility::Hidden;
 }
 
 ECheckBoxState F3DTransformTrackEditor::IsCameraLocked(FGuid ObjectGuid) const
+{
+	return IsCameraBindingLocked(ObjectGuid) ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
+}
+
+bool F3DTransformTrackEditor::IsCameraBindingLocked(FGuid ObjectGuid) const
 {
 	TWeakObjectPtr<AActor> CameraActor;
 
@@ -497,14 +621,7 @@ ECheckBoxState F3DTransformTrackEditor::IsCameraLocked(FGuid ObjectGuid) const
 			{
 				if (LevelVC->Viewport == ActiveViewport)
 				{
-					if (CameraActor.IsValid() && LevelVC->IsActorLocked(CameraActor.Get()))
-					{
-						return ECheckBoxState::Checked;
-					}
-					else
-					{
-						return ECheckBoxState::Unchecked;
-					}
+					return (CameraActor.IsValid() && LevelVC->IsActorLocked(CameraActor.Get()));
 				}
 			}
 		}
@@ -514,20 +631,26 @@ ECheckBoxState F3DTransformTrackEditor::IsCameraLocked(FGuid ObjectGuid) const
 		{
 			if (LevelVC && LevelVC->GetViewMode() != VMI_Unknown && CameraActor.IsValid() && LevelVC->IsActorLocked(CameraActor.Get()))
 			{
-				return ECheckBoxState::Checked;
+				return true;
 			}
 		}
 	}
 
-	return ECheckBoxState::Unchecked;
+	return false;
 }
-
 
 void F3DTransformTrackEditor::OnLockCameraClicked(ECheckBoxState CheckBoxState, FGuid ObjectGuid)
 {
-	TWeakObjectPtr<AActor> CameraActor;
+	LockCameraBinding((CheckBoxState == ECheckBoxState::Checked), ObjectGuid);
+}
 
-	for (auto Object : GetSequencer()->FindObjectsInCurrentSequence(ObjectGuid))
+void F3DTransformTrackEditor::LockCameraBinding(bool bLock, FGuid ObjectGuid, FLevelEditorViewportClient* ViewportClient, bool bRemoveCinematicLock)
+{
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+
+	// Find the actor bound to the given object binding ID.
+	AActor* CameraActor = nullptr;
+	for (auto Object : SequencerPtr->FindObjectsInCurrentSequence(ObjectGuid))
 	{
 		AActor* Actor = Cast<AActor>(Object.Get());
 
@@ -538,70 +661,75 @@ void F3DTransformTrackEditor::OnLockCameraClicked(ECheckBoxState CheckBoxState, 
 		}
 	}
 
-	// If toggle is on, lock the active viewport to the camera
-	if (CheckBoxState == ECheckBoxState::Checked)
+	// Bail out if we didn't find the actor to lock the viewport to.
+	if (!CameraActor)
 	{
-		// Set the active viewport or any viewport if there is no active viewport
+		return;
+	}
+
+	// Find the active viewport if no viewport was provided. If no viewport is active, or if the active viewport doesn't
+	// match our requirements, use the first one we find that fits.
+	if (ViewportClient == nullptr)
+	{
 		FViewport* ActiveViewport = GEditor->GetActiveViewport();
 
-		FLevelEditorViewportClient* LevelVC = nullptr;
-
-		for(FLevelEditorViewportClient* Viewport : GEditor->GetLevelViewportClients())
+		for (FLevelEditorViewportClient* LevelVC : GEditor->GetLevelViewportClients())
 		{		
-			if (Viewport && Viewport->GetViewMode() != VMI_Unknown && Viewport->AllowsCinematicControl())
+			if (LevelVC && 
+					LevelVC->GetViewMode() != VMI_Unknown && 
+					(LevelVC->Viewport == ActiveViewport || ActiveViewport == nullptr))
 			{
-				LevelVC = Viewport;
-
-				if (LevelVC->Viewport == ActiveViewport)
-				{
-					break;
-				}
+				ViewportClient = LevelVC;
+				break;
 			}
-		}
-
-		if (LevelVC != nullptr && CameraActor.IsValid())
-		{
-			UCameraComponent* CameraComponent = MovieSceneHelpers::CameraComponentFromActor(CameraActor.Get());
-
-			if (CameraComponent && CameraComponent->ProjectionMode == ECameraProjectionMode::Type::Perspective)
-			{
-				if (LevelVC->GetViewportType() != LVT_Perspective)
-				{
-					LevelVC->SetViewportType(LVT_Perspective);
-				}
-			}
-
-			GetSequencer()->SetPerspectiveViewportCameraCutEnabled(false);
-			LevelVC->SetCinematicActorLock(nullptr);
-			LevelVC->SetActorLock(CameraActor.Get());
-			LevelVC->bLockedCameraView = true;
-			LevelVC->UpdateViewForLockedActor();
-			LevelVC->Invalidate();
 		}
 	}
-	// Otherwise, clear all locks on the camera
+
+	// Bail out if we didn't find any acceptable viewport.
+	if (!ViewportClient)
+	{
+		return;
+	}
+
+	if (bLock)
+	{
+		// Lock the given/active/found viewport to the camera.
+		UCameraComponent* CameraComponent = MovieSceneHelpers::CameraComponentFromActor(CameraActor);
+		if (CameraComponent && CameraComponent->ProjectionMode == ECameraProjectionMode::Type::Perspective)
+		{
+			if (ViewportClient->GetViewportType() != LVT_Perspective)
+			{
+				ViewportClient->SetViewportType(LVT_Perspective);
+			}
+		}
+
+		if (bRemoveCinematicLock)
+		{
+			GetSequencer()->SetPerspectiveViewportCameraCutEnabled(false);
+			ViewportClient->SetCinematicActorLock(nullptr);
+		}
+
+		ViewportClient->SetActorLock(CameraActor);
+		ViewportClient->bLockedCameraView = true;
+		ViewportClient->UpdateViewForLockedActor();
+		ViewportClient->Invalidate();
+	}
 	else
 	{
-		ClearLockedCameras(CameraActor.Get());
-	}
-}
-
-void F3DTransformTrackEditor::ClearLockedCameras(AActor* LockedActor)
-{
-	for(FLevelEditorViewportClient* LevelVC : GEditor->GetLevelViewportClients())
-	{
-		if (LevelVC && LevelVC->GetViewMode() != VMI_Unknown && LevelVC->AllowsCinematicControl())
+		// Clear the lock to this camera on the given/active/found viewport.
+		if (ViewportClient->IsActorLocked(CameraActor))
 		{
-			if (LevelVC->IsActorLocked(LockedActor))
+			if (bRemoveCinematicLock)
 			{
-				LevelVC->SetCinematicActorLock(nullptr);
-				LevelVC->SetActorLock(nullptr);
-				LevelVC->bLockedCameraView = false;
-				LevelVC->ViewFOV = LevelVC->FOVAngle;
-				LevelVC->RemoveCameraRoll();
-				LevelVC->UpdateViewForLockedActor();
-				LevelVC->Invalidate();
+				ViewportClient->SetCinematicActorLock(nullptr);
 			}
+
+			ViewportClient->SetActorLock(nullptr);
+			ViewportClient->bLockedCameraView = false;
+			ViewportClient->ViewFOV = ViewportClient->FOVAngle;
+			ViewportClient->RemoveCameraRoll();
+			ViewportClient->UpdateViewForLockedActor();
+			ViewportClient->Invalidate();
 		}
 	}
 }
@@ -631,7 +759,7 @@ FText F3DTransformTrackEditor::GetLockCameraToolTip(FGuid ObjectGuid) const
 	return FText();
 }
 
-float UnwindChannel(const float& OldValue, float NewValue)
+double UnwindChannel(const double& OldValue, double NewValue)
 {
 	while( NewValue - OldValue > 180.0f )
 	{
@@ -660,10 +788,11 @@ void F3DTransformTrackEditor::GetTransformKeys( const TOptional<FTransformData>&
 
 	using namespace UE::MovieScene;
 
-	bool bLastVectorIsValid = LastTransform.IsSet();
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
 
 	// If key all is enabled, for a key on all the channels
-	if (GetSequencer()->GetKeyGroupMode() == EKeyGroupMode::KeyAll)
+	bool bLastVectorIsValid = LastTransform.IsSet();
+	if (SequencerPtr->GetKeyGroupMode() == EKeyGroupMode::KeyAll)
 	{
 		bLastVectorIsValid = false;
 		ChannelsToKey = EMovieSceneTransformChannel::All;
@@ -672,6 +801,24 @@ void F3DTransformTrackEditor::GetTransformKeys( const TOptional<FTransformData>&
 	FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
 
 	FTransformData RecomposedTransform = RecomposeTransform(CurrentTransform, Object, Section);
+
+	// Get the channel indices for our curve channels.
+	// We will get invalid handles for any channels that are anything else than FMovieSceneDoubleChannel (such as when
+	// a channel has been overriden by a procedural channel). This means that the value setters below will get null
+	// channels and will simply ignore those non-double channels. This is what we want, since we assume (perhaps
+	// incorrectly) that overriden channels are most probably not keyable.
+	FMovieSceneChannelProxy& SectionChannelProxy = Section->GetChannelProxy();
+	TMovieSceneChannelHandle<FMovieSceneDoubleChannel> ChannelHandles[] = {
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.X"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Y"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Z"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.X"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.Y"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.Z"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.X"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.Y"),
+		SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.Z")
+	};
 
 	// Set translation keys/defaults
 	{
@@ -706,9 +853,9 @@ void F3DTransformTrackEditor::GetTransformKeys( const TOptional<FTransformData>&
 
 		FVector KeyVector = RecomposedTransform.Translation;
 
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(0, KeyVector.X, bKeyX));
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(1, KeyVector.Y, bKeyY));
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(2, KeyVector.Z, bKeyZ));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[0].GetChannelIndex(), (double)KeyVector.X, bKeyX));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[1].GetChannelIndex(), (double)KeyVector.Y, bKeyY));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[2].GetChannelIndex(), (double)KeyVector.Z, bKeyZ));
 	}
 
 	// Set rotation keys/defaults
@@ -747,10 +894,9 @@ void F3DTransformTrackEditor::GetTransformKeys( const TOptional<FTransformData>&
 
 		// Do we need to unwind re-composed rotations?
 		KeyRotator = UnwindRotator(CurrentTransform.Rotation, RecomposedTransform.Rotation);
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(3, KeyRotator.Roll, bKeyX));
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(4, KeyRotator.Pitch, bKeyY));
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(5, KeyRotator.Yaw, bKeyZ));
-
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[3].GetChannelIndex(), (double)KeyRotator.Roll, bKeyX));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[4].GetChannelIndex(), (double)KeyRotator.Pitch, bKeyY));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[5].GetChannelIndex(), (double)KeyRotator.Yaw, bKeyZ));
 	}
 
 	// Set scale keys/defaults
@@ -785,10 +931,28 @@ void F3DTransformTrackEditor::GetTransformKeys( const TOptional<FTransformData>&
 		}
 
 		FVector KeyVector = RecomposedTransform.Scale;
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(6, KeyVector.X, bKeyX));
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(7, KeyVector.Y, bKeyY));
-		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(8, KeyVector.Z, bKeyZ));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[6].GetChannelIndex(), (double)KeyVector.X, bKeyX));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[7].GetChannelIndex(), (double)KeyVector.Y, bKeyY));
+		OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneDoubleChannel>(ChannelHandles[8].GetChannelIndex(), (double)KeyVector.Z, bKeyZ));
 	}
+}
+
+FTransform F3DTransformTrackEditor::GetTransformOrigin() const
+{
+	FTransform TransformOrigin;
+
+	const IMovieScenePlaybackClient*  Client       = GetSequencer()->GetPlaybackClient();
+	const UObject*                    InstanceData = Client ? Client->GetInstanceData() : nullptr;
+	const IMovieSceneTransformOrigin* RawInterface = Cast<const IMovieSceneTransformOrigin>(InstanceData);
+
+	const bool bHasInterface = RawInterface || (InstanceData && InstanceData->GetClass()->ImplementsInterface(UMovieSceneTransformOrigin::StaticClass()));
+	if (bHasInterface)
+	{
+		// Retrieve the current origin
+		TransformOrigin = RawInterface ? RawInterface->GetTransformOrigin() : IMovieSceneTransformOrigin::Execute_BP_GetTransformOrigin(InstanceData);
+	}
+
+	return TransformOrigin;
 }
 
 void F3DTransformTrackEditor::AddTransformKeysForHandle(TArray<FGuid> ObjectHandles, EMovieSceneTransformChannel ChannelToKey, ESequencerKeyMode KeyMode)
@@ -827,13 +991,34 @@ void F3DTransformTrackEditor::AddTransformKeys( UObject* ObjectToKey, const TOpt
 	{
 		NewTrack->SetPropertyNameAndPath(TransformPropertyName, TransformPropertyName.ToString());
 	};
-	auto GenerateKeys = [=](UMovieSceneSection* Section, FGeneratedTrackKeys& GeneratedKeys)
+	auto GenerateKeys = [=, this](UMovieSceneSection* Section, FGeneratedTrackKeys& GeneratedKeys)
 	{
+		UMovieScene3DTransformSection* TransformSection = CastChecked<UMovieScene3DTransformSection>(Section);
+
+		// Ensure that the Transform Channel is masked in
+		EMovieSceneTransformChannel ExistingChannels = TransformSection->GetMask().GetChannels();
+		if (!EnumHasAnyFlags(ExistingChannels, ChannelsToKey))
+		{
+			TransformSection->Modify();
+			TransformSection->SetMask(TransformSection->GetMask().GetChannels() | ChannelsToKey);
+		}
+
 		this->GetTransformKeys(LastTransform, CurrentTransform, ChannelsToKey, ObjectToKey, Section, GeneratedKeys);
 	};
-	auto OnKeyProperty = [=](FFrameNumber Time) -> FKeyPropertyResult
+	auto OnKeyProperty = [=, this](FFrameNumber Time) -> FKeyPropertyResult
 	{
-		return this->AddKeysToObjects(MakeArrayView(&ObjectToKey, 1), Time,  KeyMode, UMovieScene3DTransformTrack::StaticClass(), TransformPropertyName, InitializeNewTrack, GenerateKeys);
+		FKeyPropertyResult KeyPropertyResult = this->AddKeysToObjects(MakeArrayView(&ObjectToKey, 1), Time,  KeyMode, UMovieScene3DTransformTrack::StaticClass(), TransformPropertyName, InitializeNewTrack, GenerateKeys);
+		if (KeyPropertyResult.SectionsKeyed.Num() > 0)
+		{
+			for (TWeakObjectPtr<UMovieSceneSection>& WeakSection : KeyPropertyResult.SectionsKeyed)
+			{
+				if (UMovieScene3DTransformSection* Section = Cast< UMovieScene3DTransformSection>(WeakSection.Get()))
+				{
+					FMovieSceneConstraintChannelHelper::CompensateIfNeeded(GetSequencer(), Section, Time);
+				}
+			}
+		}
+		return KeyPropertyResult;
 	};
 
 	AnimatablePropertyChanged( FOnKeyProperty::CreateLambda(OnKeyProperty) );
@@ -852,27 +1037,98 @@ FTransformData F3DTransformTrackEditor::RecomposeTransform(const FTransformData&
 		return InTransformData;
 	}
 
+	USceneComponent* SceneComponent = MovieSceneHelpers::SceneComponentFromRuntimeObject(AnimatedObject);
+
 	TGuardValue<FEntityManager*> DebugVizGuard(GEntityManagerForDebuggingVisualizers, &EntityLinker->EntityManager);
 
-	FMovieSceneEntityID EntityID = EvaluationTemplate.FindEntityFromOwner(Section, 0, GetSequencer()->GetFocusedTemplateID());
+	// We want the transform value contributed to by the given transform section.
+	//
+	// In most cases, the section only has one ECS entity for it specifiy all 9 channel curves and resulting values, but if
+	// some of those channels have been overriden (e.g. with some noise channel), then there will be one extra ECS entity
+	// for each overriden channel, and the "main" entity will be missing that channel. We therefore gather up all entities
+	// related to the given section and recompose their contribution, and then join them all together by matching which one
+	// handles which channel.
+	//
+	TArray<FMovieSceneEntityID> ImportedEntityIDs;
+	EvaluationTemplate.FindEntitiesFromOwner(Section, GetSequencer()->GetFocusedTemplateID(), ImportedEntityIDs);
 
-	if (EntityID)
+	FTransform CurrentTransform = SceneComponent->GetRelativeTransform();
+
+	if (ImportedEntityIDs.Num())
 	{
 		UMovieScenePropertyInstantiatorSystem* System = EntityLinker->FindSystem<UMovieScenePropertyInstantiatorSystem>();
 		if (System)
 		{
+			FBuiltInComponentTypes* BuiltInComponents = FBuiltInComponentTypes::Get();
+			FMovieSceneTracksComponentTypes* TrackComponents = FMovieSceneTracksComponentTypes::Get();
+
+			TArray<FMovieSceneEntityID> EntityIDs;
+			{
+				// In order to check for the result channels later, we need to look up the children entities that are
+				// bound to the given animated object. Imported entities generally don't have the result channels.
+				FEntityTaskBuilder()
+				.ReadEntityIDs()
+				.Read(BuiltInComponents->ParentEntity)
+				.Read(BuiltInComponents->BoundObject)
+				.FilterAll({ TrackComponents->ComponentTransform.PropertyTag })
+				.Iterate_PerEntity(
+					&EntityLinker->EntityManager, 
+					[SceneComponent, ImportedEntityIDs, &EntityIDs](FMovieSceneEntityID EntityID, FMovieSceneEntityID ParentEntityID, UObject* BoundObject)
+					{
+						if (SceneComponent == BoundObject && ImportedEntityIDs.Contains(ParentEntityID))
+						{
+							EntityIDs.Add(EntityID);
+						}
+					});
+			}
+
 			FDecompositionQuery Query;
-			Query.Entities = MakeArrayView(&EntityID, 1);
-			Query.Object   = MovieSceneHelpers::SceneComponentFromRuntimeObject(AnimatedObject);
+			Query.Entities = MakeArrayView(EntityIDs);
+			Query.Object   = SceneComponent;
+			Query.bConvertFromSourceEntityIDs = false;  // We already pass the children entity IDs
 
 			FIntermediate3DTransform CurrentValue(InTransformData.Translation, InTransformData.Rotation, InTransformData.Scale);
 
-			TRecompositionResult<FIntermediate3DTransform> TransformData = System->RecomposeBlendOperational(FMovieSceneTracksComponentTypes::Get()->ComponentTransform, Query, CurrentValue);
-			return FTransformData(TransformData.Values[0].GetTranslation(), TransformData.Values[0].GetRotation(), TransformData.Values[0].GetScale());
+			TRecompositionResult<FIntermediate3DTransform> TransformData = System->RecomposeBlendOperational(TrackComponents->ComponentTransform, Query, CurrentValue);
+
+			double CurrentTransformChannels[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+			EMovieSceneTransformChannel ChannelsObtained(EMovieSceneTransformChannel::None);
+			check(EntityIDs.Num() == TransformData.Values.Num());
+			for (int32 EntityIndex = 0; EntityIndex < TransformData.Values.Num(); ++EntityIndex)
+			{
+				// For each entity, find which channel they contribute to by checking the result channel.
+				// We don't (yet) handle the case where two entities contribute to the same channel -- in theory the entities
+				// should be mutually exclusive in that regard, at least as far as overriden channels are concerned.
+				FMovieSceneEntityID EntityID = EntityIDs[EntityIndex];
+				FIntermediate3DTransform EntityTransformData = TransformData.Values[EntityIndex];
+				FComponentMask EntityType = EntityLinker->EntityManager.GetEntityType(EntityID);
+				for (int32 CompositeIndex = 0; CompositeIndex < 9; ++CompositeIndex)
+				{
+					EMovieSceneTransformChannel ChannelMask = (EMovieSceneTransformChannel)(1 << CompositeIndex);
+					if (!EnumHasAnyFlags(ChannelsObtained, ChannelMask) && EntityType.Contains(BuiltInComponents->DoubleResult[CompositeIndex]))
+					{
+						EnumAddFlags(ChannelsObtained, (EMovieSceneTransformChannel)(1 << CompositeIndex));
+						CurrentTransformChannels[CompositeIndex] = EntityTransformData[CompositeIndex];
+					}
+				}
+			}
+
+			CurrentTransform = FTransform(
+				FRotator(CurrentTransformChannels[4], CurrentTransformChannels[5], CurrentTransformChannels[3]), // pitch yaw roll
+				FVector(CurrentTransformChannels[0], CurrentTransformChannels[1], CurrentTransformChannels[2]),
+				FVector(CurrentTransformChannels[6], CurrentTransformChannels[7], CurrentTransformChannels[8]));			
 		}
 	}
 
-	return InTransformData;
+	// Account for the transform origin only if this is not parented because the transform origin is already being applied to the parent.
+	if (!SceneComponent->GetAttachParent() && Section->GetBlendType() == EMovieSceneBlendType::Absolute)
+	{
+		CurrentTransform *= GetTransformOrigin().Inverse();
+	}
+
+	FTransformConstraintUtils::UpdateTransformBasedOnConstraint(CurrentTransform, SceneComponent);
+	
+	return FTransformData(CurrentTransform.GetLocation(), CurrentTransform.GetRotation().Rotator(), CurrentTransform.GetScale3D());
 }
 
 void F3DTransformTrackEditor::ProcessKeyOperation(FFrameNumber InKeyTime, const UE::Sequencer::FKeyOperation& Operation, ISequencer& InSequencer)
@@ -901,107 +1157,367 @@ void F3DTransformTrackEditor::ProcessKeyOperation(FFrameNumber InKeyTime, const 
 	Operation.IterateOperations(Iterator);
 }
 
+
+int32 GetPreviousKey(FMovieSceneDoubleChannel& Channel, FFrameNumber Time)
+{
+	TArray<FFrameNumber> KeyTimes;
+	TArray<FKeyHandle> KeyHandles;
+
+	TRange<FFrameNumber> Range;
+	Range.SetLowerBound(TRangeBound<FFrameNumber>::Open());
+	Range.SetUpperBound(TRangeBound<FFrameNumber>::Exclusive(Time));
+	Channel.GetData().GetKeys(Range, &KeyTimes, &KeyHandles);
+
+	if (KeyHandles.Num() <= 0)
+	{
+		return INDEX_NONE;
+	}
+
+	int32 Index = Channel.GetData().GetIndex(KeyHandles[KeyHandles.Num() - 1]);
+	return Index;
+}
+
+EPropertyKeyedStatus F3DTransformTrackEditor::GetKeyedStatusInSection(const UMovieScene3DTransformSection& Section, const TRange<FFrameNumber>& Range, EMovieSceneTransformChannel TransformChannel, TConstArrayView<int32> ChannelIndices) const
+{
+	EPropertyKeyedStatus SectionKeyedStatus = EPropertyKeyedStatus::NotKeyed;
+
+	// Skip Section if the Transform Channel is completely masked out
+	if (!EnumHasAnyFlags(Section.GetMask().GetChannels(), TransformChannel))
+	{
+		return SectionKeyedStatus;
+	}
+
+	int32 EmptyChannelCount = 0;
+
+	FMovieSceneChannelProxy& ChannelProxy = Section.GetChannelProxy();
+	for (int32 ChannelIndex : ChannelIndices)
+	{
+		FMovieSceneDoubleChannel* Channel = ChannelProxy.GetChannel<FMovieSceneDoubleChannel>(ChannelIndex);
+		if (!Channel)
+		{
+			continue;
+		}
+
+		if (Channel->GetNumKeys() == 0)
+		{
+			++EmptyChannelCount;
+			continue;
+		}
+
+		SectionKeyedStatus = FMath::Max(SectionKeyedStatus, EPropertyKeyedStatus::KeyedInOtherFrame);
+
+		TArray<FFrameNumber> KeyTimes;
+		Channel->GetKeys(Range, &KeyTimes, nullptr);
+		if (KeyTimes.IsEmpty())
+		{
+			++EmptyChannelCount;
+		}
+		else
+		{
+			SectionKeyedStatus = FMath::Max(SectionKeyedStatus, EPropertyKeyedStatus::PartiallyKeyed);
+		}
+	}
+
+	if (EmptyChannelCount == 0 && SectionKeyedStatus == EPropertyKeyedStatus::PartiallyKeyed)
+	{
+		SectionKeyedStatus = EPropertyKeyedStatus::KeyedInFrame;
+	}
+	return SectionKeyedStatus;
+}
+
+EPropertyKeyedStatus F3DTransformTrackEditor::GetPropertyKeyedStatus(const IPropertyHandle& PropertyHandle, EMovieSceneTransformChannel TransformChannel) const
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(F3DTransformTrackEditor::GetPropertyKeyedStatus);
+
+	TSharedPtr<ISequencer> SequencerPtr = FMovieSceneTrackEditor::GetSequencer();
+	if (!SequencerPtr.IsValid())
+	{
+		return EPropertyKeyedStatus::NotKeyed;
+	}
+
+	UMovieSceneSequence* Sequence = SequencerPtr->GetFocusedMovieSceneSequence();
+
+	UMovieScene* MovieScene = Sequence ? Sequence->GetMovieScene() : nullptr;
+	if (!MovieScene)
+	{
+		return EPropertyKeyedStatus::NotKeyed;
+	}
+
+	TArray<UObject*> OuterObjects;
+	PropertyHandle.GetOuterObjects(OuterObjects);
+	if (OuterObjects.IsEmpty())
+	{
+		return EPropertyKeyedStatus::NotKeyed;
+	}
+
+	TSet<const UMovieScene3DTransformSection*> ProcessedSections;
+	ProcessedSections.Reserve(OuterObjects.Num());
+
+	TArray<int32, TFixedAllocator<3>> ChannelIndices;
+	switch (TransformChannel)
+	{
+	case EMovieSceneTransformChannel::Translation:
+		ChannelIndices = { 0, 1, 2 };
+		break;
+
+	case EMovieSceneTransformChannel::Rotation:
+		ChannelIndices = { 3, 4, 5 };
+		break;
+
+	case EMovieSceneTransformChannel::Scale:
+		ChannelIndices = { 6, 7, 8 };
+		break;
+	}
+
+	const TRange<FFrameNumber> FrameRange = TRange<FFrameNumber>(SequencerPtr->GetLocalTime().Time.FrameNumber);
+
+	EPropertyKeyedStatus KeyedStatus = EPropertyKeyedStatus::NotKeyed;
+
+	// List of Tracks that had no sections at the current frame that require an additional check by going through all its sections and whether there's a key in any of them.
+	// Used only to determine whether to return "Not Keyed" or "Keyed In Other Frame".
+	TArray<const UMovieScene3DTransformTrack*> TransformTracksToCheck;
+	TransformTracksToCheck.Reserve(OuterObjects.Num());
+
+	for (UObject* Object : OuterObjects)
+	{
+		USceneComponent* SceneComponent = Cast<USceneComponent>(Object);
+		if (!SceneComponent)
+		{
+			continue;
+		}
+
+		TArray<UMovieScene3DTransformTrack*> TransformTracks;
+		{
+			constexpr bool bCreateHandleIfMissing = false;
+
+			// Include Owner Actor Transform Track if Scene Component is Root
+			AActor* OwningActor = SceneComponent->GetOwner();
+			if (OwningActor && OwningActor->GetRootComponent() == SceneComponent)
+			{
+				FGuid OwningActorHandle = SequencerPtr->GetHandleToObject(OwningActor, bCreateHandleIfMissing);
+				if (OwningActorHandle.IsValid())
+				{
+					TransformTracks.Add(MovieScene->FindTrack<UMovieScene3DTransformTrack>(OwningActorHandle, TransformPropertyName));
+				}
+			}
+
+			FGuid SceneComponentHandle = SequencerPtr->GetHandleToObject(SceneComponent, bCreateHandleIfMissing);
+			if (SceneComponentHandle.IsValid())
+			{
+				TransformTracks.Add(MovieScene->FindTrack<UMovieScene3DTransformTrack>(SceneComponentHandle, TransformPropertyName));
+			}
+		}
+
+		for (UMovieScene3DTransformTrack* TransformTrack : TransformTracks)
+		{
+			if (!TransformTrack || TransformTrack->IsEmpty())
+			{
+				continue;
+			}
+
+			TArray<UMovieSceneSection*, TInlineAllocator<4>> Sections = TransformTrack->FindAllSections(FrameRange.GetLowerBoundValue());
+			for (const UMovieSceneSection* Section : Sections)
+			{
+				const UMovieScene3DTransformSection* TransformSection = Cast<UMovieScene3DTransformSection>(Section);
+				if (!TransformSection)
+				{
+					continue;
+				}
+
+				ProcessedSections.Add(TransformSection);
+
+				EPropertyKeyedStatus NewKeyedStatus = GetKeyedStatusInSection(*TransformSection, FrameRange, TransformChannel, ChannelIndices);
+				KeyedStatus = FMath::Max(KeyedStatus, NewKeyedStatus);
+
+				// Maximum Status Reached no need to iterate further
+				if (KeyedStatus == EPropertyKeyedStatus::KeyedInFrame)
+				{
+					return KeyedStatus;
+				}
+			}
+
+			if (KeyedStatus == EPropertyKeyedStatus::NotKeyed)
+			{
+				TransformTracksToCheck.Add(TransformTrack);
+			}
+		}		
+	}
+
+	// If there's no key in the provided sections look through all sections of the tracks
+	// And return "KeyedInOtherFrame" as soon as there's a keyed section
+	if (KeyedStatus == EPropertyKeyedStatus::NotKeyed)
+	{
+		for (const UMovieScene3DTransformTrack* TransformTrack : TransformTracksToCheck)
+		{
+			if (!TransformTrack)
+			{
+				continue;
+			}
+
+			for (const UMovieSceneSection* Section : TransformTrack->GetAllSections())
+			{
+				const UMovieScene3DTransformSection* TransformSection = Cast<UMovieScene3DTransformSection>(Section);
+
+				// Skip sections that were already processed
+				if (TransformSection && !ProcessedSections.Contains(TransformSection))
+				{
+					EPropertyKeyedStatus NewKeyedStatus = GetKeyedStatusInSection(*TransformSection, FrameRange, TransformChannel, ChannelIndices);
+					KeyedStatus = FMath::Max(KeyedStatus, NewKeyedStatus);
+
+					// Maximum Status Reached no need to iterate further
+					if (KeyedStatus >= EPropertyKeyedStatus::KeyedInOtherFrame)
+					{
+						return KeyedStatus;
+					}
+				}
+			}
+		}
+	}
+
+	return KeyedStatus;
+}
+
+void F3DTransformTrackEditor::OnTransformPropertyChanged(const FPropertyChangedParams& PropertyChangedParams, EMovieSceneTransformChannel TransformChannel)
+{
+	// Key Property sends in one object at a time
+	USceneComponent* SceneComponent = MovieSceneHelpers::SceneComponentFromRuntimeObject(PropertyChangedParams.ObjectsThatChanged[0]);
+	if (!SceneComponent)
+	{
+		return;
+	}
+
+	UObject* ObjectToKey = SceneComponent;
+
+	// Set Owning Actor to key instead of Scene Component if it's the root
+	AActor* OwningActor = SceneComponent->GetOwner();
+	if (OwningActor && SceneComponent == OwningActor->GetRootComponent())
+	{
+		ObjectToKey = OwningActor;
+	}
+
+	auto InitializeNewTrack = [](UMovieScene3DTransformTrack* NewTrack)
+	{
+		NewTrack->SetPropertyNameAndPath(TransformPropertyName, TransformPropertyName.ToString());
+	};
+
+	auto GenerateKeys = [this, SceneComponent, TransformChannel](UMovieSceneSection* Section, FGeneratedTrackKeys& OutGeneratedKeys)
+	{
+		UMovieScene3DTransformSection* TransformSection = CastChecked<UMovieScene3DTransformSection>(Section);
+
+		// Ensure that the Transform Channel is masked in
+		EMovieSceneTransformChannel ExistingChannels = TransformSection->GetMask().GetChannels();
+		if (!EnumHasAnyFlags(ExistingChannels, TransformChannel))
+		{
+			TransformSection->Modify();
+			TransformSection->SetMask(TransformSection->GetMask().GetChannels() | TransformChannel);
+		}
+
+		GetTransformKeys(TOptional<FTransformData>(), FTransformData(SceneComponent), TransformChannel, SceneComponent, Section, OutGeneratedKeys);
+	};
+
+	auto KeyProperty = [this, ObjectToKey, PropertyChangedParams, InitializeNewTrack, GenerateKeys, TransformChannel](FFrameNumber KeyTime)
+	{
+		FKeyPropertyResult KeyPropertyResult = this->AddKeysToObjects({ ObjectToKey },
+			KeyTime,
+			PropertyChangedParams.KeyMode,
+			UMovieScene3DTransformTrack::StaticClass(),
+			TransformPropertyName,
+			InitializeNewTrack,
+			GenerateKeys);
+
+		for (TWeakObjectPtr<UMovieSceneSection>& WeakSection : KeyPropertyResult.SectionsKeyed)
+		{
+			if (UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(WeakSection.Get()))
+			{
+				FMovieSceneConstraintChannelHelper::CompensateIfNeeded(GetSequencer(), Section, KeyTime);
+			}
+		}
+
+		// For new sections created, mask so only the relevant transform channel appears
+		for (TWeakObjectPtr<UMovieSceneSection>& WeakSection : KeyPropertyResult.SectionsCreated)
+		{
+			if (UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(WeakSection.Get()))
+			{
+				Section->SetMask(TransformChannel);
+			}
+		}
+
+		return KeyPropertyResult;
+	};
+
+	AnimatablePropertyChanged(FOnKeyProperty::CreateLambda(KeyProperty));
+}
+
 void F3DTransformTrackEditor::ProcessKeyOperation(UObject* ObjectToKey, TArrayView<const UE::Sequencer::FKeySectionOperation> SectionsToKey, ISequencer& InSequencer, FFrameNumber KeyTime)
 {
+	using namespace UE::MovieScene;
+	using namespace UE::Sequencer;
+
 	USceneComponent* Component = MovieSceneHelpers::SceneComponentFromRuntimeObject(ObjectToKey);
 	if (!Component)
 	{
 		return;
 	}
 
-	using namespace UE::MovieScene;
-	using namespace UE::Sequencer;
+	FTransform CurrentTransform(Component->GetRelativeRotation(), Component->GetRelativeLocation(), Component->GetRelativeScale3D());
 
-	FSystemInterrogator Interrogator;
-	Interrogator.TrackImportedEntities(true);
-
-	TGuardValue<FEntityManager*> DebugVizGuard(GEntityManagerForDebuggingVisualizers, &Interrogator.GetLinker()->EntityManager);
-
-	TArray<FInterrogationChannel> InterrogationChannelsPerOperations;
-	for (const FKeySectionOperation& Operation : SectionsToKey)
-	{
-		if (UMovieScenePropertyTrack* Track = Operation.Section->GetSectionObject()->GetTypedOuter<UMovieScenePropertyTrack>())
-		{
-			const FMovieScenePropertyBinding PropertyBinding = Track->GetPropertyBinding();
-			const FInterrogationChannel InterrogationChannel = Interrogator.AllocateChannel(Component, PropertyBinding);
-			InterrogationChannelsPerOperations.Add(InterrogationChannel);
-			Interrogator.ImportTrack(Track, InterrogationChannel);
-		}
-		else
-		{
-			InterrogationChannelsPerOperations.Add(FInterrogationChannel::Invalid());
-		}
-	}
-
-	Interrogator.AddInterrogation(KeyTime);
-
-	Interrogator.Update();
-
-	TArray<FMovieSceneEntityID> EntitiesPerSection, ValidEntities;
 	for (int32 Index = 0; Index < SectionsToKey.Num(); ++Index)
 	{
-		const FKeySectionOperation& Operation = SectionsToKey[Index];
-		const FInterrogationChannel InterrogationChannel = InterrogationChannelsPerOperations[Index];
-		const FInterrogationKey InterrogationKey(InterrogationChannel, 0);
-		FMovieSceneEntityID EntityID = Interrogator.FindEntityFromOwner(InterrogationKey, Operation.Section->GetSectionObject(), 0);
+		FTransformData RecomposedTransform = RecomposeTransform(CurrentTransform, ObjectToKey, SectionsToKey[Index].Section->GetSectionObject());
 
-		EntitiesPerSection.Add(EntityID);
-		if (EntityID)
+		for (TSharedPtr<IKeyArea> KeyArea : SectionsToKey[Index].KeyAreas)
 		{
-			ValidEntities.Add(EntityID);
-		}
-	}
-
-	UMovieSceneInterrogatedPropertyInstantiatorSystem* System = Interrogator.GetLinker()->FindSystem<UMovieSceneInterrogatedPropertyInstantiatorSystem>();
-
-	if (ensure(System && ValidEntities.Num() != 0))
-	{
-		FDecompositionQuery Query;
-		Query.Entities = ValidEntities;
-		Query.bConvertFromSourceEntityIDs = false;
-		Query.Object   = Component;
-
-		FIntermediate3DTransform CurrentValue(Component->GetRelativeLocation(), Component->GetRelativeRotation(), Component->GetRelativeScale3D());
-		TRecompositionResult<FIntermediate3DTransform> TransformData = System->RecomposeBlendOperational(FMovieSceneTracksComponentTypes::Get()->ComponentTransform, Query, CurrentValue);
-
-		for (int32 Index = 0; Index < SectionsToKey.Num(); ++Index)
-		{
-			FMovieSceneEntityID EntityID = EntitiesPerSection[Index];
-			if (!EntityID)
+			FMovieSceneChannelHandle Handle  = KeyArea->GetChannel();
+			if (Handle.GetChannelTypeName() == FMovieSceneDoubleChannel::StaticStruct()->GetFName())
 			{
-				continue;
+				FMovieSceneDoubleChannel* Channel = static_cast<FMovieSceneDoubleChannel*>(Handle.Get());
+
+				if (ensureAlwaysMsgf(Channel, TEXT("Channel: %s for Key Area %s does not exist. Keying may not function properly"), *Handle.GetChannelTypeName().ToString(), *KeyArea->GetName().ToString()))
+				{
+					double Value =
+						Handle.GetChannelIndex() == 0 ? RecomposedTransform.Translation[0] :
+						Handle.GetChannelIndex() == 1 ? RecomposedTransform.Translation[1] :
+						Handle.GetChannelIndex() == 2 ? RecomposedTransform.Translation[2] :
+						Handle.GetChannelIndex() == 3 ? RecomposedTransform.Rotation.Roll :
+						Handle.GetChannelIndex() == 4 ? RecomposedTransform.Rotation.Pitch :
+						Handle.GetChannelIndex() == 5 ? RecomposedTransform.Rotation.Yaw :
+						Handle.GetChannelIndex() == 6 ? RecomposedTransform.Scale[0] :
+						Handle.GetChannelIndex() == 7 ? RecomposedTransform.Scale[1] :
+						Handle.GetChannelIndex() == 8 ? RecomposedTransform.Scale[2] : 0.f;
+
+					if (KeyArea->GetName() == "Rotation.X" ||
+						KeyArea->GetName() == "Rotation.Y" ||
+						KeyArea->GetName() == "Rotation.Z")
+					{
+						int32 PreviousKey = GetPreviousKey(*Channel, KeyTime);
+						if (PreviousKey != INDEX_NONE && PreviousKey < Channel->GetData().GetValues().Num())
+						{
+							double OldValue = Channel->GetData().GetValues()[PreviousKey].Value;
+							Value = UnwindChannel(OldValue, Value);
+						}
+					}
+
+					EMovieSceneKeyInterpolation Interpolation = GetInterpolationMode(Channel, KeyTime, InSequencer.GetKeyInterpolation());
+					AddKeyToChannel(Channel, KeyTime, Value, Interpolation);
+				}
 			}
-
-			const FIntermediate3DTransform& RecomposedTransform = TransformData.Values[Index];
-
-			for (TSharedPtr<IKeyArea> KeyArea : SectionsToKey[Index].KeyAreas)
+			else
 			{
-				FMovieSceneChannelHandle Handle  = KeyArea->GetChannel();
-				if (Handle.GetChannelTypeName() == FMovieSceneFloatChannel::StaticStruct()->GetFName() && Handle.GetChannelIndex() < 9)
-				{
-					FMovieSceneFloatChannel* Channel = static_cast<FMovieSceneFloatChannel*>(Handle.Get());
-
-					float Value = RecomposedTransform[Handle.GetChannelIndex()];
-					AddKeyToChannel(Channel, KeyTime, Value, InSequencer.GetKeyInterpolation());
-				}
-				else
-				{
-					KeyArea->AddOrUpdateKey(KeyTime, FGuid(), InSequencer);
-				}
+				KeyArea->AddOrUpdateKey(KeyTime, FGuid(), InSequencer);
 			}
 		}
 	}
 }
 
-void AddUnwoundKey(FMovieSceneFloatChannel& Channel, FFrameNumber Time, float Value)
+void AddUnwoundKey(FMovieSceneDoubleChannel& Channel, FFrameNumber Time, double Value)
 {
 	int32 Index = Channel.AddLinearKey(Time, Value);
 
-	TArrayView<FMovieSceneFloatValue> Values = Channel.GetData().GetValues();
+	TArrayView<FMovieSceneDoubleValue> Values = Channel.GetData().GetValues();
 	if (Index >= 1)
 	{
-		const float PreviousValue = Values[Index - 1].Value;
-		float NewValue = Value;
+		const double PreviousValue = Values[Index - 1].Value;
+		double NewValue = Value;
 
 		while (NewValue - PreviousValue > 180.0f)
 		{
@@ -1020,6 +1536,8 @@ void AddUnwoundKey(FMovieSceneFloatChannel& Channel, FFrameNumber Time, float Va
 void F3DTransformTrackEditor::ImportAnimSequenceTransforms(const FAssetData& Asset, TSharedRef<ISequencer> Sequencer, UMovieScene3DTransformTrack* TransformTrack)
 {
 	FSlateApplication::Get().DismissAllMenus();
+
+	FQualifiedFrameTime CurrentTime = Sequencer->GetLocalTime();
 
 	UAnimSequence* AnimSequence = Cast<UAnimSequence>(Asset.GetAsset());
 
@@ -1058,7 +1576,7 @@ void F3DTransformTrackEditor::ImportAnimSequenceTransforms(const FAssetData& Ass
 		}
 	}
 
-	if(AnimSequence && AnimSequence->GetRawAnimationData().Num() > 0)
+	if (AnimSequence && AnimSequence->GetDataModel()->GetNumBoneTracks() > 0)
 	{
 		const FScopedTransaction Transaction( NSLOCTEXT( "Sequencer", "ImportAnimSequenceTransforms", "Import Anim Sequence Transforms" ) );
 
@@ -1071,17 +1589,19 @@ void F3DTransformTrackEditor::ImportAnimSequenceTransforms(const FAssetData& Ass
 		
 		FFrameRate TickResolution = Section->GetTypedOuter<UMovieScene>()->GetTickResolution();
 
-		TArrayView<FMovieSceneFloatChannel*> FloatChannels = Section->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
+		// We know that there aren't any channel overrides (all 9 channels are double channels) because we're working
+		// on a brand new transform section.
+		TArrayView<FMovieSceneDoubleChannel*> DoubleChannels = Section->GetChannelProxy().GetChannels<FMovieSceneDoubleChannel>();
 
 		// Set default translation and rotation
 		for (int32 Index = 0; Index < 6; ++Index)
 		{
-			FloatChannels[Index]->SetDefault(0.f);
+			DoubleChannels[Index]->SetDefault(0.f);
 		}
 		// Set default scale
 		for (int32 Index = 6; Index < 9; ++Index)
 		{
-			FloatChannels[Index]->SetDefault(1.f);
+			DoubleChannels[Index]->SetDefault(1.f);
 		}
 
 		TransformTrack->AddSection(*Section);
@@ -1095,41 +1615,21 @@ void F3DTransformTrackEditor::ImportAnimSequenceTransforms(const FAssetData& Ass
 				float Time;
 			};
 
+			float MinTime = FLT_MAX;
+
 			TArray<FTempTransformKey> TempKeys;
 
-			FRawAnimSequenceTrack& RawTrack = AnimSequence->GetRawAnimationTrack(0);
-			const int32 KeyCount = FMath::Max(FMath::Max(RawTrack.PosKeys.Num(), RawTrack.RotKeys.Num()), RawTrack.ScaleKeys.Num());
-			for(int32 KeyIndex = 0; KeyIndex < KeyCount; KeyIndex++)
+			TArray<FName> BoneTrackNames;
+			AnimSequence->GetDataModelInterface()->GetBoneTrackNames(BoneTrackNames);
+
+			TArray<FTransform> BoneTransforms;
+			AnimSequence->GetDataModelInterface()->GetBoneTrackTransforms(BoneTrackNames[0], BoneTransforms);
+
+			for(int32 KeyIndex = 0; KeyIndex < BoneTransforms.Num(); KeyIndex++)
 			{
 				FTempTransformKey TempKey;
 				TempKey.Time = AnimSequence->GetTimeAtFrame(KeyIndex);
-
-				if(RawTrack.PosKeys.IsValidIndex(KeyIndex))
-				{
-					TempKey.Transform.SetTranslation(RawTrack.PosKeys[KeyIndex]);
-				}
-				else if(RawTrack.PosKeys.Num() > 0)
-				{
-					TempKey.Transform.SetTranslation(RawTrack.PosKeys[0]);
-				}
-				
-				if(RawTrack.RotKeys.IsValidIndex(KeyIndex))
-				{
-					TempKey.Transform.SetRotation(RawTrack.RotKeys[KeyIndex]);
-				}
-				else if(RawTrack.RotKeys.Num() > 0)
-				{
-					TempKey.Transform.SetRotation(RawTrack.RotKeys[0]);
-				}
-
-				if(RawTrack.ScaleKeys.IsValidIndex(KeyIndex))
-				{
-					TempKey.Transform.SetScale3D(RawTrack.ScaleKeys[KeyIndex]);
-				}
-				else if(RawTrack.ScaleKeys.Num() > 0)
-				{
-					TempKey.Transform.SetScale3D(RawTrack.ScaleKeys[0]);
-				}
+				TempKey.Transform = BoneTransforms[KeyIndex];
 
 				// apply component transform if any
 				TempKey.Transform = InvComponentTransform * TempKey.Transform;
@@ -1137,6 +1637,8 @@ void F3DTransformTrackEditor::ImportAnimSequenceTransforms(const FAssetData& Ass
 				TempKey.WoundRotation = TempKey.Transform.GetRotation().Rotator();
 
 				TempKeys.Add(TempKey);
+
+				MinTime = FMath::Min(MinTime, TempKey.Time);
 			}
 
 			int32 TransformCount = TempKeys.Num();
@@ -1150,18 +1652,22 @@ void F3DTransformTrackEditor::ImportAnimSequenceTransforms(const FAssetData& Ass
 				FMath::WindRelativeAnglesDegrees(Rotator.Roll, NextRotator.Roll);
 			}
 
+			FFrameNumber MinKeyTime = (MinTime * TickResolution).RoundToFrame();
+
 			TRange<FFrameNumber> Range = Section->GetRange();
 			for(const FTempTransformKey& TempKey : TempKeys)
 			{
 				FFrameNumber KeyTime = (TempKey.Time * TickResolution).RoundToFrame();
 
+				KeyTime = CurrentTime.Time.FrameNumber + (KeyTime - MinKeyTime);
+
 				Range = TRange<FFrameNumber>::Hull(Range, TRange<FFrameNumber>(KeyTime));
 
-				const FVector Translation = TempKey.Transform.GetTranslation();
-				const FVector Rotation = TempKey.WoundRotation.Euler();
-				const FVector Scale = TempKey.Transform.GetScale3D();
+				const FVector3f Translation = (FVector3f)TempKey.Transform.GetTranslation();
+				const FVector3f Rotation = (FVector3f)TempKey.WoundRotation.Euler();
+				const FVector3f Scale = (FVector3f)TempKey.Transform.GetScale3D();
 
-				TArrayView<FMovieSceneFloatChannel*> Channels = Section->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
+				TArrayView<FMovieSceneDoubleChannel*> Channels = Section->GetChannelProxy().GetChannels<FMovieSceneDoubleChannel>();
 
 				Channels[0]->AddLinearKey(KeyTime, Translation.X);
 				Channels[1]->AddLinearKey(KeyTime, Translation.Y);
@@ -1192,4 +1698,334 @@ void F3DTransformTrackEditor::ImportAnimSequenceTransformsEnterPressed(const TAr
 	}
 }
 
+bool F3DTransformTrackEditor::MatchesContext(const FTransactionContext& InContext, const TArray<TPair<UObject*, FTransactionObjectEvent>>& TransactionObjects) const
+{
+	SectionsGettingUndone.SetNum(0);
+	// Check if we care about the undo/redo
+	bool bGettingUndone = false;
+	for (const TPair<UObject*, FTransactionObjectEvent>& TransactionObjectPair : TransactionObjects)
+	{
+
+		UObject* Object = TransactionObjectPair.Key;
+		while (Object != nullptr)
+		{
+			const UClass* ObjectClass = Object->GetClass();
+			if (ObjectClass && ObjectClass->IsChildOf(UMovieScene3DTransformSection::StaticClass()))
+			{
+				UMovieScene3DTransformSection* Section = Cast< UMovieScene3DTransformSection>(Object);
+				if (Section)
+				{
+					SectionsGettingUndone.Add(Section);
+				}
+				bGettingUndone = true;
+				break;
+			}
+			Object = Object->GetOuter();
+		}
+	}
+
+	return bGettingUndone;
+}
+
+void F3DTransformTrackEditor::PostUndo(bool bSuccess)
+{
+	for (TWeakObjectPtr<UMovieScene3DTransformSection> &Section : SectionsGettingUndone)
+	{
+		if (Section.IsValid())
+		{
+			TArray<FConstraintAndActiveChannel>& ConstraintChannels = Section->GetConstraintsChannels();
+			for (FConstraintAndActiveChannel& Channel : ConstraintChannels)
+			{
+				HandleOnConstraintAdded(Section.Get(), &(Channel.ActiveChannel));
+			}
+		}
+	}
+}
+
+void F3DTransformTrackEditor::HandleOnConstraintAdded(IMovieSceneConstrainedSection* InSection, FMovieSceneConstraintChannel* InConstraintChannel)
+{
+	if (!InConstraintChannel)
+	{
+		return;
+	}
+	// handle scene component changes so we can update the gizmo location when it changes
+	UWorld* World = GCurrentLevelEditingViewportClient ? GCurrentLevelEditingViewportClient->GetWorld() : nullptr;
+	FConstraintsManagerController& Controller = FConstraintsManagerController::Get(World);
+	if (!Controller.OnSceneComponentConstrained().IsBound())
+	{
+		OnSceneComponentConstrainedHandle =
+			Controller.OnSceneComponentConstrained().AddLambda([](USceneComponent* InSceneComponent)
+				{
+					//only update gizmo if it or it's actor is seleced, otherwise can be wasteful
+					GUnrealEd->UpdatePivotLocationForSelection();
+					AActor* Actor = InSceneComponent->GetTypedOuter<AActor>();
+					if (USelection* SelectedActors = GEditor->GetSelectedActors())
+					{
+						if (SelectedActors->IsSelected(Actor))
+						{
+							GUnrealEd->UpdatePivotLocationForSelection();
+							return;
+						}
+					}
+					else if (USelection* SelectedComponents = GEditor->GetSelectedComponents())
+					{
+						if (SelectedComponents->IsSelected(InSceneComponent))
+						{
+							GUnrealEd->UpdatePivotLocationForSelection();
+						}
+					}
+				});
+	}
+
+	// Store Section so we can remove these delegates
+	UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(InSection);
+	SectionsToClear.Add(Section);
+
+	// handle key moved
+	if (!InConstraintChannel->OnKeyMovedEvent().IsBound())
+	{
+		InConstraintChannel->OnKeyMovedEvent().AddLambda([this, InSection](
+			FMovieSceneChannel* InChannel, const TArray<FKeyMoveEventItem>& InMovedItems)
+			{
+				const FMovieSceneConstraintChannel* ConstraintChannel = static_cast<FMovieSceneConstraintChannel*>(InChannel);
+				HandleConstraintKeyMoved(InSection, ConstraintChannel, InMovedItems);
+			});
+	}
+
+	// handle key deleted
+	if (!InConstraintChannel->OnKeyDeletedEvent().IsBound())
+	{
+		InConstraintChannel->OnKeyDeletedEvent().AddLambda([this, InSection](
+			FMovieSceneChannel* InChannel, const TArray<FKeyAddOrDeleteEventItem>& InDeletedItems)
+			{
+				const FMovieSceneConstraintChannel* ConstraintChannel = static_cast<FMovieSceneConstraintChannel*>(InChannel);
+				HandleConstraintKeyDeleted(InSection, ConstraintChannel, InDeletedItems);
+			});
+	}
+
+	// handle constraint deleted
+	if (InSection)
+	{
+		HandleConstraintRemoved(InSection);
+	}
+
+	if (!UTickableTransformConstraint::GetOnConstraintChanged().IsBoundToObject(this))
+	{
+		UTickableTransformConstraint::GetOnConstraintChanged().AddRaw(this, &F3DTransformTrackEditor::HandleConstraintPropertyChanged);
+	}
+}
+
+static UTickableTransformConstraint* GetTickableTransformConstraint(IMovieSceneConstrainedSection* InSection, const FMovieSceneConstraintChannel* InConstraintChannel)
+{
+	UTickableTransformConstraint* Constraint = nullptr;
+	// get constraint channel
+	TArray<FConstraintAndActiveChannel>& ConstraintChannels = InSection->GetConstraintsChannels();
+	const int32 Index = ConstraintChannels.IndexOfByPredicate([InConstraintChannel](const FConstraintAndActiveChannel& InChannel)
+		{
+			return &(InChannel.ActiveChannel) == InConstraintChannel;
+		});
+
+	if (Index != INDEX_NONE)
+	{
+		Constraint = Cast<UTickableTransformConstraint>(ConstraintChannels[Index].GetConstraint().Get());
+	}
+	return Constraint;
+}
+
+void F3DTransformTrackEditor::HandleConstraintKeyDeleted(IMovieSceneConstrainedSection* InSection, const FMovieSceneConstraintChannel* InConstraintChannel,
+	const TArray<FKeyAddOrDeleteEventItem>& InDeletedItems) const
+{
+	if (FMovieSceneConstraintChannelHelper::bDoNotCompensate)
+	{
+		return;
+	}
+	
+	if (!InConstraintChannel)
+	{
+		return;
+	}
+	UTickableTransformConstraint* Constraint = GetTickableTransformConstraint(InSection, InConstraintChannel);
+	if (!Constraint)
+	{
+		return;
+	}
+
+    if(UTickableTransformConstraint* Constrain = GetTickableTransformConstraint(InSection,InConstraintChannel))
+	{
+		for (const FKeyAddOrDeleteEventItem& EventItem : InDeletedItems)
+		{
+			UMovieSceneSection* Section = Cast<UMovieSceneSection>(InSection);
+			FMovieSceneConstraintChannelHelper::HandleConstraintKeyDeleted(
+				Constraint, InConstraintChannel,
+				GetSequencer(), Section,
+				EventItem.Frame);
+			
+		}
+	}
+}
+
+void F3DTransformTrackEditor::HandleConstraintKeyMoved(IMovieSceneConstrainedSection* InSection, const FMovieSceneConstraintChannel* InConstraintChannel,
+	const TArray<FKeyMoveEventItem>& InMovedItems)
+{
+	if (!InConstraintChannel)
+	{
+		return;
+	}
+	UTickableTransformConstraint* Constraint = GetTickableTransformConstraint(InSection, InConstraintChannel);
+	if (!Constraint)
+	{
+		return;
+	}
+	UMovieSceneSection* Section = Cast<UMovieSceneSection>(InSection);
+
+	for (const FKeyMoveEventItem& MoveEventItem : InMovedItems)
+	{
+		FMovieSceneConstraintChannelHelper::HandleConstraintKeyMoved(
+			Constraint, InConstraintChannel, Section,
+			MoveEventItem.Frame, MoveEventItem.NewFrame);
+	}
+}
+
+void F3DTransformTrackEditor::HandleConstraintRemoved(IMovieSceneConstrainedSection* InSection) 
+{
+	UWorld* World = GCurrentLevelEditingViewportClient ? GCurrentLevelEditingViewportClient->GetWorld() : nullptr;
+	UMovieScene3DTransformSection* Section = Cast<UMovieScene3DTransformSection>(InSection);
+
+	FConstraintsManagerController& Controller = FConstraintsManagerController::Get(World);
+	if (!InSection->OnConstraintRemovedHandle.IsValid())
+	{
+		InSection->OnConstraintRemovedHandle =
+			Controller.GetNotifyDelegate().AddLambda([InSection,Section, this](EConstraintsManagerNotifyType InNotifyType, UObject *InObject)
+				{
+					switch (InNotifyType)
+					{
+						case EConstraintsManagerNotifyType::ConstraintAdded:
+							break;
+						case EConstraintsManagerNotifyType::ConstraintRemoved:
+						case EConstraintsManagerNotifyType::ConstraintRemovedWithCompensation:
+							{
+								const UTickableConstraint* Constraint = Cast<UTickableConstraint>(InObject);
+								if (!IsValid(Constraint))
+								{
+									return;
+								}
+
+								const FConstraintAndActiveChannel* ConstraintChannel = InSection->GetConstraintChannel(Constraint->ConstraintID);
+								if (!ConstraintChannel || ConstraintChannel->GetConstraint().Get() != Constraint)
+								{
+									return;
+								}
+
+
+								TSharedPtr<ISequencer> Sequencer = GetSequencer();
+								
+								const bool bCompensate = (InNotifyType == EConstraintsManagerNotifyType::ConstraintRemovedWithCompensation);
+								if (bCompensate && ConstraintChannel->GetConstraint().Get())
+								{
+									FMovieSceneConstraintChannelHelper::HandleConstraintRemoved(
+										ConstraintChannel->GetConstraint().Get(),
+										&ConstraintChannel->ActiveChannel,
+										Sequencer,
+										Section);
+								}
+
+								InSection->RemoveConstraintChannel(Constraint);
+
+								if (Sequencer)
+								{
+									Sequencer->RecreateCurveEditor();
+								}
+							}
+							break;
+						case EConstraintsManagerNotifyType::ManagerUpdated:
+							InSection->OnConstraintsChanged();
+							break;		
+					}
+				});
+		ConstraintHandlesToClear.Add(InSection->OnConstraintRemovedHandle);
+
+	}
+}
+
+void F3DTransformTrackEditor::HandleConstraintPropertyChanged(UTickableTransformConstraint* InConstraint, const FPropertyChangedEvent& InPropertyChangedEvent) const
+{
+	if (!IsValid(InConstraint))
+	{
+		return;
+	}
+
+	// find constraint section
+	const UTransformableComponentHandle* Handle = Cast<UTransformableComponentHandle>(InConstraint->ChildTRSHandle);
+	if (!IsValid(Handle) || !Handle->IsValid())
+	{
+		return;
+	}
+
+	const FConstraintChannelInterfaceRegistry& InterfaceRegistry = FConstraintChannelInterfaceRegistry::Get();	
+	ITransformConstraintChannelInterface* Interface = InterfaceRegistry.FindConstraintChannelInterface(Handle->GetClass());
+	if (!Interface)
+	{
+		return;
+	}
+	
+	UMovieSceneSection* Section = Interface->GetHandleConstraintSection(Handle, GetSequencer());
+	IMovieSceneConstrainedSection* ConstraintSection = Cast<IMovieSceneConstrainedSection>(Section);
+	if (!ConstraintSection)
+	{
+		return;
+	}
+
+	// find corresponding channel
+	const TArray<FConstraintAndActiveChannel>& ConstraintChannels = ConstraintSection->GetConstraintsChannels();
+	const FConstraintAndActiveChannel* Channel = ConstraintChannels.FindByPredicate([InConstraint](const FConstraintAndActiveChannel& Channel)
+	{
+		return Channel.GetConstraint() == InConstraint;
+	});
+
+	if (!Channel)
+	{
+		return;
+	}
+
+	FMovieSceneConstraintChannelHelper::HandleConstraintPropertyChanged(
+			InConstraint, Channel->ActiveChannel, InPropertyChangedEvent, GetSequencer(), Section);
+}
+
+void F3DTransformTrackEditor::ClearOutConstraintDelegates() 
+{
+	UWorld* World = GCurrentLevelEditingViewportClient ? GCurrentLevelEditingViewportClient->GetWorld() : nullptr;
+	FConstraintsManagerController& Controller = FConstraintsManagerController::Get(World);
+	for (FDelegateHandle& Handle : ConstraintHandlesToClear)
+	{
+		if (Handle.IsValid())
+		{
+			Controller.GetNotifyDelegate().Remove(Handle);
+		}
+	}
+	ConstraintHandlesToClear.Reset();
+
+	for (TWeakObjectPtr<UMovieScene3DTransformSection>& Section : SectionsToClear)
+	{
+		if (IMovieSceneConstrainedSection* CRSection = Section.Get())
+		{
+			// clear constraint channels
+			TArray<FConstraintAndActiveChannel>& ConstraintChannels = CRSection->GetConstraintsChannels();
+			for (FConstraintAndActiveChannel& Channel : ConstraintChannels)
+			{
+				Channel.ActiveChannel.OnKeyMovedEvent().Clear();
+				Channel.ActiveChannel.OnKeyDeletedEvent().Clear();
+			}
+
+			if (CRSection->OnConstraintRemovedHandle.IsValid())
+			{
+				CRSection->OnConstraintRemovedHandle.Reset();
+			}
+
+			CRSection->ConstraintChannelAdded().RemoveAll(this);
+		}
+	}
+	SectionsToClear.Reset();
+
+	UTickableTransformConstraint::GetOnConstraintChanged().RemoveAll(this);
+}
 #undef LOCTEXT_NAMESPACE

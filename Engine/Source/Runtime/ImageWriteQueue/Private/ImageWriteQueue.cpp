@@ -10,6 +10,7 @@
 #include "Async/Async.h"
 #include "Modules/ModuleManager.h"
 #include "IImageWrapperModule.h"
+#include "Misc/QueuedThreadPoolWrapper.h"
 
 DEFINE_LOG_CATEGORY(LogImageWriteQueue);
 
@@ -32,6 +33,14 @@ static TAutoConsoleVariable<int32> CVarImageWriteQueueMaxQueueSize(
  */
 struct FImageWriteFence
 {
+	FImageWriteFence(uint32 InID, uint32 InCount, TPromise<void>&& InCompleted, TFunction<void()> InOnCompleted)
+		: ID(InID)
+		, Count(InCount)
+		, Completed(MoveTemp(InCompleted))
+		, OnCompleted(MoveTemp(InOnCompleted))
+	{
+	}
+
 	FImageWriteFence(FImageWriteFence&&) = default;
 	FImageWriteFence(const FImageWriteFence&) = delete;
 
@@ -276,6 +285,12 @@ void FImageWriteQueue::RecreateThreadPool()
 			bOwnedThreadPool = false;
 			ThreadPool = GIOThreadPool;
 		}
+		else if (GThreadPool && GThreadPool->GetNumThreads() >= MaxConcurrency)
+		{
+			// Use a simple wrapper to limit concurrency and reuse threads we already have
+			bOwnedThreadPool = true;
+			ThreadPool = new FQueuedThreadPoolWrapper(GThreadPool, MaxConcurrency);
+		}
 		else
 		{
 			// Create a new thread pool as a last resort
@@ -340,7 +355,7 @@ void FImageWriteQueue::DecrementFence(uint32 FenceID)
 			}
 		}
 
-		PendingFences.RemoveAt(0, LastCompletedFenceIndex+1, false);
+		PendingFences.RemoveAt(0, LastCompletedFenceIndex+1, EAllowShrinking::No);
 	}
 }
 
@@ -382,7 +397,7 @@ TFuture<void> FImageWriteQueue::CreateFence(const TFunction<void()>& InOnFenceRe
 	else
 	{
 		// Move the promise into the write fence
-		PendingFences.Add(FImageWriteFence{CurrentFenceID, CurrentFenceCount, MoveTemp(Promise), InOnFenceReached});
+		PendingFences.Emplace(CurrentFenceID, CurrentFenceCount, MoveTemp(Promise), CopyTemp(InOnFenceReached));
 
 		// Reset the current fence context
 		++CurrentFenceID;

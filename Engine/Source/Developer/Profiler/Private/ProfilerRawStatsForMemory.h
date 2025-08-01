@@ -3,6 +3,9 @@
 #pragma once
 
 #include "CoreMinimal.h"
+
+#if STATS && UE_STATS_MEMORY_PROFILER_ENABLED
+
 #include "Stats/StatsFile.h"
 
 
@@ -322,7 +325,7 @@ public:
 	}
 
 	/**
-	 * @return Platform's name based on the loaded ue4statsraw file.
+	 * @return Platform's name based on the loaded uestatsraw file.
 	 */
 	const FString& GetPlatformName() const
 	{
@@ -383,3 +386,4 @@ protected:
 	int32 LastSequenceTagForNamedMarker;
 };
 
+#endif // STATS && UE_STATS_MEMORY_PROFILER_ENABLED

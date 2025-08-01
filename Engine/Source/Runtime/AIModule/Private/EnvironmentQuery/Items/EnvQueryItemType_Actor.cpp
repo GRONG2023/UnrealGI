@@ -6,6 +6,8 @@
 #include "AITypes.h"
 #include "EnvironmentQuery/EnvQueryTypes.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQueryItemType_Actor)
+
 UEnvQueryItemType_Actor::UEnvQueryItemType_Actor(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	ValueSize = sizeof(FWeakObjectPtr);
@@ -55,6 +57,8 @@ void UEnvQueryItemType_Actor::SetContextHelper(FEnvQueryContextData& ContextData
 	ContextData.NumValues = MultipleActors.Num();
 	ContextData.RawData.SetNumUninitialized(sizeof(FWeakObjectPtr) * MultipleActors.Num());
 
+	checkf(ContextData.RawData.Num() == sizeof(FWeakObjectPtr) * MultipleActors.Num(), TEXT("Failed to allocate the appropriate amount of memory"));
+
 	uint8* RawData = (uint8*)ContextData.RawData.GetData();
 	for (int32 ActorIndex = 0; ActorIndex < MultipleActors.Num(); ActorIndex++)
 	{
@@ -67,7 +71,9 @@ void UEnvQueryItemType_Actor::SetContextHelper(FEnvQueryContextData& ContextData
 {
 	ContextData.ValueType = UEnvQueryItemType_Actor::StaticClass();
 	ContextData.NumValues = MultipleActors.Num();
-	ContextData.RawData.SetNumUninitialized(sizeof(FWeakObjectPtr)* MultipleActors.Num());
+	ContextData.RawData.SetNumUninitialized(sizeof(FWeakObjectPtr) * MultipleActors.Num());
+
+	checkf(ContextData.RawData.Num() == sizeof(FWeakObjectPtr) * MultipleActors.Num(), TEXT("Failed to allocate the appropriate amount of memory"));
 
 	uint8* RawData = (uint8*)ContextData.RawData.GetData();
 	for (int32 ActorIndex = 0; ActorIndex < MultipleActors.Num(); ActorIndex++)
@@ -76,3 +82,4 @@ void UEnvQueryItemType_Actor::SetContextHelper(FEnvQueryContextData& ContextData
 		RawData += sizeof(FWeakObjectPtr);
 	}
 }
+

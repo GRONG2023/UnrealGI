@@ -6,8 +6,6 @@ namespace UnrealBuildTool.Rules
 	{
         public VREditor(ReadOnlyTargetRules Target) : base(Target)
 		{
-			PublicIncludePaths.Add(ModuleDirectory);
-
             PrivateDependencyModuleNames.AddRange(
                 new string[] {
                     "AppFramework",
@@ -18,27 +16,31 @@ namespace UnrealBuildTool.Rules
                     "InputCore",
 				    "Slate",
 					"SlateCore",
-                    "EditorStyle",
-				    "UnrealEd",
+                    "RenderCore",
+					"EditorFramework",
+					"UnrealEd",
 					"UMG",
 					"LevelEditor",
 					"HeadMountedDisplay",
 					"Analytics",
                     "LevelSequence",
                     "Sequencer",
-                    "Projects"
+                    "Projects",
+					"ToolMenus",
 				}
 			);
 
 			PublicDependencyModuleNames.AddRange(
 				new string[] {
-					"ViewportInteraction"
+					"ViewportInteraction",
+					"HeadMountedDisplay"
 				}
 			);
 
 			PrivateIncludePathModuleNames.AddRange(
 				new string[] {
-					"PlacementMode"
+					"AssetTools",
+					"PlacementMode",
 				}
 			);
 
@@ -47,14 +49,6 @@ namespace UnrealBuildTool.Rules
                     "PlacementMode"
                 }
 			);
-
-            PrivateIncludePaths.AddRange(
-                new string[] {
-                    "Editor/VREditor/UI",
-                    "Editor/VREditor/Teleporter",
-                }
-            );
-
 		}
 	}
 }

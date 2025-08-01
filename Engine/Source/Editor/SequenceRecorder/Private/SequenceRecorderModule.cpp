@@ -16,7 +16,7 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Textures/SlateIcon.h"
 #include "Framework/Docking/TabManager.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "EngineGlobals.h"
 #include "LevelEditor.h"
 #include "PersonaModule.h"
@@ -39,6 +39,7 @@
 #include "ActorRecordingDetailsCustomization.h"
 #include "SequenceRecorderDetailsCustomization.h"
 #include "PropertiesToRecordForClassDetailsCustomization.h"
+#include "TimecodeBoneMethodCustomization.h"
 #include "WorkflowOrientedApp/WorkflowTabFactory.h"
 #include "IStructureDetailsView.h"
 #include "WorkflowOrientedApp/WorkflowTabManager.h"
@@ -46,6 +47,7 @@
 #include "MovieSceneTimeHelpers.h"
 #include "SequenceRecorderUtils.h"
 #include "Animation/AnimSequence.h"
+#include "LevelSequence.h"
 
 #define LOCTEXT_NAMESPACE "SequenceRecorder"
 
@@ -57,10 +59,32 @@ static TAutoConsoleVariable<float> CVarDefaultRecordedAnimLength(
 	TEXT("Sets default animation length for the animation recorder system."),
 	ECVF_Default);
 
-static TAutoConsoleVariable<float> CVarAnimRecorderSampleRate(
+static FAutoConsoleCommand CVarAnimRecorderSampleFrameRate(
 	TEXT("AnimRecorder.SampleRate"),
-	FAnimationRecordingSettings::DefaultSampleRate,
-	TEXT("Sets the sample rate for the animation recorder system"),
+	TEXT("Argument: valid Frame Rate format\n")
+	TEXT("Sets the sample frame-rate for the animation recorder system"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+	{
+		bool bValidFrameRate = false;
+		if (Args.Num() == 1)
+		{
+			TValueOrError<FFrameRate, FExpressionError> ParseResult = ParseFrameRate(*Args[0]);
+
+			if (ParseResult.IsValid())
+			{
+				GetMutableDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleFrameRate = ParseResult.GetValue();
+				UE_LOG(LogEngine, Display, TEXT("Sequence recorder default sample frame rate set to: %s"), *(GetMutableDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleFrameRate.ToPrettyText().ToString()));
+			}
+			else
+			{
+				UE_LOG(LogAnimation, Warning, TEXT("Invalid Frame Rate format provided for AnimRecorder.SampleRate:\n%s"), *ParseResult.GetError().Text.ToString());
+			}
+		}
+		else
+		{
+			UE_LOG(LogAnimation, Warning, TEXT("Missing Frame Rate argument for AnimRecorder.SampleRate"));
+		}
+	}),
 	ECVF_Default);
 
 static TAutoConsoleVariable<int32> CVarAnimRecorderWorldSpace(
@@ -76,7 +100,7 @@ public:
 		: FWorkflowTabFactory(TEXT("PersonaSequenceRecorderSettings"), InHostingApp)
 	{
 		TabLabel = LOCTEXT("AnimationRecordingSettings", "Recording Settings");
-		TabIcon = FSlateIcon(FEditorStyle::GetStyleSetName(), "SequenceRecorder.TabIcon");
+		TabIcon = FSlateIcon(FAppStyle::GetAppStyleSetName(), "SequenceRecorder.TabIcon");
 		ViewMenuDescription = LOCTEXT("AnimationRecordingSettings", "Recording Settings");
 		ViewMenuTooltip = LOCTEXT("AnimationRecordingSettings_Tooltip", "Settings for animation recording");
 
@@ -108,11 +132,6 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 		CVarDefaultRecordedAnimLength.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Variable)
 		{
 			GetMutableDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.Length = CVarDefaultRecordedAnimLength.GetValueOnGameThread();
-		}));
-
-		CVarAnimRecorderSampleRate.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Variable)
-		{
-			GetMutableDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleRate = CVarAnimRecorderSampleRate.GetValueOnGameThread();
 		}));
 
 		CVarAnimRecorderWorldSpace.AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda([](IConsoleVariable* Variable)
@@ -154,13 +173,16 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 			LevelEditorModule.OnCaptureSingleFrameAnimSequence().BindStatic(&FSequenceRecorderModule::HandleCaptureSingleFrameAnimSequence);
 
 			// register standalone UI
-			auto RegisterTabSpawner = []()
+			auto RegisterTabSpawner = [this]()
 			{
-				FGlobalTabmanager::Get()->RegisterNomadTabSpawner(SequenceRecorderTabName, FOnSpawnTab::CreateStatic(&FSequenceRecorderModule::SpawnSequenceRecorderTab))
+				FTabSpawnerEntry& Entry = FGlobalTabmanager::Get()->RegisterNomadTabSpawner(SequenceRecorderTabName, FOnSpawnTab::CreateStatic(&FSequenceRecorderModule::SpawnSequenceRecorderTab))
 				.SetGroup(WorkspaceMenu::GetMenuStructure().GetLevelEditorCinematicsCategory())
 				.SetDisplayName(LOCTEXT("SequenceRecorderTabTitle", "Sequence Recorder"))
 				.SetTooltipText(LOCTEXT("SequenceRecorderTooltipText", "Open the Sequence Recorder tab."))
-				.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "SequenceRecorder.TabIcon"));
+				.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "SequenceRecorder.TabIcon"));
+
+				TabSpawnerEntry = &Entry;
+				TabSpawnerEntry->SetMenuType(ETabSpawnerMenuType::Hidden);
 			};
 			FLevelEditorModule* LocalLevelEditorModule = FModuleManager::GetModulePtr<FLevelEditorModule>(TEXT("LevelEditor"));
 			if (LocalLevelEditorModule && LocalLevelEditorModule->GetLevelEditorTabManager())
@@ -181,6 +203,7 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 			PropertyModule.RegisterCustomClassLayout(USequenceRecorderSettings::StaticClass()->GetFName(), FOnGetDetailCustomizationInstance::CreateStatic(&FSequenceRecorderDetailsCustomization::MakeInstance));
 			PropertyModule.RegisterCustomPropertyTypeLayout(FPropertiesToRecordForClass::StaticStruct()->GetFName(), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FPropertiesToRecordForClassDetailsCustomization::MakeInstance));
 			PropertyModule.RegisterCustomPropertyTypeLayout(FPropertiesToRecordForActorClass::StaticStruct()->GetFName(), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FPropertiesToRecordForActorClassDetailsCustomization::MakeInstance));
+			PropertyModule.RegisterCustomPropertyTypeLayout("TimecodeBoneMethod", FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FTimecodeBoneMethodCustomization::MakeInstance));
 		}
 #endif
 	}
@@ -228,6 +251,7 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 					PropertyModule.UnregisterCustomClassLayout(UActorRecording::StaticClass()->GetFName());
 					PropertyModule.UnregisterCustomClassLayout(USequenceRecorderSettings::StaticClass()->GetFName());
 					PropertyModule.UnregisterCustomPropertyTypeLayout(FPropertiesToRecordForClass::StaticStruct()->GetFName());
+					PropertyModule.UnregisterCustomPropertyTypeLayout("TimecodeBoneMethod");
 				}
 			}
 		}
@@ -240,7 +264,7 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 	}
 
 	// FSelfRegisteringExec implementation
-	virtual bool Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override
+	virtual bool Exec_Editor(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar) override
 	{
 #if WITH_EDITOR
 		if (FParse::Command(&Cmd, TEXT("RecordAnimation")))
@@ -473,7 +497,7 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 				}
 				else
 				{
-					UClass* FoundClass = FindObject<UClass>(ANY_PACKAGE, *SpecifierStr);
+					UClass* FoundClass = UClass::TryFindTypeSlow<UClass>(SpecifierStr);
 					if(FoundClass != nullptr)
 					{
 						Settings->ActorFilter.ActorClassesToRecord.Empty();
@@ -775,9 +799,9 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 		}
 	}
 
-	virtual bool RecordSingleNodeInstanceToAnimation(USkeletalMeshComponent* PreviewComponent, UAnimSequence* NewAsset) override
+	virtual bool RecordSingleNodeInstanceToAnimation(USkeletalMeshComponent* PreviewComponent, UAnimSequence* NewAsset, bool bShowMessage) override
 	{
-		return SequenceRecorderUtils::RecordSingleNodeInstanceToAnimation(PreviewComponent, NewAsset);
+		return SequenceRecorderUtils::RecordSingleNodeInstanceToAnimation(PreviewComponent, NewAsset, bShowMessage);
 	}
 
 #if WITH_EDITOR
@@ -785,10 +809,12 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 	{
 		FAnimationRecorder Recorder;
 		Recorder.bRecordTransforms = true;
-		Recorder.bRecordCurves = true;
+		Recorder.bRecordMorphTargets = true;
+		Recorder.bRecordAttributeCurves = true;
+		Recorder.bRecordMaterialCurves = true;
 		if (Recorder.TriggerRecordAnimation(Component))
 		{
-			class UAnimSequence * Sequence = Recorder.GetAnimationObject();
+			class UAnimSequence* Sequence = Recorder.GetAnimationObject();
 			if (Sequence)
 			{
 				Recorder.StopRecord(false);
@@ -833,7 +859,6 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 	{
 		TSharedPtr<SDockTab> MajorTab;
 		SAssignNew(MajorTab, SDockTab)
-			.Icon(FEditorStyle::Get().GetBrush("SequenceRecorder.TabIcon"))
 			.TabRole(ETabRole::NomadTab);
 
 		MajorTab->SetContent(SNew(SSequenceRecorder));
@@ -864,7 +889,19 @@ class FSequenceRecorderModule : public ISequenceRecorder, private FSelfRegisteri
 	FDelegateHandle AudioFactoryHandle;
 
 	TWeakPtr<SDockTab> SequenceRecorderTab;
+public:
+	FTabSpawnerEntry* TabSpawnerEntry;
 };
+
+static FAutoConsoleCommand CVarEnableSequenceRecorder(
+	TEXT("SequenceRecorder"),
+	TEXT("Enables the Sequence Recorder tab"),
+	FConsoleCommandWithArgsDelegate::CreateLambda([](const TArray<FString>& Args)
+		{
+			FSequenceRecorderModule& SequenceRecorder = FModuleManager::GetModuleChecked<FSequenceRecorderModule>("SequenceRecorder");
+			SequenceRecorder.TabSpawnerEntry->SetMenuType(ETabSpawnerMenuType::Enabled);
+		}),
+	ECVF_Default);
 
 IMPLEMENT_MODULE( FSequenceRecorderModule, SequenceRecorder )
 

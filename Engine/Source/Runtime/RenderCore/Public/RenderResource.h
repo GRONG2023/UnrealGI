@@ -6,69 +6,89 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Containers/List.h"
-#include "RHI.h"
-#include "RenderCore.h"
-#include "Serialization/MemoryLayout.h"
-#include "Containers/DynamicRHIResourceArray.h"
+#include "RHIFwd.h"
+#include "RHIShaderPlatform.h"
+#include "RHIFeatureLevel.h"
+#include "RenderTimer.h"
+#include "CoreGlobals.h"
 
-/** Number of frames after which unused global resource allocations will be discarded. */
-extern int32 GGlobalBufferNumFramesUnusedThresold;
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Containers/Array.h"
+#include "Containers/ResourceArray.h"
+#include "Containers/DynamicRHIResourceArray.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/List.h"
+#include "Containers/ResourceArray.h"
+#include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
+#include "HAL/CriticalSection.h"
+#include "Math/Color.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "PixelFormat.h"
+#include "RenderCore.h"
+#include "RHI.h"
+#include "RHICommandList.h"
+#include "RHIDefinitions.h"
+#include "RenderingThread.h"
+#include "Serialization/MemoryLayout.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#endif
+
+class FRenderCommandPipe;
+class FRDGPooledBuffer;
+class FResourceArrayInterface;
+
+enum class ERenderResourceState : uint8
+{
+	Default,
+	BatchReleased,
+	Deleted,
+};
+
+enum class ERayTracingMode : uint8
+{
+	Disabled,	
+	Enabled,
+	Dynamic
+};
 
 /**
  * A rendering resource which is owned by the rendering thread.
- * NOTE - Adding new virtual methods to this class may require stubs added to FViewport/FDummyViewport, otherwise certain modules may have link errors
  */
-class RENDERCORE_API FRenderResource
+class FRenderResource
 {
 public:
-	template<typename FunctionType>
-	static void ForAllResources(const FunctionType& Function)
-	{
-		const TArray<FRenderResource*>& ResourceList = GetResourceList();
-		ResourceListIterationActive.Increment();
-		for (int32 Index = 0; Index < ResourceList.Num(); ++Index)
-		{
-			FRenderResource* Resource = ResourceList[Index];
-			if (Resource)
-			{
-				checkSlow(Resource->ListIndex == Index);
-				Function(Resource);
-			}
-		}
-		ResourceListIterationActive.Decrement();
-	}
+	////////////////////////////////////////////////////////////////////////////////////
 
-	static void InitRHIForAllResources()
+	/** Controls initialization order of render resources. Early engine resources utilize the 'Pre' phase to avoid static init ordering issues. */
+	enum class EInitPhase : uint8
 	{
-		ForAllResources([](FRenderResource* Resource) { Resource->InitRHI(); });
-		// Dynamic resources can have dependencies on static resources (with uniform buffers) and must initialized last!
-		ForAllResources([](FRenderResource* Resource) { Resource->InitDynamicRHI(); });
-	}
+		Pre,
+		Default,
+		MAX
+	};
 
-	static void ReleaseRHIForAllResources()
-	{
-		ForAllResources([](FRenderResource* Resource) { check(Resource->IsInitialized()); Resource->ReleaseRHI(); });
-		ForAllResources([](FRenderResource* Resource) { Resource->ReleaseDynamicRHI(); });
-	}
+	/** Release all render resources that are currently initialized. */
+	static RENDERCORE_API void ReleaseRHIForAllResources();
 
-	static void ChangeFeatureLevel(ERHIFeatureLevel::Type NewFeatureLevel);
+	/** Initialize all resources initialized before the RHI was initialized. */
+	static RENDERCORE_API void InitPreRHIResources();
+
+	/** Reinitializes render resources at a new feature level. */
+	static RENDERCORE_API void ChangeFeatureLevel(ERHIFeatureLevel::Type NewFeatureLevel);
+
+	////////////////////////////////////////////////////////////////////////////////////
 
 	/** Default constructor. */
-	FRenderResource()
-		: ListIndex(INDEX_NONE)
-		, FeatureLevel(ERHIFeatureLevel::Num)
-	{}
+	RENDERCORE_API FRenderResource();
 
 	/** Constructor when we know what feature level this resource should support */
-	FRenderResource(ERHIFeatureLevel::Type InFeatureLevel)
-		: ListIndex(INDEX_NONE)
-		, FeatureLevel(InFeatureLevel)
-	{}
+	RENDERCORE_API FRenderResource(ERHIFeatureLevel::Type InFeatureLevel);
 
 	/** Destructor used to catch unreleased resources. */
-	virtual ~FRenderResource();
+	RENDERCORE_API virtual ~FRenderResource();
 
 	/**
 	 * Initializes the dynamic RHI resource and/or RHI render target used by this resource.
@@ -76,7 +96,8 @@ public:
 	 * Resources that need to initialize after a D3D device reset must implement this function.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void InitDynamicRHI() {}
+	UE_DEPRECATED(5.3, "InitDynamicRHI is now unified with InitRHI.")
+	virtual void InitDynamicRHI() final {}
 
 	/**
 	 * Releases the dynamic RHI resource and/or RHI render target resources used by this resource.
@@ -84,14 +105,18 @@ public:
 	 * Resources that need to release before a D3D device reset must implement this function.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void ReleaseDynamicRHI() {}
+	UE_DEPRECATED(5.3, "ReleaseDynamicRHI is now unified with ReleaseRHI.")
+	virtual void ReleaseDynamicRHI() final {}
 
 	/**
 	 * Initializes the RHI resources used by this resource.
 	 * Called when entering the state where both the resource and the RHI have been initialized.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void InitRHI() {}
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) {}
+
+	UE_DEPRECATED(5.3, "InitRHI now requires a command list.")
+	virtual void InitRHI() final {}
 
 	/**
 	 * Releases the RHI resources used by this resource.
@@ -104,19 +129,24 @@ public:
 	 * Initializes the resource.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void InitResource();
+	RENDERCORE_API virtual void InitResource(FRHICommandListBase& RHICmdList);
+
+	UE_DEPRECATED(5.3, "InitResource now requires a command list.")
+	virtual void InitResource() final { InitResource(GetImmediateCommandList()); }
 
 	/**
 	 * Prepares the resource for deletion.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void ReleaseResource();
+	RENDERCORE_API virtual void ReleaseResource();
 
 	/**
 	 * If the resource's RHI resources have been initialized, then release and reinitialize it.  Otherwise, do nothing.
 	 * This is only called by the rendering thread.
 	 */
-	void UpdateRHI();
+	UE_DEPRECATED(5.3, "UpdateRHI now requires a command list.")
+	RENDERCORE_API void UpdateRHI();
+	RENDERCORE_API void UpdateRHI(FRHICommandListBase& RHICmdList);
 
 	/** @return The resource's friendly name.  Typically a UObject name. */
 	virtual FString GetFriendlyName() const { return TEXT("undefined"); }
@@ -124,16 +154,12 @@ public:
 	// Accessors.
 	FORCEINLINE bool IsInitialized() const { return ListIndex != INDEX_NONE; }
 
-	/** Initialize all resources initialized before the RHI was initialized */
-	static void InitPreRHIResources();
+	int32 GetListIndex() const { return ListIndex; }
+	EInitPhase GetInitPhase() const { return InitPhase; }
 
-private:
-	/** @return The global initialized resource list. */
-	static TArray<FRenderResource*>& GetResourceList();
-
-	static FThreadSafeCounter ResourceListIterationActive;
-
-	int32 ListIndex;
+	/** SetOwnerName should be called before BeginInitResource for the owner name to be successfully tracked. */
+	RENDERCORE_API void SetOwnerName(const FName& InOwnerName);
+	RENDERCORE_API FName GetOwnerName() const;
 
 protected:
 	// This is used during mobile editor preview refactor, this will eventually be replaced with a parameter to InitRHI() etc..
@@ -141,27 +167,78 @@ protected:
 	const FStaticFeatureLevel GetFeatureLevel() const { return FeatureLevel == ERHIFeatureLevel::Num ? FStaticFeatureLevel(GMaxRHIFeatureLevel) : FeatureLevel; }
 	FORCEINLINE bool HasValidFeatureLevel() const { return FeatureLevel < ERHIFeatureLevel::Num; }
 
+	// Helper for submitting a resource array to RHI and freeing eligible CPU memory
+	template<typename T>
+	FBufferRHIRef CreateRHIBuffer(FRHICommandListBase& RHICmdList, T& InOutResourceObject, uint32 ResourceCount, EBufferUsageFlags InBufferUsageFlags, const TCHAR* InDebugName)
+	{
+		FBufferRHIRef Buffer;
+
+		FResourceArrayInterface* RESTRICT ResourceArray = InOutResourceObject ? InOutResourceObject->GetResourceArray() : nullptr;
+		if (ResourceCount != 0)
+		{
+			Buffer = CreateRHIBufferInternal(RHICmdList, InDebugName, GetOwnerName(), ResourceCount, InBufferUsageFlags, ResourceArray, InOutResourceObject == nullptr);
+		}
+
+		// If the buffer creation emptied the resource array, delete the containing structure as well
+		if (ShouldFreeResourceObject(InOutResourceObject, ResourceArray))
+		{
+			delete InOutResourceObject;
+			InOutResourceObject = nullptr;
+		}
+
+		return Buffer;
+	}
+
+	static RENDERCORE_API FRHICommandListBase& GetImmediateCommandList();
+
+	void SetInitPhase(EInitPhase InInitPhase)
+	{
+		check(InInitPhase != EInitPhase::MAX);
+		check(!IsInitialized());
+		InitPhase = InInitPhase;
+	}
+
 private:
+	static RENDERCORE_API bool ShouldFreeResourceObject(void* ResourceObject, FResourceArrayInterface* ResourceArray);
+	static RENDERCORE_API FBufferRHIRef CreateRHIBufferInternal(
+		FRHICommandListBase& RHICmdList,
+		const TCHAR* InDebugName,
+		const FName& InOwnerName,
+		uint32 ResourceCount,
+		EBufferUsageFlags InBufferUsageFlags,
+		FResourceArrayInterface* ResourceArray,
+		bool bWithoutNativeResource
+	);
+
+#if RHI_ENABLE_RESOURCE_INFO
+	FName OwnerName;
+#endif
+
+	int32 ListIndex;
 	TEnumAsByte<ERHIFeatureLevel::Type> FeatureLevel;
+	EInitPhase InitPhase = EInitPhase::Default;
+
+public:
+	ERenderResourceState ResourceState = ERenderResourceState::Default;
 };
 
 /**
  * Sends a message to the rendering thread to initialize a resource.
  * This is called in the game thread.
  */
-extern RENDERCORE_API void BeginInitResource(FRenderResource* Resource);
+extern RENDERCORE_API void BeginInitResource(FRenderResource* Resource, FRenderCommandPipe* RenderCommandPipe = nullptr);
 
 /**
  * Sends a message to the rendering thread to update a resource.
  * This is called in the game thread.
  */
-extern RENDERCORE_API void BeginUpdateResourceRHI(FRenderResource* Resource);
+extern RENDERCORE_API void BeginUpdateResourceRHI(FRenderResource* Resource, FRenderCommandPipe* RenderCommandPipe = nullptr);
 
 /**
  * Sends a message to the rendering thread to release a resource.
  * This is called in the game thread.
  */
-extern RENDERCORE_API void BeginReleaseResource(FRenderResource* Resource);
+extern RENDERCORE_API void BeginReleaseResource(FRenderResource* Resource, FRenderCommandPipe* RenderCommandPipe = nullptr);
 
 /**
 * Enables the batching of calls to BeginReleaseResource
@@ -180,84 +257,6 @@ extern RENDERCORE_API void EndBatchedRelease();
  * This is called in the game thread.
  */
 extern RENDERCORE_API void ReleaseResourceAndFlush(FRenderResource* Resource);
-
-/** Used to declare a render resource that is initialized/released by static initialization/destruction. */
-template<class ResourceType>
-class TGlobalResource : public ResourceType
-{
-public:
-
-	/** Default constructor. */
-	TGlobalResource()
-	{
-		InitGlobalResource();
-	}
-
-	/** Initialization constructor: 1 parameter. */
-	template<typename T1>
-	explicit TGlobalResource(T1 Param1)
-		: ResourceType(Param1)
-	{
-		InitGlobalResource();
-	}
-
-	/** Initialization constructor: 2 parameters. */
-	template<typename T1, typename T2>
-	explicit TGlobalResource(T1 Param1, T2 Param2)
-		: ResourceType(Param1, Param2)
-	{
-		InitGlobalResource();
-	}
-
-	/** Initialization constructor: 3 parameters. */
-	template<typename T1, typename T2, typename T3>
-	explicit TGlobalResource(T1 Param1, T2 Param2, T3 Param3)
-		: ResourceType(Param1, Param2, Param3)
-	{
-		InitGlobalResource();
-	}
-
-	/** Destructor. */
-	virtual ~TGlobalResource()
-	{
-		ReleaseGlobalResource();
-	}
-
-private:
-
-	/**
-	 * Initialize the global resource.
-	 */
-	void InitGlobalResource()
-	{
-		if(IsInRenderingThread())
-		{
-			// If the resource is constructed in the rendering thread, directly initialize it.
-			((ResourceType*)this)->InitResource();
-		}
-		else
-		{
-			// If the resource is constructed outside of the rendering thread, enqueue a command to initialize it.
-			BeginInitResource((ResourceType*)this);
-		}
-	}
-
-	/**
-	 * Release the global resource.
-	 */
-	void ReleaseGlobalResource()
-	{
-		// This should be called in the rendering thread, or at shutdown when the rendering thread has exited.
-		// However, it may also be called at shutdown after an error, when the rendering thread is still running.
-		// To avoid a second error in that case we don't assert.
-#if 0
-		check(IsInRenderingThread());
-#endif
-
-		// Cleanup the resource.
-		((ResourceType*)this)->ReleaseResource();
-	}
-};
 
 enum EMipFadeSettings
 {
@@ -348,7 +347,7 @@ struct FMipBiasFade
 	{
 		float DeltaTime = GRenderingRealtimeClock.GetCurrentTime() - StartTime;
 		float TimeFactor = DeltaTime * MipCountFadingRate;
-		return (FMath::Abs<float>(MipCountDelta) > SMALL_NUMBER && TimeFactor < 1.0f);
+		return (FMath::Abs<float>(MipCountDelta) > UE_SMALL_NUMBER && TimeFactor < 1.0f);
 	}
 };
 
@@ -367,580 +366,236 @@ public:
 	FSamplerStateRHIRef DeferredPassSamplerStateRHI;
 
 	/** The last time the texture has been bound */
-	mutable double		LastRenderTime;
+	mutable double		LastRenderTime = -FLT_MAX;
 
 	/** Base values for fading in/out mip-levels. */
 	FMipBiasFade		MipBiasFade;
 
-	/** true if the texture is in a greyscale texture format. */
-	bool				bGreyScaleFormat;
+	/** bGreyScaleFormat indicates the texture is actually in R channel but should be read as Grey (replicate R to RGBA)
+	 *  this is set from CompressionSettings, not PixelFormat
+	 *  this is only used by Editor/Debug shaders, not real game materials, which use SamplerType from MaterialExpressions
+	 */
+	bool				bGreyScaleFormat = false;
 
 	/**
 	 * true if the texture is in the same gamma space as the intended rendertarget (e.g. screenshots).
 	 * The texture will have sRGB==false and bIgnoreGammaConversions==true, causing a non-sRGB texture lookup
 	 * and no gamma-correction in the shader.
+	 * 
+	 * This was only ever checked in the Canvas renderer, not the standard Material shader path.
+	 * It is no longer set or checked.
 	 */
-	bool				bIgnoreGammaConversions;
+	//UE_DEPRECATED(5.5,"bIgnoreGammaConversions should not be used")
+	bool				bIgnoreGammaConversions = false;
 
 	/** 
 	 * Is the pixel data in this texture sRGB?
 	 **/
-	bool				bSRGB;
+	bool				bSRGB = false;
 
-	/** Default constructor. */
-	FTexture()
-	: TextureRHI(NULL)
-	, SamplerStateRHI(NULL)
-	, DeferredPassSamplerStateRHI(NULL)
-	, LastRenderTime(-FLT_MAX)
-	, bGreyScaleFormat(false)
-	, bIgnoreGammaConversions(false)
-	, bSRGB(false)
-	{}
+	RENDERCORE_API FTexture();
+	RENDERCORE_API virtual ~FTexture();
 
-	// Destructor
-	virtual ~FTexture() {}
-	
+	const FTextureRHIRef& GetTextureRHI() { return TextureRHI; }
+
 	/** Returns the width of the texture in pixels. */
-	virtual uint32 GetSizeX() const
-	{
-		return 0;
-	}
+	RENDERCORE_API virtual uint32 GetSizeX() const;
+
 	/** Returns the height of the texture in pixels. */
-	virtual uint32 GetSizeY() const
-	{
-		return 0;
-	}
+	RENDERCORE_API virtual uint32 GetSizeY() const;
+
 	/** Returns the depth of the texture in pixels. */
-	virtual uint32 GetSizeZ() const
-	{
-		return 0;
-	}
+	RENDERCORE_API virtual uint32 GetSizeZ() const;
 
 	// FRenderResource interface.
-	virtual void ReleaseRHI() override
-	{
-		TextureRHI.SafeRelease();
-		SamplerStateRHI.SafeRelease();
-		DeferredPassSamplerStateRHI.SafeRelease();
-	}
-	virtual FString GetFriendlyName() const override { return TEXT("FTexture"); }
+	RENDERCORE_API virtual void ReleaseRHI() override;
+	RENDERCORE_API virtual FString GetFriendlyName() const override;
 
 protected:
-	RENDERCORE_API static FRHISamplerState* GetOrCreateSamplerState(const FSamplerStateInitializerRHI& Initializer);
+	static RENDERCORE_API FRHISamplerState* GetOrCreateSamplerState(const FSamplerStateInitializerRHI& Initializer);
 };
 
 /** A textures resource that includes an SRV. */
 class FTextureWithSRV : public FTexture
 {
 public:
+	RENDERCORE_API FTextureWithSRV();
+	RENDERCORE_API virtual ~FTextureWithSRV();
+
+	RENDERCORE_API virtual void ReleaseRHI() override;
+
 	/** SRV that views the entire texture */
 	FShaderResourceViewRHIRef ShaderResourceViewRHI;
-
-	/** *optional* UAV that views the entire texture */
-	FUnorderedAccessViewRHIRef UnorderedAccessViewRHI;
-
-
-	virtual ~FTextureWithSRV() {}
-
-	virtual void ReleaseRHI() override
-	{
-		ShaderResourceViewRHI.SafeRelease();
-		UnorderedAccessViewRHI.SafeRelease();
-		FTexture::ReleaseRHI();
-	}
 };
 
 /** A texture reference resource. */
-class RENDERCORE_API FTextureReference : public FRenderResource
+class FTextureReference : public FRenderResource
 {
 public:
 	/** The texture reference's RHI resource. */
 	FTextureReferenceRHIRef	TextureReferenceRHI;
 
-
 private:
-	/** The last time the texture has been rendered via this reference. */
-	FLastRenderTimeContainer LastRenderTimeRHI;
-
 	/** True if the texture reference has been initialized from the game thread. */
 	bool bInitialized_GameThread;
 
 public:
 	/** Default constructor. */
-	FTextureReference();
+	RENDERCORE_API FTextureReference();
 
 	// Destructor
-	virtual ~FTextureReference();
+	RENDERCORE_API virtual ~FTextureReference();
 
 	/** Returns the last time the texture has been rendered via this reference. */
-	double GetLastRenderTime() const { return LastRenderTimeRHI.GetLastRenderTime(); }
+	RENDERCORE_API double GetLastRenderTime() const;
 
 	/** Invalidates the last render time. */
-	void InvalidateLastRenderTime();
+	RENDERCORE_API void InvalidateLastRenderTime();
 
 	/** Returns true if the texture reference has been initialized from the game thread. */
 	bool IsInitialized_GameThread() const { return bInitialized_GameThread; }
 
 	/** Kicks off the initialization process on the game thread. */
-	void BeginInit_GameThread();
+	RENDERCORE_API void BeginInit_GameThread();
 
 	/** Kicks off the release process on the game thread. */
-	void BeginRelease_GameThread();
+	RENDERCORE_API void BeginRelease_GameThread();
 
 	// FRenderResource interface.
-	virtual void InitRHI();
-	virtual void ReleaseRHI();
-	virtual FString GetFriendlyName() const;
+	RENDERCORE_API virtual void InitRHI(FRHICommandListBase& RHICmdList);
+	RENDERCORE_API virtual void ReleaseRHI();
+	RENDERCORE_API virtual FString GetFriendlyName() const;
 };
 
 /** A vertex buffer resource */
-class RENDERCORE_API FVertexBuffer : public FRenderResource
+class FVertexBuffer : public FRenderResource
 {
 public:
-	FVertexBufferRHIRef VertexBufferRHI;
-
-	/** Destructor. */
-	virtual ~FVertexBuffer() {}
+	RENDERCORE_API FVertexBuffer();
+	RENDERCORE_API virtual ~FVertexBuffer();
 
 	// FRenderResource interface.
-	virtual void ReleaseRHI() override
-	{
-		VertexBufferRHI.SafeRelease();
-	}
-	virtual FString GetFriendlyName() const override { return TEXT("FVertexBuffer"); }
+	RENDERCORE_API virtual void ReleaseRHI() override;
+	RENDERCORE_API virtual FString GetFriendlyName() const override;
+
+	const FBufferRHIRef& GetRHI() const { return VertexBufferRHI; }
+
+	RENDERCORE_API void SetRHI(const FBufferRHIRef& BufferRHI);
+
+	FBufferRHIRef VertexBufferRHI;
 };
 
-class RENDERCORE_API FVertexBufferWithSRV : public FVertexBuffer
+class FVertexBufferWithSRV : public FVertexBuffer
 {
 public:
+	RENDERCORE_API FVertexBufferWithSRV();
+	RENDERCORE_API ~FVertexBufferWithSRV();
+
+	RENDERCORE_API virtual void ReleaseRHI() override;
+
 	/** SRV that views the entire texture */
 	FShaderResourceViewRHIRef ShaderResourceViewRHI;
 
 	/** *optional* UAV that views the entire texture */
 	FUnorderedAccessViewRHIRef UnorderedAccessViewRHI;
-
-	virtual void ReleaseRHI() override
-	{
-		ShaderResourceViewRHI.SafeRelease();
-		UnorderedAccessViewRHI.SafeRelease();
-		FVertexBuffer::ReleaseRHI();
-	}
 };
-
-/**
-* A vertex buffer with a single color component.  This is used on meshes that don't have a color component
-* to keep from needing a separate vertex factory to handle this case.
-*/
-class FNullColorVertexBuffer : public FVertexBuffer
-{
-public:
-	/** 
-	* Initialize the RHI for this rendering resource 
-	*/
-	virtual void InitRHI() override
-	{
-		// create a static vertex buffer
-		FRHIResourceCreateInfo CreateInfo;
-		
-		void* LockedData = nullptr;
-		VertexBufferRHI = RHICreateAndLockVertexBuffer(sizeof(uint32) * 4, BUF_Static | BUF_ShaderResource, CreateInfo, LockedData);
-		uint32* Vertices = (uint32*)LockedData;
-		Vertices[0] = FColor(255, 255, 255, 255).DWColor();
-		Vertices[1] = FColor(255, 255, 255, 255).DWColor();
-		Vertices[2] = FColor(255, 255, 255, 255).DWColor();
-		Vertices[3] = FColor(255, 255, 255, 255).DWColor();
-		RHIUnlockVertexBuffer(VertexBufferRHI);
-		VertexBufferSRV = RHICreateShaderResourceView(VertexBufferRHI, sizeof(FColor), PF_R8G8B8A8);
-	}
-
-	virtual void ReleaseRHI() override
-	{
-		VertexBufferSRV.SafeRelease();
-		FVertexBuffer::ReleaseRHI();
-	}
-
-	FShaderResourceViewRHIRef VertexBufferSRV;
-};
-
-/** The global null color vertex buffer, which is set with a stride of 0 on meshes without a color component. */
-extern RENDERCORE_API TGlobalResource<FNullColorVertexBuffer> GNullColorVertexBuffer;
-
-/**
-* A vertex buffer with a single zero float3 component.
-*/
-class FNullVertexBuffer : public FVertexBuffer
-{
-public:
-	/**
-	* Initialize the RHI for this rendering resource
-	*/
-	virtual void InitRHI() override
-	{
-		// create a static vertex buffer
-		FRHIResourceCreateInfo CreateInfo;
-
-		void* LockedData = nullptr;
-		VertexBufferRHI = RHICreateAndLockVertexBuffer(sizeof(float) * 3, BUF_Static | BUF_ShaderResource, CreateInfo, LockedData);
-
-		*reinterpret_cast<FVector*>(LockedData) = FVector(0.0f);
-
-		RHIUnlockVertexBuffer(VertexBufferRHI);
-
-		VertexBufferSRV = RHICreateShaderResourceView(VertexBufferRHI, sizeof(FColor), PF_R8G8B8A8);
-	}
-
-	virtual void ReleaseRHI() override
-	{
-		VertexBufferSRV.SafeRelease();
-		FVertexBuffer::ReleaseRHI();
-	}
-
-	FShaderResourceViewRHIRef VertexBufferSRV;
-};
-
-/** The global null vertex buffer, which is set with a stride of 0 on meshes */
-extern RENDERCORE_API TGlobalResource<FNullVertexBuffer> GNullVertexBuffer;
 
 /** An index buffer resource. */
 class FIndexBuffer : public FRenderResource
 {
 public:
-	FIndexBufferRHIRef IndexBufferRHI;
-
-	/** Destructor. */
-	virtual ~FIndexBuffer() {}
+	RENDERCORE_API FIndexBuffer();
+	RENDERCORE_API virtual ~FIndexBuffer();
 
 	// FRenderResource interface.
-	virtual void ReleaseRHI() override
-	{
-		IndexBufferRHI.SafeRelease();
-	}
-	virtual FString GetFriendlyName() const override { return TEXT("FIndexBuffer"); }
+	RENDERCORE_API virtual void ReleaseRHI() override;
+	RENDERCORE_API virtual FString GetFriendlyName() const override;
+
+	const FBufferRHIRef& GetRHI() const { return IndexBufferRHI; }
+
+	RENDERCORE_API void SetRHI(const FBufferRHIRef& BufferRHI);
+
+	FBufferRHIRef IndexBufferRHI;
 };
 
-
-FORCEINLINE bool ShouldCompileRayTracingShadersForProject(EShaderPlatform ShaderPlatform)
-{
-	if (RHISupportsRayTracingShaders(ShaderPlatform))
-	{
-		extern RENDERCORE_API uint64 GRayTracingPlaformMask;
-		return !!(GRayTracingPlaformMask & (1ull << ShaderPlatform));
-	}
-	else
-	{
-		return false;
-	}
-}
-
-// Returns `true` when running on RT-capable machine, RT support is enabled for the project and by game graphics options.
-// This function may only be called at runtime, never during cooking.
-extern RENDERCORE_API bool IsRayTracingEnabled();
-
-enum class ERTAccelerationStructureBuildPriority
-{
-	Immediate,
-	High,
-	Normal,
-	Low,
-	Skip
-};
-
-/** A ray tracing geometry resource */
-class RENDERCORE_API FRayTracingGeometry : public FRenderResource
+class FBufferWithRDG : public FRenderResource
 {
 public:
-	TResourceArray<uint8> RawData;
+	RENDERCORE_API FBufferWithRDG();
+	RENDERCORE_API FBufferWithRDG(const FBufferWithRDG& Other);
+	RENDERCORE_API FBufferWithRDG& operator=(const FBufferWithRDG& Other);
+	RENDERCORE_API ~FBufferWithRDG() override;
 
+	RENDERCORE_API void ReleaseRHI() override;
+
+	TRefCountPtr<FRDGPooledBuffer> Buffer;
+};
+
+/** Used to declare a render resource that is initialized/released by static initialization/destruction. */
+template<class ResourceType, FRenderResource::EInitPhase InInitPhase = FRenderResource::EInitPhase::Default>
+class TGlobalResource : public ResourceType
+{
+public:
 	/** Default constructor. */
-	FRayTracingGeometry()
-	{}
+	TGlobalResource()
+	{
+		InitGlobalResource();
+	}
+
+	/** Initialization constructor: 1 parameter. */
+	template<typename... Args>
+	explicit TGlobalResource(Args... InArgs)
+		: ResourceType(InArgs...)
+	{
+		InitGlobalResource();
+	}
 
 	/** Destructor. */
-	virtual ~FRayTracingGeometry() {}
-
-#if RHI_RAYTRACING
-
-	/** When set to NonSharedVertexBuffers, then shared vertex buffers are not used  */
-	static constexpr int64 NonSharedVertexBuffers = -1;
-
-	/** 
-	Vertex buffers for dynamic geometries may be sub-allocated from a shared pool, which is periodically reset and its generation ID is incremented.
-	Geometries that use the shared buffer must be updated (rebuilt or refit) before they are used for rendering after the pool is reset.
-	This is validated by comparing the current shared pool generation ID against generation IDs stored in FRayTracingGeometry during latest update.
-	*/
-	int64 DynamicGeometrySharedBufferGenerationID = NonSharedVertexBuffers;
-
-	FRayTracingGeometryInitializer Initializer;
-	FRayTracingGeometryRHIRef RayTracingGeometryRHI;
-
-	// FRenderResource interface.
-	virtual FString GetFriendlyName() const override { return TEXT("FRayTracingGeometry"); }
-
-	void SetInitializer(const FRayTracingGeometryInitializer& InInitializer)
+	virtual ~TGlobalResource()
 	{
-		Initializer = InInitializer;
+		ReleaseGlobalResource();
 	}
 
-	virtual void InitRHI() override
-	{
-		if (!IsRayTracingEnabled())
-			return;
+private:
 
-		CreateRayTracingGeometry(ERTAccelerationStructureBuildPriority::Normal);
+	/**
+	 * Initialize the global resource.
+	 */
+	void InitGlobalResource()
+	{
+		ResourceType::SetInitPhase(InInitPhase);
+
+		if (IsInRenderingThread())
+		{
+			// If the resource is constructed in the rendering thread, directly initialize it.
+			((ResourceType*)this)->InitResource(FRenderResource::GetImmediateCommandList());
+		}
+		else
+		{
+			// If the resource is constructed outside of the rendering thread, enqueue a command to initialize it.
+			BeginInitResource((ResourceType*)this);
+		}
 	}
 
-	void CreateRayTracingGeometry(ERTAccelerationStructureBuildPriority InBuildPriority);
-	virtual void ReleaseRHI() override;
-
-	bool HasPendingBuildRequest() const
+	/**
+	 * Release the global resource.
+	 */
+	void ReleaseGlobalResource()
 	{
-		return RayTracingBuildRequestIndex != INDEX_NONE;
-	}
-	void BoostBuildPriority(float InBoostValue = 0.01f) const;
-
-protected:
-
-	friend class FRayTracingGeometryManager;
-	int32 RayTracingBuildRequestIndex = INDEX_NONE;
-
+		// This should be called in the rendering thread, or at shutdown when the rendering thread has exited.
+		// However, it may also be called at shutdown after an error, when the rendering thread is still running.
+		// To avoid a second error in that case we don't assert.
+#if 0
+		check(IsInRenderingThread());
 #endif
-};
 
-#if RHI_RAYTRACING
-class RENDERCORE_API FRayTracingScene : public FRenderResource
-{
-public:
-	FRayTracingSceneRHIRef RayTracingSceneRHI = nullptr;
-
-	virtual FString GetFriendlyName() const override { return TEXT("FRayTracingScene"); }
-
-	virtual void ReleaseRHI()
-	{
-		RayTracingSceneRHI.SafeRelease();
+		// Cleanup the resource.
+		((ResourceType*)this)->ReleaseResource();
 	}
 };
-#endif // RHI_RAYTRACING
 
-/**
- * A system for dynamically allocating GPU memory for vertices.
- */
-class RENDERCORE_API FGlobalDynamicVertexBuffer
-{
-public:
-	/**
-	 * Information regarding an allocation from this buffer.
-	 */
-	struct FAllocation
-	{
-		/** The location of the buffer in main memory. */
-		uint8* Buffer;
-		/** The vertex buffer to bind for draw calls. */
-		FVertexBuffer* VertexBuffer;
-		/** The offset in to the vertex buffer. */
-		uint32 VertexOffset;
-
-		/** Default constructor. */
-		FAllocation()
-			: Buffer(NULL)
-			, VertexBuffer(NULL)
-			, VertexOffset(0)
-		{
-		}
-
-		/** Returns true if the allocation is valid. */
-		FORCEINLINE bool IsValid() const
-		{
-			return Buffer != NULL;
-		}
-	};
-
-	/** Default constructor. */
-	FGlobalDynamicVertexBuffer();
-
-	/** Destructor. */
-	~FGlobalDynamicVertexBuffer();
-
-	/**
-	 * Allocates space in the global vertex buffer.
-	 * @param SizeInBytes - The amount of memory to allocate in bytes.
-	 * @returns An FAllocation with information regarding the allocated memory.
-	 */
-	FAllocation Allocate(uint32 SizeInBytes);
-
-	/**
-	 * Commits allocated memory to the GPU.
-	 *		WARNING: Once this buffer has been committed to the GPU, allocations
-	 *		remain valid only until the next call to Allocate!
-	 */
-	void Commit();
-
-	/** Returns true if log statements should be made because we exceeded GMaxVertexBytesAllocatedPerFrame */
-	bool IsRenderAlarmLoggingEnabled() const;
-
-private:
-	/** The pool of vertex buffers from which allocations are made. */
-	struct FDynamicVertexBufferPool* Pool;
-
-	/** A total of all allocations made since the last commit. Used to alert about spikes in memory usage. */
-	size_t TotalAllocatedSinceLastCommit;
-};
-
-/**
- * A system for dynamically allocating GPU memory for indices.
- */
-class RENDERCORE_API FGlobalDynamicIndexBuffer
-{
-public:
-	/**
-	 * Information regarding an allocation from this buffer.
-	 */
-	struct FAllocation
-	{
-		/** The location of the buffer in main memory. */
-		uint8* Buffer = nullptr;
-		/** The vertex buffer to bind for draw calls. */
-		FIndexBuffer* IndexBuffer = nullptr;
-		/** The offset in to the index buffer. */
-		uint32 FirstIndex = 0;
-
-		/** Returns true if the allocation is valid. */
-		FORCEINLINE bool IsValid() const
-		{
-			return Buffer != NULL;
-		}
-	};
-
-	/** Information data with usage details to avoid passing around parameters. */
-	struct FAllocationEx : public FAllocation
-	{
-		FAllocationEx() = default;
-
-		FAllocationEx(const FAllocation& InRef, uint32 InNumIndices, uint32 InIndexStride) 
-			: FAllocation(InRef)
-			, NumIndices(InNumIndices)
-			, IndexStride(InIndexStride) 
-		{}
-
-		/** The number of indices allocated. */
-		uint32 NumIndices = 0;
-		/** The allocation stride (2 or 4 bytes). */
-		uint32 IndexStride = 0;
-		/** The maximum value of the indices used. */
-		uint32 MaxUsedIndex = 0;
-	};
-
-	/** Default constructor. */
-	FGlobalDynamicIndexBuffer();
-
-	/** Destructor. */
-	~FGlobalDynamicIndexBuffer();
-
-	/**
-	 * Allocates space in the global index buffer.
-	 * @param NumIndices - The number of indices to allocate.
-	 * @param IndexStride - The size of an index (2 or 4 bytes).
-	 * @returns An FAllocation with information regarding the allocated memory.
-	 */
-	FAllocation Allocate(uint32 NumIndices, uint32 IndexStride);
-
-	/**
-	 * Helper function to allocate.
-	 * @param NumIndices - The number of indices to allocate.
-	 * @returns an FAllocation with information regarding the allocated memory.
-	 */
-	template <typename IndexType>
-	FORCEINLINE FAllocationEx Allocate(uint32 NumIndices)
-	{
-		return FAllocationEx(Allocate(NumIndices, sizeof(IndexType)), NumIndices, sizeof(IndexType));
-	}
-
-	/**
-	 * Commits allocated memory to the GPU.
-	 *		WARNING: Once this buffer has been committed to the GPU, allocations
-	 *		remain valid only until the next call to Allocate!
-	 */
-	void Commit();
-
-private:
-	/** The pool of vertex buffers from which allocations are made. */
-	struct FDynamicIndexBufferPool* Pools[2];
-};
-
-/**
- * A list of the most recently used bound shader states.
- * This is used to keep bound shader states that have been used recently from being freed, as they're likely to be used again soon.
- */
-
-template<uint32 Size, bool TThreadSafe = true>
-class TBoundShaderStateHistory : public FRenderResource
-{
-public:
-
-	/** Initialization constructor. */
-	TBoundShaderStateHistory():
-		NextBoundShaderStateIndex(0)
-	{}
-
-	/** Adds a bound shader state to the history. */
-	FORCEINLINE void Add(FRHIBoundShaderState* BoundShaderState)
-	{
-		if (TThreadSafe && GRHISupportsParallelRHIExecute)
-		{
-			BoundShaderStateHistoryLock.Lock();
-		}
-		BoundShaderStates[NextBoundShaderStateIndex] = BoundShaderState;
-		NextBoundShaderStateIndex = (NextBoundShaderStateIndex + 1) % Size;
-		if (TThreadSafe && GRHISupportsParallelRHIExecute)
-		{
-			BoundShaderStateHistoryLock.Unlock();
-		}
-	}
-
-	FRHIBoundShaderState* GetLast()
-	{
-		check(!GRHISupportsParallelRHIExecute);
-		// % doesn't work as we want on negative numbers, so handle the wraparound manually
-		uint32 LastIndex = NextBoundShaderStateIndex == 0 ? Size - 1 : NextBoundShaderStateIndex - 1;
-		return BoundShaderStates[LastIndex];
-	}
-
-	// FRenderResource interface.
-	virtual void ReleaseRHI()
-	{
-		if (TThreadSafe && GRHISupportsParallelRHIExecute)
-		{
-			BoundShaderStateHistoryLock.Lock();
-		}
-		for(uint32 Index = 0;Index < Size;Index++)
-		{
-			BoundShaderStates[Index].SafeRelease();
-		}
-		if (TThreadSafe && GRHISupportsParallelRHIExecute)
-		{
-			BoundShaderStateHistoryLock.Unlock();
-		}
-	}
-
-private:
-
-	FBoundShaderStateRHIRef BoundShaderStates[Size];
-	uint32 NextBoundShaderStateIndex;
-	FCriticalSection BoundShaderStateHistoryLock;
-};
-
-/**Note, this should only be used when a platform requires special shader compilation for 32 bit pixel format render targets.
-Does not replace pixel format associations across the board**/
-
-FORCEINLINE bool PlatformRequires128bitRT(EPixelFormat PixelFormat)
-{
-	switch (PixelFormat)
-	{
-	case PF_R32_FLOAT:
-	case PF_G32R32F:
-	case PF_A32B32G32R32F:
-		return FDataDrivenShaderPlatformInfo::GetRequiresExplicit128bitRT(GMaxRHIShaderPlatform);
-	default:
-		return false;
-	}
-}
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "RayTracingGeometry.h"
+#include "RenderUtils.h"
+#include "GlobalRenderResources.h"
+#endif

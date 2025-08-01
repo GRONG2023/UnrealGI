@@ -10,9 +10,11 @@
 #include "Fonts/CompositeFont.h"
 #include "Fonts/SlateFontInfo.h"
 #include "Layout/Margin.h"
+#include "Misc/Attribute.h"
 #include "Sound/SlateSound.h"
 #include "Styling/SlateBrush.h"
 #include "Styling/SlateWidgetStyle.h"
+#include "Types/SlateVector2.h"
 
 #include "SlateTypes.generated.h"
 
@@ -47,7 +49,7 @@ enum class ESlateParentWindowSearchMethod : uint8
 UENUM()
 namespace ESlateCheckBoxType
 {
-	enum Type
+	enum Type : int
 	{
 		/** Traditional check box with check button and label (or other content) */
 		CheckBox,
@@ -70,23 +72,40 @@ enum class ECheckBoxState : uint8
 };
 
 /**
+ * The different methods that can be used to determine what happens to text when it is longer than its allowed length
+ */
+UENUM(BlueprintType)
+enum class ETextOverflowPolicy : uint8
+{
+	/** Overflowing text will be clipped */
+	Clip = 0,
+
+	/** Overflowing text will be replaced with an ellipsis */
+	Ellipsis,
+
+	/** Overflowing text will be replaced with an ellipsis. A partially clipped line on the vertical axis will be totally clipped, and ellipsis displayed on previous line */
+	MultilineEllipsis,
+};
+
+
+/**
  * Represents the appearance of an SCheckBox
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FCheckBoxStyle : public FSlateWidgetStyle
+struct FCheckBoxStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FCheckBoxStyle();
+	SLATECORE_API FCheckBoxStyle();
 
 	virtual ~FCheckBoxStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* > & OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* > & OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FCheckBoxStyle& GetDefault();
+	static SLATECORE_API const FCheckBoxStyle& GetDefault();
 
 	/** The visual type of the checkbox */	
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category=Appearance )
@@ -96,57 +115,102 @@ struct SLATECORE_API FCheckBoxStyle : public FSlateWidgetStyle
 	/* CheckBox appearance when the CheckBox is unchecked (normal) */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush UncheckedImage;
-	FCheckBoxStyle & SetUncheckedImage( const FSlateBrush& InUncheckedImage ){ UncheckedImage = InUncheckedImage; return *this; }
+	FCheckBoxStyle& SetUncheckedImage( const FSlateBrush& InUncheckedImage ){ UncheckedImage = InUncheckedImage; return *this; }
 
 	/* CheckBox appearance when the CheckBox is unchecked and hovered */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush UncheckedHoveredImage;
-	FCheckBoxStyle & SetUncheckedHoveredImage( const FSlateBrush& InUncheckedHoveredImage ){ UncheckedHoveredImage = InUncheckedHoveredImage; return *this; }
+	FCheckBoxStyle& SetUncheckedHoveredImage( const FSlateBrush& InUncheckedHoveredImage ){ UncheckedHoveredImage = InUncheckedHoveredImage; return *this; }
 
 	/* CheckBox appearance when the CheckBox is unchecked and hovered */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush UncheckedPressedImage;
-	FCheckBoxStyle & SetUncheckedPressedImage( const FSlateBrush& InUncheckedPressedImage ){ UncheckedPressedImage = InUncheckedPressedImage; return *this; }
+	FCheckBoxStyle& SetUncheckedPressedImage( const FSlateBrush& InUncheckedPressedImage ){ UncheckedPressedImage = InUncheckedPressedImage; return *this; }
 
 	/* CheckBox appearance when the CheckBox is checked */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush CheckedImage;
-	FCheckBoxStyle & SetCheckedImage( const FSlateBrush& InCheckedImage ){ CheckedImage = InCheckedImage; return *this; }
+	FCheckBoxStyle& SetCheckedImage( const FSlateBrush& InCheckedImage ){ CheckedImage = InCheckedImage; return *this; }
 
 	/* CheckBox appearance when checked and hovered */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush CheckedHoveredImage;
-	FCheckBoxStyle & SetCheckedHoveredImage( const FSlateBrush& InCheckedHoveredImage ){ CheckedHoveredImage = InCheckedHoveredImage; return *this; }
+	FCheckBoxStyle& SetCheckedHoveredImage( const FSlateBrush& InCheckedHoveredImage ){ CheckedHoveredImage = InCheckedHoveredImage; return *this; }
 
 	/* CheckBox appearance when checked and pressed */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush CheckedPressedImage;
-	FCheckBoxStyle & SetCheckedPressedImage( const FSlateBrush& InCheckedPressedImage ){ CheckedPressedImage = InCheckedPressedImage; return *this; }
+	FCheckBoxStyle& SetCheckedPressedImage( const FSlateBrush& InCheckedPressedImage ){ CheckedPressedImage = InCheckedPressedImage; return *this; }
 	
 	/* CheckBox appearance when the CheckBox is undetermined */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush UndeterminedImage;
-	FCheckBoxStyle & SetUndeterminedImage( const FSlateBrush& InUndeterminedImage ){ UndeterminedImage = InUndeterminedImage; return *this; }
+	FCheckBoxStyle& SetUndeterminedImage( const FSlateBrush& InUndeterminedImage ){ UndeterminedImage = InUndeterminedImage; return *this; }
 
 	/* CheckBox appearance when CheckBox is undetermined and hovered */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush UndeterminedHoveredImage;
-	FCheckBoxStyle & SetUndeterminedHoveredImage( const FSlateBrush& InUndeterminedHoveredImage ){ UndeterminedHoveredImage = InUndeterminedHoveredImage; return *this; }
+	FCheckBoxStyle& SetUndeterminedHoveredImage( const FSlateBrush& InUndeterminedHoveredImage ){ UndeterminedHoveredImage = InUndeterminedHoveredImage; return *this; }
 
 	/* CheckBox appearance when CheckBox is undetermined and pressed */
 	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
 	FSlateBrush UndeterminedPressedImage;
-	FCheckBoxStyle & SetUndeterminedPressedImage( const FSlateBrush& InUndeterminedPressedImage ){ UndeterminedPressedImage = InUndeterminedPressedImage; return *this; }
+	FCheckBoxStyle& SetUndeterminedPressedImage( const FSlateBrush& InUndeterminedPressedImage ){ UndeterminedPressedImage = InUndeterminedPressedImage; return *this; }
 
 	/** Padding */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FMargin Padding;
 	FCheckBoxStyle& SetPadding( const FMargin& InPadding ){ Padding = InPadding; return *this; }
 
-	/** The foreground color */
+	/** Background appearance */
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
+	FSlateBrush BackgroundImage;
+	FCheckBoxStyle& SetBackgroundImage( const FSlateBrush& InBackgroundImage ){ BackgroundImage = InBackgroundImage; return *this; }
+
+	/** Background appearance when hovered */
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
+	FSlateBrush BackgroundHoveredImage;
+	FCheckBoxStyle& SetBackgroundHoveredImage( const FSlateBrush& InBackgroundHoveredImage ){ BackgroundHoveredImage = InBackgroundHoveredImage; return *this; }
+
+	/** Background appearance when pressed */
+	UPROPERTY( EditAnywhere, BlueprintReadWrite, Category = Appearance )
+	FSlateBrush BackgroundPressedImage;
+	FCheckBoxStyle& SetBackgroundPressedImage( const FSlateBrush& InBackgroundPressedImage ){ BackgroundPressedImage = InBackgroundPressedImage; return *this; }
+
+	/** The normal unchecked foreground color */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateColor ForegroundColor;
 	FCheckBoxStyle& SetForegroundColor(const FSlateColor& InForegroundColor) { ForegroundColor = InForegroundColor; return *this; }
+
+	/** Foreground Color when hovered */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Appearance)
+	FSlateColor HoveredForeground;
+	FCheckBoxStyle& SetHoveredForegroundColor(const FSlateColor& InHoveredForeground) { HoveredForeground = InHoveredForeground; return *this; }
+
+	/** Foreground Color when pressed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Appearance)
+	FSlateColor PressedForeground;
+	FCheckBoxStyle& SetPressedForegroundColor(const FSlateColor& InPressedForeground) { PressedForeground = InPressedForeground; return *this; }
+
+	/** Foreground Color when checked */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Appearance)
+	FSlateColor CheckedForeground;
+	FCheckBoxStyle& SetCheckedForegroundColor(const FSlateColor& InCheckedForeground) { CheckedForeground = InCheckedForeground; return *this; }
+
+	/** Foreground Color when checked and pressed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Appearance)
+	FSlateColor CheckedHoveredForeground;
+	FCheckBoxStyle& SetCheckedHoveredForegroundColor(const FSlateColor& InCheckedHoveredForeground) { CheckedHoveredForeground = InCheckedHoveredForeground; return *this; }
+
+	/** Foreground Color when checked and pressed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Appearance)
+	FSlateColor CheckedPressedForeground;
+	FCheckBoxStyle& SetCheckedPressedForegroundColor(const FSlateColor& InCheckedPressedForeground) { CheckedPressedForeground = InCheckedPressedForeground; return *this; }
+
+	/** Foreground Color when the check state is indeterminate */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Appearance)
+	FSlateColor UndeterminedForeground;
+	FCheckBoxStyle& SetUndeterminedForegroundColor(const FSlateColor& InUndeterminedForeground) { UndeterminedForeground = InUndeterminedForeground; return *this; }
 
 	/** BorderBackgroundColor refers to the actual color and opacity of the supplied border image on toggle buttons */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -185,7 +249,7 @@ struct SLATECORE_API FCheckBoxStyle : public FSlateWidgetStyle
 	/**
 	 * Used to upgrade the deprecated FName sound properties into the new-style FSlateSound properties
 	 */	
-	void PostSerialize(const FArchive& Ar);
+	SLATECORE_API void PostSerialize(const FArchive& Ar);
 #endif
 
 	/**
@@ -203,7 +267,17 @@ struct SLATECORE_API FCheckBoxStyle : public FSlateWidgetStyle
 		UndeterminedImage.UnlinkColors();
 		UndeterminedHoveredImage.UnlinkColors();
 		UndeterminedPressedImage.UnlinkColors();
+		BackgroundImage.UnlinkColors();
+		BackgroundHoveredImage.UnlinkColors();
+		BackgroundPressedImage.UnlinkColors();
+
 		ForegroundColor.Unlink();
+		HoveredForeground.Unlink();
+		PressedForeground.Unlink();
+		CheckedForeground.Unlink();
+		CheckedHoveredForeground.Unlink();
+		CheckedPressedForeground.Unlink();
+		UndeterminedForeground.Unlink();
 		BorderBackgroundColor.Unlink();
 	}
 };
@@ -220,40 +294,58 @@ struct TStructOpsTypeTraits<FCheckBoxStyle> : public TStructOpsTypeTraitsBase2<F
 #endif
 
 /**
+ * Text transformation policy that can be applied to the text before displaying it.
+ */
+UENUM(BlueprintType)
+enum class ETextTransformPolicy : uint8
+{
+	/** No transform, just use the given text as-is */
+	None = 0,
+
+	/** Convert the text to lowercase for display */
+	ToLower,
+
+	/** Convert the text to uppercase for display */
+	ToUpper,
+};
+
+/**
  * Represents the appearance of an STextBlock
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FTextBlockStyle : public FSlateWidgetStyle
+struct FTextBlockStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FTextBlockStyle();
+	SLATECORE_API FTextBlockStyle();
 
 	virtual ~FTextBlockStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FTextBlockStyle& GetDefault();
+	static SLATECORE_API const FTextBlockStyle& GetDefault();
 
 	/** Font family and size to be used when displaying this text. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateFontInfo Font;
 	FTextBlockStyle& SetFont(const FSlateFontInfo& InFont) { Font = InFont; return *this; }
-	FTextBlockStyle& SetFont(TSharedPtr<const FCompositeFont> InCompositeFont, const int32 InSize, const FName& InTypefaceFontName = NAME_None) { Font = FSlateFontInfo(InCompositeFont, InSize, InTypefaceFontName); return *this; }
-	FTextBlockStyle& SetFont(const UObject* InFontObject, const int32 InSize, const FName& InTypefaceFontName = NAME_None) { Font = FSlateFontInfo(InFontObject, InSize, InTypefaceFontName); return *this; }
-	FTextBlockStyle& SetFont(const FName& InFontName, uint16 InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
-	FTextBlockStyle& SetFont(const FString& InFontName, uint16 InSize) { Font = FSlateFontInfo(*InFontName, InSize); return *this; }
-	FTextBlockStyle& SetFont(const WIDECHAR* InFontName, uint16 InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
-	FTextBlockStyle& SetFont(const ANSICHAR* InFontName, uint16 InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
-	FTextBlockStyle& SetFontName(const FName& InFontName) { Font = FSlateFontInfo(InFontName, Font.Size); return *this; }
-	FTextBlockStyle& SetFontName(const FString& InFontName) { Font = FSlateFontInfo(InFontName, Font.Size); return *this; }
-	FTextBlockStyle& SetFontName(const WIDECHAR* InFontName) { Font = FSlateFontInfo(InFontName, Font.Size); return *this; }
-	FTextBlockStyle& SetFontName(const ANSICHAR* InFontName) { Font = FSlateFontInfo(InFontName, Font.Size); return *this; }
-	FTextBlockStyle& SetFontSize(uint16 InSize) { Font.Size = InSize; return *this; }
+	FTextBlockStyle& SetFont(TSharedPtr<const FCompositeFont> InCompositeFont, const float InSize, const FName& InTypefaceFontName = NAME_None) { Font = FSlateFontInfo(InCompositeFont, InSize, InTypefaceFontName); return *this; }
+	FTextBlockStyle& SetFont(const UObject* InFontObject, const float InSize, const FName& InTypefaceFontName = NAME_None) { Font = FSlateFontInfo(InFontObject, InSize, InTypefaceFontName); return *this; }
+	FTextBlockStyle& SetFont(const FName& InFontName, float InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
+	FTextBlockStyle& SetFont(const FString& InFontName, float InSize) { Font = FSlateFontInfo(*InFontName, InSize); return *this; }
+	FTextBlockStyle& SetFont(const WIDECHAR* InFontName, float InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
+	FTextBlockStyle& SetFont(const ANSICHAR* InFontName, float InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
+	FTextBlockStyle& SetFontName(const FName& InFontName) { Font = FSlateFontInfo(InFontName, Font.GetClampSize()); return *this; }
+	FTextBlockStyle& SetFontName(const FString& InFontName) { Font = FSlateFontInfo(InFontName, Font.GetClampSize()); return *this; }
+	FTextBlockStyle& SetFontName(const WIDECHAR* InFontName) { Font = FSlateFontInfo(InFontName, Font.GetClampSize()); return *this; }
+	FTextBlockStyle& SetFontName(const ANSICHAR* InFontName) { Font = FSlateFontInfo(InFontName, Font.GetClampSize()); return *this; }
+	FTextBlockStyle& SetFontSize(float InSize) { Font.Size = InSize; return *this; }
 	FTextBlockStyle& SetTypefaceFontName(const FName& InTypefaceFontName) { Font.TypefaceFontName = InTypefaceFontName; return *this; }
+	FTextBlockStyle& SetFontMaterial(UObject* InMaterial) { Font.FontMaterial = InMaterial; return *this; }
+	FTextBlockStyle& SetFontOutlineMaterial(UObject* InMaterial) { Font.OutlineSettings.OutlineMaterial = InMaterial; return *this; }
 
 	/** The color and opacity of this text */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance, meta=(DisplayName="Color"))
@@ -262,8 +354,8 @@ struct SLATECORE_API FTextBlockStyle : public FSlateWidgetStyle
 
 	/** How much should the shadow be offset? An offset of 0 implies no shadow. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
-	FVector2D ShadowOffset;
-	FTextBlockStyle& SetShadowOffset(const FVector2D& InShadowOffset) { ShadowOffset = InShadowOffset; return *this; }
+	FDeprecateSlateVector2D ShadowOffset;
+	FTextBlockStyle& SetShadowOffset(const UE::Slate::FDeprecateVector2DParameter& InShadowOffset) { ShadowOffset = InShadowOffset; return *this; }
 
 	/** The color and opacity of the shadow */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -277,8 +369,8 @@ struct SLATECORE_API FTextBlockStyle : public FSlateWidgetStyle
 
 	/** The color of highlighted text */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance, AdvancedDisplay)
-	FLinearColor HighlightColor;
-	FTextBlockStyle& SetHighlightColor(const FLinearColor& InHighlightColor) { HighlightColor = InHighlightColor; return *this; }
+	FSlateColor HighlightColor;
+	FTextBlockStyle& SetHighlightColor(const FSlateColor& InHighlightColor) { HighlightColor = InHighlightColor; return *this; }
 
 	/** The shape of highlighted text */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance, AdvancedDisplay)
@@ -294,6 +386,87 @@ struct SLATECORE_API FTextBlockStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance, AdvancedDisplay)
 	FSlateBrush UnderlineBrush;
 	FTextBlockStyle& SetUnderlineBrush( const FSlateBrush& InUnderlineBrush ){ UnderlineBrush = InUnderlineBrush; return *this; }
+
+	/** The Text Transform Policy (defaults to None) */ 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance, AdvancedDisplay)
+	ETextTransformPolicy TransformPolicy;
+	FTextBlockStyle& SetTransformPolicy( const ETextTransformPolicy& InTransformPolicy ){ TransformPolicy = InTransformPolicy; return *this; }
+
+	/** Determines what happens to text that is clipped and doesn't fit within the clip rect of a text widget */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance, AdvancedDisplay)
+	ETextOverflowPolicy OverflowPolicy;
+	FTextBlockStyle& SetOverflowPolicy(const ETextOverflowPolicy& InOverflowPolicy) { OverflowPolicy = InOverflowPolicy; return *this; }
+
+	/**
+	 * Checks to see whether this style is identical to another.
+	 */
+	bool IsIdenticalTo(const FTextBlockStyle& InOther) const
+	{
+		return Font.IsIdenticalTo(InOther.Font)
+			&& ColorAndOpacity == InOther.ColorAndOpacity
+			&& ShadowOffset == InOther.ShadowOffset
+			&& ShadowColorAndOpacity == InOther.ShadowColorAndOpacity
+			&& SelectedBackgroundColor == InOther.SelectedBackgroundColor
+			&& HighlightColor == InOther.HighlightColor
+			&& HighlightShape == InOther.HighlightShape
+			&& StrikeBrush == InOther.StrikeBrush
+			&& UnderlineBrush == InOther.UnderlineBrush
+			&& TransformPolicy == InOther.TransformPolicy
+			&& OverflowPolicy == InOther.OverflowPolicy;
+	}
+
+
+	/** Helper struct to compare two text styles without constructing a temporary text style */
+	struct CompareParams
+	{
+		CompareParams(const FTextBlockStyle& InStyleBase
+					, const FSlateFontInfo& InFont
+					, const FSlateColor& InColorAndOpacity
+					, const FVector2f InShadowOffset
+					, const FLinearColor& InShadowColorAndOpacity
+					, const FSlateColor InHighlightColor
+					, const FSlateBrush* InHighlightShape
+					, const FSlateBrush* InStrikeBrush)
+			: StyleBase(InStyleBase)
+			, Font(InFont)
+			, ColorAndOpacity(InColorAndOpacity)
+			, ShadowOffset(InShadowOffset)
+			, ShadowColorAndOpacity(InShadowColorAndOpacity)
+			, HighlightColor(InHighlightColor)
+			, HighlightShape(InHighlightShape)
+			, StrikeBrush(InStrikeBrush)
+		{}
+
+		const FTextBlockStyle& StyleBase;
+		const FSlateFontInfo& Font;
+		const FSlateColor& ColorAndOpacity;
+		const FVector2f ShadowOffset;
+		const FLinearColor& ShadowColorAndOpacity;
+		const FSlateColor HighlightColor;
+		const FSlateBrush* HighlightShape;
+		const FSlateBrush* StrikeBrush;
+	};
+
+	/**
+	 * Checks to see whether this style is identical to another.
+	 */
+	bool IsIdenticalTo(const FTextBlockStyle::CompareParams& InNewStyleParams) const
+	{
+		const FSlateBrush& NewStrikeBrush = InNewStyleParams.StrikeBrush ? *InNewStyleParams.StrikeBrush : InNewStyleParams.StyleBase.StrikeBrush;
+		const FSlateBrush& NewHighlightShape = InNewStyleParams.HighlightShape ? *InNewStyleParams.HighlightShape : InNewStyleParams.StyleBase.HighlightShape;
+
+		return Font.IsIdenticalTo(InNewStyleParams.Font)
+			&& ColorAndOpacity == InNewStyleParams.ColorAndOpacity
+			&& ShadowOffset == InNewStyleParams.ShadowOffset
+			&& ShadowColorAndOpacity == InNewStyleParams.ShadowColorAndOpacity
+			&& SelectedBackgroundColor == InNewStyleParams.StyleBase.SelectedBackgroundColor
+			&& HighlightColor == InNewStyleParams.HighlightColor
+			&& HighlightShape == NewHighlightShape
+			&& StrikeBrush == NewStrikeBrush
+			&& UnderlineBrush == InNewStyleParams.StyleBase.UnderlineBrush
+			&& TransformPolicy == InNewStyleParams.StyleBase.TransformPolicy
+			&& OverflowPolicy == InNewStyleParams.StyleBase.OverflowPolicy;
+	}
 
 	/**
 	 * Unlinks all colors in this style.
@@ -313,20 +486,20 @@ struct SLATECORE_API FTextBlockStyle : public FSlateWidgetStyle
  * Represents the appearance of an SButton
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FButtonStyle : public FSlateWidgetStyle
+struct FButtonStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FButtonStyle();
+	SLATECORE_API FButtonStyle();
 
 	virtual ~FButtonStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FButtonStyle& GetDefault();
+	static SLATECORE_API const FButtonStyle& GetDefault();
 
 	/** Button appearance when the button is not hovered or pressed */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -347,6 +520,27 @@ struct SLATECORE_API FButtonStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush Disabled;
 	FButtonStyle& SetDisabled( const FSlateBrush& InDisabled ){ Disabled = InDisabled; return *this; }
+
+	/** Foreground Color when the button is not hovered or pressed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Appearance)
+	FSlateColor NormalForeground;
+	FButtonStyle& SetNormalForeground( const FSlateColor& InNormalForeground ){ NormalForeground = InNormalForeground; return *this; }
+
+	/** Foreground Color when hovered */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Appearance)
+	FSlateColor HoveredForeground;
+	FButtonStyle& SetHoveredForeground( const FSlateColor& InHoveredForeground){ HoveredForeground = InHoveredForeground; return *this; }
+
+	/** Foreground Color when pressed */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Appearance)
+	FSlateColor PressedForeground;
+	FButtonStyle& SetPressedForeground( const FSlateColor& InPressedForeground ){ PressedForeground = InPressedForeground; return *this; }
+
+	/** Foreground Color when disabled */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category=Appearance)
+	FSlateColor DisabledForeground;
+	FButtonStyle& SetDisabledForeground( const FSlateColor& InDisabledForeground ){ DisabledForeground = InDisabledForeground; return *this; }
+
 
 	/**
 	 * Padding that accounts for the border in the button's background image.
@@ -388,7 +582,7 @@ struct SLATECORE_API FButtonStyle : public FSlateWidgetStyle
 	/**
 	 * Used to upgrade the deprecated FName sound properties into the new-style FSlateSound properties
 	 */	
-	void PostSerialize(const FArchive& Ar);
+	SLATECORE_API void PostSerialize(const FArchive& Ar);
 #endif
 
 	/**
@@ -420,20 +614,20 @@ struct TStructOpsTypeTraits<FButtonStyle> : public TStructOpsTypeTraitsBase2<FBu
  * Represents the appearance of an SComboButton
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FComboButtonStyle : public FSlateWidgetStyle
+struct FComboButtonStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FComboButtonStyle();
+	SLATECORE_API FComboButtonStyle();
 
 	virtual ~FComboButtonStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FComboButtonStyle& GetDefault();
+	static SLATECORE_API const FComboButtonStyle& GetDefault();
 
 	/**
 	 * The style to use for our SButton.
@@ -454,8 +648,8 @@ struct SLATECORE_API FComboButtonStyle : public FSlateWidgetStyle
 	  * An offset of 0 implies no shadow. 
 	  */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
-	FVector2D ShadowOffset;
-	FComboButtonStyle& SetShadowOffset(const FVector2D& InShadowOffset) { ShadowOffset = InShadowOffset; return *this; }
+	FDeprecateSlateVector2D ShadowOffset;
+	FComboButtonStyle& SetShadowOffset(const UE::Slate::FDeprecateVector2DParameter& InShadowOffset) { ShadowOffset = InShadowOffset; return *this; }
 
 	/** 
 	  * The color and opacity of the shadow for the down arrow.
@@ -479,6 +673,27 @@ struct SLATECORE_API FComboButtonStyle : public FSlateWidgetStyle
 	FMargin MenuBorderPadding;
 	FComboButtonStyle& SetMenuBorderPadding( const FMargin& InMenuBorderPadding ){ MenuBorderPadding = InMenuBorderPadding; return *this; }
 
+	/*
+	 * Button Content Padding 
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FMargin ContentPadding;
+	FComboButtonStyle& SetContentPadding( const FMargin& InContentPadding ) { ContentPadding = InContentPadding; return *this; }
+
+	/*
+	 * Dropdown arrow padding (if a dropdown arrow exists)
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FMargin DownArrowPadding;
+	FComboButtonStyle& SetDownArrowPadding(const FMargin& InDownArrowPadding) { DownArrowPadding = InDownArrowPadding; return *this; }
+
+	/*
+	 * Dropdown arrow vertical alignment
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	TEnumAsByte<EVerticalAlignment> DownArrowAlign;
+	FComboButtonStyle& SetDownArrowAlignment(const EVerticalAlignment& InVAlign) { DownArrowAlign = InVAlign; return *this; }
+
 	/**
 	* Unlinks all colors in this style.
 	* @see FSlateColor::Unlink
@@ -496,20 +711,20 @@ struct SLATECORE_API FComboButtonStyle : public FSlateWidgetStyle
  * Represents the appearance of an SComboBox
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FComboBoxStyle : public FSlateWidgetStyle
+struct FComboBoxStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FComboBoxStyle();
+	SLATECORE_API FComboBoxStyle();
 
 	virtual ~FComboBoxStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FComboBoxStyle& GetDefault();
+	static SLATECORE_API const FComboBoxStyle& GetDefault();
 
 	/**
 	 * The style to use for our SComboButton
@@ -532,6 +747,22 @@ struct SLATECORE_API FComboBoxStyle : public FSlateWidgetStyle
 	FSlateSound SelectionChangeSlateSound;
 	FComboBoxStyle& SetSelectionChangeSound( const FSlateSound& InSelectionChangeSound ){ SelectionChangeSlateSound = InSelectionChangeSound; return *this; }
 
+	/*
+	 * Button Content Padding 
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FMargin ContentPadding;
+	FComboBoxStyle& SetContentPadding( const FMargin& InContentPadding ) { ContentPadding = InContentPadding; return *this; }
+
+	/*
+	 * Menu Row Padding 
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FMargin MenuRowPadding;
+	FComboBoxStyle& SetMenuRowPadding( const FMargin& InMenuRowPadding ) { MenuRowPadding = InMenuRowPadding; return *this; }
+
+
+
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
 	FName PressedSound_DEPRECATED;
@@ -541,7 +772,7 @@ struct SLATECORE_API FComboBoxStyle : public FSlateWidgetStyle
 	/**
 	 * Used to upgrade the deprecated FName sound properties into the new-style FSlateSound properties
 	 */	
-	void PostSerialize(const FArchive& Ar);
+	SLATECORE_API void PostSerialize(const FArchive& Ar);
 #endif
 
 	/**
@@ -570,20 +801,20 @@ struct TStructOpsTypeTraits<FComboBoxStyle> : public TStructOpsTypeTraitsBase2<F
  * Represents the appearance of an SHyperlink
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FHyperlinkStyle : public FSlateWidgetStyle
+struct FHyperlinkStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FHyperlinkStyle();
+	SLATECORE_API FHyperlinkStyle();
 
 	virtual ~FHyperlinkStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FHyperlinkStyle& GetDefault();
+	static SLATECORE_API const FHyperlinkStyle& GetDefault();
 
 	/** Underline style */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -605,26 +836,28 @@ struct SLATECORE_API FHyperlinkStyle : public FSlateWidgetStyle
  * Represents the appearance of an SEditableText
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FEditableTextStyle : public FSlateWidgetStyle
+struct FEditableTextStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FEditableTextStyle();
+	SLATECORE_API FEditableTextStyle();
 
 	virtual ~FEditableTextStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; }
 
-	static const FEditableTextStyle& GetDefault();
+	static SLATECORE_API const FEditableTextStyle& GetDefault();
 
 	/** Font family and size to be used when displaying this text. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateFontInfo Font;
 	FEditableTextStyle& SetFont(const FSlateFontInfo& InFont) { Font = InFont; return *this; }
-	FEditableTextStyle& SetFont(const FName& InFontName, uint16 InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
+	FEditableTextStyle& SetFont(const FName& InFontName, float InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
+	FEditableTextStyle& SetFontMaterial(UObject* InMaterial) { Font.FontMaterial = InMaterial; return *this; }
+	FEditableTextStyle& SetFontOutlineMaterial(UObject* InMaterial) { Font.OutlineSettings.OutlineMaterial = InMaterial; return *this; }
 
 	/** The color and opacity of this text */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -664,20 +897,20 @@ struct SLATECORE_API FEditableTextStyle : public FSlateWidgetStyle
  * Represents the appearance of an SScrollBar
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FScrollBarStyle : public FSlateWidgetStyle
+struct FScrollBarStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FScrollBarStyle();
+	SLATECORE_API FScrollBarStyle();
 
 	virtual ~FScrollBarStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FScrollBarStyle& GetDefault();
+	static SLATECORE_API const FScrollBarStyle& GetDefault();
 
 	/** Background image to use when the scrollbar is oriented horizontally */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -724,6 +957,10 @@ struct SLATECORE_API FScrollBarStyle : public FSlateWidgetStyle
 	FSlateBrush DraggedThumbImage;
 	FScrollBarStyle& SetDraggedThumbImage( const FSlateBrush& InDraggedThumbImage ){ DraggedThumbImage = InDraggedThumbImage; return *this; }
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	float Thickness;
+	FScrollBarStyle& SetThickness(float InThickness) { Thickness = InThickness; return *this; }
+
 	/**
 	 * Unlinks all colors in this style.
 	 * @see FSlateColor::Unlink
@@ -747,20 +984,25 @@ struct SLATECORE_API FScrollBarStyle : public FSlateWidgetStyle
  * Represents the appearance of an SEditableTextBox
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FEditableTextBoxStyle : public FSlateWidgetStyle
+struct FEditableTextBoxStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
+	SLATECORE_API PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FEditableTextBoxStyle();
+	FEditableTextBoxStyle(const FEditableTextBoxStyle&) = default;
 
-	virtual ~FEditableTextBoxStyle();
+	FEditableTextBoxStyle& operator=(const FEditableTextBoxStyle&) = default;
+
+	virtual ~FEditableTextBoxStyle() = default;
+	SLATECORE_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FEditableTextBoxStyle& GetDefault();
+	static SLATECORE_API const FEditableTextBoxStyle& GetDefault();
 
 	/** Border background image when the box is not hovered or focused */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -787,11 +1029,19 @@ struct SLATECORE_API FEditableTextBoxStyle : public FSlateWidgetStyle
 	FMargin Padding;
 	FEditableTextBoxStyle& SetPadding( const FMargin& InPadding ){ Padding = InPadding; return *this; }
 
+#if WITH_EDITORONLY_DATA
 	/** Font family and size to be used when displaying this text. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
-	FSlateFontInfo Font;
-	FEditableTextBoxStyle& SetFont(const FSlateFontInfo& InFont) { Font = InFont; return *this; }
-	FEditableTextBoxStyle& SetFont(const FName& InFontName, uint16 InSize) { Font = FSlateFontInfo(InFontName, InSize); return *this; }
+	UE_DEPRECATED(5.1, "Font has been deprecated as it was duplicated information already available elsewhere. Please use TextStyle.Font instead.")
+	UPROPERTY()
+	FSlateFontInfo Font_DEPRECATED;
+#endif
+	FEditableTextBoxStyle& SetFont(const FSlateFontInfo& InFont) { TextStyle.Font = InFont; return *this; }
+	FEditableTextBoxStyle& SetFont(const FName& InFontName, float InSize) { return SetFont(FSlateFontInfo(InFontName, InSize)); }
+
+	/** The style of the text block, which dictates the font, color, and shadow options. Style overrides all other properties! */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FTextBlockStyle TextStyle;
+	FEditableTextBoxStyle& SetTextStyle(const FTextBlockStyle& InTextStyle) { TextStyle = InTextStyle; return *this; }
 
 	/** The foreground color of text. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -806,7 +1056,12 @@ struct SLATECORE_API FEditableTextBoxStyle : public FSlateWidgetStyle
 	/** The read-only foreground color of text in read-only mode. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateColor ReadOnlyForegroundColor;
-	FEditableTextBoxStyle& SetReadOnlyForegroundColor(const FSlateColor& InReadOnlyForegroundColor) { ReadOnlyForegroundColor = InReadOnlyForegroundColor; return *this; }
+	FEditableTextBoxStyle& SetReadOnlyForegroundColor(const FSlateColor& InReadOnlyForegroundColor) {ReadOnlyForegroundColor = InReadOnlyForegroundColor; return *this; }
+
+	/** The foreground color of text when the edit box has keyboard focus. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FSlateColor FocusedForegroundColor;
+	FEditableTextBoxStyle& SetFocusedForegroundColor(const FSlateColor& InFocusedForegroundColor) {FocusedForegroundColor = InFocusedForegroundColor; return *this; }
 
 	/** Padding around the horizontal scrollbar */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -836,6 +1091,7 @@ struct SLATECORE_API FEditableTextBoxStyle : public FSlateWidgetStyle
 		ForegroundColor.Unlink();
 		BackgroundColor.Unlink();
 		ReadOnlyForegroundColor.Unlink();
+		FocusedForegroundColor.Unlink();
 		ScrollBarStyle.UnlinkColors();
 	}
 };
@@ -845,20 +1101,20 @@ struct SLATECORE_API FEditableTextBoxStyle : public FSlateWidgetStyle
  * Represents the appearance of an SInlineEditableTextBlock
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FInlineEditableTextBlockStyle : public FSlateWidgetStyle
+struct FInlineEditableTextBlockStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FInlineEditableTextBlockStyle();
+	SLATECORE_API FInlineEditableTextBlockStyle();
 
 	virtual ~FInlineEditableTextBlockStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FInlineEditableTextBlockStyle& GetDefault();
+	static SLATECORE_API const FInlineEditableTextBlockStyle& GetDefault();
 
 	/** The style of the editable text box, which dictates the font, color, and shadow options. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -876,20 +1132,20 @@ struct SLATECORE_API FInlineEditableTextBlockStyle : public FSlateWidgetStyle
  * Represents the appearance of an SProgressBar
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FProgressBarStyle : public FSlateWidgetStyle
+struct FProgressBarStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FProgressBarStyle();
+	SLATECORE_API FProgressBarStyle();
 
 	virtual ~FProgressBarStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FProgressBarStyle& GetDefault();
+	static SLATECORE_API const FProgressBarStyle& GetDefault();
 
 	/** Background image to use for the progress bar */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -905,6 +1161,12 @@ struct SLATECORE_API FProgressBarStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush MarqueeImage;
 	FProgressBarStyle& SetMarqueeImage( const FSlateBrush& InMarqueeImage ){ MarqueeImage = InMarqueeImage; return *this; }
+
+	/** Enables a simple animation on the fill image to give the appearance that progress has not stalled. Disable this if you have a custom material which animates itself. 
+	 * This requires a pattern in your material or texture to give the appearance of movement.  A solid color will show no movement. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	bool EnableFillAnimation;
+	FProgressBarStyle& SetEnableFillAnimation(bool InEnableFillAnimation) { EnableFillAnimation = InEnableFillAnimation; return *this; }
 
 	/**
 	* Unlinks all colors in this style.
@@ -923,20 +1185,20 @@ struct SLATECORE_API FProgressBarStyle : public FSlateWidgetStyle
  * Represents the appearance of an SExpandableArea
  */
 USTRUCT()
-struct SLATECORE_API FExpandableAreaStyle : public FSlateWidgetStyle
+struct FExpandableAreaStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FExpandableAreaStyle();
+	SLATECORE_API FExpandableAreaStyle();
 
 	virtual ~FExpandableAreaStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FExpandableAreaStyle& GetDefault();
+	static SLATECORE_API const FExpandableAreaStyle& GetDefault();
 
 	/** Image to use when the area is collapsed */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -969,25 +1231,25 @@ struct SLATECORE_API FExpandableAreaStyle : public FSlateWidgetStyle
  * Represents the appearance of an SSearchBox
  */
 USTRUCT()
-struct SLATECORE_API FSearchBoxStyle : public FSlateWidgetStyle
+struct FSearchBoxStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FSearchBoxStyle();
+	SLATECORE_API FSearchBoxStyle();
 
 	virtual ~FSearchBoxStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FSearchBoxStyle& GetDefault();
+	static SLATECORE_API const FSearchBoxStyle& GetDefault();
 
 	/** Style to use for the text box part of the search box */
 	UPROPERTY(EditAnywhere, Category=Appearance)
 	FEditableTextBoxStyle TextBoxStyle;
-	FSearchBoxStyle& SetTextBoxStyle( const FEditableTextBoxStyle& InTextBoxStyle );
+	SLATECORE_API FSearchBoxStyle& SetTextBoxStyle( const FEditableTextBoxStyle& InTextBoxStyle );
 
 	/** Font to use for the text box part of the search box when a search term is entered*/
 	UPROPERTY(EditAnywhere, Category = Appearance)
@@ -1020,9 +1282,19 @@ struct SLATECORE_API FSearchBoxStyle : public FSlateWidgetStyle
 	FSearchBoxStyle& SetImagePadding(const FMargin& InImagePadding){ ImagePadding = InImagePadding; return *this; }
 
 	/** If true, buttons appear to the left of the search text */
+	UPROPERTY(meta = (DeprecatedProperty, DeprecationMessage="Use LeftAlignSearchResultButtons and LeftAlignGlassImageAndClearButton instead"))
+	bool bLeftAlignButtons_DEPRECATED;
+	SLATECORE_API FSearchBoxStyle& SetLeftAlignButtons(bool bInLeftAlignButtons);
+
+	/** If true, search result buttons appear to the left of the search text */
 	UPROPERTY(EditAnywhere, Category = Appearance)
-	bool bLeftAlignButtons;
-	FSearchBoxStyle& SetLeftAlignButtons(bool bInLeftAlignButtons){ bLeftAlignButtons = bInLeftAlignButtons; return *this; }
+	bool bLeftAlignSearchResultButtons;
+	FSearchBoxStyle& SetLeftAlignSearchResultButtons(bool bInLeftAlignSearchResultButtons){ bLeftAlignSearchResultButtons = bInLeftAlignSearchResultButtons; return *this; }
+	
+	/** If true, glass image and clear button appear to the left of the search text */
+	UPROPERTY(EditAnywhere, Category = Appearance)
+	bool bLeftAlignGlassImageAndClearButton;
+	FSearchBoxStyle& SetLeftAlignGlassImageAndClearButton(bool bInLeftAlignGlassImageAndClearButton){ bLeftAlignGlassImageAndClearButton = bInLeftAlignGlassImageAndClearButton; return *this; }
 };
 
 
@@ -1030,20 +1302,20 @@ struct SLATECORE_API FSearchBoxStyle : public FSlateWidgetStyle
  * Represents the appearance of an SSlider
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FSliderStyle : public FSlateWidgetStyle
+struct FSliderStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FSliderStyle();
+	SLATECORE_API FSliderStyle();
 
 	virtual ~FSliderStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FSliderStyle& GetDefault();
+	static SLATECORE_API const FSliderStyle& GetDefault();
 
 	/** Image to use when the slider bar is in its normal state */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1099,20 +1371,20 @@ struct SLATECORE_API FSliderStyle : public FSlateWidgetStyle
  * Represents the appearance of an SVolumeControl
  */
 USTRUCT()
-struct SLATECORE_API FVolumeControlStyle : public FSlateWidgetStyle
+struct FVolumeControlStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FVolumeControlStyle();
+	SLATECORE_API FVolumeControlStyle();
 
 	virtual ~FVolumeControlStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FVolumeControlStyle& GetDefault();
+	static SLATECORE_API const FVolumeControlStyle& GetDefault();
 
 	/** The style of the volume control slider */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1149,20 +1421,20 @@ struct SLATECORE_API FVolumeControlStyle : public FSlateWidgetStyle
  * Represents the appearance of an inline image used by rich text
  */
 USTRUCT()
-struct SLATECORE_API FInlineTextImageStyle : public FSlateWidgetStyle
+struct FInlineTextImageStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FInlineTextImageStyle();
+	SLATECORE_API FInlineTextImageStyle();
 
 	virtual ~FInlineTextImageStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FInlineTextImageStyle& GetDefault();
+	static SLATECORE_API const FInlineTextImageStyle& GetDefault();
 
 	/** Image to use when the slider thumb is in its normal state */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1179,25 +1451,29 @@ struct SLATECORE_API FInlineTextImageStyle : public FSlateWidgetStyle
  * Represents the appearance of an SSpinBox
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FSpinBoxStyle : public FSlateWidgetStyle
+struct FSpinBoxStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FSpinBoxStyle();
+	SLATECORE_API FSpinBoxStyle();
 
 	virtual ~FSpinBoxStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FSpinBoxStyle& GetDefault();
+	static SLATECORE_API const FSpinBoxStyle& GetDefault();
 
 	/** Brush used to draw the background of the spinbox */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush BackgroundBrush;
 	FSpinBoxStyle& SetBackgroundBrush( const FSlateBrush& InBackgroundBrush ){ BackgroundBrush = InBackgroundBrush; return *this; }
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FSlateBrush ActiveBackgroundBrush;
+	FSpinBoxStyle& SetActiveBackgroundBrush(const FSlateBrush& InBackgroundBrush) { ActiveBackgroundBrush = InBackgroundBrush; return *this; }
 
 	/** Brush used to draw the background of the spinbox when it's hovered over */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1208,6 +1484,11 @@ struct SLATECORE_API FSpinBoxStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush ActiveFillBrush;
 	FSpinBoxStyle& SetActiveFillBrush( const FSlateBrush& InActiveFillBrush ){ ActiveFillBrush = InActiveFillBrush; return *this; }
+
+	/** Brush used to fill the spinbox when it's hovered and not active */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FSlateBrush HoveredFillBrush;
+	FSpinBoxStyle& SetHoveredFillBrush(const FSlateBrush& InHoveredBrush) { HoveredFillBrush = InHoveredBrush; return *this; }
 
 	/** Brush used to fill the spinbox when it's inactive */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1229,6 +1510,11 @@ struct SLATECORE_API FSpinBoxStyle : public FSlateWidgetStyle
 	FMargin TextPadding;
 	FSpinBoxStyle& SetTextPadding( const FMargin& InTextPadding ){ TextPadding = InTextPadding; return *this; }
 
+	/** Padding between the background brush and the fill brush */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FMargin InsetPadding;
+	FSpinBoxStyle& SetInsetPadding(const FMargin& InInsetPadding) { InsetPadding = InInsetPadding; return *this; }
+
 	/**
 	 * Unlinks all colors in this style.
 	 * @see FSlateColor::Unlink
@@ -1237,7 +1523,9 @@ struct SLATECORE_API FSpinBoxStyle : public FSlateWidgetStyle
 	{
 		BackgroundBrush.UnlinkColors();
 		HoveredBackgroundBrush.UnlinkColors();
+		ActiveBackgroundBrush.UnlinkColors();
 		ActiveFillBrush.UnlinkColors();
+		HoveredFillBrush.UnlinkColors();
 		InactiveFillBrush.UnlinkColors();
 		ArrowsImage.UnlinkColors();
 		ForegroundColor.Unlink();
@@ -1249,20 +1537,20 @@ struct SLATECORE_API FSpinBoxStyle : public FSlateWidgetStyle
  * Represents the appearance of an SSplitter
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FSplitterStyle : public FSlateWidgetStyle
+struct FSplitterStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FSplitterStyle();
+	SLATECORE_API FSplitterStyle();
 
 	virtual ~FSplitterStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FSplitterStyle& GetDefault();
+	static SLATECORE_API const FSplitterStyle& GetDefault();
 
 	/** Brush used to draw the handle in its normal state */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1275,25 +1563,60 @@ struct SLATECORE_API FSplitterStyle : public FSlateWidgetStyle
 	FSplitterStyle& SetHandleHighlightBrush( const FSlateBrush& InHandleHighlightBrush ){ HandleHighlightBrush = InHandleHighlightBrush; return *this; }
 };
 
+/**
+ * Represents the appearance of an STableView
+ */
+
+USTRUCT(BlueprintType)
+struct FTableViewStyle : public FSlateWidgetStyle
+{
+	GENERATED_USTRUCT_BODY()
+
+	SLATECORE_API FTableViewStyle();
+
+	virtual ~FTableViewStyle() {}
+
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+
+	static SLATECORE_API const FName TypeName;
+	virtual const FName GetTypeName() const override { return TypeName; };
+
+	static SLATECORE_API const FTableViewStyle& GetDefault();
+
+	/** Brush used when a selected row is active */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FSlateBrush BackgroundBrush;
+	FTableViewStyle& SetBackgroundBrush( const FSlateBrush& InBackgroundBrush ){ BackgroundBrush = InBackgroundBrush; return *this; }
+
+	/**
+	 * Unlinks all colors in this style.
+	 * @see FSlateColor::Unlink
+	 */
+	void UnlinkColors()
+	{
+		BackgroundBrush.UnlinkColors();
+	}
+};
+
 
 /**
  * Represents the appearance of an STableRow
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FTableRowStyle : public FSlateWidgetStyle
+struct FTableRowStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FTableRowStyle();
+	SLATECORE_API FTableRowStyle();
 
 	virtual ~FTableRowStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FTableRowStyle& GetDefault();
+	static SLATECORE_API const FTableRowStyle& GetDefault();
 
 	/** Brush used as a selector when a row is focused */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1319,6 +1642,21 @@ struct SLATECORE_API FTableRowStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush InactiveBrush;
 	FTableRowStyle& SetInactiveBrush( const FSlateBrush& InInactiveBrush ){ InactiveBrush = InInactiveBrush; return *this; }
+
+	/** If using parent row brushes */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	bool bUseParentRowBrush;
+	FTableRowStyle& SetUseParentRowBrush(bool InUseParentRowBrush) { bUseParentRowBrush = InUseParentRowBrush; return *this; }
+
+	/** Brush used for the top parent row  */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FSlateBrush ParentRowBackgroundBrush;
+	FTableRowStyle& SetParentRowBackgroundBrush( const FSlateBrush& InParentRowBackgroundBrush ){ ParentRowBackgroundBrush = InParentRowBackgroundBrush; return *this; }
+
+	/** Brush used for the top parent row and row is hovered */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FSlateBrush ParentRowBackgroundHoveredBrush;
+	FTableRowStyle& SetParentRowBackgroundHoveredBrush( const FSlateBrush& InParentRowBackgroundHoveredBrush ){ ParentRowBackgroundHoveredBrush = InParentRowBackgroundHoveredBrush; return *this; }
 
 	/** Brush used when an even row is hovered */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1386,6 +1724,8 @@ struct SLATECORE_API FTableRowStyle : public FSlateWidgetStyle
 		ActiveBrush.UnlinkColors();
 		InactiveHoveredBrush.UnlinkColors();
 		InactiveBrush.UnlinkColors();
+		ParentRowBackgroundBrush.UnlinkColors();
+		ParentRowBackgroundHoveredBrush.UnlinkColors();
 		EvenRowBackgroundHoveredBrush.UnlinkColors();
 		EvenRowBackgroundBrush.UnlinkColors();
 		OddRowBackgroundHoveredBrush.UnlinkColors();
@@ -1405,20 +1745,20 @@ struct SLATECORE_API FTableRowStyle : public FSlateWidgetStyle
  * Represents the appearance of an STableColumnHeader
  */
 USTRUCT()
-struct SLATECORE_API FTableColumnHeaderStyle : public FSlateWidgetStyle
+struct FTableColumnHeaderStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FTableColumnHeaderStyle();
+	SLATECORE_API FTableColumnHeaderStyle();
 
 	virtual ~FTableColumnHeaderStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FTableColumnHeaderStyle& GetDefault();
+	static SLATECORE_API const FTableColumnHeaderStyle& GetDefault();
 
 	/** Image used when a column is primarily sorted in ascending order */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1471,20 +1811,20 @@ struct SLATECORE_API FTableColumnHeaderStyle : public FSlateWidgetStyle
  * Represents the appearance of an SHeaderRow
  */
 USTRUCT()
-struct SLATECORE_API FHeaderRowStyle : public FSlateWidgetStyle
+struct FHeaderRowStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FHeaderRowStyle();
+	SLATECORE_API FHeaderRowStyle();
 
 	virtual ~FHeaderRowStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FHeaderRowStyle& GetDefault();
+	static SLATECORE_API const FHeaderRowStyle& GetDefault();
 
 	/** Style of the normal header row columns */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1501,6 +1841,11 @@ struct SLATECORE_API FHeaderRowStyle : public FSlateWidgetStyle
 	FSplitterStyle ColumnSplitterStyle;
 	FHeaderRowStyle& SetColumnSplitterStyle( const FSplitterStyle& InColumnSplitterStyle ){ ColumnSplitterStyle = InColumnSplitterStyle; return *this; }
 
+	/** Size of the splitter used between the columns */
+	UPROPERTY(EditAnywhere, Category=Appearance)
+	float SplitterHandleSize;
+	FHeaderRowStyle& SetSplitterHandleSize( const float  InSplitterHandleSize){ SplitterHandleSize = InSplitterHandleSize; return *this; }
+
 	/** Brush used to draw the header row background */
 	UPROPERTY(EditAnywhere, Category=Appearance)
 	FSlateBrush BackgroundBrush;
@@ -1510,6 +1855,17 @@ struct SLATECORE_API FHeaderRowStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, Category=Appearance)
 	FSlateColor ForegroundColor;
 	FHeaderRowStyle& SetForegroundColor( const FSlateColor& InForegroundColor ){ ForegroundColor = InForegroundColor; return *this; }
+
+	/** Brush used to draw the splitter between the header and the contents below it*/
+	UPROPERTY(EditAnywhere, Category = Appearance)
+	FSlateBrush HorizontalSeparatorBrush;
+	FHeaderRowStyle& SetHorizontalSeparatorBrush(const FSlateBrush& InHorizontalSeparatorBrush) { HorizontalSeparatorBrush = InHorizontalSeparatorBrush; return *this; }
+
+	UPROPERTY(EditAnywhere, Category=Appearance)
+	float HorizontalSeparatorThickness;
+	FHeaderRowStyle& SetHorizontalSeparatorThickness(const float InHorizontalSeparatorThickness) { HorizontalSeparatorThickness = InHorizontalSeparatorThickness; return *this; }
+
+
 };
 
 
@@ -1517,20 +1873,20 @@ struct SLATECORE_API FHeaderRowStyle : public FSlateWidgetStyle
  * Represents the appearance of an SDockTab
  */
 USTRUCT()
-struct SLATECORE_API FDockTabStyle : public FSlateWidgetStyle
+struct FDockTabStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FDockTabStyle();
+	SLATECORE_API FDockTabStyle();
 
 	virtual ~FDockTabStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FDockTabStyle& GetDefault();
+	static SLATECORE_API const FDockTabStyle& GetDefault();
 
 	/** Style used for the close button */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1542,11 +1898,6 @@ struct SLATECORE_API FDockTabStyle : public FSlateWidgetStyle
 	FSlateBrush NormalBrush;
 	FDockTabStyle& SetNormalBrush( const FSlateBrush& InNormalBrush ){ NormalBrush = InNormalBrush; return *this; }
 
-	/** Brush used when this tab is in its active state */
-	UPROPERTY(EditAnywhere, Category=Appearance)
-	FSlateBrush ActiveBrush;
-	FDockTabStyle& SetActiveBrush( const FSlateBrush& InActiveBrush ){ ActiveBrush = InActiveBrush; return *this; }
-
 	/** Brush used to overlay a given color onto this tab */
 	UPROPERTY(EditAnywhere, Category=Appearance)
 	FSlateBrush ColorOverlayTabBrush;
@@ -1556,7 +1907,6 @@ struct SLATECORE_API FDockTabStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, Category = Appearance)
 	FSlateBrush ColorOverlayIconBrush;
 	FDockTabStyle& SetColorOverlayIconBrush(const FSlateBrush& InColorOverlayBrush) { ColorOverlayIconBrush = InColorOverlayBrush; return *this; }
-
 
 	/** Brush used when this tab is in the foreground */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1578,10 +1928,20 @@ struct SLATECORE_API FDockTabStyle : public FSlateWidgetStyle
 	FSlateBrush TabWellBrush;
 	FDockTabStyle& SetTabWellBrush( const FSlateBrush& InTabWellBrush ){ TabWellBrush = InTabWellBrush; return *this; }
 
+	/** Tab Text Style */
+	UPROPERTY(EditAnywhere, Category=Appearance)
+	FTextBlockStyle TabTextStyle;
+	FDockTabStyle& SetTabTextStyle( const FTextBlockStyle& InTabTextStyle ){ TabTextStyle = InTabTextStyle; return *this; }
+
 	/** Padding used around this tab */
 	UPROPERTY(EditAnywhere, Category=Appearance)
 	FMargin TabPadding;
 	FDockTabStyle& SetTabPadding( const FMargin& InTabPadding ){ TabPadding = InTabPadding; return *this; }
+
+	/** Icon size for icons in this tab */
+	UPROPERTY(EditAnywhere, Category = Appearance)
+	FDeprecateSlateVector2D IconSize;
+	FDockTabStyle& SetIconSize(const UE::Slate::FDeprecateVector2DParameter& InIconSize) { IconSize = InIconSize; return *this; }
 
 	/** The width that this tab will overlap with side-by-side tabs */
 	UPROPERTY(EditAnywhere, Category=Appearance)
@@ -1592,6 +1952,32 @@ struct SLATECORE_API FDockTabStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, Category=Appearance)
 	FSlateColor FlashColor;
 	FDockTabStyle& SetFlashColor( const FSlateColor& InFlashColor ){ FlashColor = InFlashColor; return *this; }
+
+	/** Foreground Color when the tab is not hovered, pressed, active or in the foreground */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Appearance)
+	FSlateColor NormalForegroundColor;
+	FDockTabStyle& SetNormalForegroundColor( const FSlateColor& InNormalForegroundColor ){ NormalForegroundColor = InNormalForegroundColor; return *this; }
+
+	/** Foreground Color when hovered */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Appearance)
+	FSlateColor HoveredForegroundColor;
+	FDockTabStyle& SetHoveredForegroundColor( const FSlateColor& InHoveredForegroundColor){ HoveredForegroundColor = InHoveredForegroundColor; return *this; }
+
+	/** Foreground Color when Active */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Appearance)
+	FSlateColor ActiveForegroundColor;
+	FDockTabStyle& SetActiveForegroundColor( const FSlateColor& InActiveForegroundColor ){ ActiveForegroundColor = InActiveForegroundColor; return *this; }
+
+	/** Foreground Color when this tab is the Foreground tab */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category=Appearance)
+	FSlateColor ForegroundForegroundColor;
+	FDockTabStyle& SetForegroundForegroundColor( const FSlateColor& InForegroundForegroundColor ){ ForegroundForegroundColor = InForegroundForegroundColor; return *this; }
+
+	/** The padding applied to the border around the tab icon */
+	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Appearance)
+	float IconBorderPadding;
+	FDockTabStyle& SetIconBorderPadding(const float InIconBorderPadding) { IconBorderPadding = InIconBorderPadding; return *this; }
+
 };
 
 
@@ -1599,20 +1985,24 @@ struct SLATECORE_API FDockTabStyle : public FSlateWidgetStyle
  * Represents the appearance of an SScrollBox
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FScrollBoxStyle : public FSlateWidgetStyle
+struct FScrollBoxStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FScrollBoxStyle();
+	SLATECORE_API FScrollBoxStyle();
 
 	virtual ~FScrollBoxStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FScrollBoxStyle& GetDefault();
+	static SLATECORE_API const FScrollBoxStyle& GetDefault();
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	float BarThickness;
+	FScrollBoxStyle& SetBarThickness(float InBarThickness) { BarThickness = InBarThickness; return *this; }
 
 	/** Brush used to draw the top shadow of a scrollbox */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1642,6 +2032,24 @@ struct SLATECORE_API FScrollBoxStyle : public FSlateWidgetStyle
 		return *this;
 	}
 
+	/** Padding scroll panel that presents the scrolled content */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FMargin HorizontalScrolledContentPadding = FMargin(0.0f, 0.0f, 1.0f, 0.0f);
+	FScrollBoxStyle& SetHorizontalScrolledContentPadding(const FMargin& InPadding)
+	{
+		HorizontalScrolledContentPadding = InPadding;
+		return *this;
+	}
+
+	/** Padding scroll panel that presents the scrolled content */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FMargin VerticalScrolledContentPadding = FMargin(0.0f, 0.0f, 0.0f, 1.0f);
+	FScrollBoxStyle& SetVerticalScrolledContentPadding(const FMargin& InPadding)
+	{
+		VerticalScrolledContentPadding = InPadding;
+		return *this;
+	}
+
 	/**
 	 * Unlinks all colors in this style.
 	 * @see FSlateColor::Unlink
@@ -1660,20 +2068,20 @@ struct SLATECORE_API FScrollBoxStyle : public FSlateWidgetStyle
 * Represents the appearance of an FScrollBorderStyle
 */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FScrollBorderStyle : public FSlateWidgetStyle
+struct FScrollBorderStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FScrollBorderStyle();
+	SLATECORE_API FScrollBorderStyle();
 
 	virtual ~FScrollBorderStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FScrollBorderStyle& GetDefault();
+	static SLATECORE_API const FScrollBorderStyle& GetDefault();
 
 	/** Brush used to draw the top shadow of a scrollborder */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
@@ -1691,20 +2099,20 @@ struct SLATECORE_API FScrollBorderStyle : public FSlateWidgetStyle
  * Represents the appearance of an SWindow
  */
 USTRUCT(BlueprintType)
-struct SLATECORE_API FWindowStyle : public FSlateWidgetStyle
+struct FWindowStyle : public FSlateWidgetStyle
 {
 	GENERATED_USTRUCT_BODY()
 
-	FWindowStyle();
+	SLATECORE_API FWindowStyle();
 
 	virtual ~FWindowStyle() {}
 
-	virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
+	SLATECORE_API virtual void GetResources( TArray< const FSlateBrush* >& OutBrushes ) const override;
 
-	static const FName TypeName;
+	static SLATECORE_API const FName TypeName;
 	virtual const FName GetTypeName() const override { return TypeName; };
 
-	static const FWindowStyle& GetDefault();
+	static SLATECORE_API const FWindowStyle& GetDefault();
 
 	/** Style used to draw the window minimize button */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
@@ -1766,6 +2174,11 @@ struct SLATECORE_API FWindowStyle : public FSlateWidgetStyle
 	FSlateBrush BorderBrush;
 	FWindowStyle& SetBorderBrush( const FSlateBrush& InBorderBrush ){ BorderBrush = InBorderBrush; return *this; }
 
+	/** Color used to draw the window border */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Appearance)
+	FSlateColor BorderColor;
+	FWindowStyle& SetBorderColor(const FSlateColor& InBorderColor) { BorderColor = InBorderColor; return *this; }
+
 	/** Brush used to draw the window background */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush BackgroundBrush;
@@ -1775,10 +2188,21 @@ struct SLATECORE_API FWindowStyle : public FSlateWidgetStyle
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
 	FSlateBrush ChildBackgroundBrush;
 	FWindowStyle& SetChildBackgroundBrush( const FSlateBrush& InChildBackgroundBrush ){ ChildBackgroundBrush = InChildBackgroundBrush; return *this; }
+
+	/** Window corner rounding.  If this value is <= 0 no rounding will occur.   Used for regular, non-maximized windows only (not tool-tips or decorators.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	int32 WindowCornerRadius;
+	FWindowStyle& SetCornerRadius(int32 InCornerRadius) { WindowCornerRadius = InCornerRadius; return *this; }
+
+	/** Window corner rounding.  If this value is <= 0 no rounding will occur.   Used for regular, non-maximized windows only (not tool-tips or decorators.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Appearance)
+	FMargin BorderPadding;
+	FWindowStyle& SetBorderPadding(FMargin InBorderPadding) { BorderPadding = InBorderPadding; return *this; }
+
 };
 
 
-class SLATECORE_API FInvalidatableBrushAttribute
+class FInvalidatableBrushAttribute
 {
 public:
 	FInvalidatableBrushAttribute() { }
@@ -1795,7 +2219,7 @@ public:
 
 	const FSlateBrush* Get() const { return Image.Get(); }
 	TAttribute< const FSlateBrush* > GetImage() const { return Image; }
-	void SetImage(SWidget& ThisWidget, const TAttribute< const FSlateBrush* >& InImage);
+	SLATECORE_API void SetImage(SWidget& ThisWidget, const TAttribute< const FSlateBrush* >& InImage);
 
 private:
 	/** The slate brush to draw for the image, or a bound delegate to a brush. */

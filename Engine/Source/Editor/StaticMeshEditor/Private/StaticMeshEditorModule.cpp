@@ -56,10 +56,16 @@ public:
 	virtual TSharedPtr<FExtensibilityManager> GetToolBarExtensibilityManager() override { return ToolBarExtensibilityManager; }
 	virtual TSharedPtr<FExtensibilityManager> GetSecondaryToolBarExtensibilityManager() override { return SecondaryToolBarExtensibilityManager; }
 
+	virtual TArray<FStaticMeshEditorToolbarExtender>& GetAllStaticMeshEditorToolbarExtenders() override { return StaticMeshEditorToolbarExtenders; }
+
+	virtual FOnRegisterLayoutExtensions& OnRegisterLayoutExtensions() override { return RegisterLayoutExtensions; }
+
 private:
 	TSharedPtr<FExtensibilityManager> MenuExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> ToolBarExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> SecondaryToolBarExtensibilityManager;
+	TArray<FStaticMeshEditorToolbarExtender> StaticMeshEditorToolbarExtenders;
+	FOnRegisterLayoutExtensions	RegisterLayoutExtensions;
 };
 
 IMPLEMENT_MODULE( FStaticMeshEditorModule, StaticMeshEditor );

@@ -7,25 +7,38 @@ public class Engine : ModuleRules
 {
 	public Engine(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("../Shaders/Shared");
+		NumIncludedBytesPerUnityCPPOverride = 589824; // best unity size found from using UBT ProfileUnitySizes mode
 
 		PrivatePCHHeaderFile = "Private/EnginePrivatePCH.h";
 
 		SharedPCHHeaderFile = "Public/EngineSharedPCH.h";
 
-		PublicIncludePathModuleNames.AddRange(new string[] { "Renderer", "PacketHandler", "AudioMixer", "AudioMixerCore", "AnimationCore" });
+		PublicIncludePathModuleNames.AddRange(
+			new string[] {
+				"AnimationCore",
+				"AudioExtensions",
+				"AudioMixer", 
+				"AudioMixerCore",
+				"InputCore",
+				"MovieSceneCapture", 
+				"PacketHandler", 
+				"Renderer",
+				"RHI",
+				"Shaders"
+			}
+		);
 
 		PrivateIncludePaths.AddRange(
 			new string[] {
-				"Developer/DerivedDataCache/Public",
-				"Runtime/SynthBenchmark/Public",
-				"Runtime/Engine/Private",
-				"Runtime/Net/Core/Private/Net/Core/PushModel/Types"
+				Path.Combine(GetModuleDirectory("NetCore"), "Private"),
 			}
 		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
+				"DerivedDataCache",
+				"DesktopPlatform",
+				"DistributedBuildInterface",
 				"TargetPlatform",
 				"ImageWrapper",
 				"ImageWriteQueue",
@@ -33,18 +46,14 @@ public class Engine : ModuleRules
 				"EyeTracker",
 				"MRMesh",
 				"Advertising",
-				"MovieSceneCapture",
 				"AutomationWorker",
-				"MovieSceneCapture",
-				"DesktopPlatform"
 			}
 		);
 
-		if (Target.Configuration != UnrealTargetConfiguration.Shipping)
+		if (Target.Configuration != UnrealTargetConfiguration.Shipping || Target.bCompileAgainstEditor)
 		{
 			PrivateIncludePathModuleNames.AddRange(
 				new string[] {
-					"TaskGraph",
 					"SlateReflector",
 				}
 			);
@@ -66,10 +75,13 @@ public class Engine : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
+				"CoreOnline",
 				"CoreUObject",
+				"FieldNotification",
 				"NetCore",
-				"ApplicationCore",
+				"ImageCore",
 				"Json",
+				"JsonUtilities",
 				"SlateCore",
 				"Slate",
 				"InputCore",
@@ -88,43 +100,84 @@ public class Engine : ModuleRules
 				"AudioPlatformConfiguration",
 				"MeshDescription",
 				"StaticMeshDescription",
+				"SkeletalMeshDescription",
 				"PakFile",
 				"NetworkReplayStreaming",
 				"PhysicsCore",
-                "SignalProcessing",
-                "AudioExtensions",
+				"SignalProcessing",
+				"AudioExtensions",
 				"DeveloperSettings",
-				"PropertyAccess",
+				"AudioLinkCore",
+				"CookOnTheFly",
+				"IoStoreOnDemand"
+			}
+		);
+
+		if (Target.bCompileAgainstApplicationCore)
+		{
+			PublicDependencyModuleNames.Add("ApplicationCore");
+		}
+
+		PublicIncludePathModuleNames.AddRange(
+			new string[] {
+				"TypedElementFramework",
+				"TypedElementRuntime",
+				"NetCore",
+				"RenderCore",
+				"CoreUObject",
+				"CoreOnline",
+				"PhysicsCore",
+				"ChaosCore",
+				"DeveloperSettings",
+				"NetCommon",
+				"Slate",
+				"Sockets",
+				"MeshDescription"
 			}
 		);
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
+				"AnimationCore",
 				"AppFramework",
+				"BuildSettings",
 				"Networking",
 				"Landscape",
 				"UMG",
 				"Projects",
+				"TypedElementFramework",
+				"TypedElementRuntime",
 				"MaterialShaderQualitySettings",
+				"MoviePlayerProxy",
 				"CinematicCamera",
 				"Analytics",
 				"AudioMixer",
 				"AudioMixerCore",
-				"SignalProcessing",
-				"CrunchCompression",
 				"IntelISPC",
 				"TraceLog",
+				"ColorManagement",
+				"Icmp",
+				"UniversalObjectLocator",
+				"XmlParser",
 			}
 		);
 
-		// Cross platform Audio Codecs:
-		AddEngineThirdPartyPrivateStaticDependencies(Target,
-			"UEOgg",
-			"Vorbis",
-			"VorbisFile",
-			"libOpus"
-			);
+		if (Target.bBuildWithEditorOnlyData && Target.bBuildEditor)
+		{
+			// The SparseVolumeTexture module containing the importer is only loaded and used in the editor.
+			DynamicallyLoadedModuleNames.Add("SparseVolumeTexture");
+			AddEngineThirdPartyPrivateStaticDependencies(Target,
+				"UEWavComp"
+				);
+		}
 
+		// Cross platform Audio Codecs: (we build here, but don't depend on them directly)
+		DynamicallyLoadedModuleNames.Add("RadAudioDecoder");
+		DynamicallyLoadedModuleNames.Add("BinkAudioDecoder");
+		DynamicallyLoadedModuleNames.Add("VorbisAudioDecoder");
+		DynamicallyLoadedModuleNames.Add("OpusAudioDecoder");
+		DynamicallyLoadedModuleNames.Add("AdpcmAudioDecoder");
+		
 		DynamicallyLoadedModuleNames.Add("EyeTracker");
 
 		if (Target.Configuration != UnrealTargetConfiguration.Shipping)
@@ -134,48 +187,43 @@ public class Engine : ModuleRules
 		}
 
 		// to prevent "causes WARNING: Non-editor build cannot depend on non-redistributable modules."
-		if (Target.Type == TargetType.Editor)
+		if (Target.bCompileAgainstEditor)
 		{
-			// for now we depend on this
-			PrivateDependencyModuleNames.Add("RawMesh");
-		}
 
-		bool bVariadicTemplatesSupported = true;
-		if (Target.Platform == UnrealTargetPlatform.XboxOne)
-		{
-			// Use reflection to allow type not to exist if console code is not present
-			System.Type XboxOnePlatformType = System.Type.GetType("UnrealBuildTool.XboxOnePlatform,UnrealBuildTool");
-			if (XboxOnePlatformType != null)
-			{
-				System.Object VersionName = XboxOnePlatformType.GetMethod("GetVisualStudioCompilerVersionName").Invoke(null, null);
-				if (VersionName.ToString().Equals("2012"))
-				{
-					bVariadicTemplatesSupported = false;
+			PublicDependencyModuleNames.AddRange(
+				new string[] {
+					"TextureBuildUtilities",
+					"Horde"
 				}
-			}
+			);
+
+			// for now we depend on these
+			PrivateDependencyModuleNames.AddRange(
+				new string[] {
+					"RawMesh",
+					"Zen"
+				}
+			);
 		}
 
-		if (bVariadicTemplatesSupported)
+		PrivateIncludePathModuleNames.AddRange(
+			new string[] {
+				"MessagingRpc",
+				"PortalRpc",
+				"PortalServices",
+			}
+		);
+
+		if (Target.bCompileAgainstEditor)
 		{
-			PrivateIncludePathModuleNames.AddRange(
+			// these modules require variadic templates
+			PrivateDependencyModuleNames.AddRange(
 				new string[] {
 					"MessagingRpc",
 					"PortalRpc",
 					"PortalServices",
 				}
 			);
-
-			if (Target.Type == TargetType.Editor)
-			{
-				// these modules require variadic templates
-				PrivateDependencyModuleNames.AddRange(
-					new string[] {
-						"MessagingRpc",
-						"PortalRpc",
-						"PortalServices",
-					}
-				);
-			}
 		}
 
 		CircularlyReferencedDependentModules.Add("GameplayTags");
@@ -184,10 +232,10 @@ public class Engine : ModuleRules
 		CircularlyReferencedDependentModules.Add("MaterialShaderQualitySettings");
 		CircularlyReferencedDependentModules.Add("CinematicCamera");
 		CircularlyReferencedDependentModules.Add("AudioMixer");
+		
 
-		if (Target.Type == TargetType.Editor)
+		if (Target.bCompileAgainstEditor)
 		{
-			PrivateDependencyModuleNames.Add("EditorStyle");
 			PrivateIncludePathModuleNames.Add("Foliage");
 		}
 
@@ -232,16 +280,24 @@ public class Engine : ModuleRules
 			PrivateDependencyModuleNames.Add("PerfCounters");
 		}
 
-		if (Target.Type == TargetType.Editor)
+		if (Target.bCompileAgainstEditor)
 		{
+			PrivateIncludePathModuleNames.Add("MaterialUtilities");
+			PrivateDependencyModuleNames.Add("MaterialUtilities");
+
 			PrivateIncludePathModuleNames.Add("MeshUtilities");
+			DynamicallyLoadedModuleNames.Add("MeshUtilities");
+
 			PrivateIncludePathModuleNames.Add("MeshUtilitiesCommon");
 
-			DynamicallyLoadedModuleNames.Add("MeshUtilities");
+			PublicIncludePathModuleNames.Add("AnimationDataController");
+			DynamicallyLoadedModuleNames.Add("AnimationDataController");
+
+			PublicIncludePathModuleNames.Add("AnimationBlueprintEditor");
+			DynamicallyLoadedModuleNames.Add("AnimationBlueprintEditor");
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {
-					"ImageCore",
 					"RawMesh"
 				}
 			);
@@ -257,10 +313,6 @@ public class Engine : ModuleRules
 				DynamicallyLoadedModuleNames.AddRange(
 					new string[] {
 						"WindowsTargetPlatform",
-						"WindowsNoEditorTargetPlatform",
-						"WindowsServerTargetPlatform",
-						"WindowsClientTargetPlatform",
-						"AllDesktopTargetPlatform",
 						"WindowsPlatformEditor",
 					}
 				);
@@ -270,10 +322,6 @@ public class Engine : ModuleRules
 				DynamicallyLoadedModuleNames.AddRange(
 					new string[] {
 						"MacTargetPlatform",
-						"MacNoEditorTargetPlatform",
-						"MacServerTargetPlatform",
-						"MacClientTargetPlatform",
-						"AllDesktopTargetPlatform",
 						"MacPlatformEditor",
 					}
 				);
@@ -283,13 +331,6 @@ public class Engine : ModuleRules
 				DynamicallyLoadedModuleNames.AddRange(
 					new string[] {
 						"LinuxTargetPlatform",
-						"LinuxNoEditorTargetPlatform",
-						"LinuxAArch64NoEditorTargetPlatform",
-						"LinuxServerTargetPlatform",
-						"LinuxAArch64ServerTargetPlatform",
-						"LinuxClientTargetPlatform",
-						"LinuxAArch64ClientTargetPlatform",
-						"AllDesktopTargetPlatform",
 						"LinuxPlatformEditor",
 					}
 				);
@@ -319,27 +360,46 @@ public class Engine : ModuleRules
 			);
 		}
 
-		WhitelistRestrictedFolders.Add("Private/NotForLicensees");
+		AllowedRestrictedFolders.Add("Private/NotForLicensees");
 
 		if (!Target.bBuildRequiresCookedData && Target.bCompileAgainstEngine)
 		{
-			DynamicallyLoadedModuleNames.AddRange(
-				new string[] {
-					"DerivedDataCache",
-					"TargetPlatform",
-					"DesktopPlatform"
-				}
-			);
+			PrivateDependencyModuleNames.Add("DeveloperToolSettings");
+
+
 		}
 
 		if (Target.bBuildEditor == true)
 		{
-			PublicDependencyModuleNames.AddRange(
+			PublicIncludePathModuleNames.AddRange(
 				new string[] {
+					"InterchangeCore",
+					"Kismet",
+					"ToolMenus",
 					"UnrealEd",
-					"Kismet"
 				}
-			);  // @todo api: Only public because of WITH_EDITOR and UNREALED_API
+			);
+
+			PrivateIncludePathModuleNames.AddRange(
+				new string[] {
+					"AssetTools",
+					"AssetDefinition",
+					"Documentation",
+					"HierarchicalLODUtilities",
+					"MeshBuilder",
+					"NaniteBuilder",
+					"PIEPreviewDeviceProfileSelector",
+				}
+			);
+
+			PrivateDependencyModuleNames.AddRange(
+				new string[] {
+					"DerivedDataCache",
+					"Kismet",
+					"TextureCompressor",
+					"UnrealEd"
+				}
+			);
 
 			CircularlyReferencedDependentModules.AddRange(
 				new string[] {
@@ -347,27 +407,20 @@ public class Engine : ModuleRules
 					"Kismet"
 				}
 			);
+			
 
-			PrivateIncludePathModuleNames.Add("TextureCompressor");
-			PrivateIncludePaths.Add("Developer/TextureCompressor/Public");
-
-			PrivateIncludePathModuleNames.Add("HierarchicalLODUtilities");
-			DynamicallyLoadedModuleNames.Add("HierarchicalLODUtilities");
-
-			DynamicallyLoadedModuleNames.Add("AnimationModifiers");
-
-			PrivateIncludePathModuleNames.Add("AssetTools");
-			DynamicallyLoadedModuleNames.Add("AssetTools");
-
-			PrivateIncludePathModuleNames.Add("PIEPreviewDeviceProfileSelector");
+			DynamicallyLoadedModuleNames.AddRange(
+				new string[] {
+					"AnimationModifiers",
+					"AssetTools",
+					"HierarchicalLODUtilities",
+					"LevelInstanceEditor",
+					"NaniteBuilder"
+				}
+			);
 		}
 
 		SetupModulePhysicsSupport(Target);
-
-		if (Target.bCompilePhysX && (Target.bBuildEditor || Target.bCompileAPEX))
-		{
-			DynamicallyLoadedModuleNames.Add("PhysXCooking");
-		}
 
 		// Engine public headers need to know about some types (enums etc.)
 		PublicIncludePathModuleNames.Add("ClothingSystemRuntimeInterface");
@@ -377,10 +430,10 @@ public class Engine : ModuleRules
 		{
 			PrivateDependencyModuleNames.Add("ClothingSystemEditorInterface");
 			PrivateIncludePathModuleNames.Add("ClothingSystemEditorInterface");
+			PrivateDependencyModuleNames.Add("DesktopPlatform");
 		}
 
-		if ((Target.Platform == UnrealTargetPlatform.Win64) ||
-			(Target.Platform == UnrealTargetPlatform.Win32))
+		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			// Head Mounted Display support
 			//			PrivateIncludePathModuleNames.AddRange(new string[] { "HeadMountedDisplay" });
@@ -389,43 +442,21 @@ public class Engine : ModuleRules
 
 		if (Target.Platform == UnrealTargetPlatform.Mac)
 		{
+			// Allow VirtualTextureUploadCache to use the UpdateTexture path.
+			PublicDefinitions.Add("ALLOW_UPDATE_TEXTURE=1");
+
 			PublicFrameworks.AddRange(new string[] { "AVFoundation", "CoreVideo", "CoreMedia" });
 		}
 
 		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Android))
 		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target,
-				"UEOgg",
-				"Vorbis",
-				"VorbisFile"
-				);
-
 			PrivateIncludePathModuleNames.Add("AndroidRuntimeSettings");
 		}
 
-		if (Target.Platform == UnrealTargetPlatform.IOS || Target.Platform == UnrealTargetPlatform.TVOS)
+		if (Target.IsInPlatformGroup(UnrealPlatformGroup.IOS))
 		{
-			PublicIncludePaths.AddRange(
-            	new string[] {
-               		"Runtime/IOS/IOSPlatformFeatures/Public"
-                });
-
+			PublicIncludePathModuleNames.Add("IOSPlatformFeatures");
 			PrivateIncludePathModuleNames.Add("IOSRuntimeSettings");
-		}
-
-		if (Target.Platform == UnrealTargetPlatform.Switch)
-		{
-			PrivateIncludePathModuleNames.Add("SwitchRuntimeSettings");
-		}
-
-		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Unix))
-		{
-			AddEngineThirdPartyPrivateStaticDependencies(Target,
-				"UEOgg",
-				"Vorbis",
-				"VorbisFile",
-				"libOpus"
-				);
 		}
 
 		PublicDefinitions.Add("GPUPARTICLE_LOCAL_VF_ONLY=0");
@@ -444,5 +475,12 @@ public class Engine : ModuleRules
         {
 			PublicDefinitions.Add("WITH_ODSC=0");
 		}
+
+		const bool bIrisAddAsPublicDepedency = true;
+		SetupIrisSupport(Target, bIrisAddAsPublicDepedency);
+
+		PrivateDefinitions.Add("UE_DEPRECATE_LEGACY_MATH_CONSTANT_MACRO_NAMES=1");
+
+		bAllowAutoRTFMInstrumentation = true;
 	}
 }

@@ -1,59 +1,66 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Drawing;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using System.Windows.Forms;
+
+#nullable enable
 
 namespace UnrealGameSync
 {
 	public partial class VariablesWindow : Form
 	{
-		public delegate void InsertVariableDelegate(string Name);
+		static readonly HashSet<string> s_legacyVariables = new HashSet<string>()
+		{
+			"UE4EditorConfig",
+			"UE4EditorDebugArg",
+			"UE4EditorExe",
+			"UE4EditorCmdExe",
+			"UseIncrementalBuilds",
+		};
 
-		public event InsertVariableDelegate OnInsertVariable;
+		public delegate void InsertVariableDelegate(string name);
 
-		public VariablesWindow(IReadOnlyDictionary<string, string> Variables)
+		public event InsertVariableDelegate? OnInsertVariable;
+
+		public VariablesWindow(IReadOnlyDictionary<string, string> variables)
 		{
 			InitializeComponent();
+			Font = new System.Drawing.Font("Segoe UI", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
 
-			ListViewGroup CurrentProjectGroup = new ListViewGroup("Current Project");
-			MacrosList.Groups.Add(CurrentProjectGroup);
+			ListViewGroup currentProjectGroup = new ListViewGroup("Current Project");
+			MacrosList.Groups.Add(currentProjectGroup);
 
-			ListViewGroup EnvironmentGroup = new ListViewGroup("Environment");
-			MacrosList.Groups.Add(EnvironmentGroup);
+			ListViewGroup environmentGroup = new ListViewGroup("Environment");
+			MacrosList.Groups.Add(environmentGroup);
 
-			foreach(KeyValuePair<string, string> Pair in Variables)
+			foreach (KeyValuePair<string, string> pair in variables)
 			{
-				ListViewItem Item = new ListViewItem(String.Format("$({0})", Pair.Key));
-				Item.SubItems.Add(Pair.Value);
-				Item.Group = CurrentProjectGroup;
-				MacrosList.Items.Add(Item);
+				if (!s_legacyVariables.Contains(pair.Key))
+				{
+					ListViewItem item = new ListViewItem(String.Format("$({0})", pair.Key));
+					item.SubItems.Add(pair.Value);
+					item.Group = currentProjectGroup;
+					MacrosList.Items.Add(item);
+				}
 			}
 
-			foreach(DictionaryEntry Entry in Environment.GetEnvironmentVariables())
+			foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables().OfType<DictionaryEntry>())
 			{
-				string Key = Entry.Key.ToString();
-				if(!Variables.ContainsKey(Key))
+				string? key = entry.Key?.ToString();
+				if (key != null && entry.Value != null && !variables.ContainsKey(key))
 				{
-					ListViewItem Item = new ListViewItem(String.Format("$({0})", Key));
-					Item.SubItems.Add(Entry.Value.ToString());
-					Item.Group = EnvironmentGroup;
-					MacrosList.Items.Add(Item);
+					ListViewItem item = new ListViewItem(String.Format("$({0})", key));
+					item.SubItems.Add(entry.Value.ToString());
+					item.Group = environmentGroup;
+					MacrosList.Items.Add(item);
 				}
 			}
 		}
 
-		protected override bool ShowWithoutActivation
-		{
-			get { return true; }
-		}
+		protected override bool ShowWithoutActivation => true;
 
 		private void OkButton_Click(object sender, EventArgs e)
 		{
@@ -61,21 +68,21 @@ namespace UnrealGameSync
 			Close();
 		}
 
-		private void MacrosList_MouseDoubleClick(object Sender, MouseEventArgs Args)
+		private void MacrosList_MouseDoubleClick(object sender, MouseEventArgs args)
 		{
-			if(Args.Button == MouseButtons.Left)
+			if (args.Button == MouseButtons.Left)
 			{
-				ListViewHitTestInfo HitTest = MacrosList.HitTest(Args.Location);
-				if(HitTest.Item != null && OnInsertVariable != null)
+				ListViewHitTestInfo hitTest = MacrosList.HitTest(args.Location);
+				if (hitTest.Item != null && OnInsertVariable != null)
 				{
-					OnInsertVariable(HitTest.Item.Text);
+					OnInsertVariable(hitTest.Item.Text);
 				}
 			}
 		}
 
 		private void InsertButton_Click(object sender, EventArgs e)
 		{
-			if(MacrosList.SelectedItems.Count > 0 && OnInsertVariable != null)
+			if (MacrosList.SelectedItems.Count > 0 && OnInsertVariable != null)
 			{
 				OnInsertVariable(MacrosList.SelectedItems[0].Text);
 			}

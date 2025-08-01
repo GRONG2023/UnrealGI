@@ -20,11 +20,12 @@
 
 class FPrecomputedLightVolumeData;
 class FPrecomputedVolumetricLightmapData;
+struct FAssetCompileData;
 
-struct ENGINE_API FPerInstanceLightmapData
+struct FPerInstanceLightmapData
 {
-	FVector2D LightmapUVBias;
-	FVector2D ShadowmapUVBias;
+	FVector2f LightmapUVBias;
+	FVector2f ShadowmapUVBias;
 
 	FPerInstanceLightmapData()
 		: LightmapUVBias(ForceInit)
@@ -184,17 +185,13 @@ class FReflectionCaptureData
 public:
 	int32 CubemapSize;
 	float AverageBrightness;
-	/** Needed for EncodedHDRCapturedData cooking. */
-	float Brightness;
 
 	TArray<uint8> FullHDRCapturedData;
-	UTextureCube* EncodedCaptureData;
+	TArray<uint8> EncodedHDRCapturedData;
 
 	FReflectionCaptureData() :
 		CubemapSize(0),
 		AverageBrightness(0.0f),
-		Brightness(0.0f),
-		EncodedCaptureData(nullptr),
 		bUploadedFinal(false)
 	{}
 
@@ -211,6 +208,7 @@ public:
 		if (!GIsEditor)
 		{
 			FullHDRCapturedData.Empty();
+			EncodedHDRCapturedData.Empty();
 			CubemapSize = 0;
 			bUploadedFinal = true;
 		}
@@ -294,6 +292,10 @@ public:
 	//~ Begin UObject Interface
 	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 	ENGINE_API virtual void PostLoad() override;
+#if WITH_EDITORONLY_DATA
+	ENGINE_API static void DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass);
+#endif
+
 	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 	ENGINE_API virtual void BeginDestroy() override;
 	ENGINE_API virtual bool IsReadyForFinishDestroy() override;
@@ -344,12 +346,12 @@ public:
 	ENGINE_API FReflectionCaptureMapBuildData* GetReflectionCaptureBuildData(FGuid CaptureId);
 
 	/**
-	 * Allocates a new FAtmosphericFogMapBuildData from the registry.
+	 * Allocates a new FSkyAtmosphereMapBuildData from the registry.
 	 * Warning: Further allocations will invalidate the returned reference.
 	 */
 	ENGINE_API FSkyAtmosphereMapBuildData& FindOrAllocateSkyAtmosphereBuildData(const FGuid& Guid);
 	/**
-	 * @returns pointer to the AtmosphericFogBuildData, nullptr if built data has not been built yet.
+	 * @returns pointer to the FSkyAtmosphereMapBuildData, nullptr if built data has not been built yet.
 	 */
 	ENGINE_API const FSkyAtmosphereMapBuildData* GetSkyAtmosphereBuildData(const FGuid& Guid) const;
 	ENGINE_API void ClearSkyAtmosphereBuildData();
@@ -376,10 +378,13 @@ public:
 	*/
 	ENGINE_API void HandleLegacyEncodedCubemapData();
 private:
+#if WITH_EDITOR
+	void HandleAssetPostCompileEvent(const TArray<FAssetCompileData>& CompiledAssets);
+#endif
 
-	ENGINE_API void ReleaseResources(const TSet<FGuid>* ResourcesToKeep = nullptr);
-	ENGINE_API void EmptyLevelData(const TSet<FGuid>* ResourcesToKeep = nullptr);
-	ENGINE_API void CleanupTransientOverrideMapBuildData();
+	void ReleaseResources(const TSet<FGuid>* ResourcesToKeep = nullptr);
+	void EmptyLevelData(const TSet<FGuid>* ResourcesToKeep = nullptr);
+	void CleanupTransientOverrideMapBuildData();
 
 	TMap<FGuid, FMeshMapBuildData> MeshBuildData;
 	TMap<FGuid, FPrecomputedLightVolumeData*> LevelPrecomputedLightVolumeBuildData;

@@ -24,8 +24,6 @@ public:
 	SLATE_BEGIN_ARGS(STextureEditorViewport) { }
 	SLATE_END_ARGS()
 
-public:
-
 	/**
 	 */
 	void AddReferencedObjects( FReferenceCollector& Collector );
@@ -42,15 +40,6 @@ public:
 	 */
 	void ModifyCheckerboardTextureColors( );
 
-	/**
-	 * Gets the exposure bias.
-	 *
-	 * @return Exposure bias value.
-	 */
-	int32 GetExposureBias( ) const
-	{
-		return ExposureBias;
-	}
 
 	/** Enable viewport rendering */
 	void EnableRendering();
@@ -80,15 +69,6 @@ protected:
 
 private:
 
-	// Callback for getting the visibility of the exposure bias widget.
-	EVisibility HandleExposureBiasWidgetVisibility( ) const;
-
-	// Callback for getting the exposure bias.
-	TOptional<int32> HandleExposureBiasBoxValue( ) const;
-
-	// Callback for changing the exposure bias.
-	void HandleExposureBiasBoxValueChanged( int32 NewExposure );
-
 	// Callback for the horizontal scroll bar.
 	void HandleHorizontalScrollBarScrolled( float InScrollOffsetFraction );
 
@@ -100,44 +80,6 @@ private:
 
 	// Callback for getting the visibility of the horizontal scroll bar.
 	EVisibility HandleVerticalScrollBarVisibility( ) const;
-
-	// Callback for clicking an item in the 'Zoom' menu.
-	void HandleZoomMenuEntryClicked( double ZoomValue );
-
-	// Callback for clicking the 'Fill' item in the 'Zoom' menu.
-	void HandleZoomMenuFillClicked();
-
-	// Callback for setting the checked state of the 'Fill' item in the 'Zoom' menu.
-	bool IsZoomMenuFillChecked() const;
-
-	// Callback for clicking the 'Fit' item in the 'Zoom' menu.
-	void HandleZoomMenuFitClicked();
-
-	// Callback for setting the checked state of the 'Fit' item in the 'Zoom' menu.
-	bool IsZoomMenuFitChecked() const;
-
-	// Callback for getting the zoom percentage text.
-	FText HandleZoomPercentageText( ) const;
-
-	// Callback for changes in the zoom slider.
-	void HandleZoomSliderChanged( float NewValue );
-
-	// Callback for getting the zoom slider's value.
-	float HandleZoomSliderValue( ) const;
-
-	// Callback for changes in the zoom slider.
-	void HandleOpacitySliderChanged( float NewValue );
-
-	// Callback for getting the zoom slider's value.
-	float HandleOpacitySliderValue( ) const;
-
-	// Checks if the texture being edited has a valid texture resource
-	bool HasValidTextureResource( ) const;
-
-private:
-
-	// Which exposure level should be used, in FStop e.g. 0:original, -1:half as bright, 1:2x as bright, 2:4x as bright.
-	int32 ExposureBias;
 
 	// Pointer back to the Texture editor tool that owns us.
 	TWeakPtr<ITextureEditorToolkit> ToolkitPtr;
@@ -158,5 +100,5 @@ private:
 	TSharedPtr<SScrollBar> TextureViewportHorizontalScrollBar;
 
 	// Is rendering currently enabled? (disabled when reimporting a texture)
-	bool bIsRenderingEnabled;
+	bool bIsRenderingEnabled = true;
 };

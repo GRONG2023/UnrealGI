@@ -35,13 +35,15 @@ class ULandscapeMaterialInstanceConstant : public UMaterialInstanceConstant
 	uint32 bIsLayerThumbnail:1;
 
 	UPROPERTY()
-	uint32 bDisableTessellation:1;
+	uint32 bDisableTessellation_DEPRECATED:1;
 
 	UPROPERTY()
 	uint32 bMobile:1;
 
 	UPROPERTY()
 	uint32 bEditorToolUsage:1;
+
+	virtual bool WritesToRuntimeVirtualTexture() const override;
 
 	virtual void PostLoad() override;
 #if WITH_EDITOR

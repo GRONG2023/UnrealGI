@@ -4,6 +4,8 @@
 #include "ClothingAssetBase.h"
 #include "ClothingSimulationInterface.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ClothingSimulationInteractor)
+
 void UClothingSimulationInteractor::CreateClothingInteractor(const UClothingAssetBase* ClothingAsset, int32 ClothingId)
 {
 	if (ClothingAsset)
@@ -24,7 +26,7 @@ void UClothingSimulationInteractor::DestroyClothingInteractors()
 
 UClothingInteractor* UClothingSimulationInteractor::GetClothingInteractor(const FString& ClothingAssetName) const
 {
-	if (UClothingInteractor* const* const ClothingInteractor = ClothingInteractors.Find(FName(ClothingAssetName)))
+	if (const TObjectPtr<UClothingInteractor>* ClothingInteractor = ClothingInteractors.Find(FName(ClothingAssetName)))
 	{
 		return *ClothingInteractor;
 	}
@@ -42,7 +44,7 @@ void UClothingSimulationInteractor::Sync(IClothingSimulation* Simulation, ICloth
 	LastNumSubsteps = Simulation->GetNumSubsteps();
 	LastSimulationTime = Simulation->GetSimulationTime();
 
-	for (const TPair<FName, UClothingInteractor*>& ClothingInteractor : UClothingSimulationInteractor::ClothingInteractors)
+	for (const auto& ClothingInteractor : UClothingSimulationInteractor::ClothingInteractors)
 	{
 		if (ClothingInteractor.Value)
 		{
@@ -50,3 +52,4 @@ void UClothingSimulationInteractor::Sync(IClothingSimulation* Simulation, ICloth
 		}
 	}
 }
+

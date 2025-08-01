@@ -167,8 +167,11 @@ public:
 
 	static UAssetViewerSettings* Get();
 	
-	/** Saves the config data out to the ini files */
-	void Save();
+	/**
+	 * Saves the config data out to the ini files
+	 * @param bWarnIfFail Should we log a warning if a ini file couldn't be saved.
+	 */
+	void Save(bool bWarnIfFail = true);
 
 	DECLARE_EVENT_OneParam(UAssetViewerSettings, FOnAssetViewerSettingsChangedEvent, const FName&);
 	FOnAssetViewerSettingsChangedEvent& OnAssetViewerSettingsChanged() { return OnAssetViewerSettingsChangedEvent; }
@@ -192,7 +195,7 @@ public:
 	/** Collection of scene profiles */
 	UPROPERTY(EditAnywhere, transient, Category = Settings, meta=(ShowOnlyInnerProperties))
 	TArray<FPreviewSceneProfile> Profiles;
-	
+
 	/** Cached value to determine whether or not a profile was added or removed */
 	int32 NumProfiles;
 protected:
@@ -202,4 +205,8 @@ protected:
 	FOnAssetViewerProfileAddRemovedEvent OnAssetViewerProfileAddRemovedEvent;
 
 	FOnAssetViewerSettingsPostUndo OnAssetViewerSettingsPostUndoEvent;
+
+	// This will enforce mutable CDO of UAssetViewerSettings transacted
+	UPROPERTY(Config)
+	bool bFakeConfigValue_HACK;
 };

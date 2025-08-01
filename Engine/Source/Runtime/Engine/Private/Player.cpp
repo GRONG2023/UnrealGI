@@ -5,8 +5,8 @@
 =============================================================================*/
  
 #include "Engine/Player.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/NetConnection.h"
 #include "EngineUtils.h"
@@ -16,6 +16,8 @@
 
 #include "GameFramework/CheatManager.h"
 #include "GameFramework/GameStateBase.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Player)
 
 //////////////////////////////////////////////////////////////////////////
 // UPlayer
@@ -89,13 +91,20 @@ APlayerController* UPlayer::GetPlayerController(const UWorld* const InWorld) con
 	return nullptr;
 }
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool UPlayer::Exec( UWorld* InWorld, const TCHAR* Cmd,FOutputDevice& Ar)
 {
+	// Route through Exec_Dev and Exec_Editor first
+	if (FExec::Exec(InWorld, Cmd, Ar))
+	{
+		return true;
+	}
+
 	AActor* ExecActor = PlayerController;
 	if (!ExecActor)
 	{
 		UNetConnection* NetConn = Cast<UNetConnection>(this);
-		ExecActor = (NetConn && NetConn->OwningActor) ? NetConn->OwningActor : nullptr;
+		ExecActor = (NetConn && NetConn->OwningActor) ? ToRawPtr(NetConn->OwningActor) : nullptr;
 	}
 
 	if (ExecActor)
@@ -146,6 +155,7 @@ bool UPlayer::Exec( UWorld* InWorld, const TCHAR* Cmd,FOutputDevice& Ar)
 	}
 	return false;
 }
+#endif // UE_ALLOW_EXEC_COMMANDS
 
 void UPlayer::SwitchController(class APlayerController* PC)
 {
@@ -158,4 +168,10 @@ void UPlayer::SwitchController(class APlayerController* PC)
 	// Set the viewport.
 	PC->Player = this;
 	this->PlayerController = PC;
+	
+	ReceivedPlayerController(PC);
+}
+
+void UPlayer::ReceivedPlayerController(class APlayerController* NewController)
+{
 }

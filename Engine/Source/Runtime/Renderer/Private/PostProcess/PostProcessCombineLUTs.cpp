@@ -1,9 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PostProcess/PostProcessCombineLUTs.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "Engine/Texture.h"
 #include "PostProcess/PostProcessTonemap.h"
+#include "PostProcess/SceneFilterRendering.h"
 #include "ScenePrivate.h"
 #include "VolumeRendering.h"
+#include "HDRHelper.h"
+#include "TextureResource.h"
 
 namespace
 {
@@ -28,17 +33,20 @@ TAutoConsoleVariable<float> CVarColorMax(
 	TEXT("Value should be around 1, smaller values darken the highlights, larger values move more colors towards white, Default: 1"),
 	ECVF_RenderThreadSafe);
 
-int32 GLUTSize = 32;
-FAutoConsoleVariableRef CVarLUTSize(
+TAutoConsoleVariable<int32> CVarLUTSize(
 	TEXT("r.LUT.Size"),
-	GLUTSize,
+	32,
 	TEXT("Size of film LUT"),
 	ECVF_RenderThreadSafe);
 
-TAutoConsoleVariable<int32> CVarTonemapperFilm(
-	TEXT("r.TonemapperFilm"),
-	1,
-	TEXT("Use new film tone mapper"),
+TAutoConsoleVariable<int32> CVarColorGrading(
+	TEXT("r.Color.Grading"), 1,
+	TEXT("Controls whether post process settings's color grading settings should be applied."),
+	ECVF_RenderThreadSafe);
+
+TAutoConsoleVariable<int32> CVarLUTUpdateEveryFrame(
+	TEXT("r.LUT.UpdateEveryFrame"), 0,
+	TEXT("Controls whether the tonemapping LUT pass is executed every frame."),
 	ECVF_RenderThreadSafe);
 
 // Including the neutral one at index 0
@@ -64,7 +72,7 @@ struct FColorTransform
 };
 } //! namespace
 
-// false:use 256x16 texture / true:use volume texture (faster, requires geometry shader)
+// false:use 1024x32 texture / true:use volume texture (faster, requires geometry shader)
 // USE_VOLUME_LUT: needs to be the same for C++ and HLSL.
 // Safe to use at pipeline and run time.
 bool PipelineVolumeTextureLUTSupportGuaranteedAtRuntime(EShaderPlatform Platform)
@@ -73,7 +81,7 @@ bool PipelineVolumeTextureLUTSupportGuaranteedAtRuntime(EShaderPlatform Platform
 	return RHIVolumeTextureRenderingSupportGuaranteed(Platform) && (RHISupportsGeometryShaders(Platform) || RHISupportsVertexShaderLayer(Platform));
 }
 
-FColorRemapParameters GetColorRemapParameters()
+FVector3f GetMappingPolynomial()
 {
 	FColorTransform ColorTransform;
 	ColorTransform.MinValue = FMath::Clamp(CVarColorMin.GetValueOnRenderThread(), -10.0f, 10.0f);
@@ -86,41 +94,63 @@ FColorRemapParameters GetColorRemapParameters()
 	float b = 4 * ColorTransform.MidValue - 3 * ColorTransform.MinValue - ColorTransform.MaxValue;
 	float a = ColorTransform.MaxValue - ColorTransform.MinValue - b;
 
+	return FVector3f(a, b, c);
+}
+
+FColorRemapParameters GetColorRemapParameters()
+{
 	FColorRemapParameters Parameters;
-	Parameters.MappingPolynomial = FVector(a, b, c);
+	Parameters.MappingPolynomial = GetMappingPolynomial();
 	return Parameters;
 }
+
+
+BEGIN_SHADER_PARAMETER_STRUCT(FACESTonemapShaderParameters, )
+	SHADER_PARAMETER(FVector4f, ACESMinMaxData) // xy = min ACES/luminance, zw = max ACES/luminance
+	SHADER_PARAMETER(FVector4f, ACESMidData) // x = mid ACES, y = mid luminance, z = mid slope
+	SHADER_PARAMETER(FVector4f, ACESCoefsLow_0) // coeflow 0-3
+	SHADER_PARAMETER(FVector4f, ACESCoefsHigh_0) // coefhigh 0-3
+	SHADER_PARAMETER(float, ACESCoefsLow_4)
+	SHADER_PARAMETER(float, ACESCoefsHigh_4)
+	SHADER_PARAMETER(float, ACESSceneColorMultiplier)
+	SHADER_PARAMETER(float, ACESGamutCompression)
+END_SHADER_PARAMETER_STRUCT()
+
 
 BEGIN_SHADER_PARAMETER_STRUCT(FCombineLUTParameters, )
 	SHADER_PARAMETER_TEXTURE_ARRAY(Texture2D, Textures, [GMaxLUTBlendCount])
 	SHADER_PARAMETER_SAMPLER_ARRAY(SamplerState, Samplers, [GMaxLUTBlendCount])
-	SHADER_PARAMETER_ARRAY(float, LUTWeights, [GMaxLUTBlendCount])
-	SHADER_PARAMETER(FVector4, OverlayColor)
-	SHADER_PARAMETER(FVector, ColorScale)
-	SHADER_PARAMETER(FVector4, ColorSaturation)
-	SHADER_PARAMETER(FVector4, ColorContrast)
-	SHADER_PARAMETER(FVector4, ColorGamma)
-	SHADER_PARAMETER(FVector4, ColorGain)
-	SHADER_PARAMETER(FVector4, ColorOffset)
-	SHADER_PARAMETER(FVector4, ColorSaturationShadows)
-	SHADER_PARAMETER(FVector4, ColorContrastShadows)
-	SHADER_PARAMETER(FVector4, ColorGammaShadows)
-	SHADER_PARAMETER(FVector4, ColorGainShadows)
-	SHADER_PARAMETER(FVector4, ColorOffsetShadows)
-	SHADER_PARAMETER(FVector4, ColorSaturationMidtones)
-	SHADER_PARAMETER(FVector4, ColorContrastMidtones)
-	SHADER_PARAMETER(FVector4, ColorGammaMidtones)
-	SHADER_PARAMETER(FVector4, ColorGainMidtones)
-	SHADER_PARAMETER(FVector4, ColorOffsetMidtones)
-	SHADER_PARAMETER(FVector4, ColorSaturationHighlights)
-	SHADER_PARAMETER(FVector4, ColorContrastHighlights)
-	SHADER_PARAMETER(FVector4, ColorGammaHighlights)
-	SHADER_PARAMETER(FVector4, ColorGainHighlights)
-	SHADER_PARAMETER(FVector4, ColorOffsetHighlights)
+	SHADER_PARAMETER_SCALAR_ARRAY(float, LUTWeights, [GMaxLUTBlendCount])
+	SHADER_PARAMETER_STRUCT_REF(FWorkingColorSpaceShaderParameters, WorkingColorSpace)
+	SHADER_PARAMETER_STRUCT_INCLUDE(FACESTonemapShaderParameters, ACESTonemapParameters)
+	SHADER_PARAMETER(FVector4f, OverlayColor)
+	SHADER_PARAMETER(FVector3f, ColorScale)
+	SHADER_PARAMETER(FVector4f, ColorSaturation)
+	SHADER_PARAMETER(FVector4f, ColorContrast)
+	SHADER_PARAMETER(FVector4f, ColorGamma)
+	SHADER_PARAMETER(FVector4f, ColorGain)
+	SHADER_PARAMETER(FVector4f, ColorOffset)
+	SHADER_PARAMETER(FVector4f, ColorSaturationShadows)
+	SHADER_PARAMETER(FVector4f, ColorContrastShadows)
+	SHADER_PARAMETER(FVector4f, ColorGammaShadows)
+	SHADER_PARAMETER(FVector4f, ColorGainShadows)
+	SHADER_PARAMETER(FVector4f, ColorOffsetShadows)
+	SHADER_PARAMETER(FVector4f, ColorSaturationMidtones)
+	SHADER_PARAMETER(FVector4f, ColorContrastMidtones)
+	SHADER_PARAMETER(FVector4f, ColorGammaMidtones)
+	SHADER_PARAMETER(FVector4f, ColorGainMidtones)
+	SHADER_PARAMETER(FVector4f, ColorOffsetMidtones)
+	SHADER_PARAMETER(FVector4f, ColorSaturationHighlights)
+	SHADER_PARAMETER(FVector4f, ColorContrastHighlights)
+	SHADER_PARAMETER(FVector4f, ColorGammaHighlights)
+	SHADER_PARAMETER(FVector4f, ColorGainHighlights)
+	SHADER_PARAMETER(FVector4f, ColorOffsetHighlights)
+	SHADER_PARAMETER(float, LUTSize)
 	SHADER_PARAMETER(float, WhiteTemp)
 	SHADER_PARAMETER(float, WhiteTint)
 	SHADER_PARAMETER(float, ColorCorrectionShadowsMax)
 	SHADER_PARAMETER(float, ColorCorrectionHighlightsMin)
+	SHADER_PARAMETER(float, ColorCorrectionHighlightsMax)
 	SHADER_PARAMETER(float, BlueCorrection)
 	SHADER_PARAMETER(float, ExpandGamut)
 	SHADER_PARAMETER(float, ToneCurveAmount)
@@ -129,106 +159,151 @@ BEGIN_SHADER_PARAMETER_STRUCT(FCombineLUTParameters, )
 	SHADER_PARAMETER(float, FilmShoulder)
 	SHADER_PARAMETER(float, FilmBlackClip)
 	SHADER_PARAMETER(float, FilmWhiteClip)
-	SHADER_PARAMETER(uint32, bIsTemperatureWhiteBalance)
 	SHADER_PARAMETER(uint32, bUseMobileTonemapper)
+	SHADER_PARAMETER(uint32, bIsTemperatureWhiteBalance)
 	SHADER_PARAMETER_STRUCT_INCLUDE(FColorRemapParameters, ColorRemap)
 	SHADER_PARAMETER_STRUCT_INCLUDE(FTonemapperOutputDeviceParameters, OutputDevice)
-	SHADER_PARAMETER_STRUCT_INCLUDE(FMobileFilmTonemapParameters, MobileFilmTonemap)
 END_SHADER_PARAMETER_STRUCT()
 
-void GetCombineLUTParameters(
-	FCombineLUTParameters& Parameters,
-	const FViewInfo& View,
-	const FTexture* const* Textures,
-	const float* Weights,
-	uint32 BlendCount)
+#define UPDATE_CACHE_SETTINGS(DestParameters, ParamValue, bOutHasChanged) \
+if(DestParameters != (ParamValue)) \
+{ \
+	DestParameters = (ParamValue); \
+	bOutHasChanged = true; \
+}
+
+struct FCachedLUTSettings
 {
-	check(Textures);
-	check(Weights);
+	uint32 UniqueID = 0;
+	EShaderPlatform ShaderPlatform = GMaxRHIShaderPlatform;
+	FCombineLUTParameters Parameters;
+	FWorkingColorSpaceShaderParameters WorkingColorSpaceShaderParameters;
+	bool bUseCompute = false;
 
-	const FPostProcessSettings& Settings = View.FinalPostProcessSettings;
-	const FSceneViewFamily& ViewFamily = *(View.Family);
-
-	for (uint32 BlendIndex = 0; BlendIndex < BlendCount; ++BlendIndex)
+	bool UpdateCachedValues(const FViewInfo& View, const FTexture* const* Textures, const float* Weights, uint32 BlendCount)
 	{
-		// Neutral texture occupies the first slot and doesn't actually need to be set.
-		if (BlendIndex != 0)
-		{
-			check(Textures[BlendIndex]);
+		bool bHasChanged = false;
+		GetCombineLUTParameters(View, Textures, Weights, BlendCount, bHasChanged);
+		UPDATE_CACHE_SETTINGS(UniqueID, View.State ? View.State->GetViewKey() : 0, bHasChanged);
+		UPDATE_CACHE_SETTINGS(ShaderPlatform, View.GetShaderPlatform(), bHasChanged);
+		UPDATE_CACHE_SETTINGS(bUseCompute, View.bUseComputePasses, bHasChanged);
 
-			// Don't use texture asset sampler as it might have anisotropic filtering enabled
-			Parameters.Textures[BlendIndex] = Textures[BlendIndex]->TextureRHI;
-			Parameters.Samplers[BlendIndex] = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp, 0, 1>::GetRHI();
+		const FWorkingColorSpaceShaderParameters* InWorkingColorSpaceShaderParameters = reinterpret_cast<const FWorkingColorSpaceShaderParameters*>(GDefaultWorkingColorSpaceUniformBuffer.GetContents());
+		if (InWorkingColorSpaceShaderParameters)
+		{
+			UPDATE_CACHE_SETTINGS(WorkingColorSpaceShaderParameters.ToXYZ, InWorkingColorSpaceShaderParameters->ToXYZ, bHasChanged);
+			UPDATE_CACHE_SETTINGS(WorkingColorSpaceShaderParameters.FromXYZ, InWorkingColorSpaceShaderParameters->FromXYZ, bHasChanged);
+			UPDATE_CACHE_SETTINGS(WorkingColorSpaceShaderParameters.ToAP1, InWorkingColorSpaceShaderParameters->ToAP1, bHasChanged);
+			UPDATE_CACHE_SETTINGS(WorkingColorSpaceShaderParameters.FromAP1, InWorkingColorSpaceShaderParameters->FromAP1, bHasChanged);
+			UPDATE_CACHE_SETTINGS(WorkingColorSpaceShaderParameters.ToAP0, InWorkingColorSpaceShaderParameters->ToAP0, bHasChanged);
+			UPDATE_CACHE_SETTINGS(WorkingColorSpaceShaderParameters.bIsSRGB, InWorkingColorSpaceShaderParameters->bIsSRGB, bHasChanged);
 		}
 
-		Parameters.LUTWeights[BlendIndex] = Weights[BlendIndex];
+		return bHasChanged;
 	}
+	
+	void GetCombineLUTParameters(
+		const FViewInfo& View,
+		const FTexture* const* Textures,
+		const float* Weights,
+		uint32 BlendCount,
+		bool& bHasChanged)
+	{
+		check(Textures);
+		check(Weights);
 
-	Parameters.ColorScale = FVector4(View.ColorScale);
-	Parameters.OverlayColor = View.OverlayColor;
-	Parameters.ColorRemap = GetColorRemapParameters();
+		static const FPostProcessSettings DefaultSettings;
 
-	// White balance
-	Parameters.bIsTemperatureWhiteBalance = Settings.TemperatureType == ETemperatureMethod::TEMP_WhiteBalance;
-	Parameters.WhiteTemp = Settings.WhiteTemp;
-	Parameters.WhiteTint = Settings.WhiteTint;
+		const FSceneViewFamily& ViewFamily = *(View.Family);
+		const FPostProcessSettings& Settings = (
+			ViewFamily.EngineShowFlags.ColorGrading && CVarColorGrading.GetValueOnRenderThread() != 0)
+			? View.FinalPostProcessSettings
+			: DefaultSettings;
 
-	// Color grade
-	Parameters.ColorSaturation = Settings.ColorSaturation;
-	Parameters.ColorContrast = Settings.ColorContrast;
-	Parameters.ColorGamma = Settings.ColorGamma;
-	Parameters.ColorGain = Settings.ColorGain;
-	Parameters.ColorOffset = Settings.ColorOffset;
+		for (uint32 BlendIndex = 0; BlendIndex < BlendCount; ++BlendIndex)
+		{
+			// Neutral texture occupies the first slot and doesn't actually need to be set.
+			if (BlendIndex != 0)
+			{
+				check(Textures[BlendIndex]);
 
-	Parameters.ColorSaturationShadows = Settings.ColorSaturationShadows;
-	Parameters.ColorContrastShadows = Settings.ColorContrastShadows;
-	Parameters.ColorGammaShadows = Settings.ColorGammaShadows;
-	Parameters.ColorGainShadows = Settings.ColorGainShadows;
-	Parameters.ColorOffsetShadows = Settings.ColorOffsetShadows;
+				// Don't use texture asset sampler as it might have anisotropic filtering enabled
+				UPDATE_CACHE_SETTINGS(Parameters.Textures[BlendIndex], Textures[BlendIndex]->TextureRHI, bHasChanged);
+				Parameters.Samplers[BlendIndex] = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp, 0, 1>::GetRHI();
+			}
 
-	Parameters.ColorSaturationMidtones = Settings.ColorSaturationMidtones;
-	Parameters.ColorContrastMidtones = Settings.ColorContrastMidtones;
-	Parameters.ColorGammaMidtones = Settings.ColorGammaMidtones;
-	Parameters.ColorGainMidtones = Settings.ColorGainMidtones;
-	Parameters.ColorOffsetMidtones = Settings.ColorOffsetMidtones;
+			UPDATE_CACHE_SETTINGS(GET_SCALAR_ARRAY_ELEMENT(Parameters.LUTWeights, BlendIndex), Weights[BlendIndex], bHasChanged);
+		}
 
-	Parameters.ColorSaturationHighlights = Settings.ColorSaturationHighlights;
-	Parameters.ColorContrastHighlights = Settings.ColorContrastHighlights;
-	Parameters.ColorGammaHighlights = Settings.ColorGammaHighlights;
-	Parameters.ColorGainHighlights = Settings.ColorGainHighlights;
-	Parameters.ColorOffsetHighlights = Settings.ColorOffsetHighlights;
+		Parameters.WorkingColorSpace = GDefaultWorkingColorSpaceUniformBuffer.GetUniformBufferRef();
 
-	Parameters.ColorCorrectionShadowsMax = Settings.ColorCorrectionShadowsMax;
-	Parameters.ColorCorrectionHighlightsMin = Settings.ColorCorrectionHighlightsMin;
+		FACESTonemapParams TonemapperParams;
+		GetACESTonemapParameters(TonemapperParams);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESMinMaxData, TonemapperParams.ACESMinMaxData, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESMidData, TonemapperParams.ACESMidData, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESCoefsLow_0, TonemapperParams.ACESCoefsLow_0, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESCoefsHigh_0, TonemapperParams.ACESCoefsHigh_0, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESCoefsLow_4, TonemapperParams.ACESCoefsLow_4, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESCoefsHigh_4, TonemapperParams.ACESCoefsHigh_4, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESSceneColorMultiplier, TonemapperParams.ACESSceneColorMultiplier, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESGamutCompression, TonemapperParams.ACESGamutCompression, bHasChanged);
 
-	Parameters.BlueCorrection = Settings.BlueCorrection;
-	Parameters.ExpandGamut = Settings.ExpandGamut;
-	Parameters.ToneCurveAmount = Settings.ToneCurveAmount;
+		UPDATE_CACHE_SETTINGS(Parameters.ColorScale, FVector3f(View.ColorScale), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.OverlayColor, FVector4f(View.OverlayColor), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorRemap.MappingPolynomial, GetMappingPolynomial(), bHasChanged);
 
-	Parameters.FilmSlope = Settings.FilmSlope;
-	Parameters.FilmToe = Settings.FilmToe;
-	Parameters.FilmShoulder = Settings.FilmShoulder;
-	Parameters.FilmBlackClip = Settings.FilmBlackClip;
-	Parameters.FilmWhiteClip = Settings.FilmWhiteClip;
-	Parameters.bUseMobileTonemapper = CVarTonemapperFilm.GetValueOnRenderThread() == 0;
+		// White balance
+		UPDATE_CACHE_SETTINGS(Parameters.bIsTemperatureWhiteBalance, uint32(Settings.TemperatureType == ETemperatureMethod::TEMP_WhiteBalance), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.LUTSize, (float)CVarLUTSize->GetInt(), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.WhiteTemp, Settings.WhiteTemp, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.WhiteTint, Settings.WhiteTint, bHasChanged);
 
+		// Color grade
+		UPDATE_CACHE_SETTINGS(Parameters.ColorSaturation, FVector4f(Settings.ColorSaturation), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorContrast, FVector4f(Settings.ColorContrast), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGamma, FVector4f(Settings.ColorGamma), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGain, FVector4f(Settings.ColorGain), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorOffset, FVector4f(Settings.ColorOffset), bHasChanged);
 
-	Parameters.MobileFilmTonemap = GetMobileFilmTonemapParameters(
-		Settings,
-		/* UseColorMatrix = */ true,
-		/* UseShadowTint = */ true,
-		/* UseContrast = */ true);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorSaturationShadows, FVector4f(Settings.ColorSaturationShadows), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorContrastShadows, FVector4f(Settings.ColorContrastShadows), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGammaShadows, FVector4f(Settings.ColorGammaShadows), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGainShadows, FVector4f(Settings.ColorGainShadows), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorOffsetShadows, FVector4f(Settings.ColorOffsetShadows), bHasChanged);
 
-	Parameters.bUseMobileTonemapper = CVarTonemapperFilm.GetValueOnRenderThread() == 0;
+		UPDATE_CACHE_SETTINGS(Parameters.ColorSaturationMidtones, FVector4f(Settings.ColorSaturationMidtones), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorContrastMidtones, FVector4f(Settings.ColorContrastMidtones), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGammaMidtones, FVector4f(Settings.ColorGammaMidtones), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGainMidtones, FVector4f(Settings.ColorGainMidtones), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorOffsetMidtones, FVector4f(Settings.ColorOffsetMidtones), bHasChanged);
 
-	Parameters.OutputDevice = GetTonemapperOutputDeviceParameters(ViewFamily);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorSaturationHighlights, FVector4f(Settings.ColorSaturationHighlights), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorContrastHighlights, FVector4f(Settings.ColorContrastHighlights), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGammaHighlights, FVector4f(Settings.ColorGammaHighlights), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorGainHighlights, FVector4f(Settings.ColorGainHighlights), bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorOffsetHighlights, FVector4f(Settings.ColorOffsetHighlights), bHasChanged);
 
-	Parameters.MobileFilmTonemap = GetMobileFilmTonemapParameters(
-		Settings,
-		/* UseColorMatrix = */ true,
-		/* UseShadowTint = */ true,
-		/* UseContrast = */ true);
-}
+		UPDATE_CACHE_SETTINGS(Parameters.ColorCorrectionShadowsMax, Settings.ColorCorrectionShadowsMax, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorCorrectionHighlightsMin, Settings.ColorCorrectionHighlightsMin, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ColorCorrectionHighlightsMax, Settings.ColorCorrectionHighlightsMax, bHasChanged);
+
+		UPDATE_CACHE_SETTINGS(Parameters.BlueCorrection, Settings.BlueCorrection, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ExpandGamut, Settings.ExpandGamut, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.ToneCurveAmount, Settings.ToneCurveAmount, bHasChanged);
+
+		UPDATE_CACHE_SETTINGS(Parameters.FilmSlope, Settings.FilmSlope, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.FilmToe, Settings.FilmToe, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.FilmShoulder, Settings.FilmShoulder, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.FilmBlackClip, Settings.FilmBlackClip, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.FilmWhiteClip, Settings.FilmWhiteClip, bHasChanged);
+
+		FTonemapperOutputDeviceParameters TonemapperOutputDeviceParameters = GetTonemapperOutputDeviceParameters(ViewFamily);
+		UPDATE_CACHE_SETTINGS(Parameters.OutputDevice.InverseGamma, TonemapperOutputDeviceParameters.InverseGamma, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.OutputDevice.OutputDevice, TonemapperOutputDeviceParameters.OutputDevice, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.OutputDevice.OutputGamut, TonemapperOutputDeviceParameters.OutputGamut, bHasChanged);
+		UPDATE_CACHE_SETTINGS(Parameters.OutputDevice.OutputMaxLuminance, TonemapperOutputDeviceParameters.OutputMaxLuminance, bHasChanged);
+	}
+};
 
 class FLUTBlenderShader : public FGlobalShader
 {
@@ -237,7 +312,8 @@ public:
 
 	class FBlendCount : SHADER_PERMUTATION_RANGE_INT("BLENDCOUNT", 1, 5);
 	class FSkipTemperature : SHADER_PERMUTATION_BOOL("SKIP_TEMPERATURE");
-	using FPermutationDomain = TShaderPermutationDomain<FBlendCount, FSkipTemperature>;
+	class FOutputDeviceSRGB : SHADER_PERMUTATION_BOOL("OUTPUT_DEVICE_SRGB");
+	using FPermutationDomain = TShaderPermutationDomain<FBlendCount, FSkipTemperature, FOutputDeviceSRGB>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -286,7 +362,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FCombineLUTParameters, CombineLUT)
-		SHADER_PARAMETER(FVector2D, OutputExtentInverse)
+		SHADER_PARAMETER(FVector2f, OutputExtentInverse)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWOutputTexture)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -329,7 +405,7 @@ uint32 GenerateFinalTable(const FFinalPostProcessSettings& Settings, const FText
 
 			{
 				UTexture* LUTTexture = Settings.ContributingLUTs[InputIndex].LUTTexture;
-				FTexture* Internal = LUTTexture ? LUTTexture->Resource : nullptr;
+				FTexture* Internal = LUTTexture ? LUTTexture->GetResource() : nullptr;
 				for (uint32 OutputIndex = 0; OutputIndex < LocalCount; ++OutputIndex)
 				{
 					if (Internal == OutTextures[OutputIndex])
@@ -370,7 +446,7 @@ uint32 GenerateFinalTable(const FFinalPostProcessSettings& Settings, const FText
 		}
 
 		UTexture* BestLUTTexture = Settings.ContributingLUTs[BestIndex].LUTTexture;
-		FTexture* BestInternal = BestLUTTexture ? BestLUTTexture->Resource : nullptr;
+		FTexture* BestInternal = BestLUTTexture ? BestLUTTexture->GetResource() : nullptr;
 
 		OutTextures[LocalCount] = BestInternal;
 		OutWeights[LocalCount] = BestWeight;
@@ -399,6 +475,8 @@ uint32 GenerateFinalTable(const FFinalPostProcessSettings& Settings, const FText
 
 FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& View)
 {
+	static FCachedLUTSettings CachedLUTSettings;
+
 	const FSceneViewFamily& ViewFamily = *(View.Family);
 	const FTexture* LocalTextures[GMaxLUTBlendCount];
 	float LocalWeights[GMaxLUTBlendCount];
@@ -420,23 +498,30 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 	const bool bUseFloatOutput = ViewFamily.SceneCaptureSource == SCS_FinalColorHDR || ViewFamily.SceneCaptureSource == SCS_FinalToneCurveHDR;
 
 	// Attempt to register the persistent view LUT texture.
+	const int32 LUTSize = CVarLUTSize->GetInt();
 	FRDGTextureRef OutputTexture = TryRegisterExternalTexture(GraphBuilder,
-		View.GetTonemappingLUT(GraphBuilder.RHICmdList, GLUTSize, bUseVolumeTextureLUT, bUseComputePass, bUseFloatOutput));
+		View.GetTonemappingLUT(GraphBuilder.RHICmdList, LUTSize, bUseVolumeTextureLUT, bUseComputePass, bUseFloatOutput));
 
 	View.SetValidTonemappingLUT();
+
+	const bool bHasChanged = CachedLUTSettings.UpdateCachedValues(View, LocalTextures, LocalWeights, LocalCount);
+	if (!bHasChanged && OutputTexture && CVarLUTUpdateEveryFrame.GetValueOnRenderThread() == 0)
+	{
+		return OutputTexture;
+	}
 
 	// View doesn't support a persistent LUT, so create a temporary one.
 	if (!OutputTexture)
 	{
 		OutputTexture = GraphBuilder.CreateTexture(
-			Translate(FSceneViewState::CreateLUTRenderTarget(GLUTSize, bUseVolumeTextureLUT, bUseComputePass, bUseFloatOutput)),
+			Translate(FSceneViewState::CreateLUTRenderTarget(LUTSize, bUseVolumeTextureLUT, bUseComputePass, bUseFloatOutput)),
 			TEXT("CombineLUT"));
 	}
 
 	check(OutputTexture);
 
-	// For a 3D texture, the viewport is 16x16 (per slice); for a 2D texture, it's unwrapped to 256x16.
-	const FIntPoint OutputViewSize(bUseVolumeTextureLUT ? GLUTSize : GLUTSize * GLUTSize, GLUTSize);
+	// For a 3D texture, the viewport defaults to 32x32 (per slice); for a 2D texture, it's unwrapped to 1024x32.
+	const FIntPoint OutputViewSize(bUseVolumeTextureLUT ? LUTSize : LUTSize * LUTSize, LUTSize);
 
 	FLUTBlenderShader::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FLUTBlenderShader::FBlendCount>(LocalCount);
@@ -447,13 +532,15 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 	if (bUseComputePass)
 	{
 		FLUTBlenderCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FLUTBlenderCS::FParameters>();
-		GetCombineLUTParameters(PassParameters->CombineLUT, View, LocalTextures, LocalWeights, LocalCount);
-		PassParameters->OutputExtentInverse = FVector2D(1.0f, 1.0f) / FVector2D(OutputViewSize);
+		PassParameters->CombineLUT = CachedLUTSettings.Parameters;
+		PassParameters->OutputExtentInverse = FVector2f(1.0f, 1.0f) / FVector2f(OutputViewSize);
 		PassParameters->RWOutputTexture = GraphBuilder.CreateUAV(OutputTexture);
 
 		const bool ShouldSkipTemperature = FMath::IsNearlyEqual(PassParameters->CombineLUT.WhiteTemp, DefaultTemperature) && FMath::IsNearlyEqual(PassParameters->CombineLUT.WhiteTint, DefaultTint);
+		const bool bOutputDeviceSRGB = (PassParameters->CombineLUT.OutputDevice.OutputDevice == (uint32)EDisplayOutputFormat::SDR_sRGB);
 
 		PermutationVector.Set<FLUTBlenderShader::FSkipTemperature>(ShouldSkipTemperature);
+		PermutationVector.Set<FLUTBlenderShader::FOutputDeviceSRGB>(bOutputDeviceSRGB);
 		TShaderMapRef<FLUTBlenderCS> ComputeShader(View.ShaderMap, PermutationVector);
 
 		const uint32 GroupSizeXY = FMath::DivideAndRoundUp(OutputViewSize.X, FLUTBlenderCS::GroupSize);
@@ -461,7 +548,7 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,
-			RDG_EVENT_NAME("CombineLUTs (CS)"),
+			RDG_EVENT_NAME("CombineLUTs %d (CS)", LUTSize),
 			ComputeShader,
 			PassParameters,
 			FIntVector(GroupSizeXY, GroupSizeXY, GroupSizeZ));
@@ -469,19 +556,21 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 	else
 	{
 		FLUTBlenderPS::FParameters* PassParameters = GraphBuilder.AllocParameters<FLUTBlenderPS::FParameters>();
-		GetCombineLUTParameters(PassParameters->CombineLUT, View, LocalTextures, LocalWeights, LocalCount);
+		PassParameters->CombineLUT = CachedLUTSettings.Parameters;
 		PassParameters->RenderTargets[0] = FRenderTargetBinding(OutputTexture, ERenderTargetLoadAction::ENoAction);
 
 		const bool ShouldSkipTemperature = FMath::IsNearlyEqual(PassParameters->CombineLUT.WhiteTemp, DefaultTemperature) && FMath::IsNearlyEqual(PassParameters->CombineLUT.WhiteTint, DefaultTint);
+		const bool bOutputDeviceSRGB = (PassParameters->CombineLUT.OutputDevice.OutputDevice == (uint32)EDisplayOutputFormat::SDR_sRGB);
 
 		PermutationVector.Set<FLUTBlenderShader::FSkipTemperature>(ShouldSkipTemperature);
+		PermutationVector.Set<FLUTBlenderShader::FOutputDeviceSRGB>(bOutputDeviceSRGB);
 		TShaderMapRef<FLUTBlenderPS> PixelShader(View.ShaderMap, PermutationVector);
 
 		GraphBuilder.AddPass(
-			RDG_EVENT_NAME("CombineLUTS (PS)"),
+			RDG_EVENT_NAME("CombineLUTS %d (PS)", LUTSize),
 			PassParameters,
 			ERDGPassFlags::Raster,
-			[&View, PixelShader, PassParameters, bUseVolumeTextureLUT] (FRHICommandList& RHICmdList)
+			[&View, PixelShader, PassParameters, bUseVolumeTextureLUT, LUTSize] (FRHICommandList& RHICmdList)
 		{
 			FGraphicsPipelineStateInitializer GraphicsPSOInit;
 			RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
@@ -491,7 +580,7 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 
 			if (bUseVolumeTextureLUT)
 			{
-				const FVolumeBounds VolumeBounds(GLUTSize);
+				const FVolumeBounds VolumeBounds(LUTSize);
 
 				TShaderMapRef<FWriteToSliceVS> VertexShader(View.ShaderMap);
 				TOptionalShaderMapRef<FWriteToSliceGS> GeometryShader(View.ShaderMap);
@@ -499,12 +588,11 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 				GraphicsPSOInit.PrimitiveType = PT_TriangleStrip;
 				GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GScreenVertexDeclaration.VertexDeclarationRHI;
 				GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
-				GraphicsPSOInit.BoundShaderState.GeometryShaderRHI = GeometryShader.GetGeometryShader();
+				GraphicsPSOInit.BoundShaderState.SetGeometryShader(GeometryShader.GetGeometryShader());
 				GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
-				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
-				VertexShader->SetParameters(RHICmdList, VolumeBounds, FIntVector(VolumeBounds.MaxX - VolumeBounds.MinX));
-
+				SetShaderParametersLegacyVS(RHICmdList, VertexShader, VolumeBounds, FIntVector(VolumeBounds.MaxX - VolumeBounds.MinX));
 				SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
 
 				RasterizeToVolumeTexture(RHICmdList, VolumeBounds);
@@ -517,18 +605,18 @@ FRDGTextureRef AddCombineLUTPass(FRDGBuilder& GraphBuilder, const FViewInfo& Vie
 				GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GFilterVertexDeclaration.VertexDeclarationRHI;
 				GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 				GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
-				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
+				SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
 
 				SetShaderParameters(RHICmdList, PixelShader, PixelShader.GetPixelShader(), *PassParameters);
 
 				DrawRectangle(
 					RHICmdList,
 					0, 0,										// XY
-					GLUTSize * GLUTSize, GLUTSize,				// SizeXY
+					LUTSize * LUTSize, LUTSize,				// SizeXY
 					0, 0,										// UV
-					GLUTSize * GLUTSize, GLUTSize,				// SizeUV
-					FIntPoint(GLUTSize * GLUTSize, GLUTSize),	// TargetSize
-					FIntPoint(GLUTSize * GLUTSize, GLUTSize),	// TextureSize
+					LUTSize * LUTSize, LUTSize,				// SizeUV
+					FIntPoint(LUTSize * LUTSize, LUTSize),	// TargetSize
+					FIntPoint(LUTSize * LUTSize, LUTSize),	// TextureSize
 					VertexShader,
 					EDRF_UseTriangleOptimization);
 			}

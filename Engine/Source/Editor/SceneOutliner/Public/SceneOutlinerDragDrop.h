@@ -2,153 +2,203 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "SceneOutlinerFwd.h"
-#include "Layout/Visibility.h"
+#include "DragAndDrop/CompositeDragDropOp.h"
+#include "HAL/Platform.h"
+#include "ISceneOutlinerTreeItem.h"
 #include "Input/DragAndDrop.h"
-#include "DragAndDrop/DecoratedDragDropOp.h"
-#include "DragAndDrop/ActorDragDropGraphEdOp.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "SceneOutlinerFwd.h"
+#include "Templates/Function.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
 
-namespace SceneOutliner
+class SWidget;
+struct FSlateBrush;
+struct ISceneOutlinerTreeItem;
+
+/** Enum to describe the compatibility of a drag drop operation */
+enum class ESceneOutlinerDropCompatibility : uint8
 {
-	/** Consilidated drag/drop information parsed for the scene outliner */
-	struct FDragDropPayload
-	{
-		/** Default constructor, resulting in unset contents */
-		FDragDropPayload();
+	Compatible,
+	Incompatible,
+	MultipleSelection_Incompatible,
+	CompatibleAttach,
+	IncompatibleGeneric,
+	CompatibleGeneric,
+	CompatibleMultipleAttach,
+	IncompatibleMultipleAttach,
+	CompatibleDetach,
+	CompatibleMultipleDetach,
+};
 
-		/** Populate this payload from an array of tree items */
-		template<typename TItem>
-		FDragDropPayload(const TArray<TItem>& InDraggedItems)
+/** Consolidated drag/drop with parsing functions for the scene outliner */
+struct FSceneOutlinerDragDropPayload
+{
+	/** Default constructor, resulting in unset contents */
+	FSceneOutlinerDragDropPayload(const FDragDropOperation& InOperation = FDragDropOperation())
+	: SourceOperation(InOperation)
+	{
+	}
+
+	/** Populate this payload from an array of tree items */
+	template<typename TreeType>
+	FSceneOutlinerDragDropPayload(const TArray<TreeType>& InDraggedItems, const FDragDropOperation& InOperation = FDragDropOperation())
+	: SourceOperation(InOperation)
+	{
+		for (const auto& Item : InDraggedItems)
 		{
-			for (const auto& Item : InDraggedItems)
+			DraggedItems.Add(Item);
+		}
+	}
+
+	/** Returns true if the payload has an item of a specified type */
+	template <typename TreeType>
+	bool Has() const
+	{
+		for (const TWeakPtr<ISceneOutlinerTreeItem>& Item : DraggedItems)
+		{
+			if (const auto ItemPtr = Item.Pin())
 			{
-				Item->PopulateDragDropPayload(*this);
+				if (ItemPtr->IsA<TreeType>())
+				{
+					return true;
+				}
 			}
 		}
+		return false;
+	}
 
-		/** Optional array of dragged folders */
-		TOptional<FFolderPaths> Folders;
-
-		/** Optional array of dragged actors */
-		TOptional<FActorArray> Actors;
-
-		/** Optional array of dragged sub-component Items */
-		TOptional<FSubComponentItemArray> SubComponents;
-
-		/**
-		 *	Parse a drag operation into our list of actors and folders
-		 *	@return true if the operation is viable for the sceneoutliner to process, false otherwise
-		 */
-		bool ParseDrag(const FDragDropOperation& Operation);
-	};
-	
-	/** Construct a new Drag and drop operation for a scene outliner */
-	TSharedPtr<FDragDropOperation> CreateDragDropOperation(const TArray<FTreeItemPtr>& InTreeItems);
-
-	/** Struct used for validation of a drag/drop operation in the scene outliner */
-	struct FDragValidationInfo
+	/** Return an array of all tree items in the payload which are of a specified type */
+	template <typename TreeType>
+	TArray<TreeType*> Get() const
 	{
-		/** The tooltip type to display on the operation */
-		FActorDragDropGraphEdOp::ToolTipTextType TooltipType;
-
-		/** The tooltip text to display on the operation */
-		FText ValidationText;
-
-		/** Construct this validation information out of a tootip type and some text */
-		FDragValidationInfo(const FActorDragDropGraphEdOp::ToolTipTextType InTooltipType, const FText InValidationText)
-			: TooltipType(InTooltipType)
-			, ValidationText(InValidationText)
-		{}
-
-		/** Return a generic invalid result */
-		static FDragValidationInfo Invalid()
+		TArray<TreeType*> Result;
+		for (const TWeakPtr<ISceneOutlinerTreeItem>& Item : DraggedItems)
 		{
-			return FDragValidationInfo(FActorDragDropGraphEdOp::ToolTip_IncompatibleGeneric, FText());
+			if (const auto ItemPtr = Item.Pin())
+			{
+				if (TreeType* CastedItem = ItemPtr->CastTo<TreeType>())
+				{
+					Result.Add(CastedItem);
+				}
+			}
 		}
+		return Result;
+	}
+
+	/** Apply a function to each item in the payload */
+	template <typename TreeType>
+	void ForEachItem(TFunctionRef<void(TreeType&)> Func) const
+	{
+		for (const TWeakPtr<ISceneOutlinerTreeItem>& Item : DraggedItems)
+		{
+			if (const auto ItemPtr = Item.Pin())
+			{
+				if (TreeType* CastedItem = ItemPtr->CastTo<TreeType>())
+				{
+					Func(*CastedItem);
+				}
+			}
+		}
+	}
 		
-		/** @return true if this operation is valid, false otheriwse */ 
-		bool IsValid() const
+	/** Use a selector to retrieve an array of a specific data type from the items in the payload */
+	template <typename DataType>
+	TArray<DataType> GetData(TFunctionRef<bool(TWeakPtr<ISceneOutlinerTreeItem>, DataType&)> Selector) const
+	{
+		TArray<DataType> Result;
+		for (TWeakPtr<ISceneOutlinerTreeItem>& Item : DraggedItems)
 		{
-			switch(TooltipType)
+			DataType Data;
+			if (Selector(Item, Data))
 			{
-			case FActorDragDropGraphEdOp::ToolTip_Compatible:
-			case FActorDragDropGraphEdOp::ToolTip_CompatibleAttach:
-			case FActorDragDropGraphEdOp::ToolTip_CompatibleGeneric:
-			case FActorDragDropGraphEdOp::ToolTip_CompatibleMultipleAttach:
-			case FActorDragDropGraphEdOp::ToolTip_CompatibleDetach:
-			case FActorDragDropGraphEdOp::ToolTip_CompatibleMultipleDetach:
-				return true;
-			default:
-				return false;
+				Result.Add(Data);
 			}
 		}
-	};
+		return Result;
+	}
 
-	/* A drag/drop operation when dragging folders in the scene outliner */
-	struct FFolderDragDropOp: public FDecoratedDragDropOp
+	/** List of all dragged items */
+	mutable TArray<TWeakPtr<ISceneOutlinerTreeItem>> DraggedItems;
+
+	/** The source FDragDropOperation */
+	const FDragDropOperation& SourceOperation;
+};
+
+/** Struct used for validation of a drag/drop operation in the scene outliner */
+struct FSceneOutlinerDragValidationInfo
+{
+	/** The tooltip type to display on the operation */
+	ESceneOutlinerDropCompatibility CompatibilityType;
+
+	/** The tooltip text to display on the operation */
+	FText ValidationText;
+
+	/** Construct this validation information out of a tootip type and some text */
+	FSceneOutlinerDragValidationInfo(const ESceneOutlinerDropCompatibility InCompatibilityType, const FText InValidationText)
+		: CompatibilityType(InCompatibilityType)
+		, ValidationText(InValidationText)
+	{}
+
+	/** Return a generic invalid result */
+	static FSceneOutlinerDragValidationInfo Invalid()
 	{
-		DRAG_DROP_OPERATOR_TYPE(FFolderDragDropOp, FDecoratedDragDropOp)
-
-		/** Array of folders that we are dragging */
-		FFolderPaths Folders;
-
-		void Init(FFolderPaths InFolders);
-	};
-
-	/* A drag/drop operation when dragging sub-component items in the scene outliner */
-	struct FSubComponentDragDropOp: public FDecoratedDragDropOp
+		return FSceneOutlinerDragValidationInfo(ESceneOutlinerDropCompatibility::IncompatibleGeneric, FText());
+	}
+		
+	/** @return true if this operation is valid, false otheriwse */ 
+	bool IsValid() const
 	{
-		DRAG_DROP_OPERATOR_TYPE(FSubComponentDragDropOp, FDecoratedDragDropOp)
-
-			/** Actor that we are dragging */
-			FSubComponentItemArray Items;
-
-		void Init(const FSubComponentItemArray& InItems);
-	};
-
-	/** A drag/drop operation that was started from the scene outliner */
-	struct FSceneOutlinerDragDropOp : public FDragDropOperation
-	{
-		DRAG_DROP_OPERATOR_TYPE(FSceneOutlinerDragDropOp, FDragDropOperation);
-
-		FSceneOutlinerDragDropOp(const FDragDropPayload& DraggedObjects);
-
-		using FDragDropOperation::Construct;
-
-		/** Actor drag operation */
-		TSharedPtr<FActorDragDropOp>	ActorOp;
-
-		/** Folder drag operation */
-		TSharedPtr<FFolderDragDropOp>	FolderOp;
-
-		/** Sub-Component drag operation */
-		TSharedPtr<FSubComponentDragDropOp>	SubComponentOp;
-
-		void ResetTooltip()
+		switch(CompatibilityType)
 		{
-			OverrideText = FText();
-			OverrideIcon = nullptr;
+		case ESceneOutlinerDropCompatibility::Compatible:
+		case ESceneOutlinerDropCompatibility::CompatibleAttach:
+		case ESceneOutlinerDropCompatibility::CompatibleGeneric:
+		case ESceneOutlinerDropCompatibility::CompatibleMultipleAttach:
+		case ESceneOutlinerDropCompatibility::CompatibleDetach:
+		case ESceneOutlinerDropCompatibility::CompatibleMultipleDetach:
+			return true;
+		default:
+			return false;
 		}
+	}
+};
 
-		void SetTooltip(FText InOverrideText, const FSlateBrush* InOverrideIcon)
-		{
-			OverrideText = InOverrideText;
-			OverrideIcon = InOverrideIcon;
-		}
+/** A drag/drop operation that was started from the scene outliner */
+struct SCENEOUTLINER_API FSceneOutlinerDragDropOp : public FCompositeDragDropOp
+{
+	DRAG_DROP_OPERATOR_TYPE(FSceneOutlinerDragDropOp, FCompositeDragDropOp);
+		
+	FSceneOutlinerDragDropOp();
 
-		virtual TSharedPtr<SWidget> GetDefaultDecorator() const override;
+	using FDragDropOperation::Construct;
 
-	private:
+	void ResetTooltip()
+	{
+		OverrideText = FText();
+		OverrideIcon = nullptr;
+	}
 
-		EVisibility GetOverrideVisibility() const;
-		EVisibility GetDefaultVisibility() const;
+	void SetTooltip(FText InOverrideText, const FSlateBrush* InOverrideIcon)
+	{
+		OverrideText = InOverrideText;
+		OverrideIcon = InOverrideIcon;
+	}
 
-		FText OverrideText;
-		FText GetOverrideText() const { return OverrideText; }
+	virtual TSharedPtr<SWidget> GetDefaultDecorator() const override;
 
-		const FSlateBrush* OverrideIcon;
-		const FSlateBrush* GetOverrideIcon() const { return OverrideIcon; }
-	};
+private:
 
-}
+	EVisibility GetOverrideVisibility() const;
+	EVisibility GetDefaultVisibility() const;
+
+	FText OverrideText;
+	FText GetOverrideText() const { return OverrideText; }
+
+	const FSlateBrush* OverrideIcon;
+	const FSlateBrush* GetOverrideIcon() const { return OverrideIcon; }
+};

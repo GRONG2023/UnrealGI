@@ -1,27 +1,74 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimMontageSegmentDetails.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/SViewport.h"
-#include "Animation/DebugSkelMeshComponent.h"
-#include "Animation/AnimSequenceBase.h"
-#include "Animation/AnimMontage.h"
-#include "DetailWidgetRow.h"
-#include "Viewports.h"
-#include "PropertyHandle.h"
-#include "DetailLayoutBuilder.h"
-#include "IDetailPropertyRow.h"
-#include "DetailCategoryBuilder.h"
-#include "PropertyCustomizationHelpers.h"
+
 #include "AnimPreviewInstance.h"
-#include "Slate/SceneViewport.h"
-#define LOCTEXT_NAMESPACE "AnimMontageSegmentDetails"
+#include "Animation/AnimCompositeBase.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "Animation/AnimSequenceBase.h"
+#include "Animation/AnimSingleNodeInstance.h"
+#include "Animation/AnimationAsset.h"
+#include "Animation/DebugSkelMeshComponent.h"
+#include "Animation/EditorAnimSegment.h"
+#include "Animation/Skeleton.h"
+#include "AssetRegistry/AssetData.h"
+#include "Components/SceneComponent.h"
+#include "Components/SkinnedMeshComponent.h"
+#include "Containers/UnrealString.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Editor/UnrealEdTypes.h"
+#include "EditorComponents.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/World.h"
+#include "EngineDefines.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Math/BoxSphereBounds.h"
+#include "Math/Transform.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector.h"
+#include "Misc/AssertionMacros.h"
+#include "PropertyCustomizationHelpers.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SScrubControlPanel.h"
+#include "SceneInterface.h"
 #include "Settings/SkeletalMeshEditorSettings.h"
+#include "ShowFlags.h"
+#include "Slate/SceneViewport.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/Field.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealType.h"
+#include "Viewports.h"
+#include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SViewport.h"
+#include "Widgets/Text/STextBlock.h"
+#include "SWarningOrErrorBox.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SEditableText.h"
+
+class SWidget;
+struct FGeometry;
+
+#define LOCTEXT_NAMESPACE "AnimMontageSegmentDetails"
 
 /////////////////////////////////////////////////////////////////////////
-FAnimationSegmentViewportClient::FAnimationSegmentViewportClient(FPreviewScene& InPreviewScene, const TWeakPtr<SEditorViewport>& InEditorViewportWidget)
+FAnimationSegmentViewportClient::FAnimationSegmentViewportClient(FAdvancedPreviewScene& InPreviewScene, const TWeakPtr<SEditorViewport>& InEditorViewportWidget)
 	: FEditorViewportClient(nullptr, &InPreviewScene, InEditorViewportWidget)
 {
 	SetViewMode(VMI_Lit);
@@ -40,7 +87,7 @@ FAnimationSegmentViewportClient::FAnimationSegmentViewportClient(FPreviewScene& 
 	DrawHelper.GridColorAxis = FColor(70, 70, 70);
 	DrawHelper.GridColorMajor = FColor(40, 40, 40);
 	DrawHelper.GridColorMinor =  FColor(20, 20, 20);
-	DrawHelper.PerspectiveGridSize = HALF_WORLD_MAX1;
+	DrawHelper.PerspectiveGridSize = UE_OLD_HALF_WORLD_MAX1;
 }
 
 
@@ -74,25 +121,25 @@ void FAnimMontageSegmentDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 {
 	IDetailCategoryBuilder& SegmentCategory = DetailBuilder.EditCategory("Animation Segment", LOCTEXT("AnimationSegmentCategoryTitle", "Animation Segment") );
 
-	TSharedRef<IPropertyHandle> TargetPropertyHandle = DetailBuilder.GetProperty("AnimSegment.AnimReference");
+	AnimSegmentHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UEditorAnimSegment, AnimSegment));
+	TSharedPtr<IPropertyHandle> TargetPropertyHandle = AnimSegmentHandle->GetChildHandle("AnimReference");
 	FProperty* TargetProperty = TargetPropertyHandle->GetProperty();
 
 	const FObjectPropertyBase* ObjectProperty = CastFieldChecked<const FObjectPropertyBase>(TargetProperty);
 
 	IDetailPropertyRow& PropertyRow = SegmentCategory.AddProperty(TargetPropertyHandle);
-	PropertyRow.DisplayName(LOCTEXT("AnimationReferenceLabel", "Animation Reference"));
 
 	TSharedPtr<SWidget> NameWidget;
 	TSharedPtr<SWidget> ValueWidget;
 	FDetailWidgetRow Row;
 	PropertyRow.GetDefaultWidgets(NameWidget, ValueWidget, Row);
-
-	bool bAllowClear = !(ObjectProperty->PropertyFlags & CPF_NoClear);
+	PropertyRow.OverrideResetToDefault(FResetToDefaultOverride::Hide());
 
 	SAssignNew(ValueWidget, SObjectPropertyEntryBox)
 		.PropertyHandle(TargetPropertyHandle)
 		.AllowedClass(ObjectProperty->PropertyClass)
-		.AllowClear(bAllowClear)
+		.AllowClear(false)
+		.OnObjectChanged(this, &FAnimMontageSegmentDetails::SetAnimationAsset)
 		.OnShouldFilterAsset(FOnShouldFilterAsset::CreateSP(this, &FAnimMontageSegmentDetails::OnShouldFilterAnimAsset));
 
 	PropertyRow.CustomWidget()
@@ -109,38 +156,375 @@ void FAnimMontageSegmentDetails::CustomizeDetails( IDetailLayoutBuilder& DetailB
 			ValueWidget.ToSharedRef()
 		];
 
-	SegmentCategory.AddProperty("AnimSegment.AnimStartTime").DisplayName( LOCTEXT("StartTimeLabel", "Start Time") );
-	SegmentCategory.AddProperty("AnimSegment.AnimEndTime").DisplayName( LOCTEXT("EndTimeLabel", "End Time") );
-
-	SegmentCategory.AddProperty("AnimSegment.AnimPlayRate").DisplayName( LOCTEXT("PlayRateLabel", "Play Rate") );
-	SegmentCategory.AddProperty("AnimSegment.LoopingCount").DisplayName( LOCTEXT("LoopCountLabel", "Loop Count") );
-
-	TSharedPtr<IPropertyHandle> InPropertyHandle = DetailBuilder.GetProperty("AnimSegment.AnimReference");
-	UObject *Object = NULL;
-	InPropertyHandle->GetValue(Object);
-
-	UAnimSequenceBase *AnimRef = Cast<UAnimSequenceBase>(Object);
-	USkeleton *Skeleton = NULL;
-	if(AnimRef != NULL)
+	TWeakPtr<FAnimMontageSegmentDetails> WeakDetails = TWeakPtr<FAnimMontageSegmentDetails>(StaticCastSharedRef<FAnimMontageSegmentDetails>(AsShared()));
+	if (AnimSegmentHandle.IsValid())
 	{
-		Skeleton = AnimRef->GetSkeleton();
+		AnimStartTimeProperty = AnimSegmentHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FAnimSegment, AnimStartTime));
+
+		IDetailPropertyRow& StartPropertyRow = SegmentCategory.AddProperty(AnimStartTimeProperty);
+		StartPropertyRow.CustomWidget()
+		.NameContent()
+		[
+			AnimStartTimeProperty->CreatePropertyNameWidget()
+		]
+		.ValueContent()
+		[
+			SNew(SNumericEntryBox<float>)
+			.Font(DetailBuilder.GetDetailFont())
+			.AllowSpin(true)
+			.MinSliderValue(0.f)
+			.MinValue(0.f)
+			.MaxSliderValue(this, &FAnimMontageSegmentDetails::GetAnimationAssetPlayLength)
+			.MaxValue(this, &FAnimMontageSegmentDetails::GetAnimationAssetPlayLength)
+			.Value(this, &FAnimMontageSegmentDetails::GetStartTime)
+			.OnValueChanged(this, &FAnimMontageSegmentDetails::OnStartTimeChanged, ETextCommit::Default, true)
+			.OnValueCommitted(this, &FAnimMontageSegmentDetails::OnStartTimeChanged, false)
+		];
+
+		FResetToDefaultOverride Handler = FResetToDefaultOverride::Create
+		(
+			FIsResetToDefaultVisible::CreateLambda([this](TSharedPtr<IPropertyHandle> InAnimEndTimeProperty)
+			{
+				float Value = 0.f;
+				if (InAnimEndTimeProperty->GetValue(Value) == FPropertyAccess::Success)
+				{
+					return !FMath::IsNearlyEqual(Value, GetAnimationAssetPlayLength().Get(Value));
+				}
+
+				return false;
+			}),
+			FResetToDefaultHandler::CreateLambda([this](TSharedPtr<IPropertyHandle> InAnimEndTimeProperty)
+			{			
+				InAnimEndTimeProperty->SetValue(GetAnimationAssetPlayLength().Get(0.f));
+			})
+		);
+		
+		AnimEndTimeProperty = AnimSegmentHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FAnimSegment, AnimEndTime));
+		SegmentCategory.AddProperty(AnimEndTimeProperty).CustomWidget()
+		.NameContent()
+		[
+			AnimEndTimeProperty->CreatePropertyNameWidget()
+		]
+		.OverrideResetToDefault(Handler)
+		.ValueContent()
+		[
+			SNew(SNumericEntryBox<float>)
+			.Font(DetailBuilder.GetDetailFont())
+			.AllowSpin(true)
+			.MinSliderValue(0.f)
+			.MinValue(0.f)
+			.MaxSliderValue(this, &FAnimMontageSegmentDetails::GetAnimationAssetPlayLength)
+			.MaxValue(this, &FAnimMontageSegmentDetails::GetAnimationAssetPlayLength)
+			.Value(this, &FAnimMontageSegmentDetails::GetEndTime)
+			.OnValueChanged(this, &FAnimMontageSegmentDetails::OnEndTimeChanged, ETextCommit::Default, true)
+			.OnValueCommitted(this, &FAnimMontageSegmentDetails::OnEndTimeChanged, false)
+		];
+
+		const TSharedPtr<IPropertyHandle> AnimPlayRateProperty = AnimSegmentHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FAnimSegment, AnimPlayRate));
+		
+		IDetailPropertyRow& PlayRatePropertyRow = SegmentCategory.AddProperty(AnimPlayRateProperty);
+
+		PlayRatePropertyRow.CustomWidget()
+		.NameContent()
+		[
+			AnimPlayRateProperty->CreatePropertyNameWidget()
+		]
+		.ValueContent()
+		[
+			SNew(SNumericEntryBox<float>)
+			.Font(DetailBuilder.GetDetailFont())
+			.AllowSpin(true)
+			.MinSliderValue(-1.f)
+			.MinValue(-32.f)
+			.MaxSliderValue(1.f)
+			.MaxValue(32.f)
+			.Value(this, &FAnimMontageSegmentDetails::GetPlayRate)
+			.OnValueChanged_Lambda([AnimPlayRateProperty](float InValue)
+			{
+				if(AnimPlayRateProperty.IsValid() && !FMath::IsNearlyZero(InValue))
+				{
+					AnimPlayRateProperty->SetValue(InValue, EPropertyValueSetFlags::InteractiveChange);
+				}
+			})
+			.OnValueCommitted_Lambda([AnimPlayRateProperty](float InValue, ETextCommit::Type InCommitType)
+			{
+                if(AnimPlayRateProperty.IsValid() && !FMath::IsNearlyZero(InValue))
+                {
+					AnimPlayRateProperty->SetValue(InValue);
+                }
+			})
+		];
+
+		const TSharedPtr<IPropertyHandle> LoopingCountProperty = AnimSegmentHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FAnimSegment, LoopingCount));
+		
+		IDetailPropertyRow& LoopingPropertyRow = SegmentCategory.AddProperty(LoopingCountProperty);
+
+		LoopingPropertyRow.CustomWidget()
+		.NameContent()
+		[
+			LoopingCountProperty->CreatePropertyNameWidget()
+		]
+		.ValueContent()
+		[
+			SNew(SNumericEntryBox<int32>)
+			.Font(DetailBuilder.GetDetailFont())
+			.AllowSpin(true)
+			.MinSliderValue(1)
+			.MinValue(1)
+			.MaxSliderValue(4)
+			.MaxValue(32)
+			.Value_Lambda([WeakDetails]
+			{
+				if (const TSharedPtr<FAnimMontageSegmentDetails> SegmentDetails = WeakDetails.Pin())
+				{
+					if(const FAnimSegment* AnimSegmentPtr = SegmentDetails->GetAnimationSegment())
+					{
+						return AnimSegmentPtr->LoopingCount;
+					}
+				}
+				return 0;
+			})
+			.OnValueChanged_Lambda([LoopingCountProperty](int32 InValue)
+			{
+				if(LoopingCountProperty.IsValid() && InValue != 0)
+				{
+					LoopingCountProperty->SetValue(InValue, EPropertyValueSetFlags::InteractiveChange);
+				}
+			})
+			.OnValueCommitted_Lambda([LoopingCountProperty](int32 InValue, ETextCommit::Type InCommitType)
+			{
+				if(LoopingCountProperty.IsValid() && InValue != 0)
+				{
+					LoopingCountProperty->SetValue(InValue);
+				}
+			})
+		];
 	}
+
+	SegmentCategory.AddProperty(AnimSegmentHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FAnimSegment, StartPos)));
+
+	const UAnimSequenceBase* AnimRef = GetAnimationAsset();
+	const USkeleton* Skeleton = AnimRef ? AnimRef->GetSkeleton() : nullptr;
 
 	SegmentCategory.AddCustomRow(FText::GetEmpty(), false)
 	[
 		SNew(SAnimationSegmentViewport)
-		.Skeleton(Skeleton)
-		.AnimRef(AnimRef)
-		.AnimRefPropertyHandle(DetailBuilder.GetProperty("AnimSegment.AnimReference"))
-		.StartTimePropertyHandle(DetailBuilder.GetProperty("AnimSegment.AnimStartTime"))
-		.EndTimePropertyHandle(DetailBuilder.GetProperty("AnimSegment.AnimEndTime"))
-		.PlayRatePropertyHandle(DetailBuilder.GetProperty("AnimSegment.AnimPlayRate"))
-	];	
+		.AnimRef(this, &FAnimMontageSegmentDetails::GetAnimationAsset)
+		.StartTime(this, &FAnimMontageSegmentDetails::GetStartTime)
+		.EndTime(this, &FAnimMontageSegmentDetails::GetEndTime)
+		.PlayRate(this, &FAnimMontageSegmentDetails::GetPlayRate)
+		.OnStartTimeChanged_Lambda([WeakDetails](float InValue, bool bInteractive)
+		{
+			if (const TSharedPtr<FAnimMontageSegmentDetails> SegmentDetails = WeakDetails.Pin())
+			{
+				SegmentDetails->OnStartTimeChanged(InValue, ETextCommit::Default, bInteractive);
+			}
+		})
+		.OnEndTimeChanged_Lambda([WeakDetails](float InValue, bool bInteractive)
+		{
+			if (const TSharedPtr<FAnimMontageSegmentDetails> SegmentDetails = WeakDetails.Pin())
+			{
+				SegmentDetails->OnEndTimeChanged(InValue, ETextCommit::Default, bInteractive);
+			}
+		})
+	];
+	
+	const TSharedPtr<IPropertyHandle> PlayLengthHandle = AnimSegmentHandle->GetChildHandle(GET_MEMBER_NAME_CHECKED(FAnimSegment, CachedPlayLength));
+	PlayLengthHandle->MarkHiddenByCustomization();
+	IDetailCategoryBuilder& WarningCategory = DetailBuilder.EditCategory(TEXT("Warning"), LOCTEXT("WarningCategoryDisplayName", "Warning"), ECategoryPriority::Transform);
+	WarningCategory.AddCustomRow(LOCTEXT("WarningCategoryDisplayName", "Warning"))
+	.WholeRowContent()
+	[
+		SNew(SBox)
+		.Padding(FMargin(0.f, 4.f))
+		[
+			SNew(SWarningOrErrorBox)
+			.MessageStyle(EMessageStyle::Warning)
+			.Message_Lambda([this]() -> FText
+			{
+				const FAnimSegment* Segment = GetAnimationSegment();
+				static const FNumberFormattingOptions FormatOptions = FNumberFormattingOptions()
+					.SetMinimumFractionalDigits(2)
+					.SetMaximumFractionalDigits(2);
+				
+				return FText::Format(LOCTEXT("AnimSegmentLengthMismatchWarning", "Referenced Animation length has changed and mismatches with set Segment length. Animation length: {0}. Segment length: {1}."), FText::AsNumber(Segment->GetAnimReference()->GetPlayLength(), &FormatOptions), FText::AsNumber(Segment->CachedPlayLength, &FormatOptions));
+			})
+			[
+				SNew(SVerticalBox)
+				+SVerticalBox::Slot()
+				[
+					SNew(SButton)
+					.OnClicked_Lambda([this, PlayLengthHandle]()
+					{						
+						if (PlayLengthHandle.IsValid())
+						{
+							if (const FAnimSegment* AnimSegment = GetAnimationSegment())
+							{									
+								if(const IAnimationDataModel* DataModel = AnimSegment->GetAnimReference()->GetDataModel())
+								{
+									const float NewPlayLength = DataModel->GetPlayLength();
+									PlayLengthHandle->SetValue(NewPlayLength);
+								}
+							}
+						}
+							
+						return FReply::Handled();
+					})
+					.TextStyle(FAppStyle::Get(), "NormalText")
+					.Text(LOCTEXT("KeepSegmentLengthButtonText", "Keep Segment Length"))
+					.ToolTipText(LOCTEXT("KeepSegmentLengthButtonToolTip", "This will update the cached Animation Asset length with its current value while keeping the Segment Length the same."))
+					.HAlign(EHorizontalAlignment::HAlign_Center)
+				]
+				+SVerticalBox::Slot()
+				[
+					SNew(SButton)
+					.OnClicked_Lambda([this]()
+					{						
+						if (AnimEndTimeProperty.IsValid())
+						{
+							if (const FAnimSegment* AnimSegment = GetAnimationSegment())
+							{
+								if(const IAnimationDataModel* DataModel = AnimSegment->GetAnimReference()->GetDataModel())
+								{
+									const float NewPlayLength = DataModel->GetPlayLength();
+									AnimEndTimeProperty->SetValue(NewPlayLength);
+								}
+							}
+						}
+							
+						return FReply::Handled();
+					})
+					.TextStyle(FAppStyle::Get(), "NormalText")
+					.Text(LOCTEXT("SyncWithAnimLengthButtonText", "Sync with Animation Length"))
+					.ToolTipText(LOCTEXT("SyncWithAnimLengthButtonToolTip", "This will update the Segment Length to match the Animation Asset length its current value."))
+					.HAlign(EHorizontalAlignment::HAlign_Center)
+				]
+			]
+		]
+	]
+	.Visibility(TAttribute<EVisibility>::CreateLambda([this]() -> EVisibility
+	{
+		if (GetAnimationSegment() && GetAnimationSegment()->IsPlayLengthOutOfDate())
+		{
+			return EVisibility::Visible;
+		}
+
+		return EVisibility::Collapsed;
+	}));	
 }
 
 bool FAnimMontageSegmentDetails::OnShouldFilterAnimAsset(const FAssetData& AssetData) const
 {
 	return AssetData.GetClass() == UAnimMontage::StaticClass();
+}
+
+const UAnimSequenceBase* FAnimMontageSegmentDetails::GetAnimationAsset() const
+{
+	if (const FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		return AnimSegment->GetAnimReference().Get();
+	}
+
+	return nullptr;
+}
+
+void FAnimMontageSegmentDetails::SetAnimationAsset(const FAssetData& InAssetData)
+{
+	if (FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		UAnimSequenceBase* AnimSequenceBase = Cast<UAnimSequenceBase>(InAssetData.GetAsset());
+		AnimSegment->SetAnimReference(AnimSequenceBase);
+	}
+}
+
+void FAnimMontageSegmentDetails::OnStartTimeChanged(float InValue, ETextCommit::Type InCommitType, bool bInteractive)
+{
+	if (FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		const float ValueToSet = FMath::Min(AnimSegment->AnimEndTime, InValue);
+		AnimStartTimeProperty->SetValue(ValueToSet, bInteractive ? EPropertyValueSetFlags::InteractiveChange : EPropertyValueSetFlags::DefaultFlags);			
+	}
+}
+
+TOptional<float> FAnimMontageSegmentDetails::GetStartTime() const
+{
+	TOptional<float> TimeValue;
+	
+	if (const FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		TimeValue = AnimSegment->AnimStartTime;
+	}
+
+	return TimeValue;
+}
+
+void FAnimMontageSegmentDetails::OnEndTimeChanged(float InValue, ETextCommit::Type InCommitType, bool bInteractive)
+{
+	if (FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		const float ValueToSet = FMath::Max(AnimSegment->AnimStartTime, InValue);
+		AnimEndTimeProperty->SetValue(ValueToSet, bInteractive ? EPropertyValueSetFlags::InteractiveChange : EPropertyValueSetFlags::DefaultFlags);		
+	}
+}
+
+TOptional<float> FAnimMontageSegmentDetails::GetEndTime() const
+{
+	TOptional<float> TimeValue;
+	if (const FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		TimeValue = AnimSegment->AnimEndTime;
+	}
+
+	return TimeValue;
+}
+
+TOptional<float> FAnimMontageSegmentDetails::GetPlayRate() const
+{
+	TOptional<float> Value;
+	if (const FAnimSegment* AnimSegment = GetAnimationSegment())
+	{
+		Value = AnimSegment->AnimPlayRate;
+	}
+
+	return Value;
+}
+
+FAnimSegment* FAnimMontageSegmentDetails::GetAnimationSegment() const
+{
+	if (AnimSegmentHandle.IsValid())
+	{
+		void* Data;
+		const FPropertyAccess::Result Result = AnimSegmentHandle->GetValueData(Data);
+		if (Result == FPropertyAccess::MultipleValues)
+		{
+			return nullptr;
+		}
+
+		if (Result == FPropertyAccess::Success)
+		{
+			FAnimSegment* AnimSegment = reinterpret_cast<FAnimSegment*>(Data);
+			return AnimSegment;
+		}
+	}
+
+	return nullptr;
+}
+
+bool FAnimMontageSegmentDetails::CanEditSegmentProperties() const
+{
+	return true;
+}
+
+TOptional<float> FAnimMontageSegmentDetails::GetAnimationAssetPlayLength() const
+{
+	TOptional<float> Value;
+	
+	if (const UAnimSequenceBase* SequenceBase = GetAnimationAsset())
+	{
+		Value = SequenceBase->GetPlayLength();
+	}
+
+	return Value;
 }
 
 /////////////////////////////////////////////////
@@ -183,19 +567,18 @@ void SAnimationSegmentViewport::CleanupComponent(USceneComponent* Component)
 }
 
 SAnimationSegmentViewport::SAnimationSegmentViewport()
-	: PreviewScene(FPreviewScene::ConstructionValues())
+	: CurrentAnimSequenceBase(nullptr), AdvancedPreviewScene(FPreviewScene::ConstructionValues())
 {
 }
 
 void SAnimationSegmentViewport::Construct(const FArguments& InArgs)
 {
-	TargetSkeleton = InArgs._Skeleton;
-	AnimRef = InArgs._AnimRef;
-	
-	AnimRefPropertyHandle = InArgs._AnimRefPropertyHandle;
-	StartTimePropertyHandle = InArgs._StartTimePropertyHandle;
-	EndTimePropertyHandle = InArgs._EndTimePropertyHandle;
-	PlayRatePropertyHandle = InArgs._PlayRatePropertyHandle;
+	AnimationRefAttribute = InArgs._AnimRef;
+	StartTimeAttribute = InArgs._StartTime;
+	EndTimeAttribute = InArgs._EndTime;
+	PlayRateAttribute = InArgs._PlayRate;
+	OnStartTimeChanged = InArgs._OnStartTimeChanged;
+	OnEndTimeChanged = InArgs._OnEndTimeChanged;
 
 	this->ChildSlot
 	[
@@ -229,14 +612,15 @@ void SAnimationSegmentViewport::Construct(const FArguments& InArgs)
 			.ViewInputMax(this, &SAnimationSegmentViewport::GetViewMaxInput)
 			.PreviewInstance(this, &SAnimationSegmentViewport::GetPreviewInstance)
 			.DraggableBars(this, &SAnimationSegmentViewport::GetBars)
-			.OnBarDrag(this, &SAnimationSegmentViewport::OnBarDrag)
+			.OnBarDrag(this, &SAnimationSegmentViewport::OnBarDrag, true)
+			.OnBarCommit(this, &SAnimationSegmentViewport::OnBarDrag, false)
 			.bAllowZoom(true)
 		]
 	];
 	
 
 	// Create a viewport client
-	LevelViewportClient	= MakeShareable( new FAnimationSegmentViewportClient(PreviewScene) );
+	LevelViewportClient	= MakeShareable( new FAnimationSegmentViewportClient(AdvancedPreviewScene) );
 
 	LevelViewportClient->ViewportType = LVT_Perspective;
 	LevelViewportClient->bSetListenerPosition = false;
@@ -253,65 +637,52 @@ void SAnimationSegmentViewport::Construct(const FArguments& InArgs)
 	
 	PreviewComponent = NewObject<UDebugSkelMeshComponent>();
 	PreviewComponent->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-	PreviewScene.AddComponent(PreviewComponent, FTransform::Identity);
+	AdvancedPreviewScene.AddComponent(PreviewComponent, FTransform::Identity);
 
 	InitSkeleton();
 }
 
 void SAnimationSegmentViewport::InitSkeleton()
 {
-	UObject *Object = NULL;
-	AnimRefPropertyHandle->GetValue(Object);
-	UAnimSequenceBase *AnimSequence = Cast<UAnimSequenceBase>(Object);
-	USkeleton *Skeleton = NULL;
-	if(AnimSequence != NULL)
+	UAnimSequenceBase* AnimSequenceBase = const_cast<UAnimSequenceBase*>(AnimationRefAttribute.Get());
+	if (PreviewComponent && AnimSequenceBase && AnimSequenceBase != CurrentAnimSequenceBase)
 	{
-		Skeleton = AnimSequence->GetSkeleton();
-	}
-
-	if( PreviewComponent != NULL && Skeleton != NULL )
-	{
-		USkeletalMesh* PreviewMesh = Skeleton->GetAssetPreviewMesh(AnimSequence);
-		if (PreviewMesh)
+		USkeleton* Skeleton = AnimSequenceBase->GetSkeleton();
+		USkeletalMesh* PreviewMesh = Skeleton ? Skeleton->GetAssetPreviewMesh(AnimSequenceBase) : nullptr;
+		if (Skeleton && PreviewMesh)
 		{
-			UAnimSingleNodeInstance * Preview = PreviewComponent->PreviewInstance;
-			if((Preview == NULL || Preview->GetCurrentAsset() != AnimSequence) ||
-				(PreviewComponent->SkeletalMesh != PreviewMesh))
+			UAnimSingleNodeInstance* Preview = PreviewComponent->PreviewInstance;
+			if((Preview == nullptr || Preview->GetCurrentAsset() != AnimSequenceBase) || (PreviewComponent->GetSkeletalMeshAsset() != PreviewMesh))
 			{
-				float PlayRate;
-				PlayRatePropertyHandle->GetValue(PlayRate);
+				const float PlayRate = PlayRateAttribute.Get().Get(1.f);
 
 				PreviewComponent->SetSkeletalMesh(PreviewMesh);
-				PreviewComponent->EnablePreview(true, AnimSequence);
+				PreviewComponent->EnablePreview(true, AnimSequenceBase);
 				PreviewComponent->PreviewInstance->SetLooping(true);
 				PreviewComponent->SetPlayRate(PlayRate);
 
 				//Place the camera at a good viewer position
-				FVector NewPosition = LevelViewportClient->GetViewLocation();
-				NewPosition.Normalize();
+				const FVector NewPosition = LevelViewportClient->GetViewLocation().GetSafeNormal();
 				LevelViewportClient->SetViewLocation(NewPosition * (PreviewMesh->GetImportedBounds().SphereRadius*1.5f));
+
+				CurrentAnimSequenceBase = AnimSequenceBase;
 			}
 		}
 	}
-
-	TargetSkeleton = Skeleton;
 }
 
 void SAnimationSegmentViewport::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
 {
 	class UDebugSkelMeshComponent* Component = PreviewComponent;
-
-	FString TargetSkeletonName = TargetSkeleton ? TargetSkeleton->GetName() : FName(NAME_None).ToString();
-
-	if (Component != NULL)
+	const FString TargetSkeletonName = CurrentAnimSequenceBase && CurrentAnimSequenceBase->GetSkeleton() ? CurrentAnimSequenceBase->GetSkeleton()->GetName() : TEXT("None");
+	if (Component != nullptr)
 	{
 		// Reinit the skeleton if the anim ref has changed
 		InitSkeleton();
 
-		float Start, End, PlayRate;
-		StartTimePropertyHandle->GetValue(Start);
-		EndTimePropertyHandle->GetValue(End);
-		PlayRatePropertyHandle->GetValue(PlayRate);
+		const float Start = StartTimeAttribute.Get().Get(0.f);
+		const float End = EndTimeAttribute.Get().Get(0.f);
+		const float PlayRate = PlayRateAttribute.Get().Get(0.f);
 
 		if (Component->PreviewInstance->GetCurrentTime() > End || Component->PreviewInstance->GetCurrentTime() < Start)
 		{
@@ -329,7 +700,7 @@ void SAnimationSegmentViewport::Tick( const FGeometry& AllottedGeometry, const d
 		{
 			Description->SetText(FText::Format( LOCTEXT("Previewing", "Previewing {0}"), FText::FromString(Component->AnimClass->GetName()) ));
 		}
-		else if (Component->SkeletalMesh == NULL)
+		else if (Component->GetSkeletalMeshAsset() == NULL)
 		{
 			Description->SetText(FText::Format( LOCTEXT("NoMeshFound", "No skeletal mesh found for skeleton '{0}'"), FText::FromString(TargetSkeletonName) ));
 		}
@@ -391,9 +762,8 @@ float SAnimationSegmentViewport::GetViewMaxInput() const
 
 TArray<float> SAnimationSegmentViewport::GetBars() const
 {
-	float Start, End;
-	StartTimePropertyHandle->GetValue(Start);
-	EndTimePropertyHandle->GetValue(End);
+	const float Start = StartTimeAttribute.Get().Get(0.f);
+	const float End = EndTimeAttribute.Get().Get(0.f);
 
 	TArray<float> Bars;
 	Bars.Add(Start);
@@ -402,15 +772,15 @@ TArray<float> SAnimationSegmentViewport::GetBars() const
 	return Bars;
 }
 
-void SAnimationSegmentViewport::OnBarDrag(int32 Index, float Position)
+void SAnimationSegmentViewport::OnBarDrag(int32 Index, float Position, bool bInteractive)
 {
 	if(Index==0)
 	{
-		StartTimePropertyHandle->SetValue(Position);
+		OnStartTimeChanged.ExecuteIfBound(Position, bInteractive);
 	}
 	else if(Index==1)
 	{
-		EndTimePropertyHandle->SetValue(Position);
+		OnEndTimeChanged.ExecuteIfBound(Position, bInteractive);
 	}
 }
 
@@ -453,6 +823,7 @@ void SAnimationSegmentScrubPanel::Construct( const SAnimationSegmentScrubPanel::
 				.IsRealtimeStreamingMode(this, &SAnimationSegmentScrubPanel::IsRealtimeStreamingMode)
 				.DraggableBars(InArgs._DraggableBars)
 				.OnBarDrag(InArgs._OnBarDrag)
+				.OnBarCommit(InArgs._OnBarCommit)
 				.OnTickPlayback(InArgs._OnTickPlayback)
 			]
 		];
@@ -541,17 +912,17 @@ uint32 SAnimationSegmentScrubPanel::GetNumOfFrames() const
 	{
 		UAnimSingleNodeInstance* PreviewInst = GetPreviewInstance();
 		float Length = PreviewInst->GetLength();
-		// if anim sequence, use correct num frames
-		int32 NumFrames = (int32) (Length/0.0333f); 
+		// if anim sequence, use correct number of keys
+		int32 NumKeys = (int32) (Length/0.0333f); 
 		if (PreviewInst->GetCurrentAsset() && PreviewInst->GetCurrentAsset()->IsA(UAnimSequenceBase::StaticClass()))
 		{
-			NumFrames = CastChecked<UAnimSequenceBase>(PreviewInst->GetCurrentAsset())->GetNumberOfFrames();
+			NumKeys = CastChecked<UAnimSequenceBase>(PreviewInst->GetCurrentAsset())->GetNumberOfSampledKeys();
 		}
-		return NumFrames;
+		return NumKeys;
 	}
 	else if (LockedSequence)
 	{
-		return LockedSequence->GetNumberOfFrames();
+		return LockedSequence->GetNumberOfSampledKeys();
 	}
 	return 1;
 }
@@ -564,7 +935,7 @@ float SAnimationSegmentScrubPanel::GetSequenceLength() const
 	}
 	else if (LockedSequence)
 	{
-		return LockedSequence->SequenceLength;
+		return LockedSequence->GetPlayLength();
 	}
 	return 0.f;
 }

@@ -3,36 +3,12 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "SpirvCommon.h"
 #include "hlslcc.h"
 
-enum class EVulkanShaderVersion
+
+struct FVulkanSpirv : FSpirv
 {
-	ES3_1,
-	ES3_1_ANDROID,
-	SM5,
-};
-
-extern void DoCompileVulkanShader(const struct FShaderCompilerInput& Input,struct FShaderCompilerOutput& Output,const class FString& WorkingDirectory, EVulkanShaderVersion Version);
-
-
-// Hold information to be able to call the compilers
-struct FCompilerInfo
-{
-	const struct FShaderCompilerInput& Input;
-	FString WorkingDirectory;
-	FString Profile;
-	uint32 CCFlags;
-	EHlslShaderFrequency Frequency;
-	bool bDebugDump;
-	FString BaseSourceFilename;
-
-	FCompilerInfo(const struct FShaderCompilerInput& InInput, const FString& InWorkingDirectory, EHlslShaderFrequency InFrequency);
-};
-
-
-struct FSpirv
-{
-	TArray<uint32> Data;
 	struct FEntry
 	{
 		FEntry() = default;
@@ -52,10 +28,10 @@ struct FSpirv
 		// Index into the Spirv Word containing the binding index decoration
 		uint32 WordBindingIndex = UINT32_MAX;
 	};
+
 	TArray<FEntry> ReflectionInfo;
-	uint32 OffsetToMainName = 0;
-	uint32 OffsetToEntryPoint = 0;
 	uint32 CRC = 0;
+	const ANSICHAR* EntryPointName = nullptr;
 
 	int32 FindBinding(const FString& Name, bool bOuter = false) const
 	{
@@ -135,7 +111,4 @@ struct FSpirv
 };
 
 // Updates all reflection entries in the specified SPIR-V module.
-extern bool PatchSpirvReflectionEntriesAndEntryPoint(FSpirv& OutSpirv);
-
-// Generates SPIR-V out of the specified GLSL source code.
-extern bool GenerateSpirv(const ANSICHAR* Source, FCompilerInfo& CompilerInfo, FString& OutErrors, const FString& DumpDebugInfoPath, FSpirv& OutSpirv);
+extern void PatchSpirvReflectionEntries(FVulkanSpirv& OutSpirv);

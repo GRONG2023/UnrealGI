@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Class.h"
+#include "EntitySystem/MovieSceneComponentDebug.h"
 #include "MovieSceneSequenceID.generated.h"
 
 USTRUCT()
@@ -86,7 +87,15 @@ struct TStructOpsTypeTraits<FMovieSceneSequenceID> : public TStructOpsTypeTraits
 		WithSerializer = true,
 		WithCopy = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
+
+#if UE_MOVIESCENE_ENTITY_DEBUG
+namespace UE::MovieScene
+{
+	template<> struct TComponentDebugType<FMovieSceneSequenceID> { static const EComponentDebugType Type = EComponentDebugType::SequenceID; };
+}
+#endif
 
 typedef TCallTraits<FMovieSceneSequenceID>::ParamType FMovieSceneSequenceIDRef;
 

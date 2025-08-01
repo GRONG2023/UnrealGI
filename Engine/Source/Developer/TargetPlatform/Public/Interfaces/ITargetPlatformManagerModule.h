@@ -9,6 +9,8 @@
 #include "Modules/ModuleInterface.h"
 
 class ITargetPlatform;
+class ITargetPlatformControls;
+class ITargetPlatformSettings;
 
 DECLARE_MULTICAST_DELEGATE(FOnTargetPlatformsInvalidated);
 
@@ -69,6 +71,22 @@ public:
 	virtual ITargetPlatform* FindTargetPlatform( FStringView Name ) = 0;
 
 	/**
+	 * Finds a target platform by name.
+	 *
+	 * @param Name The target platform's short or long name.
+	 * @return The target platform, or nullptr if not found.
+	 */
+	virtual ITargetPlatform* FindTargetPlatform(FName Name) = 0;
+
+	/**
+	 * Finds a target platform by name.
+	 *
+	 * @param Name The target platform's short or long name.
+	 * @return The target platform, or nullptr if not found.
+	 */
+	virtual ITargetPlatform* FindTargetPlatform(const TCHAR* Name) = 0;
+
+	/**
 	 * Finds a target platform by looking for one that supports a given value for a generic type of support
 	 *
 	 * @param Name SupportClass The type of support needed (like "ShaderFormat")
@@ -82,6 +100,7 @@ public:
 	 *
 	 * @return Collection of platforms.
 	 */
+	UE_DEPRECATED(5.1, "Use GetActiveTargetPlatforms instead of GetCookingTargetPlatforms")
 	virtual const TArray<ITargetPlatform*>& GetCookingTargetPlatforms() = 0;
 
 	/**
@@ -108,7 +127,7 @@ public:
 	/**
 	 * Returns the target platform that is currently running.
 	 *
-	 * Note: This method is not available on consoles.
+	 * Note: This method only returns a Target Platform when WITH_EDITOR.
 	 *
 	 * @return Running target platform.
 	 */
@@ -127,6 +146,8 @@ public:
 	 * @return Collection of platforms.
 	 */
 	virtual const TArray<ITargetPlatform*>& GetTargetPlatforms() = 0;
+	virtual const TArray<ITargetPlatformControls*>& GetTargetPlatformControls() = 0;
+	virtual const TArray<ITargetPlatformSettings*>& GetTargetPlatformSettings() = 0;
 
 	/**
 	 * Returns the list of all ITextureFormats that were located in DLLs.
@@ -173,6 +194,10 @@ public:
 
 	/** A callback that holders of ITargetPlatform* must subscribe to to be notified of when the ITargetPlatform* has been invalidated and should be requeried from e.g. FindTargetPlatform */
 	virtual FOnTargetPlatformsInvalidated& GetOnTargetPlatformsInvalidatedDelegate() = 0;
+	/**
+	 * After installing an SDK with Turnkey, this will refresh the TargetPlatform, find devices, etc
+	 */
+	virtual bool UpdateAfterSDKInstall(FName TargetPlatformName) = 0;
 
 public:
 

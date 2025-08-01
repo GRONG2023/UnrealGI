@@ -8,19 +8,21 @@ public class EditorWidgets : ModuleRules
 	{
 		PrivateIncludePathModuleNames.Add("AssetRegistry");
 
-		PrivateDependencyModuleNames.AddRange(
+		PublicDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
-				"CoreUObject",
 				"Engine",
-                "InputCore",
+				"InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
-				"UnrealEd"
+				"UnrealEd",
+				"CoreUObject",
+				"ToolWidgets",
+				"EditorConfig",
+				"AssetDefinition",
 			}
 		);
-
+		
 		DynamicallyLoadedModuleNames.Add("AssetRegistry");
 	}
 }

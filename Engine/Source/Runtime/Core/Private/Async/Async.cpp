@@ -2,6 +2,8 @@
 
 #include "Async/Async.h"
 
+#include "HAL/ThreadSafeCounter.h"
+
 
 /* Private types
  *****************************************************************************/
@@ -43,13 +45,11 @@ private:
 /* Global functions
  *****************************************************************************/
 
-#if PLATFORM_WINDOWS && defined(__clang__)
-CORE_API int32 FAsyncThreadIndex::GetNext() // @todo clang: Workaround for missing symbol export
+CORE_API int32 FAsyncThreadIndex::GetNext()
 {
 	static FThreadSafeCounter ThreadIndex;
 	return ThreadIndex.Add(1);
 }
-#endif
 
 void AsyncTask(ENamedThreads::Type Thread, TUniqueFunction<void()> Function)
 {

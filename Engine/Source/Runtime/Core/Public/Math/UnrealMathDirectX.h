@@ -2,6 +2,11 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Not included directly
+
+// enabled by bWithDirectXMath
+// LWC_TODO: No longer supported. Needs removing.
+
 #if defined __cplusplus_cli && !PLATFORM_HOLOLENS
 // there are compile issues with this file in managed mode, so use the FPU version
 #include "Math/UnrealMathFPU.h"
@@ -22,7 +27,7 @@
  *	float4 vector register type, where the first float (X) is stored in the lowest 32 bits, and so on.
  */
 typedef DirectX::XMVECTOR VectorRegister;
-typedef __m128i VectorRegisterInt;
+typedef __m128i VectorRegister4Int;
 
 // for an DirectX::XMVECTOR, we need a single set of braces (for clang)
 #define DECLARE_VECTOR_REGISTER(X, Y, Z, W) { X, Y, Z, W }
@@ -66,9 +71,27 @@ FORCEINLINE VectorRegister MakeVectorRegister( float X, float Y, float Z, float 
  * @param W		4th int32 component
  * @return		Vector of the 4 int32
  */
-FORCEINLINE VectorRegisterInt MakeVectorRegisterInt(int32 X, int32 Y, int32 Z, int32 W)
+FORCEINLINE VectorRegister4Int MakeVectorRegisterInt(int32 X, int32 Y, int32 Z, int32 W)
 {
 	return _mm_castps_si128(DirectX::XMVectorSetInt(X, Y, Z, W));
+}
+
+FORCEINLINE constexpr VectorRegister4Int MakeVectorRegisterIntConstant(int32 X, int32 Y, int32 Z, int32 W)
+{
+    return {static_cast<char>(X >> 0), static_cast<char>(X >> 8), static_cast<char>(X >> 16), static_cast<char>(X >> 24),
+            static_cast<char>(Y >> 0), static_cast<char>(Y >> 8), static_cast<char>(Y >> 16), static_cast<char>(Y >> 24), 
+            static_cast<char>(Z >> 0), static_cast<char>(Z >> 8), static_cast<char>(Z >> 16), static_cast<char>(Z >> 24), 
+            static_cast<char>(W >> 0), static_cast<char>(W >> 8), static_cast<char>(W >> 16), static_cast<char>(W >> 24)};
+}
+
+FORCEINLINE constexpr VectorRegister4Float MakeVectorRegisterFloatConstant(float X, float Y, float Z, float W)
+{
+	return VectorRegister4Float { X, Y, Z, W };
+}
+
+FORCEINLINE constexpr VectorRegister2Double MakeVectorRegister2DoubleConstant(double X, double Y)
+{
+	return VectorRegister2Double { X, Y };
 }
 
 /*=============================================================================
@@ -153,6 +176,22 @@ FORCEINLINE VectorRegisterInt MakeVectorRegisterInt(int32 X, int32 Y, int32 Z, i
  * @return		VectorRegister(Ptr[0], Ptr[1], Ptr[0], Ptr[1])
  */
 #define VectorLoadFloat2( Ptr )			MakeVectorRegister( ((const float*)(Ptr))[0], ((const float*)(Ptr))[1], ((const float*)(Ptr))[0], ((const float*)(Ptr))[1] )
+
+/**
+ * Loads 4 unaligned floats - 2 from the first pointer, 2 from the second, and packs
+ * them in to 1 vector.
+ *
+ * @param Ptr1	Unaligned memory pointer to the first 2 floats
+ * @param Ptr2	Unaligned memory pointer to the second 2 floats
+ * @return		VectorRegister(Ptr1[0], Ptr1[1], Ptr2[0], Ptr2[1])
+ */
+FORCEINLINE VectorRegister VectorLoadTwoPairsFloat(const float* Ptr1, const float* Ptr2)
+{
+	__m128 Ret = _mm_castpd_ps(_mm_load_sd((double const*)(Ptr1)));
+	Ret = _mm_loadh_pi(Ret, (__m64 const*)(Ptr2));
+	return Ret;
+}
+
 
 /**
  * Creates a vector out of three FLOATs and leaves W undefined.
@@ -319,6 +358,16 @@ FORCEINLINE float VectorGetComponent( VectorRegister Vec, uint32 ComponentIndex 
  * @return		VectorRegister( Vec1.x*Vec2.x + Vec3.x, Vec1.y*Vec2.y + Vec3.y, Vec1.z*Vec2.z + Vec3.z, Vec1.w*Vec2.w + Vec3.w )
  */
 #define VectorMultiplyAdd( Vec1, Vec2, Vec3 )	DirectX::XMVectorMultiplyAdd( Vec1, Vec2, Vec3 )
+
+/**
+ * Multiplies two vectors (component-wise), negates the results and adds it to the third vector i.e. -AB + C = C - AB
+ *
+ * @param Vec1	1st vector
+ * @param Vec2	2nd vector
+ * @param Vec3	3rd vector
+ * @return		VectorRegister( Vec3.x - Vec1.x*Vec2.x, Vec3.y - Vec1.y*Vec2.y, Vec3.z - Vec1.z*Vec2.z, Vec3.w - Vec1.w*Vec2.w )
+ */
+#define VectorNegateMultiplyAdd(Vec1, Vec2, Vec3) DirectX::XMVectorNegativeMultiplySubtract( Vec1, Vec2, Vec3 )
 
 /**
  * Calculates the dot3 product of two vectors and returns a vector with the result in all 4 components.
@@ -547,12 +596,26 @@ FORCEINLINE void VectorMatrixMultiply( FMatrix* Result, const FMatrix* Matrix1, 
  * @param DstMatrix		FMatrix pointer to where the result should be stored
  * @param SrcMatrix		FMatrix pointer to the Matrix to be inversed
  */
-FORCEINLINE void VectorMatrixInverse( FMatrix* DstMatrix, const FMatrix* SrcMatrix )
+FORCEINLINE bool VectorMatrixInverse( FMatrix* DstMatrix, const FMatrix* SrcMatrix )
 {
 	using namespace DirectX;
 	XMMATRIX XMSrcMatrix = XMLoadFloat4x4A((const XMFLOAT4X4A*)(SrcMatrix));
-	XMMATRIX XMDstMatrix = XMMatrixInverse( nullptr, XMSrcMatrix );
+	XMVECTOR XMDeterminant;
+	XMMATRIX XMDstMatrix = XMMatrixInverse( &XMDeterminant, XMSrcMatrix );
+	
+	//XMMatrixInverse Returns the matrix inverse of M. If there is no inverse (that is, if the determinant is 0), 
+	//	then XMMatrixInverse returns an infinite matrix.
+
+	float Determinant;
+	XMStoreFloat(&Determinant,XMDeterminant);
+	if ( Determinant == 0.f || !FMath::IsFinite(Determinant) )
+	{
+		*DstMatrix = FMatrix::Identity;
+		return false;
+	}
+	
 	XMStoreFloat4x4A( (XMFLOAT4X4A*)(DstMatrix), XMDstMatrix);
+	return true;
 }
 
 /**
@@ -635,6 +698,22 @@ FORCEINLINE VectorRegister VectorCombineLow(const VectorRegister& Vec1, const Ve
 {
 	return VectorShuffle(Vec1, Vec2, 0, 1, 0, 1);
 }
+
+/**
+ * Deinterleaves the components of the two given vectors such that the even components
+ * are in one vector and the odds in another.
+ *
+ * @param Lo	[Even0, Odd0, Even1, Odd1]
+ * @param Hi	[Even2, Odd2, Even3, Odd3]
+ * @param OutEvens [Even0, Even1, Even2, Even3]
+ * @param OutOdds [Odd0, Odd1, Odd2, Odd3]
+*/
+FORCEINLINE void VectorDeinterleave(VectorRegister& OutEvens, VectorRegister& OutOdds, const VectorRegister& Lo, const VectorRegister& Hi)
+{
+	OutEvens = _mm_shuffle_ps(Lo, Hi, _MM_SHUFFLE(2, 0, 2, 0));
+	OutOdds = _mm_shuffle_ps(Lo, Hi, _MM_SHUFFLE(3, 1, 3, 1));
+}
+
 
 /**
  * These functions return a vector mask to indicate which components pass the comparison.
@@ -964,9 +1043,9 @@ FORCEINLINE bool VectorContainsNaNOrInfinite(const VectorRegister& Vec)
 	// This means finite values will not have all exponent bits set, so check against those bits.
 
 	// Mask off Exponent
-	const VectorRegister ExpTest = VectorBitwiseAnd(Vec, GlobalVectorConstants::FloatInfinity);
+	const VectorRegister ExpTest = VectorBitwiseAnd(Vec, GlobalVectorConstants::FloatInfinity());
 	// Compare to full exponent. If any are full exponent (not finite), the signs copied to the mask are non-zero, otherwise it's zero and finite.
-	bool IsFinite = VectorMaskBits(VectorCompareEQ(ExpTest, GlobalVectorConstants::FloatInfinity)) == 0;
+	bool IsFinite = VectorMaskBits(VectorCompareEQ(ExpTest, GlobalVectorConstants::FloatInfinity())) == 0;
 	return !IsFinite;
 }
 
@@ -1097,7 +1176,7 @@ FORCEINLINE VectorRegister VectorStep(const VectorRegister& X)
 #define VectorIntCompareLE(A, B)	VectorIntNot(VectorIntCompareGT(A,B))
 
 
-FORCEINLINE VectorRegisterInt VectorIntSelect(const VectorRegisterInt& Mask, const VectorRegisterInt& Vec1, const VectorRegisterInt& Vec2)
+FORCEINLINE VectorRegister4Int VectorIntSelect(const VectorRegister4Int& Mask, const VectorRegister4Int& Vec1, const VectorRegister4Int& Vec2)
 {
 	return _mm_xor_si128(Vec2, _mm_and_si128(Mask, _mm_xor_si128(Vec1, Vec2)));
 }
@@ -1106,7 +1185,7 @@ FORCEINLINE VectorRegisterInt VectorIntSelect(const VectorRegisterInt& Mask, con
 #define VectorIntAdd(A, B)	_mm_add_epi32(A, B)
 #define VectorIntSubtract(A, B)	_mm_sub_epi32(A, B)
 
-FORCEINLINE VectorRegisterInt VectorIntMultiply(const VectorRegisterInt& A, const VectorRegisterInt& B)
+FORCEINLINE VectorRegister4Int VectorIntMultiply(const VectorRegister4Int& A, const VectorRegister4Int& B)
 {
 	//SSE2 doesn't have a multiply op for 4 32bit ints. Ugh.
 	__m128i Temp0 = _mm_mul_epu32(A, B);
@@ -1116,21 +1195,21 @@ FORCEINLINE VectorRegisterInt VectorIntMultiply(const VectorRegisterInt& A, cons
 
 #define VectorIntNegate(A) VectorIntSubtract( GlobalVectorConstants::IntZero, A)
 
-FORCEINLINE VectorRegisterInt VectorIntMin(const VectorRegisterInt& A, const VectorRegisterInt& B)
+FORCEINLINE VectorRegister4Int VectorIntMin(const VectorRegister4Int& A, const VectorRegister4Int& B)
 {
-	VectorRegisterInt Mask = VectorIntCompareLT(A, B);
+	VectorRegister4Int Mask = VectorIntCompareLT(A, B);
 	return VectorIntSelect(Mask, A, B);
 }
 
-FORCEINLINE VectorRegisterInt VectorIntMax(const VectorRegisterInt& A, const VectorRegisterInt& B)
+FORCEINLINE VectorRegister4Int VectorIntMax(const VectorRegister4Int& A, const VectorRegister4Int& B)
 {
-	VectorRegisterInt Mask = VectorIntCompareGT(A, B);
+	VectorRegister4Int Mask = VectorIntCompareGT(A, B);
 	return VectorIntSelect(Mask, A, B);
 }
 
-FORCEINLINE VectorRegisterInt VectorIntAbs(const VectorRegisterInt& A)
+FORCEINLINE VectorRegister4Int VectorIntAbs(const VectorRegister4Int& A)
 {
-	VectorRegisterInt Mask = VectorIntCompareGE(A, GlobalVectorConstants::IntZero);
+	VectorRegister4Int Mask = VectorIntCompareGE(A, GlobalVectorConstants::IntZero);
 	return VectorIntSelect(Mask, A, VectorIntNegate(A));
 }
 
@@ -1138,6 +1217,11 @@ FORCEINLINE VectorRegisterInt VectorIntAbs(const VectorRegisterInt& A)
 
 #define VectorIntToFloat(A) _mm_cvtepi32_ps(A)
 #define VectorFloatToInt(A) _mm_cvttps_epi32(A)
+
+FORCEINLINE VectorRegister4Int VectorRoundToIntHalfToEven(const VectorRegister4Float& Vec)
+{
+	return _mm_cvtps_epi32(Vec);
+}
 
 //Loads and stores
 
@@ -1147,15 +1231,15 @@ FORCEINLINE VectorRegisterInt VectorIntAbs(const VectorRegisterInt& A)
 * @param Vec	Vector to store
 * @param Ptr	Memory pointer
 */
-#define VectorIntStore( Vec, Ptr )			_mm_storeu_si128( (VectorRegisterInt*)(Ptr), Vec )
+#define VectorIntStore( Vec, Ptr )			_mm_storeu_si128( (VectorRegister4Int*)(Ptr), Vec )
 
 /**
 * Loads 4 int32s from unaligned memory.
 *
 * @param Ptr	Unaligned memory pointer to the 4 int32s
-* @return		VectorRegisterInt(Ptr[0], Ptr[1], Ptr[2], Ptr[3])
+* @return		VectorRegister4Int(Ptr[0], Ptr[1], Ptr[2], Ptr[3])
 */
-#define VectorIntLoad( Ptr )				_mm_loadu_si128( (VectorRegisterInt*)(Ptr) )
+#define VectorIntLoad( Ptr )				_mm_loadu_si128( (VectorRegister4Int*)(Ptr) )
 
 /**
 * Stores a vector to memory (aligned).
@@ -1163,23 +1247,23 @@ FORCEINLINE VectorRegisterInt VectorIntAbs(const VectorRegisterInt& A)
 * @param Vec	Vector to store
 * @param Ptr	Aligned Memory pointer
 */
-#define VectorIntStoreAligned( Vec, Ptr )			_mm_store_si128( (VectorRegisterInt*)(Ptr), Vec )
+#define VectorIntStoreAligned( Vec, Ptr )			_mm_store_si128( (VectorRegister4Int*)(Ptr), Vec )
 
 /**
 * Loads 4 int32s from aligned memory.
 *
 * @param Ptr	Aligned memory pointer to the 4 int32s
-* @return		VectorRegisterInt(Ptr[0], Ptr[1], Ptr[2], Ptr[3])
+* @return		VectorRegister4Int(Ptr[0], Ptr[1], Ptr[2], Ptr[3])
 */
-#define VectorIntLoadAligned( Ptr )				_mm_load_si128( (VectorRegisterInt*)(Ptr) )
+#define VectorIntLoadAligned( Ptr )				_mm_load_si128( (VectorRegister4Int*)(Ptr) )
 
 /**
 * Loads 1 int32 from unaligned memory into all components of a vector register.
 *
 * @param Ptr	Unaligned memory pointer to the 4 int32s
-* @return		VectorRegisterInt(*Ptr, *Ptr, *Ptr, *Ptr)
+* @return		VectorRegister4Int(*Ptr, *Ptr, *Ptr, *Ptr)
 */
-#define VectorIntLoad1( Ptr )	_mm_shuffle_epi32(_mm_loadu_si128((VectorRegisterInt*)(Ptr)),_MM_SHUFFLE(0,0,0,0))
+#define VectorIntLoad1( Ptr )	_mm_shuffle_epi32(_mm_loadu_si128((VectorRegister4Int*)(Ptr)),_MM_SHUFFLE(0,0,0,0))
 
 #endif
 

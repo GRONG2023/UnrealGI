@@ -5,8 +5,7 @@
 #include "Fonts/FontMeasure.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Rendering/DrawElements.h"
-#include "Styling/CoreStyle.h"
-#include "TraceServices/AnalysisService.h"
+#include "Styling/AppStyle.h"
 
 // Insights
 #include "Insights/Common/PaintUtils.h"
@@ -17,24 +16,27 @@
 #include <limits>
 #include "Misc/StringBuilder.h"
 
+#define INSIGHTS_USE_LEGACY_BORDER 0
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // FPacketContentViewDrawStateBuilder
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-FPacketContentViewDrawStateBuilder::FPacketContentViewDrawStateBuilder(FPacketContentViewDrawState& InDrawState, const FPacketContentViewport& InViewport)
+FPacketContentViewDrawStateBuilder::FPacketContentViewDrawStateBuilder(FPacketContentViewDrawState& InDrawState, const FPacketContentViewport& InViewport, float InFontScale)
 	: DrawState(InDrawState)
 	, Viewport(InViewport)
 	, MaxDepth(-1)
 	, LastEventX2()
 	, LastBox()
-	, EventFont(FCoreStyle::GetDefaultFontStyle("Regular", 8))
+	, EventFont(FAppStyle::Get().GetFontStyle("SmallFont"))
+	, FontScale(InFontScale)
 {
 	DrawState.Reset();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerContentEvent& Event, const TCHAR* EventName, uint32 NetId)
+void FPacketContentViewDrawStateBuilder::AddEvent(const TraceServices::FNetProfilerContentEvent& Event, const TCHAR* EventName, uint64 NetId)
 {
 	DrawState.Events.AddUninitialized();
 	FNetworkPacketEvent& PacketEvent = DrawState.Events.Last();
@@ -42,7 +44,7 @@ void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerConte
 	PacketEvent.ObjectInstanceIndex = Event.ObjectInstanceIndex;
 	PacketEvent.NetId = NetId;
 	PacketEvent.BitOffset = Event.StartPos;
-	PacketEvent.BitSize = Event.EndPos - Event.StartPos;
+	PacketEvent.BitSize = static_cast<uint32>(Event.EndPos - Event.StartPos);
 	PacketEvent.Level = Event.Level;
 
 	const FAxisViewportDouble& ViewportX = Viewport.GetHorizontalAxisViewport();
@@ -184,9 +186,10 @@ void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerConte
 		TStringBuilder<512> Builder;
 
 		Builder.Appendf(TEXT("%s"), EventName ? EventName : TEXT("?"));
-		if (EventW > Builder.Len() * 2.0f + 48.0f)
+		const float MinWidth = static_cast<float>(Builder.Len()) * 2.0f + 48.0f;
+		if (EventW > MinWidth)
 		{
-			const Trace::FNetProfilerBunchInfo& Info = Event.BunchInfo;
+			const TraceServices::FNetProfilerBunchInfo& Info = Event.BunchInfo;
 			if (Info.bIsValid)
 			{
 				Builder.Appendf(TEXT(" ChannelId:%u"), Info.ChannelIndex);
@@ -201,7 +204,7 @@ void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerConte
 				}
 				else if (Event.BunchInfo.bClose)
 				{
-					Builder.Appendf(TEXT(" | Close: %s"), LexToString(Trace::ENetProfilerChannelCloseReason(Info.ChannelCloseReason)));		
+					Builder.Appendf(TEXT(" | Close: %s"), LexToString(TraceServices::ENetProfilerChannelCloseReason(Info.ChannelCloseReason)));
 				}
 				if (Event.BunchInfo.bReliable)
 				{
@@ -211,10 +214,12 @@ void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerConte
 				{
 					Builder.Appendf(TEXT(" | Partial%s%s"), Info.bPartialInitial ? TEXT("Initial") : TEXT(""), Info.bPartialFinal ? TEXT("Final") : TEXT(""));
 				}
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
 				if (Event.BunchInfo.bIsReplicationPaused)
 				{
 					Builder.Append(TEXT(" | ReplicationPaused"));
 				}
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
 				if (Event.BunchInfo.bHasMustBeMappedGUIDs)
 				{
 					Builder.Append(TEXT(" | HasMustBeMappedGUIDs"));
@@ -229,13 +234,13 @@ void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerConte
 
 			if (Event.ObjectInstanceIndex != 0)
 			{
-				Builder.Appendf(TEXT(" (NetId:%u, "), NetId);
+				Builder.Appendf(TEXT(" (NetId:%" UINT64_FMT ", "), NetId);
 			}
 			else
 			{
 				Builder.Append(TEXT(" ("));
 			}
-			const uint32 EventSize = Event.EndPos - Event.StartPos;
+			const uint32 EventSize = static_cast<uint32>(Event.EndPos - Event.StartPos);
 			if (EventSize == 1)
 			{
 				Builder.Append(TEXT("1 bit)"));
@@ -246,17 +251,18 @@ void FPacketContentViewDrawStateBuilder::AddEvent(const Trace::FNetProfilerConte
 			}
 		}
 
-		FString Name(Builder.ToString());
+		const FString Name(Builder);
 
 		const TSharedRef<FSlateFontMeasure> FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
-		const int32 LastWholeCharacterIndex = FontMeasureService->FindLastWholeCharacterIndexBeforeOffset(Name, EventFont, FMath::RoundToInt(EventW - 2.0f));
+		const int32 HorizontalOffset = FMath::RoundToInt((EventW - 2.0f) * FontScale);
+		const int32 LastWholeCharacterIndex = FontMeasureService->FindLastWholeCharacterIndexBeforeOffset(Name, EventFont, HorizontalOffset, FontScale);
 
 		if (LastWholeCharacterIndex >= 0)
 		{
 			// Grey threshold is shifted toward black (0.4 instead of 0.5 in test below) due to "area rule":
 			// a large gray surface (background of an event in this case) is perceived lighter than a smaller area (text pixels).
 			// Ref: https://books.google.ro/books?id=0pVr7dhmdWYC
-			const bool bIsDarkColor = (EventColorFill.ComputeLuminance() < 0.4f);
+			const bool bIsDarkColor = (EventColorFill.GetLuminance() < 0.4f);
 
 			DrawState.Texts.AddDefaulted();
 			FPacketContentViewDrawState::FTextPrimitive& DrawText = DrawState.Texts.Last();
@@ -306,10 +312,7 @@ FPacketContentViewDrawHelper::FPacketContentViewDrawHelper(const FDrawContext& I
 	, EventBorderBrush(FInsightsStyle::Get().GetBrush("EventBorder"))
 	, HoveredEventBorderBrush(FInsightsStyle::Get().GetBrush("HoveredEventBorder"))
 	, SelectedEventBorderBrush(FInsightsStyle::Get().GetBrush("SelectedEventBorder"))
-	, EventFont(FCoreStyle::GetDefaultFontStyle("Regular", 8))
-	, LayoutPosY(0.0f)
-	, LayoutEventH(14.0f)
-	, LayoutEventDY(2.0f)
+	, EventFont(FAppStyle::Get().GetFontStyle("SmallFont"))
 {
 }
 
@@ -371,51 +374,80 @@ FLinearColor FPacketContentViewDrawHelper::GetColorByType(int32 Type)
 void FPacketContentViewDrawHelper::Draw(const FPacketContentViewDrawState& DrawState, const float Opacity) const
 {
 	// Draw filled boxes (merged borders).
-	//if (LayoutEventH > 0.0f)
+	//if (Viewport.GetEventHeight() > 0.0f)
 	{
-		const float EventFillH = LayoutEventH;
+		const float BoxY0 = Viewport.GetTopEventPosY();
+		const float BoxDY = Viewport.GetEventHeight() + Viewport.GetEventDY();
+		const float EventFillH = Viewport.GetEventHeight();
 		for (const FPacketContentViewDrawState::FBoxPrimitive& Box : DrawState.Boxes)
 		{
-			const float Y = LayoutPosY + (LayoutEventH + LayoutEventDY) * Box.Depth;
-			DrawContext.DrawBox(Box.X, Y, Box.W, EventFillH, WhiteBrush, Box.Color.CopyWithNewOpacity(Opacity));
+			DrawContext.DrawBox(Box.X, BoxY0 + BoxDY * (float)Box.Depth, Box.W, EventFillH, WhiteBrush, Box.Color.CopyWithNewOpacity(Opacity));
 		}
 		DrawContext.LayerId++;
 	}
 
 	// Draw filled boxes (event inside area).
-	if (LayoutEventH > 2.0f)
+	if (Viewport.GetEventHeight() > 2.0f)
 	{
-		const float EventFillH = LayoutEventH - 2.0f;
+		const float BoxY0 = Viewport.GetTopEventPosY() + 1.0f;
+		const float BoxDY = Viewport.GetEventHeight() + Viewport.GetEventDY();
+		const float EventFillH = Viewport.GetEventHeight() - 2.0f;
 		for (const FPacketContentViewDrawState::FBoxPrimitive& Box : DrawState.InsideBoxes)
 		{
-			const float Y = LayoutPosY + (LayoutEventH + LayoutEventDY) * Box.Depth + 1.0f;
-			DrawContext.DrawBox(Box.X, Y, Box.W, EventFillH, WhiteBrush, Box.Color.CopyWithNewOpacity(Opacity));
+			DrawContext.DrawBox(Box.X, BoxY0 + BoxDY * (float)Box.Depth, Box.W, EventFillH, WhiteBrush, Box.Color.CopyWithNewOpacity(Opacity));
 		}
 		DrawContext.LayerId++;
 	}
 
 	// Draw borders.
-	//if (LayoutEventH > 0.0f)
+	//if (Viewport.GetEventHeight() > 0.0f)
 	{
-		const float EventBorderH = LayoutEventH;
+#if INSIGHTS_USE_LEGACY_BORDER
+		const float BoxY0 = Viewport.GetTopEventPosY();
+		const float BoxDY = Viewport.GetEventHeight() + Viewport.GetEventDY();
+		const float EventBorderH = Viewport.GetEventHeight();
 		for (const FPacketContentViewDrawState::FBoxPrimitive& Box : DrawState.Borders)
 		{
-			const float Y = LayoutPosY + (LayoutEventH + LayoutEventDY) * Box.Depth;
-			DrawContext.DrawBox(Box.X, Y, Box.W, EventBorderH, EventBorderBrush, Box.Color.CopyWithNewOpacity(Opacity));
+			DrawContext.DrawBox(Box.X, BoxY0 + BoxDY * (float)Box.Depth, Box.W, EventBorderH, EventBorderBrush, Box.Color.CopyWithNewOpacity(Opacity));
 		}
 		DrawContext.LayerId++;
+#else
+		if (Opacity == 1.0f)
+		{
+			const int32 EventBorderLayerId = DrawContext.LayerId - 2; // draw under the filled boxes
+			const float BoxY0 = Viewport.GetTopEventPosY();
+			const float BoxDY = Viewport.GetEventHeight() + Viewport.GetEventDY();
+			const float EventBorderH = Viewport.GetEventHeight();
+			for (const FPacketContentViewDrawState::FBoxPrimitive& Box : DrawState.Borders)
+			{
+				DrawContext.DrawBox(EventBorderLayerId, Box.X, BoxY0 + BoxDY * (float)Box.Depth, Box.W, EventBorderH, WhiteBrush, Box.Color);
+			}
+		}
+		else
+		{
+			const float BoxY0 = Viewport.GetTopEventPosY();
+			const float BoxDY = Viewport.GetEventHeight() + Viewport.GetEventDY();
+			const float EventBorderH = Viewport.GetEventHeight();
+			for (const FPacketContentViewDrawState::FBoxPrimitive& Box : DrawState.Borders)
+			{
+				FSlateRoundedBoxBrush Brush(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), 0.0f, Box.Color.CopyWithNewOpacity(Opacity), 1.0f);
+				DrawContext.DrawBox(Box.X, BoxY0 + BoxDY * (float)Box.Depth, Box.W, EventBorderH, &Brush, FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+			}
+			DrawContext.LayerId++;
+		}
+#endif
 	}
 
 	// Draw texts.
-	if (LayoutEventH > 10.0f)
+	if (Viewport.GetEventHeight() > 10.0f)
 	{
+		const float TextY0 = Viewport.GetTopEventPosY() + 1.0f;
+		const float TextDY = Viewport.GetEventHeight() + Viewport.GetEventDY();
 		const FLinearColor WhiteColor(1.0f, 1.0f, 1.0f, Opacity);
 		const FLinearColor BlackColor(0.0f, 0.0f, 0.0f, Opacity);
-
 		for (const FPacketContentViewDrawState::FTextPrimitive& Text : DrawState.Texts)
 		{
-			const float Y = LayoutPosY + (LayoutEventH + LayoutEventDY) * Text.Depth + 1.0f;
-			DrawContext.DrawText(Text.X, Y, Text.Text, EventFont, Text.bWhite ? WhiteColor : BlackColor);
+			DrawContext.DrawText(Text.X, TextY0 + TextDY * (float)Text.Depth, Text.Text, EventFont, Text.bWhite ? WhiteColor : BlackColor);
 		}
 		DrawContext.LayerId++;
 	}
@@ -460,28 +492,46 @@ void FPacketContentViewDrawHelper::DrawEventHighlight(const FNetworkPacketEvent&
 	}
 
 	const float EventW = EventX2 - EventX1;
-	const float EventY = LayoutPosY + (LayoutEventH + LayoutEventDY) * Event.Level;
+	const float EventY = Viewport.GetTopEventPosY() + (Viewport.GetEventHeight() + Viewport.GetEventDY()) * static_cast<float>(Event.Level);
+
+#if INSIGHTS_USE_LEGACY_BORDER
+	constexpr float BorderOffset = 1.0f;
+#else
+	constexpr float BorderOffset = 2.0f;
+#endif
 
 	if (Mode == EHighlightMode::Hovered)
 	{
 		const FLinearColor Color(1.0f, 1.0f, 0.0f, 1.0f); // yellow
 
 		// Draw border around the timing event box.
-		DrawContext.DrawBox(EventX1 - 2.0f, EventY - 2.0f, EventW + 4.0f, LayoutEventH + 4.0f, HoveredEventBorderBrush, Color);
+#if INSIGHTS_USE_LEGACY_BORDER
+		DrawContext.DrawBox(EventX1 - BorderOffset, EventY - BorderOffset, EventW + 2 * BorderOffset, Viewport.GetEventHeight() + 2 * BorderOffset, HoveredEventBorderBrush, Color);
+#else
+		FSlateRoundedBoxBrush Brush(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), 2.0f, Color, 2.0f);
+		DrawContext.DrawBox(EventX1 - BorderOffset, EventY - BorderOffset, EventW + 2 * BorderOffset, Viewport.GetEventHeight() + 2 * BorderOffset, &Brush, FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+#endif
 	}
 	else // EHighlightMode::Selected or EHighlightMode::SelectedAndHovered
 	{
 		// Animate color from white (if selected and hovered) or yellow (if only selected) to black, using a squared sine function.
 		const double Time = static_cast<double>(FPlatformTime::Cycles64()) * FPlatformTime::GetSecondsPerCycle64();
-		float S = FMath::Sin(2.0 * Time);
-		S = S * S; // squared, to ensure only positive [0 - 1] values
-		const float Blue = (Mode == EHighlightMode::SelectedAndHovered) ? 0.0f : S;
-		const FLinearColor Color(S, S, Blue, 1.0f);
+		float Hue = static_cast<float>(FMath::Sin(2.0 * Time));
+		Hue = Hue * Hue; // squared, to ensure only positive [0 - 1] values
+		const float Blue = (Mode == EHighlightMode::SelectedAndHovered) ? 0.0f : Hue;
+		const FLinearColor Color(Hue, Hue, Blue, 1.0f);
 
 		// Draw border around the timing event box.
-		DrawContext.DrawBox(EventX1 - 2.0f, EventY - 2.0f, EventW + 4.0f, LayoutEventH + 4.0f, SelectedEventBorderBrush, Color);
+#if INSIGHTS_USE_LEGACY_BORDER
+		DrawContext.DrawBox(EventX1 - BorderOffset, EventY - BorderOffset, EventW + 2 * BorderOffset, Viewport.GetEventHeight() + 2 * BorderOffset, SelectedEventBorderBrush, Color);
+#else
+		FSlateRoundedBoxBrush Brush(FLinearColor(0.0f, 0.0f, 0.0f, 0.0f), 2.0f, Color, 2.0f);
+		DrawContext.DrawBox(EventX1 - BorderOffset, EventY - BorderOffset, EventW + 2 * BorderOffset, Viewport.GetEventHeight() + 2 * BorderOffset, &Brush, FLinearColor(0.0f, 0.0f, 0.0f, 0.0f));
+#endif
 	}
 	DrawContext.LayerId++;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+#undef INSIGHTS_USE_LEGACY_BORDER

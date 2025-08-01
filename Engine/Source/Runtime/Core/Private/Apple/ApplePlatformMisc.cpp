@@ -13,6 +13,29 @@
 #include "Apple/ApplePlatformDebugEvents.h"
 #include "Apple/ApplePlatformCrashContext.h"
 #include "FramePro/FrameProProfiler.h"
+#include "CoreGlobals.h"
+
+#if !UE_BUILD_SHIPPING
+
+bool FApplePlatformMisc::IsDebuggerPresent()
+{
+	// Based on http://developer.apple.com/library/mac/#qa/qa1361/_index.html
+
+	if (GIgnoreDebugger)
+	{
+		return false;
+	}
+
+	struct kinfo_proc Info;
+	int32 Mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+	SIZE_T Size = sizeof(Info);
+
+	sysctl(Mib, sizeof(Mib) / sizeof(*Mib), &Info, &Size, NULL, 0);
+
+	return (Info.kp_proc.p_flag & P_TRACED) != 0;
+}
+
+#endif // !UE_BUILD_SHIPPING
 
 void FApplePlatformMisc::GetEnvironmentVariable(const TCHAR* VariableName, TCHAR* Result, int32 ResultLength)
 {
@@ -51,7 +74,7 @@ FString FApplePlatformMisc::GetEnvironmentVariable(const TCHAR* VariableName)
 void FApplePlatformMisc::LocalPrint(const TCHAR* Message)
 {
 	//NsLog will out to all iOS output consoles, instead of just the Xcode console.
-	NSLog(@"[UE4] %s", TCHAR_TO_UTF8(Message));
+	NSLog(@"[UE] %s", TCHAR_TO_UTF8(Message));
 }
 
 const TCHAR* FApplePlatformMisc::GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error)
@@ -63,8 +86,14 @@ const TCHAR* FApplePlatformMisc::GetSystemErrorMessage(TCHAR* OutBuffer, int32 B
 		Error = errno;
 	}
 	char* ErrorBuffer = (char*)alloca(BufferCount);
-	strerror_r(Error, ErrorBuffer, BufferCount);
-	FCString::Strcpy(OutBuffer, BufferCount, UTF8_TO_TCHAR((const ANSICHAR*)ErrorBuffer));
+	if (strerror_r(Error, ErrorBuffer, 1024) == 0)
+	{
+		FCString::Strcpy(OutBuffer, BufferCount, UTF8_TO_TCHAR((const ANSICHAR*)ErrorBuffer));
+	}
+	else
+	{
+		*OutBuffer = TEXT('\0');
+	}
 	return OutBuffer;
 }
 
@@ -224,7 +253,7 @@ void GetBytesForFont(const NSString* InFontName, OUT TArray<uint8>& OutBytes)
 		}
 		SearchRange <<= 4;
 
-		uint16 RangeShift = (TableCount << 4) - SearchRange;
+		uint16 RangeShift = (uint16)((TableCount << 4) - SearchRange);
 
 		// Write font header (also called sfnt header, offset subtable)
 		FFontHeader* OffsetTable = (FFontHeader*)DataPtr;
@@ -273,13 +302,13 @@ TArray<uint8> FApplePlatformMisc::GetSystemFontBytes()
 {
 #if PLATFORM_MAC
 	// Gather some details about the system font
-	uint32 SystemFontSize = [NSFont systemFontSize];
+	uint32 SystemFontSize = (uint32)[NSFont systemFontSize];
 	NSString* SystemFontName = [NSFont systemFontOfSize:SystemFontSize].fontName;
 #elif PLATFORM_TVOS
 	NSString* SystemFontName = [UIFont preferredFontForTextStyle:UIFontTextStyleBody].fontName;
 #else
 	// Gather some details about the system font
-	uint32 SystemFontSize = [UIFont systemFontSize];
+	uint32 SystemFontSize = (uint32)[UIFont systemFontSize];
 	NSString* SystemFontName = [UIFont systemFontOfSize:SystemFontSize].fontName;
 #endif
 
@@ -301,7 +330,14 @@ FString FApplePlatformMisc::GetLocalCurrencySymbol()
 
 bool FApplePlatformMisc::IsOSAtLeastVersion(const uint32 MacOSVersion[3], const uint32 IOSVersion[3], const uint32 TVOSVersion[3])
 {
-	static const uint32 OSVersion[3] = { (uint32)[NSProcessInfo processInfo].operatingSystemVersion.majorVersion, (uint32)[NSProcessInfo processInfo].operatingSystemVersion.minorVersion, (uint32)[NSProcessInfo processInfo].operatingSystemVersion.patchVersion };
+	NSOperatingSystemVersion CurrentSystemVersion =
+#if PLATFORM_MAC
+	FMacPlatformMisc::GetNSOperatingSystemVersion();
+#else
+	[NSProcessInfo processInfo].operatingSystemVersion;
+#endif
+
+	static const uint32 OSVersion[3] = { (uint32)CurrentSystemVersion.majorVersion, (uint32)CurrentSystemVersion.minorVersion, (uint32)CurrentSystemVersion.patchVersion };
 	const uint32* VersionToCompare = PLATFORM_MAC ? MacOSVersion : (PLATFORM_IOS ? IOSVersion : TVOSVersion);
 
 	for (uint32 Index = 0; Index < 3; Index++)

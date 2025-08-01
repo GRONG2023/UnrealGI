@@ -2,19 +2,21 @@
 
 #include "Processor.h"
 #include "HAL/Event.h"
+#include "HAL/LowLevelMemTracker.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
 #include "StreamReader.h"
+#include "TraceAnalysisModule.h"
+#include "Logging/MessageLog.h"
 #include "Templates/UnrealTemplate.h"
-#include "Trace/Analysis.h"
 #include "Trace/DataStream.h"
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
-FAnalysisProcessor::FImpl::FImpl(IInDataStream& InDataStream, TArray<IAnalyzer*>&& InAnalyzers)
-: AnalysisEngine(Forward<TArray<IAnalyzer*>>(InAnalyzers))
+FAnalysisProcessor::FImpl::FImpl(IInDataStream& InDataStream, TArray<IAnalyzer*>&& InAnalyzers, FMessageDelegate&& InMessage)
+: AnalysisEngine(Forward<TArray<IAnalyzer*>>(InAnalyzers), Forward<FMessageDelegate>(InMessage))
 , DataStream(InDataStream)
 , StopEvent(FPlatformProcess::GetSynchEventFromPool(true))
 , UnpausedEvent(FPlatformProcess::GetSynchEventFromPool(true))
@@ -34,8 +36,11 @@ FAnalysisProcessor::FImpl::~FImpl()
 ////////////////////////////////////////////////////////////////////////////////
 uint32 FAnalysisProcessor::FImpl::Run()
 {
-	FStreamBuffer Buffer;
+	LLM_SCOPE_BYNAME(TEXT("TraceAnalysis"));
 
+	AnalysisEngine.Begin();
+
+	FStreamBuffer Buffer(4 << 20);
 	while (!StopEvent->Wait(0, true))
 	{
 		UnpausedEvent->Wait();
@@ -98,7 +103,6 @@ void FAnalysisProcessor::FImpl::PauseAnalysis(bool bState)
 }
 
 
-
 ////////////////////////////////////////////////////////////////////////////////
 bool FAnalysisProcessor::IsActive() const	{ return (Impl != nullptr) ? Impl->IsActive() : false; }
 void FAnalysisProcessor::Stop()				{ if (Impl != nullptr) { Impl->StopAnalysis(); } }
@@ -125,3 +129,4 @@ FAnalysisProcessor::~FAnalysisProcessor()
 }
 
 } // namespace Trace
+} // namespace UE

@@ -3,37 +3,58 @@
 #include "AssetEditorModeManager.h"
 #include "Engine/Selection.h"
 #include "PreviewScene.h"
+#include "Elements/Framework/TypedElementSelectionSet.h"
 
 //////////////////////////////////////////////////////////////////////////
 // FAssetEditorModeManager
 
 FAssetEditorModeManager::FAssetEditorModeManager()
-	: PreviewScene(nullptr)
 {
-	ActorSet = NewObject<USelection>();
-	ActorSet->SetFlags(RF_Transactional);
-	ActorSet->AddToRoot();
-	ActorSet->Initialize(nullptr);
+	{
+		UTypedElementSelectionSet* ActorAndComponentsSelectionSet = NewObject<UTypedElementSelectionSet>(GetTransientPackage(), NAME_None, RF_Transactional);
 
-	ObjectSet = NewObject<USelection>();
-	ObjectSet->SetFlags(RF_Transactional);
+		ActorSet = USelection::CreateActorSelection(GetTransientPackage(), NAME_None, RF_Transactional);
+		ActorSet->SetElementSelectionSet(ActorAndComponentsSelectionSet);
+		ActorSet->AddToRoot();
+
+		ComponentSet = USelection::CreateComponentSelection(GetTransientPackage(), NAME_None, RF_Transactional);
+		ComponentSet->SetElementSelectionSet(ActorAndComponentsSelectionSet);
+		ComponentSet->AddToRoot();
+	}
+
+	ObjectSet = USelection::CreateObjectSelection(GetTransientPackage(), NAME_None, RF_Transactional);
+	ObjectSet->SetElementSelectionSet(NewObject<UTypedElementSelectionSet>(ObjectSet, NAME_None, RF_Transactional));
 	ObjectSet->AddToRoot();
-	ObjectSet->Initialize(nullptr);
-
-	ComponentSet = NewObject<USelection>();
-	ComponentSet->SetFlags(RF_Transactional);
-	ComponentSet->AddToRoot();
-	ComponentSet->Initialize(nullptr);
 }
 
 FAssetEditorModeManager::~FAssetEditorModeManager()
 {
-	ActorSet->RemoveFromRoot();
-	ActorSet = nullptr;
-	ObjectSet->RemoveFromRoot();
-	ObjectSet = nullptr;
-	ComponentSet->RemoveFromRoot();
-	ComponentSet = nullptr;
+	// We may be destroyed after the UObject system has already shutdown, 
+	// which would mean that these instances will be garbage
+	if (UObjectInitialized())
+	{
+		if (!ActorSet->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed))
+		{
+			check(ActorSet->GetElementSelectionSet() == ComponentSet->GetElementSelectionSet());
+			if (UTypedElementSelectionSet* ActorAndComponentsSelectionSet = ActorSet->GetElementSelectionSet())
+			{
+				ActorAndComponentsSelectionSet->ClearSelection(FTypedElementSelectionOptions());
+			}
+		}
+
+		ActorSet->RemoveFromRoot();
+		ComponentSet->RemoveFromRoot();
+
+		if (!ObjectSet->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed))
+		{
+			if (UTypedElementSelectionSet* ObjectSelectionSet = ObjectSet->GetElementSelectionSet())
+			{
+				ObjectSelectionSet->ClearSelection(FTypedElementSelectionOptions());
+			}
+		}
+
+		ObjectSet->RemoveFromRoot();
+	}
 }
 
 USelection* FAssetEditorModeManager::GetSelectedActors() const
@@ -53,12 +74,17 @@ USelection* FAssetEditorModeManager::GetSelectedComponents() const
 
 UWorld* FAssetEditorModeManager::GetWorld() const
 {
-	return (PreviewScene != nullptr) ? PreviewScene->GetWorld() : GEditor->GetEditorWorldContext().World();
+	return (PreviewSceneWorld.IsValid()) ? PreviewSceneWorld.Get() : GEditor->GetEditorWorldContext().World();
 }
 
-void FAssetEditorModeManager::SetPreviewScene(class FPreviewScene* NewPreviewScene)
+void FAssetEditorModeManager::SetPreviewScene(FPreviewScene* NewPreviewScene)
 {
 	PreviewScene = NewPreviewScene;
+
+	// Due to destruction order, we might get a call from FEditorModeTools::OnWorldCleanup with an already destoyed PreviewScene,
+	// but we sill have to return the correct World the editor was using to perform a correct shutdown,
+	// so caching the PreviewScene World when assigning (and clearing if null preview is set)
+	PreviewSceneWorld = (NewPreviewScene != nullptr) ? NewPreviewScene->GetWorld() : nullptr;
 }
 
 FPreviewScene* FAssetEditorModeManager::GetPreviewScene() const

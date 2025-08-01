@@ -10,6 +10,7 @@
 #include "Presentation/PropertyTable/PropertyTableRowHeaderColumn.h"
 #include "Presentation/PropertyTable/PropertyTableObjectNameColumn.h"
 #include "Presentation/PropertyTable/PropertyTablePropertyNameColumn.h"
+#include "PropertyPermissionList.h"
 
 #include "EditConditionParser.h"
 
@@ -39,9 +40,9 @@ FPropertyTable::FPropertyTable()
 
 FPropertyTable::~FPropertyTable()
 {
-	if (GEditor && ObjectsReplacedHandle.IsValid())
+	if (ObjectsReplacedHandle.IsValid())
 	{
-		GEditor->OnObjectsReplaced().Remove(ObjectsReplacedHandle);
+		FCoreUObjectDelegates::OnObjectsReplaced.Remove(ObjectsReplacedHandle);
 	}
 }
 
@@ -83,6 +84,12 @@ void FPropertyTable::RequestRefresh()
 	bRefreshRequested = true;
 }
 
+void FPropertyTable::RequestForceRefresh()
+{
+	// RequestRefresh is already a deferred ForceRefresh
+	RequestRefresh();
+}
+
 class FNotifyHook* FPropertyTable::GetNotifyHook() const
 {
 	return NULL;
@@ -113,9 +120,11 @@ TSharedPtr<class FAssetThumbnailPool> FPropertyTable::GetThumbnailPool() const
 	return NULL;
 }
 
-TSharedPtr<FEditConditionParser> FPropertyTable::GetEditConditionParser() const
+const TArray<TSharedRef<class IClassViewerFilter>>& FPropertyTable::GetClassViewerFilters() const
 {
-	return EditConditionParser;
+	// not implemented
+	static TArray<TSharedRef<class IClassViewerFilter>> NotImplemented;
+	return NotImplemented;
 }
 
 bool FPropertyTable::GetIsUserAllowedToChangeRoot()
@@ -478,11 +487,21 @@ void FPropertyTable::PasteTextAtCell( const FString& Text, const TSharedRef< IPr
 
 	// Parse into row strings
 	TArray<FString> RowStrings;
-	Text.ParseIntoArray(RowStrings,LINE_TERMINATOR, true);
+	Text.ParseIntoArray(RowStrings,LINE_TERMINATOR, false);
+	if (RowStrings.Num() == 0)
+	{
+		// Pasted an empty string, ParseIntoArray didn't create empty entry, so create that now
+		RowStrings.Emplace(TEXT(""));
+	}
 
 	// Parse row strings into individual cell strings
 	TArray<FString> CellStrings;
 	RowStrings[CurrentRowIdx++].ParseIntoArray(CellStrings, TEXT("\t"), false);
+	if (CellStrings.Num() == 0)
+	{
+		// Pasted an empty string, ParseIntoArray didn't create empty entry, so create that now
+		CellStrings.Emplace(TEXT(""));
+	}
 
 	// Get the maximum paste operations before displaying the slow task
 	int32 NumPasteOperationsBeforeWarning = GetDefault<UEditorPerProjectUserSettings>()->PropertyMatrix_NumberOfPasteOperationsBeforeWarning;
@@ -526,6 +545,11 @@ void FPropertyTable::PasteTextAtCell( const FString& Text, const TSharedRef< IPr
 					CurrentColumnIdx = 0;
 					FirstCellInRow = TargetCell;
 					RowStrings[CurrentRowIdx++].ParseIntoArray(CellStrings, TEXT("\t"), false);
+					if (CellStrings.Num() == 0)
+					{
+						// Tried to parse an empty row string, create an empty cell string
+						CellStrings.Emplace(TEXT(""));
+					}
 				
 					if ( bShowProgressDialog )
 					{
@@ -1026,9 +1050,9 @@ void FPropertyTable::SetObjects( const TArray< TWeakObjectPtr< UObject > >& Obje
 	UpdateRows();
 
 	// Bind to object delegates, we can't do this at construction because the shared pointer isn't set up yet
-	if (GEditor && !ObjectsReplacedHandle.IsValid())
+	if (!ObjectsReplacedHandle.IsValid())
 	{
-		ObjectsReplacedHandle = GEditor->OnObjectsReplaced().AddSP(this, &FPropertyTable::OnObjectsReplaced);
+		ObjectsReplacedHandle = FCoreUObjectDelegates::OnObjectsReplaced.AddSP(this, &FPropertyTable::OnObjectsReplaced);
 	}
 }
 
@@ -1352,7 +1376,7 @@ void FPropertyTable::UpdateColumns()
 				TWeakFieldPtr< FProperty > Property = *PropertyIter;
 
 				// Don't expose CPF_NativeAccessSpecifierProtected and CPF_NativeAccessSpecifierPrivate properties
-				if ( PropertyIter->HasAllPropertyFlags(CPF_NativeAccessSpecifierPublic | CPF_AssetRegistrySearchable) )
+				if ( PropertyIter->HasAllPropertyFlags(CPF_NativeAccessSpecifierPublic | CPF_AssetRegistrySearchable) && FPropertyEditorPermissionList::Get().DoesPropertyPassFilter(PrimaryType.Get(), Property->GetFName()))
 				{
 					TArray< TSharedRef< IPropertyTableColumn > > MapResults;
 

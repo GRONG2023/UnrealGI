@@ -5,7 +5,7 @@
 #include "Widgets/Layout/SBox.h"
 
 #if WITH_EDITOR
-	#include "EditorStyleSet.h"
+	#include "Styling/AppStyle.h"
 #endif // WITH_EDITOR
 #include "Slate/WidgetTransform.h"
 #include "Components/Widget.h"
@@ -36,7 +36,7 @@ void STransformHandle::Construct(const FArguments& InArgs, IUMGDesigner* InDesig
 	[
 		SNew(SImage)
 		.Visibility(this, &STransformHandle::GetHandleVisibility)
-		.Image(FEditorStyle::Get().GetBrush("UMGEditor.TransformHandle"))
+		.Image(FAppStyle::Get().GetBrush("UMGEditor.TransformHandle"))
 	];
 }
 
@@ -138,7 +138,7 @@ FReply STransformHandle::OnMouseMove(const FGeometry& MyGeometry, const FPointer
 		ETransformMode::Type TransformMode = Designer->GetTransformMode();
 		if ( TransformMode == ETransformMode::Render )
 		{
-			FWidgetTransform PreviewRenderTransform = Preview->RenderTransform;
+			FWidgetTransform PreviewRenderTransform = Preview->GetRenderTransform();
 
 			static const FName RenderTransformName(TEXT("RenderTransform"));
 
@@ -155,7 +155,7 @@ bool STransformHandle::CanResize(UPanelSlot* Slot, const FVector2D& Direction) c
 	return Cast<UCanvasPanelSlot>(Slot) != nullptr;
 }
 
-void STransformHandle::Resize(UCanvasPanelSlot* Slot, const FVector2D& Direction, const FVector2D& Amount)
+void STransformHandle::Resize(UCanvasPanelSlot* Slot, const FVector2D& InDirection, const FVector2D& InAmount)
 {
 	if ( Slot == nullptr )
 	{
@@ -163,11 +163,15 @@ void STransformHandle::Resize(UCanvasPanelSlot* Slot, const FVector2D& Direction
 	}
 
 	FMargin Offsets = StartingOffsets;
-	const FAnchorData& LayoutData = Slot->LayoutData;
+	const FAnchorData LayoutData = Slot->GetLayout();
+	FVector2f Alignment = UE::Slate::CastToVector2f(LayoutData.Alignment);
 
-	FVector2D Movement = Amount * Direction;
-	FVector2D PositionMovement = Movement * ( FVector2D(1.0f, 1.0f) - LayoutData.Alignment );
-	FVector2D SizeMovement = Movement;
+	FVector2f Direction = UE::Slate::CastToVector2f(InDirection);
+	FVector2f Amount = UE::Slate::CastToVector2f(InAmount);	
+
+	FVector2f Movement = Amount * Direction;
+	FVector2f PositionMovement = Movement * ( FVector2f(1.0f, 1.0f) - Alignment);
+	FVector2f SizeMovement = Movement;
 
 	if ( Direction.X < 0 )
 	{
@@ -203,7 +207,7 @@ void STransformHandle::Resize(UCanvasPanelSlot* Slot, const FVector2D& Direction
 		}
 		else
 		{
-			Offsets.Left += (Movement * LayoutData.Alignment).X;
+			Offsets.Left += (Movement * Alignment).X;
 			Offsets.Right += Amount.X * Direction.X;
 		}
 	}
@@ -216,7 +220,7 @@ void STransformHandle::Resize(UCanvasPanelSlot* Slot, const FVector2D& Direction
 		}
 		else
 		{
-			Offsets.Top += ( Movement * LayoutData.Alignment ).Y;
+			Offsets.Top += ( Movement * Alignment ).Y;
 			Offsets.Bottom += Amount.Y * Direction.Y;
 		}
 	}

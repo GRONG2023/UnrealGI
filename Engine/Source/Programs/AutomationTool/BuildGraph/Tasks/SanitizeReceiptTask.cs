@@ -1,13 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 using UnrealBuildTool;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool.Tasks
 {
@@ -33,7 +38,7 @@ namespace AutomationTool.Tasks
 	/// Task that tags build products and/or runtime dependencies by reading from *.target files.
 	/// </summary>
 	[TaskElement("SanitizeReceipt", typeof(SanitizeReceiptTaskParameters))]
-	class SanitizeReceiptTask : CustomTask
+	class SanitizeReceiptTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters to this task
@@ -55,13 +60,20 @@ namespace AutomationTool.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override async Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Set the Engine directory
-			DirectoryReference EngineDir = Parameters.EngineDir ?? CommandUtils.EngineDirectory;
+			DirectoryReference EngineDir = Parameters.EngineDir ?? Unreal.EngineDirectory;
 
 			// Resolve the input list
-			IEnumerable<FileReference> TargetFiles = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet);
+			IEnumerable<FileReference> TargetFiles = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet);
+			await ExecuteAsync(TargetFiles, EngineDir);
+		}
+
+		public static Task ExecuteAsync(IEnumerable<FileReference> TargetFiles, DirectoryReference EngineDir)
+		{
+			EngineDir ??= Unreal.EngineDirectory;
+
 			foreach(FileReference TargetFile in TargetFiles)
 			{
 				// check all files are .target files
@@ -71,14 +83,14 @@ namespace AutomationTool.Tasks
 				}
 
 				// Print the name of the file being scanned
-				Log.TraceInformation("Sanitizing {0}", TargetFile);
+				Logger.LogInformation("Sanitizing {TargetFile}", TargetFile);
 				using(new LogIndentScope("  "))
 				{
 					// Read the receipt
 					TargetReceipt Receipt;
 					if (!TargetReceipt.TryRead(TargetFile, EngineDir, out Receipt))
 					{
-						CommandUtils.LogWarning("Unable to load file using TagReceipt task ({0})", TargetFile.FullName);
+						Logger.LogWarning("Unable to load file using TagReceipt task ({Arg0})", TargetFile.FullName);
 						continue;
 					}
 
@@ -92,7 +104,7 @@ namespace AutomationTool.Tasks
 						}
 						else
 						{
-							Log.TraceInformation("Removing build product: {0}", BuildProduct.Path);
+							Logger.LogInformation("Removing build product: {File}", BuildProduct.Path);
 						}
 					}
 					Receipt.BuildProducts = NewBuildProducts;
@@ -107,7 +119,7 @@ namespace AutomationTool.Tasks
 						}
 						else
 						{
-							Log.TraceInformation("Removing runtime dependency: {0}", RuntimeDependency.Path);
+							Logger.LogInformation("Removing runtime dependency: {File}", RuntimeDependency.Path);
 						}
 					}
 					Receipt.RuntimeDependencies = NewRuntimeDependencies;
@@ -116,6 +128,7 @@ namespace AutomationTool.Tasks
 					Receipt.Write(TargetFile, EngineDir);
 				}
 			}
+			return Task.CompletedTask;
 		}
 
 		/// <summary>
@@ -142,6 +155,20 @@ namespace AutomationTool.Tasks
 		public override IEnumerable<string> FindProducedTagNames()
 		{
 			return new string[0];
+		}
+	}
+
+	/// <summary>
+	/// Extension methods
+	/// </summary>
+	public static class SanitizeReceiptExtensions
+	{
+		/// <summary>
+		/// Sanitize the given receipt files, removing any files that don't exist in the current workspace
+		/// </summary>
+		public static async Task SanitizeReceiptsAsync(this FileSet TargetFiles, DirectoryReference EngineDir = null)
+		{
+			await SanitizeReceiptTask.ExecuteAsync(TargetFiles, EngineDir);
 		}
 	}
 }

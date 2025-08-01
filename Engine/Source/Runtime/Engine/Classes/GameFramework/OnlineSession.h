@@ -9,13 +9,13 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
-#include "UObject/CoreOnline.h"
+#include "Online/CoreOnline.h"
 #include "OnlineSession.generated.h"
 
 class FOnlineSessionSearchResult;
 
-UCLASS(config=Game)
-class ENGINE_API UOnlineSession : public UObject
+UCLASS(config=Game, MinimalAPI)
+class UOnlineSession : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -28,7 +28,7 @@ public:
 	virtual void ClearOnlineDelegates() {};
 
 	/** Called to tear down any online sessions and return to main menu	 */
-	virtual void HandleDisconnect(UWorld *World, class UNetDriver *NetDriver);
+	ENGINE_API virtual void HandleDisconnect(UWorld *World, class UNetDriver *NetDriver);
 
 	/** Start the online session specified */
 	virtual void StartOnlineSession(FName SessionName) {};

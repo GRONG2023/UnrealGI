@@ -15,6 +15,7 @@
 #include "Framework/Docking/SDockingCross.h"
 #include "Framework/Docking/FDockingDragOperation.h"
 #include "Framework/Docking/TabCommands.h"
+#include "Brushes/SlateColorBrush.h"
 
 #define LOCTEXT_NAMESPACE "DockTabStack"
 
@@ -51,14 +52,14 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 	Tabs = PersistentNode->Tabs;
 	this->SetSizeCoefficient(PersistentNode->GetSizeCoefficient());
 
+	// the value of this is determined every time a tab is added
+	bShowingTitleBarArea = false;
+
 	bIsDocumentArea = InArgs._IsDocumentArea;
 
-	InlineContentAreaLeft = NULL;
-	InlineContentAreaRight = NULL;
-	BackgroundContentArea = NULL;
-	TitleBarSlot = NULL;
-
-	this->TabStackGeometry = FGeometry();
+	InlineContentAreaLeft = nullptr;
+	InlineContentAreaRight = nullptr;
+	TitleBarSlot = nullptr;
 
 	// Animation that toggles the tabs
 	{
@@ -74,7 +75,7 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 		
 	}
 
-	// In TabStack mode we glue together a TabWell, two InlineContent areas and a ContentOverlay
+	// In TabStack mode we glue together a TabWell, InlineContent areas and a ContentOverlay
 	// that shows the content of the currently selected Tab.
 	//                                         ________ TabWell
 	//                                        |
@@ -93,11 +94,8 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 	// create inline title bar content
 	TitleBarContent = 
 	SNew(SOverlay)
-	+ SOverlay::Slot().Expose(BackgroundContentArea)
 	+ SOverlay::Slot()
 	[
-	
-		
 		SNew(SHorizontalBox)
 		.Visibility(EVisibility::SelfHitTestInvisible)
 
@@ -108,11 +106,10 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 		+ SHorizontalBox::Slot() 
 		.FillWidth(1.0f)
 		.VAlign(VAlign_Bottom)
-		.Padding(4.0f, 0.0f, 0.0f, 0.0f)
+		.Padding(0.0f, 0.0f, 0.0f, 0.0f)
 		[
 			SNew(SVerticalBox)
 			.Visibility(EVisibility::SelfHitTestInvisible)
-
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
@@ -120,7 +117,6 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 				.Visibility(this, &SDockingTabStack::GetMaximizeSpacerVisibility)
 				.Size(FVector2D(0.0f, 10.0f))
 			]
-
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			[
@@ -134,7 +130,7 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 		.AutoWidth()
 		.Expose(InlineContentAreaRight)
 		.Padding(5.0f, 0.0f, 0.0f, 0.0f)
-		.VAlign((VAlign_Center))
+		.VAlign(VAlign_Center)
 	];
 
 	ChildSlot
@@ -149,7 +145,7 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 			SNew(SBorder)
 			.Visibility(this, &SDockingTabStack::GetTabWellVisibility)
 			.DesiredSizeScale(this, &SDockingTabStack::GetTabWellScale)
-			.BorderImage(FCoreStyle::Get().GetBrush("NoBorder"))
+			.BorderImage(this, &SDockingTabStack::GetTabStackBorderImage)
 			.VAlign(VAlign_Bottom)
 			.OnMouseButtonDown(this, &SDockingTabStack::TabWellRightClicked)
 			.Padding(0.0f)
@@ -159,7 +155,7 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 
 				+ SVerticalBox::Slot()
 				.Expose(TitleBarSlot)
-				.AutoHeight()				
+				.AutoHeight()
 
 				+ SVerticalBox::Slot()
 				.AutoHeight()
@@ -183,6 +179,7 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 				.BorderImage(this, &SDockingTabStack::GetContentAreaBrush)
 				.Padding(this, &SDockingTabStack::GetContentPadding)
 				.Clipping(EWidgetClipping::ClipToBounds)
+				.IsEnabled(this, &SDockingTabStack::IsContentEnabled)
 				[
 					SNew(STextBlock)
 					.Text(LOCTEXT("EmptyTabMessage", "Empty Tab!"))
@@ -202,6 +199,7 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 				.Visibility(this, &SDockingTabStack::GetUnhideButtonVisibility)
 				.DesiredSizeScale(this, &SDockingTabStack::GetUnhideTabWellButtonScale)
 				.ButtonColorAndOpacity(this, &SDockingTabStack::GetUnhideTabWellButtonOpacity)
+				.ToolTipText(LOCTEXT("UnhideTabWellToolTip", "Show Tabs"))
 				[
 					// button should be big enough to show its own image
 					SNew(SSpacer)
@@ -230,10 +228,9 @@ void SDockingTabStack::Construct( const FArguments& InArgs, const TSharedRef<FTa
 
 	if (bIsDocumentArea)
 	{
-		this->SetNodeContent(SDocumentAreaWidget::MakeDocumentAreaWidget(), SNullWidget::NullWidget, SNullWidget::NullWidget, SNullWidget::NullWidget);
+		this->SetNodeContent(SDocumentAreaWidget::MakeDocumentAreaWidget(), FDockingStackOptionalContent());
 	}
 }
-
 
 void SDockingTabStack::OnLastTabRemoved()
 {
@@ -241,15 +238,15 @@ void SDockingTabStack::OnLastTabRemoved()
 	{
 		// Stop holding onto any meaningful window content.
 		// The user should not see any content in this DockNode.
-		this->SetNodeContent(SNullWidget::NullWidget, SNullWidget::NullWidget, SNullWidget::NullWidget, SNullWidget::NullWidget);
+		this->SetNodeContent(SNullWidget::NullWidget, FDockingStackOptionalContent());
 	}
 	else
 	{
-		this->SetNodeContent(SDocumentAreaWidget::MakeDocumentAreaWidget(), SNullWidget::NullWidget, SNullWidget::NullWidget, SNullWidget::NullWidget);
+		this->SetNodeContent(SDocumentAreaWidget::MakeDocumentAreaWidget(), FDockingStackOptionalContent());
 	}
 }
 
-void SDockingTabStack::OnTabClosed( const TSharedRef<SDockTab>& ClosedTab )
+void SDockingTabStack::OnTabClosed(const TSharedRef<SDockTab>& ClosedTab, SDockingNode::ELayoutModification RemovalMethod)
 {
 	const FTabId& TabIdBeingClosed = ClosedTab->GetLayoutIdentifier();
 	
@@ -257,37 +254,64 @@ void SDockingTabStack::OnTabClosed( const TSharedRef<SDockTab>& ClosedTab )
 	const bool bIsTabPersistable = TabIdBeingClosed.IsTabPersistable();
 	if (bIsTabPersistable)
 	{
-		ClosePersistentTab(TabIdBeingClosed);
+		// Sidebar tabs should still exist in the stacks layout so we can restore it
+		if (RemovalMethod != SDockingNode::ELayoutModification::TabRemoval_Sidebar)
+		{
+			ClosePersistentTab(TabIdBeingClosed);
+		}
 	}
 	else
 	{
-		RemovePersistentTab( TabIdBeingClosed );
+		RemovePersistentTab(TabIdBeingClosed);
 	}	
 }
+
 
 void SDockingTabStack::OnTabRemoved( const FTabId& TabId )
 {
 	RemovePersistentTab( TabId );
 }
 
-void SDockingTabStack::Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime )
+void SDockingTabStack::OpenTab(const TSharedRef<SDockTab>& InTab, int32 InsertLocationAmongActiveTabs, bool bKeepInactive)
 {
-	TabStackGeometry = AllottedGeometry;
-}
+	const int32 InsertIndex = OpenPersistentTab(InTab->GetLayoutIdentifier(), InsertLocationAmongActiveTabs);
 
-void SDockingTabStack::OpenTab( const TSharedRef<SDockTab>& InTab, int32 InsertLocationAmongActiveTabs )
-{
-	const int32 TabIndex = OpenPersistentTab( InTab->GetLayoutIdentifier(), InsertLocationAmongActiveTabs );
 	// The tab may be a nomad tab, in which case it should inherit whichever tab manager it is being put into!
-	InTab->SetTabManager( GetDockArea()->GetTabManager() );
-	AddTabWidget( InTab, TabIndex );
-	OnLiveTabAdded();
-	TabWell->RefreshParentContent();
+	InTab->SetTabManager(GetDockArea()->GetTabManager());
+
+	const FTabId TabId = InTab->GetLayoutIdentifier();
+
+	// the insert index is not the same as the tab index in the array for new tabs so find the tab again to check the tab state.
+	const FTabManager::FTab& TabInfo = *Tabs.FindByPredicate([TabId](const FTabManager::FTab& TestTab) {return TestTab.TabId == TabId; });
+
+	if (TabInfo.TabState == ETabState::SidebarTab)
+	{
+		FSidebarTabLists SidebarLists;
+		if (TabInfo.SidebarLocation == ESidebarLocation::Left)
+		{
+			SidebarLists.LeftSidebarTabs.Add(InTab);
+		}
+		else
+		{
+			ensure(TabInfo.SidebarLocation == ESidebarLocation::Right);
+			SidebarLists.RightSidebarTabs.Add(InTab);
+		}
+
+		AddSidebarTab(InTab);
+		GetDockArea()->AddSidebarTabsFromRestoredLayout(SidebarLists);
+	}
+	else
+	{
+		AddTabWidget(InTab, InsertIndex, bKeepInactive);
+		OnLiveTabAdded();
+		TabWell->RefreshParentContent();
+	}
+
 }
 
-void SDockingTabStack::AddTabWidget( const TSharedRef<SDockTab>& InTab, int32 AtLocation )
+void SDockingTabStack::AddTabWidget(const TSharedRef<SDockTab>& InTab, int32 AtLocation, bool bKeepInactive)
 {
-	TabWell->AddTab( InTab, AtLocation );
+	TabWell->AddTab(InTab, AtLocation, bKeepInactive);
 
 	if ( IsTabWellHidden() && TabWell->GetNumTabs() > 1 )
 	{
@@ -302,6 +326,51 @@ void SDockingTabStack::AddTabWidget( const TSharedRef<SDockTab>& InTab, int32 At
 		ParentDockArea->HideCross();
 	}
 
+}
+
+void SDockingTabStack::AddSidebarTab(const TSharedRef<SDockTab>& InTab)
+{
+	InTab->SetParent(TabWell);
+}
+
+float SDockingTabStack::GetTabSidebarSizeCoefficient(const TSharedRef<SDockTab>& InTab)
+{
+	FTabManager::FTab* Tab = Tabs.FindByPredicate(FTabMatcher(InTab->GetLayoutIdentifier()));
+	if (Tab)
+	{
+		return Tab->SidebarSizeCoefficient;
+	}
+
+	return 0;
+}
+
+void SDockingTabStack::SetTabSidebarSizeCoefficient(const TSharedRef<SDockTab>& InTab, float InSizeCoefficient)
+{
+	FTabManager::FTab* Tab = Tabs.FindByPredicate(FTabMatcher(InTab->GetLayoutIdentifier()));
+	if (Tab)
+	{
+		Tab->SidebarSizeCoefficient = InSizeCoefficient;
+	}
+}
+
+bool SDockingTabStack::IsTabPinnedInSidebar(const TSharedRef<SDockTab>& InTab)
+{
+	FTabManager::FTab* Tab = Tabs.FindByPredicate(FTabMatcher(InTab->GetLayoutIdentifier()));
+	if (Tab)
+	{
+		return Tab->bPinnedInSidebar;
+	}
+
+	return false;
+}
+
+void SDockingTabStack::SetTabPinnedInSidebar(const TSharedRef<SDockTab>& InTab, bool bPinnedInSidebar)
+{
+	FTabManager::FTab* Tab = Tabs.FindByPredicate(FTabMatcher(InTab->GetLayoutIdentifier()));
+	if (Tab)
+	{
+		Tab->bPinnedInSidebar = bPinnedInSidebar;
+	}
 }
 
 const TSlotlessChildren<SDockTab>& SDockingTabStack::GetTabs() const
@@ -321,7 +390,7 @@ bool SDockingTabStack::HasTab(const struct FTabMatcher& TabMatcher) const
 
 FGeometry SDockingTabStack::GetTabStackGeometry() const
 {
-	return TabStackGeometry;
+	return GetTickSpaceGeometry();
 }
 
 void SDockingTabStack::RemoveClosedTabsWithName( FName InName )
@@ -350,12 +419,20 @@ void SDockingTabStack::BringToFront( const TSharedRef<SDockTab>& TabToBringToFro
 	TabWell->BringTabToFront(TabToBringToFront);
 }
 
-void SDockingTabStack::SetNodeContent(const TSharedRef<SWidget>& InContent, const TSharedRef<SWidget>& ContentLeft, const TSharedRef<SWidget>& ContentRight, const TSharedRef<SWidget>& InContentBackground)
+void SDockingTabStack::SetNodeContent(const TSharedRef<SWidget>& InContent, const FDockingStackOptionalContent& OptionalContent)
 {
 	ContentSlot->SetContent(InContent);
-	(*InlineContentAreaLeft)[ContentLeft];
-	(*InlineContentAreaRight)[ContentRight];
-	(*BackgroundContentArea)[InContentBackground];
+	(*InlineContentAreaLeft)[OptionalContent.ContentLeft];
+	(*InlineContentAreaRight)[OptionalContent.ContentRight];
+
+	if(TabWell->GetForegroundTab())
+	{
+		if (TSharedPtr<SWindow> ParentWindow = TabWell->GetForegroundTab()->GetParentWindow())
+		{
+			ParentWindow->GetTitleBar()->UpdateBackgroundContent(OptionalContent.TitleBarContentRight);
+		}
+	}
+
 }
 
 FReply SDockingTabStack::OnDragOver( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent )
@@ -406,7 +483,7 @@ void SDockingTabStack::OnFocusChanging( const FWeakWidgetPath& PreviousFocusPath
 	const TSharedPtr<SDockTab> ForegroundTab = TabWell->GetForegroundTab();
 	if ( ForegroundTab.IsValid() )
 	{
-		const bool bIsForegroundTabActive = NewWidgetPath.ContainsWidget( SharedThis(this) );
+		const bool bIsForegroundTabActive = NewWidgetPath.ContainsWidget( this );
 	
 		if (bIsForegroundTabActive)
 		{
@@ -491,10 +568,11 @@ void SDockingTabStack::CloseTabsToRightOfForegroundTab(ETabsToClose TabsToClose)
 		{
 			const TSharedRef<SDockTab>& Tab = TabWell->GetTabs()[DestroyIndex];
 
+			const ETabRole VisualTabRole = Tab->GetVisualTabRole();
 			const bool bCanClose =
 				(TabsToClose == CloseAllTabs) ||
-				(TabsToClose == CloseDocumentTabs && Tab->GetTabRole() == ETabRole::DocumentTab) ||
-				(TabsToClose == CloseDocumentAndMajorTabs && (Tab->GetTabRole() == ETabRole::DocumentTab || Tab->GetTabRole() == ETabRole::MajorTab));
+				(TabsToClose == CloseDocumentTabs && VisualTabRole == ETabRole::DocumentTab) ||
+				(TabsToClose == CloseDocumentAndMajorTabs && (VisualTabRole == ETabRole::DocumentTab || VisualTabRole == ETabRole::MajorTab));
 
 			if (!bCanClose || !Tab->RequestCloseTab())
 			{
@@ -514,10 +592,11 @@ void SDockingTabStack::CloseAllButForegroundTab(ETabsToClose TabsToClose)
 		{
 			const TSharedRef<SDockTab>& Tab = TabWell->GetTabs()[DestroyIndex];
 
+			const ETabRole VisualTabRole = Tab->GetVisualTabRole();
 			const bool bCanClose = 
 				(TabsToClose == CloseAllTabs) ||
-				(TabsToClose == CloseDocumentTabs && Tab->GetTabRole() == ETabRole::DocumentTab) ||
-				(TabsToClose == CloseDocumentAndMajorTabs && (Tab->GetTabRole() == ETabRole::DocumentTab || Tab->GetTabRole() == ETabRole::MajorTab));
+				(TabsToClose == CloseDocumentTabs && VisualTabRole == ETabRole::DocumentTab) ||
+				(TabsToClose == CloseDocumentAndMajorTabs && (VisualTabRole == ETabRole::DocumentTab || VisualTabRole == ETabRole::MajorTab));
 
 			if ((Tab == ForegroundTab) || !bCanClose || !Tab->RequestCloseTab())
 			{
@@ -549,7 +628,7 @@ SDockingNode::ECleanupRetVal SDockingTabStack::CleanUpNodes()
 	}
 	else if (Tabs.Num() > 0)
 	{
-		Visibility = EVisibility::Collapsed;
+		SetVisibility(EVisibility::Collapsed);
 		return HistoryTabsUnderNode;
 	}
 	else
@@ -570,14 +649,28 @@ TSharedRef<SWidget> SDockingTabStack::MakeContextMenu()
 		MenuBuilder.BeginSection("DockingTabStackOptions", LOCTEXT("TabOptionsHeading", "Options") );
 		{
 			MenuBuilder.AddMenuEntry(
-				LOCTEXT("HideTabWell", "Hide Tab"),
-				LOCTEXT("HideTabWellTooltip", "Hide the tabs to save room."),
+				LOCTEXT("CollapseTabWell", "Hide Tabs"),
+				LOCTEXT("CollapseTabWellTooltip", "Collapses the tabs headers to save room."),
 				FSlateIcon(),
 				FUIAction(
 					FExecuteAction::CreateSP( this, &SDockingTabStack::ToggleTabWellVisibility ),
 					FCanExecuteAction::CreateSP( this, &SDockingTabStack::CanHideTabWell )
 				) 
 			);
+
+			if(IsTabAllowedInSidebar(TabWell->GetForegroundTab()))
+			{
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("MoveToSidebar", "Dock to Sidebar"),
+					LOCTEXT("MoveToSidebarTooltip", "Moves this tab to a sidebar drawer on the side of the window closest to the tab.\nThe tab can be opened from the drawer and will automatically close again when clicking off it."),
+					FSlateIcon(),
+					FUIAction(
+						FExecuteAction::CreateSP(this, &SDockingTabStack::MoveForegroundTabToSidebar),
+						FCanExecuteAction::CreateSP(this, &SDockingTabStack::CanMoveForegroundTabToSidebar)
+					)
+				);
+			}
+
 		}
 		MenuBuilder.EndSection();
 
@@ -616,6 +709,12 @@ TSharedRef<SWidget> SDockingTabStack::MakeContextMenu()
 			);
 		}
 		MenuBuilder.EndSection();
+
+		TSharedPtr<SDockTab> ForegroundTab = TabWell->GetForegroundTab();
+		if (ForegroundTab.IsValid())
+		{
+			ForegroundTab->ExtendContextMenu(MenuBuilder);
+		}
 	}
 
 	return MenuBuilder.MakeWidget();
@@ -747,7 +846,7 @@ TSharedPtr<FTabManager::FLayoutNode> SDockingTabStack::GatherPersistentLayout() 
 			const bool bIsTabPersistable = Tabs[TabIndex].TabId.IsTabPersistable();
 			if ( bIsTabPersistable )
 			{
-				PersistentStack->AddTab(Tabs[TabIndex].TabId, Tabs[TabIndex].TabState);
+				PersistentStack->AddTab(Tabs[TabIndex]);
 			}			
 		}
 		return PersistentStack;
@@ -761,40 +860,62 @@ TSharedPtr<FTabManager::FLayoutNode> SDockingTabStack::GatherPersistentLayout() 
 
 void SDockingTabStack::ClearReservedSpace()
 {
-	(*TitleBarSlot).Padding(0);
+	bShowingTitleBarArea = false;
+	TitleBarSlot->SetPadding(0.f);
 }
 
-
-void SDockingTabStack::ReserveSpaceForWindowChrome(EChromeElement Element)
+void SDockingTabStack::ReserveSpaceForWindowChrome(EChromeElement Element, bool bIncludePaddingForMenuBar, bool bOnlyMinorTabs)
 {
-	// @todo: It would be nice to read these from the desired size of the title bar
-	//        instead of hard-coding, but at least the long-standing TTP is fixed!
-	#if PLATFORM_MAC
-		static const FMargin ControlsPadding = FMargin(64, 0, 0, 0);
-		static const FMargin IconPadding = FMargin(0);
-	#else
-		static const FMargin ControlsPadding = FMargin(0, 0, 96, 0);
-		static const FMargin IconPadding = FMargin(32, 0, 0, 0);
-	#endif
+	FMargin ControlsPadding;
+	FMargin IconPadding;
 
-	const FMargin CurrentPadding = TitleBarSlot->SlotPadding.Get();
+#if PLATFORM_MAC
+	if (bIncludePaddingForMenuBar)
+	{
+		static const float TopPaddingForTrafficLightsAndMenuBar = 30.0f;
+		// Always add padding on top, because on the Mac there is always either a main menu bar or the "traffic light" buttons (close, minimize, and maximize) above controls.
+		// Always add padding to the left, because on the Mac there's no Unreal icon to the left of controls, only the window edge, so we need some space.
+		ControlsPadding = FMargin(8.0f, TopPaddingForTrafficLightsAndMenuBar, 0, 0);
+	}
+	else
+	{
+		// Without a main menu bar in the title bar, we just need to pad on the left to avoid overlapping with the "traffic light" buttons (close, minimize, and maximize).
+		ControlsPadding = FMargin(67.0f, 0, 0, 0);
+	}
+#else
+	static const float TopPaddingForMenuBar = 25.0f;
+
+	static const float LeftPaddingForIcon = FSlateApplication::Get().GetAppIcon()->GetImageSize().X;
+	// If we are including top padding for the menu bar we do not need to pad the outer sides since we will be below the left icon and the right controls.
+	if (bIncludePaddingForMenuBar)
+	{
+		ControlsPadding = FMargin(8.f, TopPaddingForMenuBar, 0.f, 0.f);
+		IconPadding = FMargin(LeftPaddingForIcon + 12.f, bOnlyMinorTabs ? 5.f : 0.f, 0.f, 0.f);
+	}
+	else
+	{
+		ControlsPadding = FMargin(8.f, 2.f, 128.f, 0.f);
+		IconPadding = FMargin(25.f, bOnlyMinorTabs ? 5.f : 0.f, 0.f, 0.f);
+	}
+#endif
+
+	bShowingTitleBarArea = true;
+	const FMargin CurrentPadding = TitleBarSlot->GetPadding();
 	switch (Element)
 	{
-	case EChromeElement::Controls:
-		(*TitleBarSlot).Padding(CurrentPadding + ControlsPadding);
-		break;
+		case EChromeElement::Controls:
+			TitleBarSlot->SetPadding(CurrentPadding + ControlsPadding);
+			break;
 
-	case EChromeElement::Icon:
-		(*TitleBarSlot).Padding(CurrentPadding + IconPadding);
-		break;
+		case EChromeElement::Icon:
+			TitleBarSlot->SetPadding(CurrentPadding + IconPadding);
+			break;
 
-	default:
-		ensure(false);
-		break;
+		default:
+			ensure(false);
+			break;
 	}
 }
-
-
 
 TSharedRef< SDockingTabStack > SDockingTabStack::CreateNewTabStackBySplitting( const SDockingNode::RelativeDirection Direction )
 {
@@ -810,16 +931,30 @@ TSharedRef< SDockingTabStack > SDockingTabStack::CreateNewTabStackBySplitting( c
 	return NewStack;
 }
 
-
 void SDockingTabStack::SetParentNode( TSharedRef<class SDockingSplitter> InParent )
 {
 	SDockingNode::SetParentNode(InParent);
 
-	// OK, if this docking area has a parent window, we'll assume the window was created with no title bar, and we'll
-	// place the title bar widgets into our content instead!
-	const TSharedPtr<SDockingArea>& DockArea = GetDockArea();
+	TitleBarSlot->AttachWidget(TitleBarContent.ToSharedRef());
+}
 
-	(*TitleBarSlot)[TitleBarContent.ToSharedRef()];
+bool SDockingTabStack::IsContentEnabled() const
+{
+	TSharedRef<FTabManager> TabManager = GetDockArea()->GetTabManager();
+
+	if(!TabManager->IsReadOnly())
+	{
+		return true;
+	}
+
+	// If we are in read only mode, and the foreground tab desires custom behavior (i.e not hidden or disabled) it is enabled
+	// and the tab owner is responsible for handling the content in read only mode
+	if(TSharedPtr<SDockTab> ForegroundTab = TabWell->GetForegroundTab())
+	{
+		return TabManager->GetTabReadOnlyBehavior(ForegroundTab->GetLayoutIdentifier()) == ETabReadOnlyBehavior::Custom;
+	}
+
+	return true;
 }
 
 
@@ -837,7 +972,7 @@ FMargin SDockingTabStack::GetContentPadding() const
 	TSharedPtr<SDockTab> ForegroundTab = TabWell->GetForegroundTab();
 	return (ForegroundTab.IsValid())
 		? ForegroundTab->GetContentPadding()
-		: FMargin(2);
+		: FMargin(0);
 }
 
 EVisibility SDockingTabStack::GetTabWellVisibility() const
@@ -879,6 +1014,46 @@ void SDockingTabStack::ToggleTabWellVisibility()
 	ShowHideTabWell.Reverse();
 }
 
+void SDockingTabStack::MoveForegroundTabToSidebar()
+{
+	if (TSharedPtr<SDockTab> ForegroundTabPtr = TabWell->GetForegroundTab())
+	{
+		MoveTabToSidebar(ForegroundTabPtr.ToSharedRef());
+	}
+}
+
+void SDockingTabStack::MoveTabToSidebar(TSharedRef<SDockTab> Tab)
+{
+	const int32 TabIndex = Tabs.IndexOfByPredicate(FTabMatcher(Tab->GetLayoutIdentifier(), ETabState::OpenedTab));
+	if(TabIndex != INDEX_NONE)
+	{
+		ESidebarLocation SidebarLoc = GetDockArea()->AddTabToSidebar(Tab);
+
+		if (SidebarLoc != ESidebarLocation::None)
+		{
+			Tabs[TabIndex].TabState = ETabState::SidebarTab;
+			Tabs[TabIndex].SidebarLocation = SidebarLoc;
+
+			TabWell->RemoveAndDestroyTab(Tab, ELayoutModification::TabRemoval_Sidebar);
+		}
+	}
+}
+
+void SDockingTabStack::RestoreTabFromSidebar(TSharedRef<SDockTab> Tab)
+{
+	const int32 TabIndex = Tabs.IndexOfByPredicate(FTabMatcher(Tab->GetLayoutIdentifier(), ETabState::SidebarTab));
+	if (TabIndex != INDEX_NONE)
+	{
+		FTabManager::FTab& TabInfo = Tabs[TabIndex];
+
+		TabInfo.SidebarSizeCoefficient = 0;
+		// Set the sate to closed so its reopened by OpenTab
+		TabInfo.TabState = ETabState::ClosedTab;
+		TabInfo.SidebarLocation = ESidebarLocation::None;
+		OpenTab(Tab);
+	}
+}
+
 FReply SDockingTabStack::UnhideTabWell()
 {
 	SetTabWellHidden(false);
@@ -888,13 +1063,21 @@ FReply SDockingTabStack::UnhideTabWell()
 
 bool SDockingTabStack::CanHideTabWell() const
 {
-	TSharedPtr<SDockingSplitter> ParentNode = ParentNodePtr.Pin();
-	// Is target tab located at the upper and left most among tabs in the parent window(as first child). Unreal icon will overlap golden triangle(unhide button) when the tab is the first child of the window.
-	const bool bIsUpperLeftmostTab = (FGlobalTabmanager::Get()->GetActiveTab() == ParentNode->GetAllChildTabs()[0]);
-	// Is target tab in the Floating Window. Unreal icon will overlap when the tab is in the floating window(without menu)
-	const bool bIsInFloatingWindow = ParentNode->GetDockArea()->GetParentWindow().IsValid();
+	const TSharedPtr<SDockingSplitter> ParentNode = ParentNodePtr.Pin();
 
-	return GetNumTabs() == 1 && FGlobalTabmanager::Get()->CanSetAsActiveTab(GetTabs()[0]) && !(bIsUpperLeftmostTab && bIsInFloatingWindow);
+	if (ParentNode && !ParentNode->GetAllChildTabs().IsEmpty())
+	{
+		// Is target tab located at the upper and left most among tabs in the parent window(as first child). Unreal icon will overlap golden triangle(unhide button) when the tab is the first child of the window.
+		const bool bIsUpperLeftmostTab = (FGlobalTabmanager::Get()->GetActiveTab() == ParentNode->GetAllChildTabs()[0]);
+		// Is target tab in the Floating Window. Unreal icon will overlap when the tab is in the floating window(without menu)
+		const bool bIsInFloatingWindow = ParentNode->GetDockArea()->GetParentWindow().IsValid();
+
+		return GetNumTabs() == 1 && FGlobalTabmanager::Get()->CanSetAsActiveTab(GetTabs()[0]) && !(bIsUpperLeftmostTab && bIsInFloatingWindow);
+	}
+
+	/* in the case where there are no parent splitter or child tabs, it is invalid to hide the tab well.
+	 * The likely case for this would be in a sidebar flyout  */
+	return false;
 }
 
 bool SDockingTabStack::CanCloseForegroundTab() const
@@ -906,7 +1089,13 @@ bool SDockingTabStack::CanCloseForegroundTab() const
 bool SDockingTabStack::CanCloseTabsToRightOfForegroundTab() const
 {
 	TSharedPtr<SDockTab> ForegroundTabPtr = TabWell->GetForegroundTab();
-	if (ForegroundTabPtr.IsValid() && (ForegroundTabPtr->GetTabRole() == ETabRole::DocumentTab || ForegroundTabPtr->GetTabRole() == ETabRole::MajorTab) && (TabWell->GetNumTabs() > 1) && (TabWell->GetForegroundTabIndex() != TabWell->GetNumTabs() - 1))
+	if (!ForegroundTabPtr.IsValid())
+	{
+		return false;
+	}
+
+	const ETabRole VisualTabRole = ForegroundTabPtr->GetVisualTabRole();
+	if ((VisualTabRole == ETabRole::DocumentTab || VisualTabRole == ETabRole::MajorTab) && (TabWell->GetNumTabs() > 1) && (TabWell->GetForegroundTabIndex() != TabWell->GetNumTabs() - 1))
 	{
 		const TArray< TSharedRef<SDockTab> > MyTabs = this->GetTabs().AsArrayCopy();
 		for (int32 TabIndex = TabWell->GetForegroundTabIndex() + 1; TabIndex < MyTabs.Num(); ++TabIndex)
@@ -925,7 +1114,13 @@ bool SDockingTabStack::CanCloseAllButForegroundTab() const
 {
 	// If the active tab is a document tab or major tab and there is at least 1 other closeable tab, offer to close the others
 	TSharedPtr<SDockTab> ForegroundTabPtr = TabWell->GetForegroundTab();
-	if (ForegroundTabPtr.IsValid() && (ForegroundTabPtr->GetTabRole() == ETabRole::DocumentTab || ForegroundTabPtr->GetTabRole() == ETabRole::MajorTab) && (TabWell->GetNumTabs() > 1))
+	if (!ForegroundTabPtr.IsValid())
+	{
+		return false;
+	}
+
+	const ETabRole VisualTabRole = ForegroundTabPtr->GetVisualTabRole();
+	if ((VisualTabRole == ETabRole::DocumentTab || VisualTabRole == ETabRole::MajorTab) && (TabWell->GetNumTabs() > 1))
 	{
 		const TArray< TSharedRef<SDockTab> > MyTabs = this->GetTabs().AsArrayCopy();
 		for (int32 TabIndex = 0; TabIndex < MyTabs.Num(); ++TabIndex)
@@ -935,6 +1130,36 @@ bool SDockingTabStack::CanCloseAllButForegroundTab() const
 			{
 				return true;
 			}
+		}
+	}
+	return false;
+}
+
+bool SDockingTabStack::CanMoveForegroundTabToSidebar() const
+{
+	if(TSharedPtr<SDockTab> ForegroundTabPtr = TabWell->GetForegroundTab())
+	{
+		return CanMoveTabToSideBar(ForegroundTabPtr.ToSharedRef());
+	}
+
+	return false;
+}
+
+bool SDockingTabStack::CanMoveTabToSideBar(TSharedRef<SDockTab> Tab) const
+{
+	const FTabId TabIdBeingClosed = Tab->GetLayoutIdentifier();
+	// Only persistable non-major tabs can be put into a sidebar. There must also be more than one tab or else adding to a sidebar doesnt make si
+	return TabIdBeingClosed.IsTabPersistable() && Tab->GetVisualTabRole() != ETabRole::MajorTab && GetDockArea()->GetNumTabs() > 1;
+}
+
+bool SDockingTabStack::IsTabAllowedInSidebar(TSharedPtr<SDockTab> Tab) const
+{
+	// Major tabs are not allowed to be sidebared
+	if (Tab.IsValid())
+	{
+		if (TSharedPtr<FTabManager> TabManager = Tab->GetTabManagerPtr())
+		{
+			return Tab->GetVisualTabRole() != ETabRole::MajorTab && TabManager->IsTabAllowedInSidebar(Tab->GetLayoutIdentifier());
 		}
 	}
 	return false;
@@ -963,6 +1188,12 @@ SSplitter::ESizeRule SDockingTabStack::GetSizeRule() const
 
 void SDockingTabStack::SetTabWellHidden( bool bShouldHideTabWell )
 {
+	// If the tab well is already hidden or visible, don't replay the animations.
+	if ( (bShouldHideTabWell && IsTabWellHidden()) || (!bShouldHideTabWell && !IsTabWellHidden()))
+	{
+		return;
+	}
+	
 	if (bShouldHideTabWell)
 	{
 		ShowHideTabWell.PlayReverse( this->AsShared() );
@@ -993,16 +1224,23 @@ FSlateColor SDockingTabStack::GetUnhideTabWellButtonOpacity() const
 	return FLinearColor( 1,1,1, 1.0f - ShowHideTabWell.GetLerp() );
 }
 
+const FSlateBrush* SDockingTabStack::GetTabStackBorderImage() const
+{
+	static const FSlateBrush* MajorTabBackgroundBrush = FAppStyle::Get().GetBrush("Brushes.Title");
+	static const FSlateBrush* MinorTabBackgroundBrush = FAppStyle::Get().GetBrush("Brushes.Background");
+	return bShowingTitleBarArea ? MajorTabBackgroundBrush : MinorTabBackgroundBrush;
+}
+
 int32 SDockingTabStack::OpenPersistentTab( const FTabId& TabId, int32 OpenLocationAmongActiveTabs )
 {
-	const int32 ExistingClosedTabIndex = Tabs.IndexOfByPredicate(FTabMatcher(TabId, ETabState::ClosedTab));
+	const int32 ExistingClosedTabIndex = Tabs.IndexOfByPredicate(FTabMatcher(TabId, static_cast<ETabState::Type>(ETabState::ClosedTab|ETabState::SidebarTab)));
 
 	if (OpenLocationAmongActiveTabs == INDEX_NONE)
 	{						
 		if (ExistingClosedTabIndex != INDEX_NONE)
 		{
-			// There's already a tab with that name; open it.
-			Tabs[ExistingClosedTabIndex].TabState = ETabState::OpenedTab;
+			FTabManager::FTab& Tab = Tabs[ExistingClosedTabIndex];
+			Tab.TabState = Tab.SidebarLocation == ESidebarLocation::None ? ETabState::OpenedTab : ETabState::SidebarTab;
 			return ExistingClosedTabIndex;
 		}
 		else
@@ -1068,7 +1306,7 @@ int32 SDockingTabStack::OpenPersistentTab( const FTabId& TabId, int32 OpenLocati
 
 int32 SDockingTabStack::ClosePersistentTab( const FTabId& TabId )
 {
-	const int32 TabIndex = Tabs.IndexOfByPredicate(FTabMatcher(TabId, ETabState::OpenedTab));
+	const int32 TabIndex = Tabs.IndexOfByPredicate(FTabMatcher(TabId, static_cast<ETabState::Type>(ETabState::OpenedTab|ETabState::SidebarTab)));
 	if (TabIndex != INDEX_NONE)
 	{
 		Tabs[TabIndex].TabState = ETabState::ClosedTab;
@@ -1079,11 +1317,15 @@ int32 SDockingTabStack::ClosePersistentTab( const FTabId& TabId )
 void SDockingTabStack::RemovePersistentTab( const FTabId& TabId )
 {
 	const int32 TabIndex = Tabs.IndexOfByPredicate(FTabMatcher(TabId));
-	Tabs.RemoveAtSwap(TabIndex);
+	if(TabIndex != INDEX_NONE)
+	{
+		Tabs.RemoveAtSwap(TabIndex);
+	}
 }
 
 EVisibility SDockingTabStack::GetMaximizeSpacerVisibility() const
 {
+/*
 	if(GetDockArea().IsValid() && GetDockArea()->GetParentWindow().IsValid())
 	{
 		if (GetDockArea()->GetParentWindow()->IsWindowMaximized())
@@ -1094,8 +1336,7 @@ EVisibility SDockingTabStack::GetMaximizeSpacerVisibility() const
 		{
 			return EVisibility::SelfHitTestInvisible;
 		}
-	}
-
+	}*/
 	return EVisibility::Collapsed;
 }
 
@@ -1125,6 +1366,7 @@ void SDockingTabStack::BindTabCommands()
 	const FTabCommands& Commands = FTabCommands::Get();
 	ActionList->MapAction(Commands.CloseMajorTab, FExecuteAction::CreateSP(this, &SDockingTabStack::ExecuteCloseMajorTabCommand), FCanExecuteAction::CreateSP(this, &SDockingTabStack::CanExecuteCloseMajorTabCommand));
 	ActionList->MapAction(Commands.CloseMinorTab, FExecuteAction::CreateSP(this, &SDockingTabStack::ExecuteCloseMinorTabCommand), FCanExecuteAction::CreateSP(this, &SDockingTabStack::CanExecuteCloseMinorTabCommand));
+	ActionList->MapAction(Commands.CloseFocusedTab, FExecuteAction::CreateSP(this, &SDockingTabStack::ExecuteCloseFocusedTabCommand), FCanExecuteAction::CreateSP(this, &SDockingTabStack::CanExecuteCloseFocusedTabCommand));
 }
 
 void SDockingTabStack::ExecuteCloseMajorTabCommand()
@@ -1154,8 +1396,7 @@ void SDockingTabStack::ExecuteCloseMinorTabCommand()
 
 bool SDockingTabStack::CanExecuteCloseMinorTabCommand()
 {
-	auto DockArea = GetDockArea();
-	if (DockArea.IsValid())
+	if (TSharedPtr<SDockingArea> DockArea = GetDockArea())
 	{
 		TSharedPtr<FGlobalTabmanager> GlobalTabManager = FGlobalTabmanager::Get();
 		TSharedPtr<SDockTab> ActiveTab = GlobalTabManager->GetActiveTab();
@@ -1169,6 +1410,31 @@ bool SDockingTabStack::CanExecuteCloseMinorTabCommand()
 		}
 	}
 	return false;
+}
+
+void SDockingTabStack::ExecuteCloseFocusedTabCommand()
+{
+	if (CanExecuteCloseMinorTabCommand())
+	{
+		ExecuteCloseMinorTabCommand();
+	}
+	else
+	{
+		ExecuteCloseMajorTabCommand();
+	}
+}
+
+bool SDockingTabStack::CanExecuteCloseFocusedTabCommand()
+{
+	return CanExecuteCloseMinorTabCommand() || CanExecuteCloseMajorTabCommand();
+}
+
+void SDockingTabStack::OnResized()
+{
+	if (TSharedPtr<SDockingArea> DockArea = GetDockArea())
+	{
+		DockArea->GetTabManager()->RequestSavePersistentLayout();
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

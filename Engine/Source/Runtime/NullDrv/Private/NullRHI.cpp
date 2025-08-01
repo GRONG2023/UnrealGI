@@ -5,7 +5,8 @@
 #include "Containers/List.h"
 #include "RenderResource.h"
 #include "RenderUtils.h"
-
+#include "RHICommandList.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 FNullDynamicRHI::FNullDynamicRHI()
 {
@@ -18,18 +19,28 @@ FNullDynamicRHI::FNullDynamicRHI()
 
 void FNullDynamicRHI::Init()
 {
+	GMaxRHIFeatureLevel = GetMaxSupportedFeatureLevel(GMaxRHIShaderPlatform);
+
 #if PLATFORM_WINDOWS
 	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES2_REMOVED] = SP_NumPlatforms;
 	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES3_1] = SP_PCD3D_ES3_1;
 	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM4_REMOVED] = SP_NumPlatforms;
 	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM5] = SP_PCD3D_SM5;
+	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM6] = SP_PCD3D_SM6;
 #elif PLATFORM_MAC
     GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES2_REMOVED] = SP_NumPlatforms;
     GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES3_1] = SP_METAL_MACES3_1;
     GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM4_REMOVED] = SP_NumPlatforms;
     GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM5] = SP_METAL_SM5;
+    GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM6] = SP_METAL_SM6;
+#elif PLATFORM_LINUX // (see FVulkanGenericPlatform::SetupFeatureLevels)
+	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES2_REMOVED] = SP_NumPlatforms;
+	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES3_1] = SP_VULKAN_PCES3_1;
+	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM4_REMOVED] = SP_NumPlatforms;
+	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM5] = SP_VULKAN_SM5;
+	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM6] = SP_VULKAN_SM6;
 #else
-	GShaderPlatformForFeatureLevel[GetMaxSupportedFeatureLevel(GMaxRHIShaderPlatform)] = GMaxRHIShaderPlatform;
+	GShaderPlatformForFeatureLevel[GMaxRHIFeatureLevel] = GMaxRHIShaderPlatform;
 #endif
 	
 	GRHIVendorId = 1;
@@ -41,9 +52,7 @@ void FNullDynamicRHI::Init()
 	if (!IsRunningDedicatedServer())
 #endif
 	{
-		// Command lists need the validation RHI context if enabled, so call the global scope version of RHIGetDefaultContext() and RHIGetDefaultAsyncComputeContext().
-		GRHICommandList.GetImmediateCommandList().SetContext(::RHIGetDefaultContext());
-		GRHICommandList.GetImmediateAsyncComputeCommandList().SetComputeContext(::RHIGetDefaultAsyncComputeContext());
+		GRHICommandList.GetImmediateCommandList().InitializeImmediateContexts();
 
 		FRenderResource::InitPreRHIResources();
 	}
@@ -77,9 +86,13 @@ void* FNullDynamicRHI::GetStaticBuffer(size_t Size)
 	return MemoryBuffer.GetData();
 }
 
-void* FNullDynamicRHI::GetStaticTextureBuffer(int32 SizeX, int32 SizeY, EPixelFormat Format, uint32& DestStride)
+void* FNullDynamicRHI::GetStaticTextureBuffer(int32 SizeX, int32 SizeY, EPixelFormat Format, uint32& DestStride, uint64* OutLockedByteCount)
 {
 	size_t Size = CalculateImageBytes(SizeX, SizeY, 0, Format);
+	if (OutLockedByteCount)
+	{
+		*OutLockedByteCount = Size;
+	}
 	DestStride = Size / SizeY;
 	return GetStaticBuffer(Size);
 }

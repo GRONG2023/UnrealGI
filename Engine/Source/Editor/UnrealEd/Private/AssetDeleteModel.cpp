@@ -15,16 +15,17 @@
 #include "ISourceControlOperation.h"
 #include "SourceControlOperations.h"
 #include "ISourceControlModule.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Settings/EditorLoadingSavingSettings.h"
 #include "EngineGlobals.h"
 #include "Editor.h"
+#include "Editor/Transactor.h"
 #include "FileHelpers.h"
 #include "UnrealEdGlobals.h"
 
 #include "ObjectTools.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "AutoReimport/AutoReimportUtilities.h"
 #include "AutoReimport/AutoReimportManager.h"
 #include "Kismet2/BlueprintEditorUtils.h"
@@ -366,7 +367,7 @@ bool FAssetDeleteModel::CanReplaceReferencesWith( const FAssetData& InAssetData 
 
 		if (!NativeClassName.IsEmpty())
 		{
-			UClass* NativeParentClassToTest = FindObject<UClass>(ANY_PACKAGE, *NativeClassName);
+			UClass* NativeParentClassToTest = UClass::TryFindTypeSlow<UClass>(NativeClassName);
 			UClass* NativeParentClassToReplace = FBlueprintEditorUtils::FindFirstNativeClass(OriginalBPParentClass);
 
 			if (!NativeParentClassToTest || !NativeParentClassToTest->IsChildOf(NativeParentClassToReplace))
@@ -409,7 +410,12 @@ bool FAssetDeleteModel::DoReplaceReferences(const FAssetData& ReplaceReferencesW
 	// If the consolidation went off successfully with no failed objects, prompt the user to checkout/save the packages dirtied by the operation
 	if ( ConsResults.DirtiedPackages.Num() > 0 && ConsResults.FailedConsolidationObjs.Num() == 0)
 	{
-		FEditorFileUtils::PromptForCheckoutAndSave( ConsResults.DirtiedPackages, false, true );
+		FEditorFileUtils::FPromptForCheckoutAndSaveParams SaveParams;
+		SaveParams.bCheckDirty = false;
+		SaveParams.bPromptToSave = true;
+		SaveParams.bIsExplicitSave = true;
+
+		FEditorFileUtils::PromptForCheckoutAndSave( ObjectPtrDecay(ConsResults.DirtiedPackages), SaveParams);
 	}
 	// If the consolidation resulted in failed (partially consolidated) objects, do not save, and inform the user no save attempt was made
 	else if ( ConsResults.FailedConsolidationObjs.Num() > 0)
@@ -682,14 +688,14 @@ void FPendingDelete::CheckForReferences()
 	{
 		// Check and see whether we are referenced by any objects that won't be garbage collected (*including* the undo buffer)
 		FReferencerInformationList ReferencesIncludingUndo;
-		bool bReferencedInMemoryOrUndoStack = IsReferenced(Object, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags::GarbageCollectionKeepFlags, true, &ReferencesIncludingUndo);
+		bool bReferencedInMemoryOrUndoStack = IsReferenced(Object, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags_GarbageCollectionKeepFlags, true, &ReferencesIncludingUndo);
 
 		// Determine the in-memory references, *excluding* the undo buffer
 		if (GEditor && GEditor->Trans)
 		{
 			GEditor->Trans->DisableObjectSerialization();
 		}
-		bIsReferencedInMemoryByNonUndo = IsReferenced(Object, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags::GarbageCollectionKeepFlags, true, &MemoryReferences);
+		bIsReferencedInMemoryByNonUndo = IsReferenced(Object, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags_GarbageCollectionKeepFlags, true, &MemoryReferences);
 		if (GEditor && GEditor->Trans)
 		{
 			GEditor->Trans->EnableObjectSerialization();
@@ -714,7 +720,7 @@ void FPendingDelete::CheckForReferences()
 					FReferencerInformation& RefInfo = *RefIt;
 					if (RefInfo.Referencer->IsA(Blueprint->GeneratedClass))
 					{
-						if (IsReferenced(RefInfo.Referencer, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags::GarbageCollectionKeepFlags, true, &ReferencesIncludingUndo))
+						if (IsReferenced(RefInfo.Referencer, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags_GarbageCollectionKeepFlags, true, &ReferencesIncludingUndo))
 						{
 							if (GEditor && GEditor->Trans)
 							{
@@ -722,7 +728,7 @@ void FPendingDelete::CheckForReferences()
 							}
 
 							FReferencerInformationList ReferencesExcludingUndo;
-							if (IsReferenced(RefInfo.Referencer, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags::GarbageCollectionKeepFlags, true, &ReferencesExcludingUndo))
+							if (IsReferenced(RefInfo.Referencer, GARBAGE_COLLECTION_KEEPFLAGS, EInternalObjectFlags_GarbageCollectionKeepFlags, true, &ReferencesExcludingUndo))
 							{
 								bIsReferencedInMemoryByUndo = (ReferencesIncludingUndo.InternalReferences.Num() + ReferencesIncludingUndo.ExternalReferences.Num()) > (ReferencesExcludingUndo.InternalReferences.Num() + ReferencesExcludingUndo.ExternalReferences.Num());
 							}

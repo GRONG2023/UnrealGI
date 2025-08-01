@@ -11,9 +11,9 @@
 #include "IAssetTools.h"
 #include "IAssetTypeActions.h"
 #include "AssetToolsModule.h"
-#include "Toolkits/AssetEditorManager.h"
+#include "AssetTypeActivationOpenedMethod.h"
 #include "Toolkits/SimpleAssetEditor.h"
-#include "ARFilter.h"
+#include "AssetRegistry/ARFilter.h"
 
 struct FAssetData;
 struct FARFilter;
@@ -31,43 +31,18 @@ public:
 		return Object->GetName();
 	}
 
-	virtual bool HasActions( const TArray<UObject*>& InObjects ) const override
-	{
-		return false;
-	}
-
-	virtual void GetActions( const TArray<UObject*>& InObjects, FMenuBuilder& MenuBuilder ) override
-	{
-
-	}
-
-	virtual void GetActions(const TArray<UObject*>& InObjects, FToolMenuSection& Section) override
-	{
-
-	}
-
 	virtual void OpenAssetEditor( const TArray<UObject*>& InObjects, TSharedPtr<class IToolkitHost> EditWithinLevelEditor = TSharedPtr<IToolkitHost>() ) override
 	{
 		FSimpleAssetEditor::CreateEditor(EToolkitMode::Standalone, EditWithinLevelEditor, InObjects);
 	}
 
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-UE_DEPRECATED(4.24, "Use AssetsActivatedOverride instead to provide any non-default behavior. Using AssetsActivatedOverride, you no longer need a call to FAssetTypeActions_Base::AssetsActivated.")
-	virtual void AssetsActivated( const TArray<UObject*>& InObjects, EAssetTypeActivationMethod::Type ActivationType ) override
+	virtual void OpenAssetEditor(const TArray<UObject*>& InObjects, const EAssetTypeActivationOpenedMethod OpenedMethod, TSharedPtr<IToolkitHost> EditWithinLevelEditor = TSharedPtr<IToolkitHost>()) override
 	{
-		if (ActivationType == EAssetTypeActivationMethod::DoubleClicked || ActivationType == EAssetTypeActivationMethod::Opened)
+		if (OpenedMethod == EAssetTypeActivationOpenedMethod::Edit)
 		{
-			if (InObjects.Num() == 1)
-			{
-				FAssetEditorManager::Get().OpenEditorForAsset(InObjects[0]);
-			}
-			else if (InObjects.Num() > 1)
-			{
-				FAssetEditorManager::Get().OpenEditorForAssets(InObjects);
-			}
+			OpenAssetEditor(InObjects, EditWithinLevelEditor);
 		}
 	}
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	virtual bool AssetsActivatedOverride(const TArray<UObject*>& InObjects, EAssetTypeActivationMethod::Type ActivationType) override
 	{
@@ -77,6 +52,16 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	virtual TArray<FAssetData> GetValidAssetsForPreviewOrEdit(TArrayView<const FAssetData> InAssetDatas, bool bIsPreview) override
 	{
 		return TArray<FAssetData>(InAssetDatas);
+	}
+
+	virtual bool CanRename(const FAssetData& InAsset, FText* OutErrorMsg) const override
+	{
+		return true;
+	}
+
+	virtual bool CanDuplicate(const FAssetData& InAsset, FText* OutErrorMsg) const override
+	{
+		return true;
 	}
 
 	virtual bool CanFilter() override
@@ -111,8 +96,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	virtual void PerformAssetDiff(UObject* OldAsset, UObject* NewAsset, const struct FRevisionInfo& OldRevision, const struct FRevisionInfo& NewRevision) const override
 	{
-		check(OldAsset != nullptr);
-		check(NewAsset != nullptr);
+		check(OldAsset != nullptr || NewAsset != nullptr);
 
 		// Dump assets to temp text files
 		FString OldTextFilename = DumpAssetToTempFile(OldAsset);
@@ -167,7 +151,7 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	virtual void BuildBackendFilter(FARFilter& InFilter) override
 	{
 		// Add the supported class for this type to a filter
-		InFilter.ClassNames.Add(GetSupportedClass()->GetFName());
+		InFilter.ClassPaths.Add(GetClassPathName());
 		InFilter.bRecursiveClasses = true;
 	}
 	
@@ -176,15 +160,24 @@ PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		return FText::GetEmpty();
 	}
 
-	virtual void SetSupported(bool bInSupported) final
+	virtual bool SupportsOpenedMethod(const EAssetTypeActivationOpenedMethod OpenedMethod) const override
 	{
-		bIsSupported = bInSupported;
+		return OpenedMethod == EAssetTypeActivationOpenedMethod::Edit;
 	}
 
-	virtual bool IsSupported() const final
+	virtual FName GetFilterName() const override
 	{
-		return bIsSupported;
+		return FName(*GetSupportedClass()->GetPathName());
 	}
+
+	virtual FTopLevelAssetPath GetClassPathName() const override
+	{
+		return GetSupportedClass()->GetClassPathName();
+	}
+
+	virtual const FSlateBrush* GetThumbnailBrush(const FAssetData& InAssetData, const FName InClassName) const override { return nullptr; }
+
+	virtual const FSlateBrush* GetIconBrush(const FAssetData& InAssetData, const FName InClassName) const override { return nullptr; }
 
 protected:
 
@@ -224,6 +217,20 @@ protected:
 
 		return TypedObjects;
 	}
+	
+	template <typename T>
+    static TArray<TSoftObjectPtr<T>> GetTypedSoftObjectPtrs(const TArray<UObject*>& InObjects)
+    {
+    	check(InObjects.Num() > 0);
+
+    	TArray<TSoftObjectPtr<T>> TypedObjects;
+    	for (auto ObjIt = InObjects.CreateConstIterator(); ObjIt; ++ObjIt)
+    	{
+    		TypedObjects.Add( CastChecked<T>(*ObjIt) );
+    	}
+
+    	return TypedObjects;
+    }
 
 	template <typename T>
 	static TArray<T*> GetTypedObjectPtrs(const TArray<UObject*>& InObjects)
@@ -238,7 +245,4 @@ protected:
 
 		return TypedObjects;
 	}
-
-private:
-	bool bIsSupported = true;
 };

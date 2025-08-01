@@ -4,6 +4,37 @@
 #include "UObject/SequencerObjectVersion.h"
 #include "Channels/MovieSceneChannelProxy.h"
 
+#include "Evaluation/MovieSceneEvaluationField.h"
+#include "EntitySystem/BuiltInComponentTypes.h"
+#include "MovieSceneTracksComponentTypes.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneParameterSection)
+
+
+namespace UE::MovieScene
+{
+
+/* Entity IDs are an encoded type and index, with the upper 8 bits being the type, and the lower 24 bits as the index */
+uint32 EncodeEntityID(int32 InIndex, uint8 InType)
+{
+	check(InIndex >= 0 && InIndex < int32(0x00FFFFFF));
+	return static_cast<uint32>(InIndex) | (uint32(InType) << 24);
+}
+void DecodeEntityID(uint32 InEntityID, int32& OutIndex, uint8& OutType)
+{
+	// Mask out the type to get the index
+	OutIndex = static_cast<int32>(InEntityID & 0x00FFFFFF);
+	OutType = InEntityID >> 24;
+}
+
+
+}// namespace UE::MovieScene
+
+void IMovieSceneParameterSectionExtender::ExtendEntity(UMovieSceneParameterSection* Section, UMovieSceneEntitySystemLinker* EntityLinker, const UE::MovieScene::FEntityImportParams& Params, UE::MovieScene::FImportedEntity* OutImportedEntity)
+{
+	ExtendEntityImpl(Section, EntityLinker, Params, OutImportedEntity);
+}
+
 FScalarParameterNameAndCurve::FScalarParameterNameAndCurve( FName InParameterName )
 {
 	ParameterName = InParameterName;
@@ -52,8 +83,7 @@ void UMovieSceneParameterSection::Serialize(FArchive& Ar)
 
 	if (Ar.IsLoading())
 	{
-		//Don't force if transacting, since it may not be a channel creation/deletion change
-		ReconstructChannelProxy(!Ar.IsTransacting());
+		ReconstructChannelProxy();
 	}
 }
 
@@ -61,13 +91,12 @@ void UMovieSceneParameterSection::PostEditImport()
 {
 	Super::PostEditImport();
 
-	ReconstructChannelProxy(true);
+	ReconstructChannelProxy();
 }
 
 
-void UMovieSceneParameterSection::ReconstructChannelProxy(bool bForce)
+void UMovieSceneParameterSection::ReconstructChannelProxy()
 {
-
 	FMovieSceneChannelProxyData Channels;
 
 #if WITH_EDITOR
@@ -224,7 +253,6 @@ void UMovieSceneParameterSection::ReconstructChannelProxy(bool bForce)
 #endif
 
 	ChannelProxy = MakeShared<FMovieSceneChannelProxy>(MoveTemp(Channels));
-	
 }
 
 void UMovieSceneParameterSection::AddScalarParameterKey( FName InParameterName, FFrameNumber InTime, float InValue )
@@ -243,10 +271,10 @@ void UMovieSceneParameterSection::AddScalarParameterKey( FName InParameterName, 
 		const int32 NewIndex = ScalarParameterNamesAndCurves.Add( FScalarParameterNameAndCurve( InParameterName ) );
 		ExistingChannel = &ScalarParameterNamesAndCurves[NewIndex].ParameterCurve;
 
-		ReconstructChannelProxy(true);
+		ReconstructChannelProxy();
 	}
 
-	ExistingChannel->AddCubicKey(InTime, InValue);
+	ExistingChannel->GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue));
 
 	if (TryModify())
 	{
@@ -270,7 +298,7 @@ void UMovieSceneParameterSection::AddBoolParameterKey(FName InParameterName, FFr
 		const int32 NewIndex = BoolParameterNamesAndCurves.Add(FBoolParameterNameAndCurve(InParameterName));
 		ExistingChannel = &BoolParameterNamesAndCurves[NewIndex].ParameterCurve;
 
-		ReconstructChannelProxy(true);
+		ReconstructChannelProxy();
 	}
 
 	ExistingChannel->GetData().UpdateOrAddKey(InTime, InValue);
@@ -298,11 +326,11 @@ void UMovieSceneParameterSection::AddVector2DParameterKey(FName InParameterName,
 		int32 NewIndex = Vector2DParameterNamesAndCurves.Add(FVector2DParameterNameAndCurves(InParameterName));
 		ExistingCurves = &Vector2DParameterNamesAndCurves[NewIndex];
 
-		ReconstructChannelProxy(true);
+		ReconstructChannelProxy();
 	}
 
-	ExistingCurves->XCurve.AddCubicKey(InTime, InValue.X);
-	ExistingCurves->YCurve.AddCubicKey(InTime, InValue.Y);
+	ExistingCurves->XCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.X));
+	ExistingCurves->YCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.Y));
 
 	if (TryModify())
 	{
@@ -326,12 +354,12 @@ void UMovieSceneParameterSection::AddVectorParameterKey( FName InParameterName, 
 		int32 NewIndex = VectorParameterNamesAndCurves.Add( FVectorParameterNameAndCurves( InParameterName ) );
 		ExistingCurves = &VectorParameterNamesAndCurves[NewIndex];
 
-		ReconstructChannelProxy(true);
+		ReconstructChannelProxy();
 	}
 
-	ExistingCurves->XCurve.AddCubicKey(InTime, InValue.X);
-	ExistingCurves->YCurve.AddCubicKey(InTime, InValue.Y);
-	ExistingCurves->ZCurve.AddCubicKey(InTime, InValue.Z);
+	ExistingCurves->XCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.X));
+	ExistingCurves->YCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.Y));
+	ExistingCurves->ZCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.Z));
 
 	if (TryModify())
 	{
@@ -355,13 +383,13 @@ void UMovieSceneParameterSection::AddColorParameterKey( FName InParameterName, F
 		int32 NewIndex = ColorParameterNamesAndCurves.Add( FColorParameterNameAndCurves( InParameterName ) );
 		ExistingCurves = &ColorParameterNamesAndCurves[NewIndex];
 
-		ReconstructChannelProxy(true);
+		ReconstructChannelProxy();
 	}
-
-	ExistingCurves->RedCurve.AddCubicKey(   InTime, InValue.R );
-	ExistingCurves->GreenCurve.AddCubicKey( InTime, InValue.G );
-	ExistingCurves->BlueCurve.AddCubicKey(  InTime, InValue.B );
-	ExistingCurves->AlphaCurve.AddCubicKey( InTime, InValue.A );
+	
+	ExistingCurves->RedCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.R));
+	ExistingCurves->GreenCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.G));
+	ExistingCurves->BlueCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.B));
+	ExistingCurves->AlphaCurve.GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(InValue.A));
 
 	if (TryModify())
 	{
@@ -385,22 +413,23 @@ void UMovieSceneParameterSection::AddTransformParameterKey(FName InParameterName
 		int32 NewIndex = TransformParameterNamesAndCurves.Add(FTransformParameterNameAndCurves(InParameterName));
 		ExistingCurves = &TransformParameterNamesAndCurves[NewIndex];
 
-		ReconstructChannelProxy(true);
+		ReconstructChannelProxy();
 	}
 	FVector Translation = InValue.GetTranslation();
 	FRotator Rotator = InValue.GetRotation().Rotator();
 	FVector Scale = InValue.GetScale3D();
-	ExistingCurves->Translation[0].AddCubicKey(InTime, Translation[0]);
-	ExistingCurves->Translation[1].AddCubicKey(InTime, Translation[1]);
-	ExistingCurves->Translation[2].AddCubicKey(InTime, Translation[2]);
 
-	ExistingCurves->Rotation[0].AddCubicKey(InTime, Rotator.Roll);
-	ExistingCurves->Rotation[1].AddCubicKey(InTime, Rotator.Pitch);
-	ExistingCurves->Rotation[2].AddCubicKey(InTime, Rotator.Yaw);
+	ExistingCurves->Translation[0].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Translation[0]));
+	ExistingCurves->Translation[1].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Translation[1]));
+	ExistingCurves->Translation[2].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Translation[2]));
 
-	ExistingCurves->Scale[0].AddCubicKey(InTime, Scale[0]);
-	ExistingCurves->Scale[1].AddCubicKey(InTime, Scale[1]);
-	ExistingCurves->Scale[2].AddCubicKey(InTime, Scale[2]);
+	ExistingCurves->Rotation[0].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Rotator.Roll));
+	ExistingCurves->Rotation[1].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Rotator.Pitch));
+	ExistingCurves->Rotation[2].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Rotator.Yaw));
+
+	ExistingCurves->Scale[0].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Scale[0]));
+	ExistingCurves->Scale[1].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Scale[1]));
+	ExistingCurves->Scale[2].GetData().UpdateOrAddKey(InTime, FMovieSceneFloatValue(Scale[2]));
 
 	if (TryModify())
 	{
@@ -415,7 +444,7 @@ bool UMovieSceneParameterSection::RemoveScalarParameter( FName InParameterName )
 		if ( ScalarParameterNamesAndCurves[i].ParameterName == InParameterName )
 		{
 			ScalarParameterNamesAndCurves.RemoveAt(i);
-			ReconstructChannelProxy(true);
+			ReconstructChannelProxy();
 			return true;
 		}
 	}
@@ -429,7 +458,7 @@ bool UMovieSceneParameterSection::RemoveBoolParameter(FName InParameterName)
 		if (BoolParameterNamesAndCurves[i].ParameterName == InParameterName)
 		{
 			BoolParameterNamesAndCurves.RemoveAt(i);
-			ReconstructChannelProxy(true);
+			ReconstructChannelProxy();
 			return true;
 		}
 	}
@@ -443,7 +472,7 @@ bool UMovieSceneParameterSection::RemoveVector2DParameter(FName InParameterName)
 		if (Vector2DParameterNamesAndCurves[i].ParameterName == InParameterName)
 		{
 			Vector2DParameterNamesAndCurves.RemoveAt(i);
-			ReconstructChannelProxy(true);
+			ReconstructChannelProxy();
 			return true;
 		}
 	}
@@ -457,7 +486,7 @@ bool UMovieSceneParameterSection::RemoveVectorParameter( FName InParameterName )
 		if ( VectorParameterNamesAndCurves[i].ParameterName == InParameterName )
 		{
 			VectorParameterNamesAndCurves.RemoveAt( i );
-			ReconstructChannelProxy(true);
+			ReconstructChannelProxy();
 			return true;
 		}
 	}
@@ -471,7 +500,7 @@ bool UMovieSceneParameterSection::RemoveColorParameter( FName InParameterName )
 		if ( ColorParameterNamesAndCurves[i].ParameterName == InParameterName )
 		{
 			ColorParameterNamesAndCurves.RemoveAt( i );
-			ReconstructChannelProxy(true);
+			ReconstructChannelProxy();
 			return true;
 		}
 	}
@@ -485,7 +514,7 @@ bool UMovieSceneParameterSection::RemoveTransformParameter(FName InParameterName
 		if (TransformParameterNamesAndCurves[i].ParameterName == InParameterName)
 		{
 			TransformParameterNamesAndCurves.RemoveAt(i);
-			ReconstructChannelProxy(true);
+			ReconstructChannelProxy();
 			return true;
 		}
 	}
@@ -569,5 +598,184 @@ void UMovieSceneParameterSection::GetParameterNames( TSet<FName>& ParameterNames
 	for (const FTransformParameterNameAndCurves& TransformParameterNamesAndCurve : TransformParameterNamesAndCurves)
 	{
 		ParameterNames.Add(TransformParameterNamesAndCurve.ParameterName);
+	}
+}
+
+void UMovieSceneParameterSection::ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity)
+{
+	using namespace UE::MovieScene;
+
+	IMovieSceneParameterSectionExtender* Extender = GetImplementingOuter<IMovieSceneParameterSectionExtender>();
+	if (!ensureMsgf(Extender, TEXT("It is not valid for a UMovieSceneParameterSection to be used for importing entities outside of an outer chain that implements IMovieSceneParameterSectionExtender")))
+	{
+		return;
+	}
+
+	uint8 ParameterType = 0;
+	int32 EntityIndex = 0;
+	DecodeEntityID(Params.EntityID, EntityIndex, ParameterType);
+
+	FBuiltInComponentTypes* BuiltInComponentTypes = FBuiltInComponentTypes::Get();
+	FMovieSceneTracksComponentTypes* TracksComponentTypes = FMovieSceneTracksComponentTypes::Get();
+
+	FGuid ObjectBindingID = Params.GetObjectBindingID();
+
+	TEntityBuilder<TAddConditional<FGuid>> BaseBuilder = FEntityBuilder()
+		.AddConditional(BuiltInComponentTypes->GenericObjectBinding, ObjectBindingID, ObjectBindingID.IsValid());
+
+	switch (ParameterType)
+	{
+		case 0:
+		{
+			const FScalarParameterNameAndCurve& Scalar = ScalarParameterNamesAndCurves[EntityIndex];
+
+			if (Scalar.ParameterCurve.HasAnyData())
+			{
+				OutImportedEntity->AddBuilder(
+					BaseBuilder
+					.Add(TracksComponentTypes->ScalarParameterName, Scalar.ParameterName)
+					.Add(BuiltInComponentTypes->FloatChannel[0], &Scalar.ParameterCurve)
+				);
+			}
+			break;
+		}
+		case 1:
+		{
+			const FBoolParameterNameAndCurve& Bool = BoolParameterNamesAndCurves[EntityIndex];
+
+			if (Bool.ParameterCurve.HasAnyData())
+			{
+				OutImportedEntity->AddBuilder(
+					BaseBuilder
+					.Add(TracksComponentTypes->BoolParameterName, Bool.ParameterName)
+					.Add(BuiltInComponentTypes->BoolChannel, &Bool.ParameterCurve)
+				);
+			}
+			break;
+		}
+		case 2:
+		{
+			const FVector2DParameterNameAndCurves& Vector2D = Vector2DParameterNamesAndCurves[EntityIndex];
+			if (Vector2D.XCurve.HasAnyData() || Vector2D.YCurve.HasAnyData())
+			{
+				OutImportedEntity->AddBuilder(
+					BaseBuilder
+					.Add(TracksComponentTypes->Vector2DParameterName, Vector2D.ParameterName)
+					.AddConditional(BuiltInComponentTypes->FloatChannel[0], &Vector2D.XCurve, Vector2D.XCurve.HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[1], &Vector2D.YCurve, Vector2D.YCurve.HasAnyData())
+				);
+			}
+			break;
+		}
+		case 3:
+		{
+			const FVectorParameterNameAndCurves& Vector = VectorParameterNamesAndCurves[EntityIndex];
+
+			if (Vector.XCurve.HasAnyData() || Vector.YCurve.HasAnyData() || Vector.ZCurve.HasAnyData())
+			{
+				OutImportedEntity->AddBuilder(
+					BaseBuilder
+					.Add(TracksComponentTypes->VectorParameterName, Vector.ParameterName)
+					.AddConditional(BuiltInComponentTypes->FloatChannel[0], &Vector.XCurve, Vector.XCurve.HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[1], &Vector.YCurve, Vector.YCurve.HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[2], &Vector.ZCurve, Vector.ZCurve.HasAnyData())
+				);
+			}
+			break;
+		}
+		case 4:
+		{
+			const FColorParameterNameAndCurves& Color = ColorParameterNamesAndCurves[EntityIndex];
+			if (Color.RedCurve.HasAnyData() || Color.GreenCurve.HasAnyData() || Color.BlueCurve.HasAnyData() || Color.AlphaCurve.HasAnyData())
+			{
+				OutImportedEntity->AddBuilder(
+					BaseBuilder
+					.Add(TracksComponentTypes->ColorParameterName, Color.ParameterName)
+					.AddConditional(BuiltInComponentTypes->FloatChannel[0], &Color.RedCurve, Color.RedCurve.HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[1], &Color.GreenCurve, Color.GreenCurve.HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[2], &Color.BlueCurve, Color.BlueCurve.HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[3], &Color.AlphaCurve, Color.AlphaCurve.HasAnyData())
+				);
+			}
+			break;
+		}
+		case 5:
+		{
+			const FTransformParameterNameAndCurves& Transform = TransformParameterNamesAndCurves[EntityIndex];
+			if (Transform.Translation[0].HasAnyData() || Transform.Translation[1].HasAnyData() || Transform.Translation[2].HasAnyData() ||
+				Transform.Rotation[0].HasAnyData() || Transform.Rotation[1].HasAnyData() || Transform.Rotation[2].HasAnyData()
+				|| Transform.Scale[0].HasAnyData() || Transform.Scale[1].HasAnyData() || Transform.Scale[2].HasAnyData())
+			{
+				OutImportedEntity->AddBuilder(
+					BaseBuilder
+					.Add(TracksComponentTypes->TransformParameterName, Transform.ParameterName)
+					.AddConditional(BuiltInComponentTypes->FloatChannel[0], &Transform.Translation[0], Transform.Translation[0].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[1], &Transform.Translation[1], Transform.Translation[1].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[2], &Transform.Translation[2], Transform.Translation[2].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[3], &Transform.Rotation[0], Transform.Rotation[0].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[4], &Transform.Rotation[1], Transform.Rotation[1].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[5], &Transform.Rotation[2], Transform.Rotation[2].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[6], &Transform.Scale[0], Transform.Scale[0].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[7], &Transform.Scale[1], Transform.Scale[1].HasAnyData())
+					.AddConditional(BuiltInComponentTypes->FloatChannel[8], &Transform.Scale[2], Transform.Scale[2].HasAnyData())
+				);
+			}
+			break;
+		}
+	}
+
+	Extender->ExtendEntity(this, EntityLinker, Params, OutImportedEntity);
+}
+
+bool UMovieSceneParameterSection::PopulateEvaluationFieldImpl(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder)
+{
+	// By default, parameter sections do not populate any evaluation field entries
+	// that is the job of its outer UMovieSceneTrack through a call to ExternalPopulateEvaluationField
+	return true;
+}
+
+void UMovieSceneParameterSection::ExternalPopulateEvaluationField(const TRange<FFrameNumber>& EffectiveRange, const FMovieSceneEvaluationFieldEntityMetaData& InMetaData, FMovieSceneEntityComponentFieldBuilder* OutFieldBuilder)
+{
+	using namespace UE::MovieScene;
+
+	const int32 MetaDataIndex = OutFieldBuilder->AddMetaData(InMetaData);
+
+	// We use the top 8 bits of EntityID to encode the type of parameter
+	const int32 NumScalarID    = ScalarParameterNamesAndCurves.Num();
+	const int32 NumBoolID      = BoolParameterNamesAndCurves.Num();
+	const int32 NumVector2DID  = Vector2DParameterNamesAndCurves.Num();
+	const int32 NumVectorID    = VectorParameterNamesAndCurves.Num();
+	const int32 NumColorID     = ColorParameterNamesAndCurves.Num();
+	const int32 NumTransformID = TransformParameterNamesAndCurves.Num();
+
+	for (int32 Index = 0; Index < NumScalarID; ++Index)
+	{
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(this, EncodeEntityID(Index, 0));
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	}
+	for (int32 Index = 0; Index < NumBoolID; ++Index)
+	{
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(this, EncodeEntityID(Index, 1));
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	}
+	for (int32 Index = 0; Index < NumVector2DID; ++Index)
+	{
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(this, EncodeEntityID(Index, 2));
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	}
+	for (int32 Index = 0; Index < NumVectorID; ++Index)
+	{
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(this, EncodeEntityID(Index, 3));
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	}
+	for (int32 Index = 0; Index < NumColorID; ++Index)
+	{
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(this, EncodeEntityID(Index, 4));
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
+	}
+	for (int32 Index = 0; Index < NumTransformID; ++Index)
+	{
+		const int32 EntityIndex = OutFieldBuilder->FindOrAddEntity(this, EncodeEntityID(Index, 5));
+		OutFieldBuilder->AddPersistentEntity(EffectiveRange, EntityIndex, MetaDataIndex);
 	}
 }

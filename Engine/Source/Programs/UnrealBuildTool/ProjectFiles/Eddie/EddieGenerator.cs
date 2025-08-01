@@ -2,42 +2,28 @@
 
 using System;
 using System.Collections.Generic;
-using System.Text;
 using System.IO;
-using Tools.DotNETCommon;
+using System.Text;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
-
-	class EddieProjectFolder : MasterProjectFolder
-	{
-		public EddieProjectFolder(ProjectFileGenerator InitOwnerProjectFileGenerator, string InitFolderName)
-			: base(InitOwnerProjectFileGenerator, InitFolderName)
-		{
-		}
-	}
-
 	class EddieProjectFileGenerator : ProjectFileGenerator
 	{
-		public EddieProjectFileGenerator(FileReference InOnlyGameProject)
+		public EddieProjectFileGenerator(FileReference? InOnlyGameProject)
 			: base(InOnlyGameProject)
 		{
 		}
-		
-		override public string ProjectFileExtension
+
+		public override string ProjectFileExtension => ".wkst";
+
+		public override void CleanProjectFiles(DirectoryReference InPrimaryProjectDirectory, string InPrimaryProjectName, DirectoryReference InIntermediateProjectFilesPath, ILogger Logger)
 		{
-			get
+			FileReference PrimaryProjDeleteFilename = FileReference.Combine(InPrimaryProjectDirectory, InPrimaryProjectName + ".wkst");
+			if (FileReference.Exists(PrimaryProjDeleteFilename))
 			{
-				return ".wkst";
-			}
-		}
-		
-		public override void CleanProjectFiles(DirectoryReference InMasterProjectDirectory, string InMasterProjectName, DirectoryReference InIntermediateProjectFilesPath)
-		{
-			FileReference MasterProjDeleteFilename = FileReference.Combine(InMasterProjectDirectory, InMasterProjectName + ".wkst");
-			if (FileReference.Exists(MasterProjDeleteFilename))
-			{
-				File.Delete(MasterProjDeleteFilename.FullName);
+				File.Delete(PrimaryProjDeleteFilename.FullName);
 			}
 
 			// Delete the project files folder
@@ -49,43 +35,38 @@ namespace UnrealBuildTool
 				}
 				catch (Exception Ex)
 				{
-					Log.TraceInformation("Error while trying to clean project files path {0}. Ignored.", InIntermediateProjectFilesPath);
-					Log.TraceInformation("\t" + Ex.Message);
+					Logger.LogInformation("Error while trying to clean project files path {InIntermediateProjectFilesPath}. Ignored.", InIntermediateProjectFilesPath);
+					Logger.LogInformation("\t{Ex}", Ex.Message);
 				}
 			}
 		}
-		
-		protected override ProjectFile AllocateProjectFile(FileReference InitFilePath)
+
+		protected override ProjectFile AllocateProjectFile(FileReference InitFilePath, DirectoryReference BaseDir)
 		{
-			return new EddieProjectFile(InitFilePath, OnlyGameProject);
+			return new EddieProjectFile(InitFilePath, BaseDir);
 		}
-		
-		public override MasterProjectFolder AllocateMasterProjectFolder(ProjectFileGenerator InitOwnerProjectFileGenerator, string InitFolderName)
-		{
-			return new EddieProjectFolder(InitOwnerProjectFileGenerator, InitFolderName);
-		}
-		
-		private bool WriteEddieWorkset()
+
+		private bool WriteEddieWorkset(ILogger Logger)
 		{
 			bool bSuccess = false;
-			
+
 			StringBuilder WorksetDataContent = new StringBuilder();
 			WorksetDataContent.Append("# @Eddie Workset@" + ProjectFileGenerator.NewLine);
-			WorksetDataContent.Append("AddWorkset \"" + MasterProjectName + ".wkst\" \"" + MasterProjectPath + "\"" + ProjectFileGenerator.NewLine);
-			
-			System.Action< String /*Path*/, List<MasterProjectFolder> /* Folders */> AddProjectsFunction = null;
+			WorksetDataContent.Append("AddWorkset \"" + PrimaryProjectName + ".wkst\" \"" + PrimaryProjectPath + "\"" + ProjectFileGenerator.NewLine);
+
+			System.Action<String /*Path*/, List<PrimaryProjectFolder> /* Folders */>? AddProjectsFunction = null;
 			AddProjectsFunction = (Path, FolderList) =>
 				{
-					foreach (EddieProjectFolder CurFolder in FolderList)
+					foreach (PrimaryProjectFolder CurFolder in FolderList)
 					{
 						String NewPath = Path + "/" + CurFolder.FolderName;
 						WorksetDataContent.Append("AddFileGroup \"" + NewPath + "\" \"" + CurFolder.FolderName + "\"" + ProjectFileGenerator.NewLine);
 
-						AddProjectsFunction(NewPath, CurFolder.SubFolders);
+						AddProjectsFunction!(NewPath, CurFolder.SubFolders);
 
 						foreach (ProjectFile CurProject in CurFolder.ChildProjects)
 						{
-							EddieProjectFile EddieProject = CurProject as EddieProjectFile;
+							EddieProjectFile? EddieProject = CurProject as EddieProjectFile;
 							if (EddieProject != null)
 							{
 								WorksetDataContent.Append("AddFile \"" + EddieProject.ToString() + "\" \"" + EddieProject.ProjectFilePath + "\"" + ProjectFileGenerator.NewLine);
@@ -95,25 +76,25 @@ namespace UnrealBuildTool
 						WorksetDataContent.Append("EndFileGroup \"" + NewPath + "\"" + ProjectFileGenerator.NewLine);
 					}
 				};
-			AddProjectsFunction(MasterProjectName, RootFolder.SubFolders);
-			
-			string ProjectName = MasterProjectName;
-			string FilePath = MasterProjectPath + "/" + ProjectName + ".wkst";
-			
-			bSuccess = WriteFileIfChanged(FilePath, WorksetDataContent.ToString(), new UTF8Encoding());
-			
+			AddProjectsFunction(PrimaryProjectName, RootFolder.SubFolders);
+
+			string ProjectName = PrimaryProjectName;
+			string FilePath = PrimaryProjectPath + "/" + ProjectName + ".wkst";
+
+			bSuccess = WriteFileIfChanged(FilePath, WorksetDataContent.ToString(), Logger, new UTF8Encoding());
+
 			return bSuccess;
 		}
-		
-		protected override bool WriteMasterProjectFile(ProjectFile UBTProject, PlatformProjectGeneratorCollection PlatformProjectGenerators)
+
+		protected override bool WritePrimaryProjectFile(ProjectFile? UBTProject, PlatformProjectGeneratorCollection PlatformProjectGenerators, ILogger Logger)
 		{
-			return WriteEddieWorkset();
+			return WriteEddieWorkset(Logger);
 		}
-		
-		protected override void ConfigureProjectFileGeneration(string[] Arguments, ref bool IncludeAllPlatforms)
+
+		protected override void ConfigureProjectFileGeneration(string[] Arguments, ref bool IncludeAllPlatforms, ILogger Logger)
 		{
 			// Call parent implementation first
-			base.ConfigureProjectFileGeneration(Arguments, ref IncludeAllPlatforms);
+			base.ConfigureProjectFileGeneration(Arguments, ref IncludeAllPlatforms, Logger);
 
 			if (bGeneratingGameProjectFiles)
 			{

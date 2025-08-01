@@ -27,6 +27,7 @@ FDuplicateDataReader::FDuplicateDataReader( class FUObjectAnnotationSparse<FDupl
 {
 	this->SetIsLoading(true);
 	this->SetIsPersistent(true);
+	this->SetUseUnversionedPropertySerialization(true);
 	this->ArNoIntraPropertyDelta = true;
 	ArPortFlags |= PPF_Duplicate | InPortFlags;
 
@@ -66,13 +67,30 @@ FArchive& FDuplicateDataReader::operator<<( UObject*& Object )
 	FDuplicatedObject ObjectInfo = SourceObject ? DuplicatedObjectAnnotation.GetAnnotation(SourceObject) : FDuplicatedObject();
 	if( !ObjectInfo.IsDefault() )
 	{
-		Object = ObjectInfo.DuplicatedObject;
+		Object = ObjectInfo.DuplicatedObject.GetEvenIfUnreachable();
 	}
 	else
 	{
 		Object = SourceObject;
 	}
 
+	return *this;
+}
+
+FArchive& FDuplicateDataReader::operator<<(FObjectPtr& ObjectPtr)
+{
+	FObjectHandle& Handle  = ObjectPtr.GetHandleRef();
+	Serialize(&Handle, sizeof(FObjectHandle));
+
+	if (!IsObjectHandleNull(Handle) && IsObjectHandleResolved(Handle))
+	{
+		UObject* SourceObject = UE::CoreUObject::Private::ReadObjectHandlePointerNoCheck(Handle);
+		FDuplicatedObject ObjectInfo = DuplicatedObjectAnnotation.GetAnnotation(SourceObject);
+		if (!ObjectInfo.IsDefault())
+		{
+			ObjectPtr = ObjectInfo.DuplicatedObject.GetEvenIfUnreachable();
+		}
+	}
 	return *this;
 }
 
@@ -100,7 +118,7 @@ FArchive& FDuplicateDataReader::operator<<(FSoftObjectPath& SoftObjectPath)
 	FDuplicatedObject ObjectInfo = SourceObject ? DuplicatedObjectAnnotation.GetAnnotation(SourceObject) : FDuplicatedObject();
 	if (!ObjectInfo.IsDefault())
 	{
-		SoftObjectPath = FSoftObjectPath::GetOrCreateIDForObject(ObjectInfo.DuplicatedObject);
+		SoftObjectPath = FSoftObjectPath::GetOrCreateIDForObject(ObjectInfo.DuplicatedObject.GetEvenIfUnreachable());
 	}
 	
 	return *this;

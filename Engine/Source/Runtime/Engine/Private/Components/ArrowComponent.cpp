@@ -1,23 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/ArrowComponent.h"
-#include "EngineGlobals.h"
-#include "RHI.h"
-#include "RenderingThread.h"
-#include "RenderResource.h"
-#include "VertexFactory.h"
-#include "LocalVertexFactory.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "Engine/Engine.h"
-#include "MaterialShared.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "Engine/CollisionProfile.h"
+#include "SceneInterface.h"
 #include "SceneManagement.h"
 #include "DynamicMeshBuilder.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "StaticMeshResources.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ArrowComponent)
 
 #define DEFAULT_SCREEN_SIZE	(0.0025f)
 #define ARROW_SCALE			(80.0f)
@@ -151,7 +147,7 @@ public:
 				Mesh.MaterialRenderProxy = ArrowMaterialRenderProxy;
 
 				FDynamicPrimitiveUniformBuffer& DynamicPrimitiveUniformBuffer = Collector.AllocateOneFrameResource<FDynamicPrimitiveUniformBuffer>();
-				DynamicPrimitiveUniformBuffer.Set(FScaleMatrix(ViewScale) * EffectiveLocalToWorld, FScaleMatrix(ViewScale) * EffectiveLocalToWorld, GetBounds(), GetLocalBounds(), true, false, DrawsVelocity(), false);
+				DynamicPrimitiveUniformBuffer.Set(Collector.GetRHICommandList(), FScaleMatrix(ViewScale) * EffectiveLocalToWorld, FScaleMatrix(ViewScale) * EffectiveLocalToWorld, GetBounds(), GetLocalBounds(), true, false, AlwaysHasVelocity());
 				BatchElement.PrimitiveUniformBufferResource = &DynamicPrimitiveUniformBuffer.UniformBuffer;
 
 				BatchElement.FirstIndex = 0;
@@ -183,11 +179,11 @@ public:
 #endif
 		Result.bShadowRelevance = IsShadowCast(View);
 		Result.bEditorPrimitiveRelevance = UseEditorCompositing(View);
-		Result.bVelocityRelevance = IsMovable() && Result.bOpaque && Result.bRenderInMainPass;
+		Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 		return Result;
 	}
 
-	virtual void OnTransformChanged() override
+	virtual void OnTransformChanged(FRHICommandListBase& RHICmdList) override
 	{
 		Origin = GetLocalToWorld().GetOrigin();
 	}
@@ -255,13 +251,13 @@ FPrimitiveSceneProxy* UArrowComponent::CreateSceneProxy()
 }
 
 #if WITH_EDITOR
-bool UArrowComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UArrowComponent::ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	// Arrow components not treated as 'selectable' in editor
 	return false;
 }
 
-bool UArrowComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
+bool UArrowComponent::ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const
 {
 	// Arrow components not treated as 'selectable' in editor
 	return false;
@@ -276,8 +272,54 @@ FBoxSphereBounds UArrowComponent::CalcBounds(const FTransform& LocalToWorld) con
 
 void UArrowComponent::SetArrowColor(FLinearColor NewColor)
 {
-	ArrowColor = NewColor.ToFColor(true);
+	SetArrowFColor(NewColor.ToFColor(true));
+}
+
+void UArrowComponent::SetArrowFColor(FColor NewColor)
+{
+	ArrowColor = NewColor;
 	MarkRenderStateDirty();
+}
+
+void UArrowComponent::SetArrowSize(float NewSize)
+{
+	ArrowSize = NewSize;
+	MarkRenderStateDirty();
+}
+
+void UArrowComponent::SetArrowLength(float NewLength)
+{
+	ArrowLength = NewLength;
+	MarkRenderStateDirty();
+}
+
+void UArrowComponent::SetScreenSize(float NewScreenSize)
+{
+	ScreenSize = NewScreenSize;
+	MarkRenderStateDirty();
+}
+
+void UArrowComponent::SetIsScreenSizeScaled(bool bNewValue)
+{
+	bIsScreenSizeScaled = bNewValue;
+	MarkRenderStateDirty();
+}
+
+void UArrowComponent::SetTreatAsASprite(bool bNewValue)
+{
+	bTreatAsASprite = bNewValue;
+	MarkRenderStateDirty();
+}
+
+void UArrowComponent::SetUseInEditorScaling(bool bNewValue)
+{
+#if WITH_EDITORONLY_DATA
+	bUseInEditorScaling = bNewValue;
+	MarkRenderStateDirty();
+#else
+	const bool bCallOutsideOf_WithEditorOnlyData = false;
+	ensure(bCallOutsideOf_WithEditorOnlyData);
+#endif
 }
 
 #if WITH_EDITORONLY_DATA
@@ -290,3 +332,4 @@ void UArrowComponent::SetEditorScale(float InEditorScale)
 	}
 }
 #endif
+

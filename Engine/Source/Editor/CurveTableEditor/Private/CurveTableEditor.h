@@ -2,43 +2,42 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Types/SlateStructs.h"
-#include "Layout/Visibility.h"
-#include "Widgets/SWidget.h"
-#include "Toolkits/IToolkitHost.h"
-#include "ICurveTableEditor.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
-#include "CurveTableEditorHandle.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "CurveEditorTypes.h"
 #include "CurveTableEditorUtils.h"
+#include "Curves/RealCurve.h"
+#include "Delegates/Delegate.h"
+#include "EditorUndoClient.h"
+#include "Framework/Docking/TabManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "ICurveTableEditor.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Color.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UnrealTemplate.h"
+#include "Toolkits/IToolkit.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/Views/SHeaderRow.h"
+#include "Widgets/Views/SListView.h"
 
-struct FCurveTableEditorColumnHeaderData
-{
-	/** Unique ID used to identify this column */
-	FName ColumnId;
+class FCurveEditor;
+class FExtender;
+class SCurveEditorPanel;
+class SDockTab;
+class SWidget;
+class UCurveTable;
+class UObject;
 
-	/** Display name of this column */
-	FText DisplayName;
-
-	/** The calculated width of this column taking into account the cell data for each row */
-	float DesiredColumnWidth;
-};
-
-struct FCurveTableEditorRowListViewData
-{
-	/** Unique ID used to identify this row */
-	FName RowId;
-
-	/** Display name of this row */
-	FText DisplayName;
-
-	/** Array corresponding to each cell in this row */
-	TArray<FText> CellData;
-
-	/** Handle to the row */
-	FCurveTableEditorHandle RowHandle;
-};
 
 /** The manner in which curve tables are displayed */
 enum class ECurveTableViewMode : int32
@@ -50,16 +49,16 @@ enum class ECurveTableViewMode : int32
 	CurveTable,
 };
 
-typedef TSharedPtr<FCurveTableEditorColumnHeaderData> FCurveTableEditorColumnHeaderDataPtr;
-typedef TSharedPtr<FCurveTableEditorRowListViewData>  FCurveTableEditorRowListViewDataPtr;
+struct FCurveTableEditorColumnHeaderData;
 
-/** Viewer/editor for a CurveTable */
+typedef TSharedPtr<FCurveTableEditorColumnHeaderData> FCurveTableEditorColumnHeaderDataPtr;
+
+/** Viewer/Editor for a CurveTable */
 class FCurveTableEditor :
 	public ICurveTableEditor
 	, public FCurveTableEditorUtils::INotifyOnCurveTableChanged
+	, public FEditorUndoClient
 {
-	friend class SCurveTableListViewRow;
-	friend class SCurveTableCurveViewRow;
 
 public:
 	virtual void RegisterTabSpawners(const TSharedRef<class FTabManager>& TabManager) override;
@@ -86,9 +85,17 @@ public:
 	// INotifyOnDataTableChanged
 	virtual void PreChange(const UCurveTable* Changed, FCurveTableEditorUtils::ECurveTableChangeInfo Info) override;
 	virtual void PostChange(const UCurveTable* Changed, FCurveTableEditorUtils::ECurveTableChangeInfo Info) override;
+	virtual void PostUndo(bool bSuccess) override;
+	virtual void PostRedo(bool bSuccess) override;
 
 	/** Get the curve table being edited */
-	const UCurveTable* GetCurveTable() const;
+	UCurveTable* GetCurveTable() const;
+
+	/** Determine if the table being viewed, can be edited or is read-only */
+	bool IsReadOnly() const;
+
+	/** Get the curve editor used for the Curve View*/
+	TSharedPtr<FCurveEditor> GetCurveEditor() const { return CurveEditor; }
 
 	void HandlePostChange();
 
@@ -98,6 +105,27 @@ public:
 	/** Get the mode that we are displaying data in */
 	ECurveTableViewMode GetViewMode() const { return ViewMode; }
 
+	/** Rename a specific curve */
+	void HandleCurveRename(FCurveEditorTreeItemID& TreeID, FName& OldCurveName, FName& NewCurveName);
+
+	/** Pop open context Menu */
+	TSharedPtr<SWidget> OnOpenCurveMenu();
+
+	/** Callback for R-Click Menu Delete Curves */
+	void OnDeleteCurves();
+
+	/** Callback for R-Click Menu Rename Selected Curve */
+	void OnRenameCurve();
+
+	/** Callback for R-Click Menu Delete Key Column */
+	void OnDeleteKeyColumn(float KeyTime);
+
+	/** Ensure that whatever time we are reetiming to is not redundant */
+	bool VerifyValidRetime(const FText& InText, FText& OutErrorMessage, float OriginalTime);
+
+	/** Process the retime from the header column text entry */
+	void HandleRetimeCommitted(const FText& InText, ETextCommit::Type CommitInfo, float OriginalKeyTime);
+
 protected:
 
 	/** Handles setting up slate for the curve table editor */
@@ -106,44 +134,44 @@ protected:
 	/** Add extra menu items */
 	void ExtendMenu();
 
+	/** Add extra menu items */
+	void ExtendToolbar();
+
 	/** Bind commands to delegates */
 	void BindCommands();
 
 	/** Update the cached state of this curve table, and then reflect that new state in the UI */
 	void RefreshCachedCurveTable();
 
-	/** Cache the data from the current curve table so that it can be shown in the editor */
-	void CacheCurveTableForEditing();
+	/** Make the toolbar */
+	TSharedRef<SWidget> MakeToolbar(TSharedRef<SCurveEditorPanel>& CurveEditorPanel);
 
-	/** Make the widget for a row name entry in the data table row list view */
-	TSharedRef<ITableRow> MakeRowNameWidget(FCurveTableEditorRowListViewDataPtr InRowDataPtr, const TSharedRef<STableViewBase>& OwnerTable);
+	/** Called when the CurveEditorTree view is scrolled - used to keep the two list views in sync */
+	void OnCurveTreeViewScrolled(double InScrollOffset);
 
-	/** Make the widget for a row entry in the data table row list view */
-	TSharedRef<ITableRow> MakeRowWidget(FCurveTableEditorRowListViewDataPtr InRowDataPtr, const TSharedRef<STableViewBase>& OwnerTable);
+	/** Called when the Table View is scrolled - used to keep the two list views in sync */
+	void OnTableViewScrolled(double InScrollOffset);
 
-	/** Make the widget for a cell entry in the data table row list view */
-	TSharedRef<SWidget> MakeCellWidget(FCurveTableEditorRowListViewDataPtr InRowDataPtr, const int32 InRowIndex, const FName& InColumnId);
-
-	/** Make the curve widget for a row entry in the data table row list view */
-	TSharedRef<SWidget> MakeCurveWidget(FCurveTableEditorRowListViewDataPtr InRowDataPtr, const int32 InRowIndex);
-
-	/** Called when the row names list is scrolled - used to keep the two list views in sync */
-	void OnRowNamesListViewScrolled(double InScrollOffset);
-
-	/** Called when the cell names list view is scrolled - used to keep the two list views in sync */
-	void OnCellsListViewScrolled(double InScrollOffset);
-
-	/** Get the width to use for the row names column */
-	FOptionalSize GetRowNameColumnWidth() const;
+	/** Called when someone selected a row directly in the TableView - used to keep selection in sync between CurveTree  and TableView */
+	void OnTableViewSelectionChanged(FCurveEditorTreeItemID ItemID, ESelectInfo::Type);
 
 	/** Called when an asset has finished being imported */
 	void OnPostReimport(UObject* InObject, bool);
 
 	/** Control control visibility based on view mode */
-	EVisibility GetGridViewControlsVisibility() const;
+	EVisibility GetTableViewControlsVisibility() const;
 
 	/** Control control visibility based on view mode */
 	EVisibility GetCurveViewControlsVisibility() const;
+
+	/** Add New Curve Callback */
+	FReply OnAddCurveClicked();
+
+	/** Callback For SimpleCurves, add a new Key/Column */
+	void OnAddNewKeyColumn();
+
+	/* Adds new key for all (Simple) curves in the table at given time */
+	void AddNewKeyColumn(float NewKeyTime);
 
 	/** Toggle between curve & grid view */
 	void ToggleViewMode();
@@ -151,36 +179,59 @@ protected:
 	/** Get whether the curve view checkbox should be toggled on */
 	bool IsCurveViewChecked() const;
 
+	/** Invoke UI for Renaming a Curve */
+	void OnRequestCurveRename(FCurveEditorTreeItemID TreeItemId);
+
 	virtual bool ShouldCreateDefaultStandaloneMenu() const { return true; }
-	virtual bool ShouldCreateDefaultToolbar() const { return false; }
+	virtual bool ShouldCreateDefaultToolbar() const { return true ; }
+
+	SHeaderRow::FColumn::FArguments GenerateHeaderColumnForKey(FCurveTableEditorColumnHeaderDataPtr ColumnData);
 
 	/** Array of the columns that are available for editing */
 	TArray<FCurveTableEditorColumnHeaderDataPtr> AvailableColumns;
 
-	/** Array of the rows that are available for editing */
-	TArray<FCurveTableEditorRowListViewDataPtr> AvailableRows;
-
 	/** Header row containing entries for each column in AvailableColumns */
 	TSharedPtr<SHeaderRow> ColumnNamesHeaderRow;
 
-	/** List view responsible for showing the row names column */
-	TSharedPtr<SListView<FCurveTableEditorRowListViewDataPtr>> RowNamesListView;
-
 	/** List view responsible for showing the rows from AvailableColumns */
-	TSharedPtr<SListView<FCurveTableEditorRowListViewDataPtr>> CellsListView;
+	TSharedPtr<SListView<FCurveEditorTreeItemID>> TableView;
 
 	/** Menu extender */
 	TSharedPtr<FExtender> MenuExtender;
 
-	/** Width of the row name column */
-	float RowNameColumnWidth;
+	/** Menu extender */
+	TSharedPtr<FExtender> ToolbarExtender;
 
 	/**	The tab id for the curve table tab */
 	static const FName CurveTableTabId;
 
-	/** The column id for the row name list view column */
-	static const FName RowNameColumnId;
-
 	/** The manner in which curve tables are displayed */
 	ECurveTableViewMode ViewMode;
+
+	/** The Curve Editor */
+	TSharedPtr<FCurveEditor> CurveEditor;
+
+	/* The Data Model that holds the source items for Views (TreeView, TableView) */
+	TSharedPtr<class SCurveEditorTree> CurveEditorTree;
+
+	bool bUpdatingTableViewSelection;
+
+	/* Sync Filtered from the CurveEditorTree model to the TableView*/
+	void RefreshTableRows();
+
+	/* Sync selected rows from the CurveEditorTree model to the TableView */
+	void RefreshTableRowsSelection();
+
+	/** A delegate to let item rows know when the number of columns have changed */
+	FSimpleMulticastDelegate OnColumnsChanged;
+
+	/** An empty source list used to initialize or when rebuilding the TableView */
+	TArray<FCurveEditorTreeItemID> EmptyItems;
+
+	/** Associates the CurveEditor Ids with the FName Ids from the Curve Table */
+	TMap< FCurveEditorTreeItemID, FName > RowIDMap;
+
+	/** The default interpolation type of the curves within the table */
+	ERichCurveInterpMode InterpMode;
+
 };

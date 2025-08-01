@@ -1,19 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "MovieSceneSectionHelpers.h"
+#include "Sections/MovieSceneSectionHelpers.h"
 
 #include "Sections/MovieSceneColorSection.h"
 #include "Channels/MovieSceneChannelProxy.h"
 #include "Channels/MovieSceneFloatChannel.h"
-#include "CommonMovieSceneTools.h"
 
 #include "Misc/FrameNumber.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "ScopedTransaction.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Engine/Engine.h"
+#include "TimeToPixel.h"
 
-void MovieSceneSectionHelpers::ConsolidateColorCurves( TArray< TTuple<float, FLinearColor> >& OutColorKeys, const FLinearColor& DefaultColor, const TArray<FMovieSceneFloatChannel*>& ColorChannels, const FTimeToPixel& TimeConverter )
+void MovieSceneSectionHelpers::ConsolidateColorCurves( TArray< TTuple<float, FLinearColor> >& OutColorKeys, const FLinearColor& DefaultColor, TArrayView<const FMovieSceneFloatChannel* const> ColorChannels, const FTimeToPixel& TimeConverter )
 {
 	// @todo Sequencer Optimize - This could all get cached, instead of recalculating everything every OnPaint
 
@@ -63,7 +63,7 @@ void MovieSceneSectionHelpers::ConsolidateColorCurves( TArray< TTuple<float, FLi
 		{
 			if (ChannelTimes[Index].Num() == 0)
 			{
-				ChannelTimes.RemoveAt(Index, 1, false);
+				ChannelTimes.RemoveAt(Index, 1, EAllowShrinking::No);
 			}
 		}
 
@@ -137,7 +137,7 @@ FMovieSceneKeyColorPicker::FMovieSceneKeyColorPicker(UMovieSceneSection* Section
 	FColorPickerArgs PickerArgs;
 	PickerArgs.bUseAlpha = false;
 	PickerArgs.DisplayGamma = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma));
-	PickerArgs.InitialColorOverride = InitialColor;
+	PickerArgs.InitialColor = InitialColor;
 	PickerArgs.ParentWidget = FSlateApplication::Get().GetActiveTopLevelWindow();
 
 	PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateRaw(this, &FMovieSceneKeyColorPicker::OnColorPickerPicked, RChannel, GChannel, BChannel, AChannel);
@@ -147,12 +147,25 @@ FMovieSceneKeyColorPicker::FMovieSceneKeyColorPicker(UMovieSceneSection* Section
 	OpenColorPicker(PickerArgs);
 }
 
+void UpdateOrAddKey(FMovieSceneFloatChannel* Channel, FFrameNumber KeyTime, float Value)
+{
+	int32 KeyHandleIndex = Channel->GetData().FindKey(KeyTime);
+	if (KeyHandleIndex == INDEX_NONE)
+	{
+		Channel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(Value));
+	}
+	else
+	{
+		Channel->GetData().GetValues()[KeyHandleIndex].Value = Value;
+	}
+}
+
 void FMovieSceneKeyColorPicker::OnColorPickerPicked(FLinearColor NewColor, FMovieSceneFloatChannel* RChannel, FMovieSceneFloatChannel* GChannel, FMovieSceneFloatChannel* BChannel, FMovieSceneFloatChannel* AChannel)
 {
-	RChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(NewColor.R));
-	GChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(NewColor.G));
-	BChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(NewColor.B));
-	AChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(NewColor.A));
+	UpdateOrAddKey(RChannel, KeyTime, NewColor.R);
+	UpdateOrAddKey(GChannel, KeyTime, NewColor.G);
+	UpdateOrAddKey(BChannel, KeyTime, NewColor.B);
+	UpdateOrAddKey(AChannel, KeyTime, NewColor.A);
 }
 
 void FMovieSceneKeyColorPicker::OnColorPickerClosed(const TSharedRef<SWindow>& Window, UMovieSceneSection* Section, FMovieSceneFloatChannel* RChannel, FMovieSceneFloatChannel* GChannel, FMovieSceneFloatChannel* BChannel, FMovieSceneFloatChannel* AChannel)
@@ -170,17 +183,17 @@ void FMovieSceneKeyColorPicker::OnColorPickerClosed(const TSharedRef<SWindow>& W
 		BChannel->Evaluate(KeyTime, B);
 		AChannel->Evaluate(KeyTime, A);
 
-		RChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.R));
-		GChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.G));
-		BChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.B));
-		AChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.A));
+		UpdateOrAddKey(RChannel, KeyTime, InitialColor.R);
+		UpdateOrAddKey(GChannel, KeyTime, InitialColor.G);
+		UpdateOrAddKey(BChannel, KeyTime, InitialColor.B);
+		UpdateOrAddKey(AChannel, KeyTime, InitialColor.A);
 
 		Section->Modify();
 
-		RChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(R));
-		GChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(G));
-		BChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(B));
-		AChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(A));
+		UpdateOrAddKey(RChannel, KeyTime, R);
+		UpdateOrAddKey(GChannel, KeyTime, G);
+		UpdateOrAddKey(BChannel, KeyTime, B);
+		UpdateOrAddKey(AChannel, KeyTime, A);
 	}
 }
 
@@ -189,8 +202,8 @@ void FMovieSceneKeyColorPicker::OnColorPickerCancelled(FLinearColor NewColor, FM
 	bColorPickerWasCancelled = true;
 	
 	// Restore the original color. No transaction will be created when the OnColorPickerClosed callback is called.
-	RChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.R));
-	GChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.G));
-	BChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.B));
-	AChannel->GetData().UpdateOrAddKey(KeyTime, FMovieSceneFloatValue(InitialColor.A));
+	UpdateOrAddKey(RChannel, KeyTime, InitialColor.R);
+	UpdateOrAddKey(GChannel, KeyTime, InitialColor.G);
+	UpdateOrAddKey(BChannel, KeyTime, InitialColor.B);
+	UpdateOrAddKey(AChannel, KeyTime, InitialColor.A);
 }

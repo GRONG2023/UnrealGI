@@ -4,6 +4,7 @@
 
 #include "Async/ParallelFor.h"
 #include "ChaosSolversModule.h"
+#include "Engine/World.h"
 #include "Field/FieldSystemCoreAlgo.h"
 #include "Field/FieldSystemSceneProxy.h"
 #include "Field/FieldSystemNodes.h"
@@ -13,6 +14,8 @@
 #include "Physics/Experimental/PhysScene_Chaos.h"
 #include "PhysicsProxy/PerSolverFieldSystem.h"
 #include "PBDRigidsSolver.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(FieldSystemComponent)
 
 DEFINE_LOG_CATEGORY_STATIC(FSC_Log, NoLogging, All);
 
@@ -55,7 +58,6 @@ TSet<FPhysScene_Chaos*> UFieldSystemComponent::GetPhysicsScenes() const
 	}
 	else
 	{
-#if INCLUDE_CHAOS
 		if (ensure(GetOwner()) && ensure(GetOwner()->GetWorld()))
 		{
 			Scenes.Add(GetOwner()->GetWorld()->GetPhysicsScene());
@@ -65,7 +67,6 @@ TSet<FPhysScene_Chaos*> UFieldSystemComponent::GetPhysicsScenes() const
 			check(GWorld);
 			Scenes.Add(GWorld->GetPhysicsScene());
 		}
-#endif
 	}
 	return Scenes;
 }
@@ -87,7 +88,18 @@ TArray<Chaos::FPhysicsSolverBase*> UFieldSystemComponent::GetPhysicsSolvers() co
 		}
 	}
 
-	const TArray<Chaos::FPhysicsSolverBase*>& WorldSolvers = ChaosModule->GetAllSolvers();
+	TArray<Chaos::FPhysicsSolverBase*> WorldSolvers;
+
+	//Need to only grab solvers that are owned by our world. In multi-client PIE this avoids solvers for other clients
+	UWorld* World = GetWorld();
+	FPhysScene* PhysScene = World ? World->GetPhysicsScene() : nullptr;
+	if(PhysScene)
+	{
+		WorldSolvers.Add(PhysScene->GetSolver());
+		ChaosModule->GetSolversMutable(World, WorldSolvers);
+	}
+
+	
 	const int32 NumFilterSolvers = FilterSolvers.Num();
 
 	for (Chaos::FPhysicsSolverBase* Solver : WorldSolvers)
@@ -137,7 +149,7 @@ bool UFieldSystemComponent::HasValidPhysicsState() const
 void UFieldSystemComponent::DispatchFieldCommand(const FFieldSystemCommand& InCommand, const bool IsTransient)
 {
 	using namespace Chaos;
-	if (HasValidPhysicsState())
+	if (HasValidPhysicsState() && InCommand.RootNode)
 	{
 		const FName Name = GetOwner() ? *GetOwner()->GetName() : TEXT("");
 		
@@ -155,6 +167,7 @@ void UFieldSystemComponent::DispatchFieldCommand(const FFieldSystemCommand& InCo
 				{
 					FFieldSystemCommand LocalCommand = InCommand;
 					LocalCommand.InitFieldNodes(Concrete.GetSolverTime(), Name);
+
 					if(!IsTransient) LocalFields.Add(LocalCommand);
 
 					Concrete.EnqueueCommandImmediate([ConcreteSolver = &Concrete, NewCommand = LocalCommand, LocalTransient = IsTransient]()
@@ -179,7 +192,6 @@ void UFieldSystemComponent::DispatchFieldCommand(const FFieldSystemCommand& InCo
 			{
 				FFieldSystemCommand LocalCommand = InCommand;
 				LocalCommand.InitFieldNodes(World->GetTimeSeconds(), Name);
-				UPhysicsFieldComponent::BuildCommandBounds(LocalCommand);
 
 				if (!IsTransient)
 				{
@@ -269,7 +281,7 @@ void UFieldSystemComponent::BuildFieldCommand(bool Enabled, EFieldPhysicsType Ta
 {
 	if (Enabled && Field && HasValidPhysicsState())
 	{
-		FFieldSystemCommand Command = FFieldObjectCommands::CreateFieldCommand(GetFieldPhysicsName(Target), Field, MetaData);
+		FFieldSystemCommand Command = FFieldObjectCommands::CreateFieldCommand(Target, Field, MetaData);
 		DispatchFieldCommand(Command, IsTransient);
 	}
 }
@@ -280,8 +292,22 @@ void UFieldSystemComponent::AddFieldCommand(bool Enabled, EFieldPhysicsType Targ
 	{
 		if (FieldSystem)
 		{
-			FFieldSystemCommand Command = FFieldObjectCommands::CreateFieldCommand(GetFieldPhysicsName(Target), Field, MetaData);
-			SetupConstructionFields.Add(Command);
+			FFieldSystemCommand Command = FFieldObjectCommands::CreateFieldCommand(Target, Field, MetaData);
+			if (Command.RootNode)
+			{
+				SetupConstructionFields.Add(Command);
+
+				UWorld* World = GetWorld();
+				if (World && World->PhysicsField)
+				{
+					const FName Name = GetOwner() ? *GetOwner()->GetName() : TEXT("");
+
+					FFieldSystemCommand LocalCommand = Command;
+					LocalCommand.InitFieldNodes(World->GetTimeSeconds(), Name);
+
+					World->PhysicsField->AddConstructionCommand(LocalCommand);
+				}
+			}
 		}
 
 		BufferCommands.AddFieldCommand(GetFieldPhysicsName(Target), Field, MetaData);
@@ -292,8 +318,11 @@ void UFieldSystemComponent::ApplyStayDynamicField(bool Enabled, FVector Position
 {
 	if (Enabled && HasValidPhysicsState())
 	{
-		DispatchFieldCommand({"DynamicState",new FRadialIntMask(Radius, Position, (int32)Chaos::EObjectStateType::Dynamic, 
-			(int32)Chaos::EObjectStateType::Kinematic, ESetMaskConditionType::Field_Set_IFF_NOT_Interior)}, true);
+		FFieldSystemCommand FieldCommand = FFieldObjectCommands::CreateFieldCommand(EFieldPhysicsType::Field_DynamicState,
+			new FRadialIntMask(Radius, Position, (int32)Chaos::EObjectStateType::Dynamic,
+			(int32)Chaos::EObjectStateType::Kinematic, ESetMaskConditionType::Field_Set_IFF_NOT_Interior));
+
+		DispatchFieldCommand(FieldCommand, true);
 	}
 }
 
@@ -301,7 +330,9 @@ void UFieldSystemComponent::ApplyLinearForce(bool Enabled, FVector Direction, fl
 {
 	if (Enabled && HasValidPhysicsState())
 	{
-		DispatchFieldCommand({ "LinearForce", new FUniformVector(Magnitude, Direction) }, true);
+		FFieldSystemCommand FieldCommand = FFieldObjectCommands::CreateFieldCommand(EFieldPhysicsType::Field_LinearForce, 
+			new FUniformVector(Magnitude, Direction));
+		DispatchFieldCommand(FieldCommand, true);
 	}
 }
 
@@ -309,7 +340,9 @@ void UFieldSystemComponent::ApplyRadialForce(bool Enabled, FVector Position, flo
 {
 	if (Enabled && HasValidPhysicsState())
 	{
-		DispatchFieldCommand({ "LinearForce", new FRadialVector(Magnitude, Position) }, true);
+		FFieldSystemCommand FieldCommand = FFieldObjectCommands::CreateFieldCommand(EFieldPhysicsType::Field_LinearForce,
+			new FRadialVector(Magnitude, Position));
+		DispatchFieldCommand(FieldCommand, true);
 	}
 }
 
@@ -318,8 +351,11 @@ void UFieldSystemComponent::ApplyRadialVectorFalloffForce(bool Enabled, FVector 
 	if (Enabled && HasValidPhysicsState())
 	{
 		FRadialFalloff * FalloffField = new FRadialFalloff(Magnitude,0.f, 1.f, 0.f, Radius, Position);
-		FRadialVector* VectorField = new FRadialVector(Magnitude, Position);
-		DispatchFieldCommand({"LinearForce", new FSumVector(1.0, FalloffField, VectorField, nullptr, Field_Multiply)}, true);
+		FRadialVector* VectorField = new FRadialVector(1.f, Position);
+
+		FFieldSystemCommand FieldCommand = FFieldObjectCommands::CreateFieldCommand(EFieldPhysicsType::Field_LinearForce,
+			new FSumVector(1.0, FalloffField, VectorField, nullptr, Field_Multiply));
+		DispatchFieldCommand(FieldCommand, true);
 	}
 }
 
@@ -328,8 +364,11 @@ void UFieldSystemComponent::ApplyUniformVectorFalloffForce(bool Enabled, FVector
 	if (Enabled && HasValidPhysicsState())
 	{
 		FRadialFalloff * FalloffField = new FRadialFalloff(Magnitude, 0.f, 1.f, 0.f, Radius, Position);
-		FUniformVector* VectorField = new FUniformVector(Magnitude, Direction);
-		DispatchFieldCommand({ "LinearForce", new FSumVector(1.0, FalloffField, VectorField, nullptr, Field_Multiply) }, true);
+		FUniformVector* VectorField = new FUniformVector(1.f, Direction);
+
+		FFieldSystemCommand FieldCommand = FFieldObjectCommands::CreateFieldCommand(EFieldPhysicsType::Field_LinearForce,
+			new FSumVector(1.0, FalloffField, VectorField, nullptr, Field_Multiply));
+		DispatchFieldCommand(FieldCommand, true);
 	}
 }
 
@@ -337,8 +376,9 @@ void UFieldSystemComponent::ApplyStrainField(bool Enabled, FVector Position, flo
 {
 	if (Enabled && HasValidPhysicsState())
 	{
-		FFieldSystemCommand Command = { "ExternalClusterStrain", new FRadialFalloff(Magnitude,0.f, 1.f, 0.f, Radius, Position) };
-		DispatchFieldCommand(Command, true);
+		FFieldSystemCommand FieldCommand = FFieldObjectCommands::CreateFieldCommand(EFieldPhysicsType::Field_ExternalClusterStrain,
+			new FRadialFalloff(Magnitude, 0.f, 1.f, 0.f, Radius, Position));
+		DispatchFieldCommand(FieldCommand, true);
 	}
 }
 
@@ -366,6 +406,7 @@ void UFieldSystemComponent::ResetFieldSystem()
 	ConstructionCommands.ResetFieldCommands();
 	BufferCommands.ResetFieldCommands();
 }
+
 
 
 

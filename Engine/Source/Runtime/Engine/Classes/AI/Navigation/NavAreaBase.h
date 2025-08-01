@@ -3,13 +3,17 @@
 #pragma once
 
 #include "UObject/Object.h"
+#include "Templates/SubclassOf.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "AI/Navigation/NavigationTypes.h"
+#endif //UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "NavAreaBase.generated.h"
 
+struct FNavAgentProperties;
 
 // a stub class. Actual implementation in NavigationSystem module.
-UCLASS(DefaultToInstanced, abstract, Config = Engine)
-class ENGINE_API UNavAreaBase : public UObject
+UCLASS(DefaultToInstanced, abstract, Config = Engine, MinimalAPI)
+class UNavAreaBase : public UObject
 {
 	GENERATED_BODY()
 
@@ -17,7 +21,7 @@ protected:
 	uint8 bIsMetaArea : 1;
 
 public:
-	UNavAreaBase(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	ENGINE_API UNavAreaBase(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	// leftover from NavigationSystem extraction from the Engine code
 	virtual bool IsLowArea() const { return false; }
@@ -41,6 +45,6 @@ protected:
 	*	Picks an navigation area class that should be used for Actor when
 	*	queried by NavAgent. Call it via the UNavAreaBase::PickAreaClass
 	*/
-	virtual TSubclassOf<UNavAreaBase> PickAreaClassForAgent(const AActor& Actor, const FNavAgentProperties& NavAgent) const;
+	ENGINE_API virtual TSubclassOf<UNavAreaBase> PickAreaClassForAgent(const AActor& Actor, const FNavAgentProperties& NavAgent) const;
 };
 

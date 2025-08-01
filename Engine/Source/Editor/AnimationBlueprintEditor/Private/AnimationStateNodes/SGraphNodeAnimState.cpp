@@ -1,20 +1,51 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AnimationStateNodes/SGraphNodeAnimState.h"
-#include "AnimStateNodeBase.h"
+
 #include "AnimStateConduitNode.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/SToolTip.h"
-#include "Animation/AnimInstance.h"
+#include "AnimStateNodeBase.h"
 #include "Animation/AnimBlueprint.h"
-#include "SGraphPreviewer.h"
-#include "Kismet2/BlueprintEditorUtils.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
+#include "Animation/AnimInstance.h"
+#include "Containers/Map.h"
+#include "Delegates/Delegate.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "Engine/Blueprint.h"
+#include "GenericPlatform/ICursor.h"
+#include "HAL/PlatformCrt.h"
 #include "IDocumentation.h"
-#include "AnimationStateMachineGraph.h"
-#include "Animation/AnimNode_StateMachine.h"
-#include "AnimGraphNode_StateMachineBase.h"
+#include "Internationalization/Internationalization.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "SGraphPanel.h"
+#include "SGraphPin.h"
+#include "SGraphPreviewer.h"
+#include "SNodePanel.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Notifications/SErrorText.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SToolTip.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+class UEdGraphSchema;
+struct FGeometry;
+struct FPointerEvent;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SGraphNodeAnimState"
 
@@ -40,8 +71,6 @@ void SStateMachineOutputPin::Construct(const FArguments& InArgs, UEdGraphPin* In
 {
 	this->SetCursor( EMouseCursor::Default );
 
-	typedef SStateMachineOutputPin ThisClass;
-
 	bShowLabel = true;
 
 	GraphPinObj = InPin;
@@ -53,9 +82,9 @@ void SStateMachineOutputPin::Construct(const FArguments& InArgs, UEdGraphPin* In
 	// Set up a hover for pins that is tinted the color of the pin.
 	SBorder::Construct( SBorder::FArguments()
 		.BorderImage( this, &SStateMachineOutputPin::GetPinBorder )
-		.BorderBackgroundColor( this, &ThisClass::GetPinColor )
-		.OnMouseButtonDown( this, &ThisClass::OnPinMouseDown )
-		.Cursor( this, &ThisClass::GetPinCursor )
+		.BorderBackgroundColor( this, &SStateMachineOutputPin::GetPinColor )
+		.OnMouseButtonDown( this, &SStateMachineOutputPin::OnPinMouseDown )
+		.Cursor( this, &SStateMachineOutputPin::GetPinCursor )
 	);
 }
 
@@ -67,8 +96,8 @@ TSharedRef<SWidget>	SStateMachineOutputPin::GetDefaultValueWidget()
 const FSlateBrush* SStateMachineOutputPin::GetPinBorder() const
 {
 	return ( IsHovered() )
-		? FEditorStyle::GetBrush( TEXT("Graph.StateNode.Pin.BackgroundHovered") )
-		: FEditorStyle::GetBrush( TEXT("Graph.StateNode.Pin.Background") );
+		? FAppStyle::GetBrush( TEXT("Graph.StateNode.Pin.BackgroundHovered") )
+		: FAppStyle::GetBrush( TEXT("Graph.StateNode.Pin.Background") );
 }
 
 /////////////////////////////////////////////////////
@@ -141,6 +170,11 @@ FSlateColor SGraphNodeAnimState::GetBorderBackgroundColor() const
 	FLinearColor ActiveStateColorDim(0.4f, 0.3f, 0.15f);
 	FLinearColor ActiveStateColorBright(1.f, 0.6f, 0.35f);
 
+	return GetBorderBackgroundColor_Internal(InactiveStateColor, ActiveStateColorDim, ActiveStateColorBright);
+}
+
+FSlateColor SGraphNodeAnimState::GetBorderBackgroundColor_Internal(FLinearColor InactiveStateColor, FLinearColor ActiveStateColorDim, FLinearColor ActiveStateColorBright) const
+{
 	UAnimBlueprint* AnimBlueprint = Cast<UAnimBlueprint>(FBlueprintEditorUtils::FindBlueprintForNode(GraphNode));
 	if(AnimBlueprint)
 	{
@@ -172,6 +206,46 @@ FSlateColor SGraphNodeAnimState::GetBorderBackgroundColor() const
 	return InactiveStateColor;
 }
 
+void SGraphNodeAnimState::OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
+{
+	// Add pins to the hover set so outgoing transitions arrows remains highlighted while the mouse is over the state node
+	if (const UAnimStateNodeBase* StateNode = Cast<UAnimStateNodeBase>(GraphNode))
+	{
+		if (const UEdGraphPin* OutputPin = StateNode->GetOutputPin())
+		{
+			TSharedPtr<SGraphPanel> OwnerPanel = GetOwnerPanel();
+			check(OwnerPanel.IsValid());
+
+			for (int32 LinkIndex = 0; LinkIndex < OutputPin->LinkedTo.Num(); ++LinkIndex)
+			{
+				OwnerPanel->AddPinToHoverSet(OutputPin->LinkedTo[LinkIndex]);
+			}
+		}
+	}
+	
+	SGraphNode::OnMouseEnter(MyGeometry, MouseEvent);
+}
+
+void SGraphNodeAnimState::OnMouseLeave(const FPointerEvent& MouseEvent)
+{
+	// Remove manually added pins from the hover set
+	if (const UAnimStateNodeBase* StateNode = Cast<UAnimStateNodeBase>(GraphNode))
+	{
+		if(const UEdGraphPin* OutputPin = StateNode->GetOutputPin())
+		{
+			TSharedPtr<SGraphPanel> OwnerPanel = GetOwnerPanel();
+			check(OwnerPanel.IsValid());
+
+			for (int32 LinkIndex = 0; LinkIndex < OutputPin->LinkedTo.Num(); ++LinkIndex)
+			{
+				OwnerPanel->RemovePinFromHoverSet(OutputPin->LinkedTo[LinkIndex]);
+			}
+		}
+	}
+
+	SGraphNode::OnMouseLeave(MouseEvent);
+}
+
 void SGraphNodeAnimState::UpdateGraphNode()
 {
 	InputPins.Empty();
@@ -193,7 +267,7 @@ void SGraphNodeAnimState::UpdateGraphNode()
 		.VAlign(VAlign_Center)
 		[
 			SNew(SBorder)
-			.BorderImage( FEditorStyle::GetBrush( "Graph.StateNode.Body" ) )
+			.BorderImage( FAppStyle::GetBrush( "Graph.StateNode.Body" ) )
 			.Padding(0)
 			.BorderBackgroundColor( this, &SGraphNodeAnimState::GetBorderBackgroundColor )
 			[
@@ -214,7 +288,7 @@ void SGraphNodeAnimState::UpdateGraphNode()
 				.Padding(10.0f)
 				[
 					SNew(SBorder)
-					.BorderImage( FEditorStyle::GetBrush("Graph.StateNode.ColorSpill") )
+					.BorderImage( FAppStyle::GetBrush("Graph.StateNode.ColorSpill") )
 					.BorderBackgroundColor( TitleShadowColor )
 					.HAlign(HAlign_Center)
 					.VAlign(VAlign_Center)
@@ -244,7 +318,7 @@ void SGraphNodeAnimState::UpdateGraphNode()
 								.AutoHeight()
 							[
 								SAssignNew(InlineEditableText, SInlineEditableTextBlock)
-								.Style( FEditorStyle::Get(), "Graph.StateNode.NodeTitleInlineEditableText" )
+								.Style( FAppStyle::Get(), "Graph.StateNode.NodeTitleInlineEditableText" )
 								.Text( NodeTitle.Get(), &SNodeTitle::GetHeadTitle )
 								.OnVerifyTextChanged(this, &SGraphNodeAnimState::OnVerifyNameTextChanged)
 								.OnTextCommitted(this, &SGraphNodeAnimState::OnNameTextCommited)
@@ -330,7 +404,7 @@ FText SGraphNodeAnimState::GetPreviewCornerText() const
 
 const FSlateBrush* SGraphNodeAnimState::GetNameIcon() const
 {
-	return FEditorStyle::GetBrush( TEXT("Graph.StateNode.Icon") );
+	return FAppStyle::GetBrush( TEXT("Graph.StateNode.Icon") );
 }
 
 /////////////////////////////////////////////////////
@@ -346,6 +420,12 @@ void SGraphNodeAnimConduit::GetNodeInfoPopups(FNodeInfoContext* Context, TArray<
 	// Intentionally empty.
 }
 
+FSlateColor SGraphNodeAnimConduit::GetBorderBackgroundColor_Internal(FLinearColor InactiveStateColor, FLinearColor ActiveStateColorDim, FLinearColor ActiveStateColorBright) const
+{
+	// Override inactive state color for conduits.
+	return SGraphNodeAnimState::GetBorderBackgroundColor_Internal(FLinearColor(0.38f, 0.45f, 0.21f), ActiveStateColorDim, ActiveStateColorBright);
+}
+
 FText SGraphNodeAnimConduit::GetPreviewCornerText() const
 {
 	UAnimStateNodeBase* StateNode = CastChecked<UAnimStateNodeBase>(GraphNode);
@@ -355,7 +435,7 @@ FText SGraphNodeAnimConduit::GetPreviewCornerText() const
 
 const FSlateBrush* SGraphNodeAnimConduit::GetNameIcon() const
 {
-	return FEditorStyle::GetBrush( TEXT("Graph.ConduitNode.Icon") );
+	return FAppStyle::GetBrush( TEXT("Graph.ConduitNode.Icon") );
 }
 
 #undef LOCTEXT_NAMESPACE

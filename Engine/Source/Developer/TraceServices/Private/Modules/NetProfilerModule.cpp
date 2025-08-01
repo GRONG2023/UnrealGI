@@ -1,34 +1,28 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "NetProfilerModule.h"
-#include "Analyzers/NetTraceAnalyzer.h"
+
 #include "AnalysisServicePrivate.h"
+#include "Analyzers/NetTraceAnalyzer.h"
 #include "Model/NetProfilerProvider.h"
 
-namespace Trace
+namespace TraceServices
 {
-
-FName FNetProfilerModule::ModuleName("TraceModule_NetProfiler");
-static const FName NetProfilerProviderName("NetProfilerProvider");
 
 void FNetProfilerModule::GetModuleInfo(FModuleInfo& OutModuleInfo)
 {
+	static const FName ModuleName("TraceModule_NetProfiler");
+
 	OutModuleInfo.Name = ModuleName;
 	OutModuleInfo.DisplayName = TEXT("NetProfiler");
 }
-	
-void FNetProfilerModule::OnAnalysisBegin(IAnalysisSession& InSession)
+
+void FNetProfilerModule::OnAnalysisBegin(IAnalysisSession& Session)
 {
-	FAnalysisSession& Session = static_cast<FAnalysisSession&>(InSession);
+	TSharedPtr<FNetProfilerProvider> NetProfilerProvider = MakeShared<FNetProfilerProvider>(Session);
+	Session.AddProvider(GetNetProfilerProviderName(), NetProfilerProvider);
 
-	FNetProfilerProvider* NetProfilerProvider = new FNetProfilerProvider(Session);
-	Session.AddProvider(NetProfilerProviderName, NetProfilerProvider);
-	InSession.AddAnalyzer(new FNetTraceAnalyzer(InSession, *NetProfilerProvider));
+	Session.AddAnalyzer(new FNetTraceAnalyzer(Session, *NetProfilerProvider));
 }
 
-void FNetProfilerModule::GetLoggers(TArray<const TCHAR *>& OutLoggers)
-{
-	//OutLoggers.Add(TEXT("NetProfiler"));
-}
-
-}
+} // namespace TraceServices

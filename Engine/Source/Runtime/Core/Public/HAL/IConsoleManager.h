@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "Misc/AccessDetection.h"
 #include "Misc/AssertionMacros.h"
 #include "Templates/UnrealTemplate.h"
 #include "Containers/UnrealString.h"
@@ -83,11 +84,38 @@ enum EConsoleVariableFlags
 	 */
 	ECVF_RenderThreadSafe = 0x20,
 
-	/* ApplyCVarSettingsGroupFromIni will complain if this wasn't set, should not be combined with ECVF_Cheat */
+	/* ApplyCVarSettingsGroupFromIni will complain if this wasn't set, should not be combined with ECVF_Cheat and ECVF_ExcludeFromPreview. 
+	 * They are automatically added as  ECVF_Preview unless ECVF_ExcludeFromPreview is used
+	 */
 	ECVF_Scalability = 0x40,
 
 	/* those cvars control other cvars with the flag ECVF_Scalability, names should start with "sg." */
 	ECVF_ScalabilityGroup = 0x80,
+
+	/* CVars with this flag will be included in the device profile previews. */
+	ECVF_Preview = 0x100,
+
+	/* Cvars with this flag will modify the Shader Keystring for All Platforms*/
+	ECVF_GeneralShaderChange = 0x200,
+
+	/* Cvars with this flag will modify the Shader Keystring for Mobile Platforms*/
+	ECVF_MobileShaderChange = 0x400,
+
+	/* Cvars with this flag will modify the Shader Keystring for Desktop Platforms*/
+	ECVF_DesktopShaderChange = 0x800,
+
+	/* CVars with this flag will be excluded from the device profile previews. */
+	ECVF_ExcludeFromPreview = 0x1000,
+
+	/**
+	 * CVars with this flag will be saved into local temp file for next boot after hotfixed. Normally use for feature switch which is too early, even before launching the hotfix http request
+	 * Use it carefully with these constrains in mind: 
+	 *  - WARNING: This exposes the config to end user who could change it through the local temp file in shipping client, it's your responsibility to make sure client can't "legally" cheat through this type of CVar;
+	 *  - For the first time get hotfixed, the value will change from default value during boot to the hotfixed value after the hotfix http request, so make sure caching it when boot if the logic doesn't support to change at runtime;
+	 *  - When there is a new released game version, the saved local temp file of last version could still be there. So it will still got read once. Keep the logic work well with the old value, or remove the CVar if the old value no longer supported;
+	 *  - It will only work for game client, not for dedicated servers which will be dynamically allocated on different server instances.
+	 */
+	ECVF_SaveForNextBoot = 0x2000,
 
 	// ------------------------------------------------
 
@@ -96,47 +124,89 @@ enum EConsoleVariableFlags
 
 	// Use to set a cvar without calling all cvar sinks. Much faster, but potentially unsafe. Use only if you know the particular cvar/setting does not require a sink call
 	ECVF_Set_NoSinkCall_Unsafe =	0x00010000,
+	
+	// Similar to ECVF_Set_NoSinkCall_Unsafe, but this will do nothing but set the cvar, and push updates to render thread, no changing flags, no sinks, etc
+	ECVF_Set_SetOnly_Unsafe = 		0x00020000,
 
 	// ------------------------------------------------
 
 	/* to get some history of where the last value was set by ( useful for track down why a cvar is in a specific state */
 	ECVF_SetByMask =				0xff000000,
 
-	// the ECVF_SetBy are sorted in override order (weak to strong), the value is not serialized, it only affects it's override behavior when calling Set()
+	// The ECVF_SetBy flags are sorted in override order (weak to strong), the value is not serialized. It only affects the override behavior when calling Set()
 
-	// lowest priority (default after console variable creation)
+	// Lowest priority (default after console variable creation)
 	ECVF_SetByConstructor =			0x00000000,
-	// from Scalability.ini (lower priority than game settings so it's easier to override partially)
+	// Set by scalability groups from Scalability.ini (lower priority than game settings so it's easier to override partially)
 	ECVF_SetByScalability =			0x01000000,
-	// (in game UI or from file)
+	// Default priority for engine-level game user settings, platform-specific settings will override this
 	ECVF_SetByGameSetting =			0x02000000,
-	// project settings (editor UI or from file, higher priority than game setting to allow to enforce some setting fro this project)
+	// Set by project settings UI or specific sections in ini file (higher priority than game setting to allow enforcing some settings for this project)
 	ECVF_SetByProjectSetting =		0x03000000,
-	// per project setting (ini file e.g. Engine.ini or Game.ini)
+	// Used by the [ConsoleVariables] section of Engine.ini as well as FSystemSettings
 	ECVF_SetBySystemSettingsIni =	0x04000000,
-	// per device setting (e.g. specific iOS device, higher priority than per project to do device specific settings)
-	ECVF_SetByDeviceProfile =		0x05000000,
-	// consolevariables.ini (for multiple projects)
-	ECVF_SetByConsoleVariablesIni = 0x06000000,
-	// a minus command e.g. -VSync (very high priority to enforce the setting for the application)
-	ECVF_SetByCommandline =			0x07000000,
-	// least useful, likely a hack, maybe better to find the correct SetBy...
-	ECVF_SetByCode =				0x08000000,
-	// editor UI or console in game or editor
-	ECVF_SetByConsole =				0x09000000,
+	// Dyanmically loaded/unloaded plugins, used with the History concept to restore cvars on plugin unload. THIS IS AN ARRAY TYPE meaning multiple vales with this SetBy are stored in the history.
+	ECVF_SetByPluginLowPriority =	0x05000000,
+	// Per device settings using the DeviceProfiles.ini hierarchy (e.g. specific iOS device, higher priority than per project to do device specific settings)
+	ECVF_SetByDeviceProfile =		0x06000000,
+	// Dyanmically loaded/unloaded plugins, used with the History concept to restore cvars on plugin unload. THIS IS AN ARRAY TYPE meaning multiple vales with this SetBy are stored in the history.
+	ECVF_SetByPluginHighPriority =	0x07000000,
+	// User settable game overrides, used for GameUserSettings fields that need to override device specific settings
+	ECVF_SetByGameOverride =		0x08000000,
+	// Set by local consolevariables.ini, mostly used for testing multiple projects
+	ECVF_SetByConsoleVariablesIni = 0x09000000,
+	// Set by hotfix. THIS IS AN ARRAY TYPE meaning multiple vales with this SetBy are stored in the history
+	ECVF_SetByHotfix =				0x0A000000,
+	// Set for previewing in editor. THIS IS AN ARRAY TYPE meaning multiple vales with this SetBy are stored in the history
+	ECVF_SetByPreview =				0x0B000000,
+	// Used by some command line parameters, others use the Console priority instead
+	ECVF_SetByCommandline =			0x0C000000,
+	// Used for high priority temporary debugging or operation modes
+	ECVF_SetByCode =				0x0D000000,
+	// Highest priority used via editor UI or or game/editor interactive console
+	ECVF_SetByConsole =				0x0E000000,
+
 
 	// ------------------------------------------------
 };
+
+
+#define ENUMERATE_SET_BY(op) \
+	op(Constructor) \
+	op(Scalability) \
+	op(GameSetting) \
+	op(ProjectSetting) \
+	op(SystemSettingsIni) \
+	op(PluginLowPriority) \
+	op(DeviceProfile) \
+	op(PluginHighPriority) \
+	op(ConsoleVariablesIni) \
+	op(Hotfix) \
+	op(Preview) \
+	op(Commandline) \
+	op(Code) \
+	op(Console)
+
+
+/** Returns human readable ECVF_SetByMask bits of the console variable flags. */
+extern CORE_API const TCHAR* GetConsoleVariableSetByName(EConsoleVariableFlags ConsoleVariableFlags);
+
+/** Inverse of GetConsoleVariableSetByName() */
+extern CORE_API EConsoleVariableFlags GetConsoleVariableSetByValue(const TCHAR* SetByName);
+
 
 class IConsoleVariable;
 
 #if !NO_CVARS
 
 /** Console variable delegate type  This is a void callback function. */
-DECLARE_DELEGATE_OneParam(FConsoleVariableDelegate, IConsoleVariable*);
+DECLARE_DELEGATE_OneParam( FConsoleVariableDelegate, IConsoleVariable* );
 
 /** Console variable multicast delegate type. */
 DECLARE_MULTICAST_DELEGATE_OneParam(FConsoleVariableMulticastDelegate, IConsoleVariable*);
+
+/** Console object with name multicast delegate type. */
+DECLARE_MULTICAST_DELEGATE_TwoParams(FConsoleObjectWithNameMulticastDelegate, const TCHAR*, IConsoleObject*);
 
 /** Console command delegate type (takes no arguments.)  This is a void callback function. */
 DECLARE_DELEGATE( FConsoleCommandDelegate );
@@ -149,6 +219,9 @@ DECLARE_DELEGATE_OneParam( FConsoleCommandWithWorldDelegate, UWorld* );
 
 /** Console command delegate type (with a world and arguments.)  This is a void callback function that always takes a list of arguments and a world. */
 DECLARE_DELEGATE_TwoParams(FConsoleCommandWithWorldAndArgsDelegate, const TArray< FString >&, UWorld*);
+
+/** Console command delegate type (with arguments and output device.)  This is a void callback function that always takes a list of arguments and output device. */
+DECLARE_DELEGATE_TwoParams(FConsoleCommandWithArgsAndOutputDeviceDelegate, const TArray< FString >&, FOutputDevice&);
 
 /** Console command delegate type (with a world arguments and output device.)  This is a void callback function that always takes a list of arguments, a world and output device. */
 DECLARE_DELEGATE_ThreeParams(FConsoleCommandWithWorldArgsAndOutputDeviceDelegate, const TArray< FString >&, UWorld*, FOutputDevice&);
@@ -177,6 +250,12 @@ struct FNullConsoleVariableDelegate
 	}
 
 	template<typename UserClass, typename FunctorType, typename... VarTypes>
+	inline static DerivedType CreateSPLambda(UserClass*, FunctorType&&, VarTypes...)
+	{
+		return {};
+	}
+
+	template<typename UserClass, typename FunctorType, typename... VarTypes>
 	inline static DerivedType CreateWeakLambda(UserClass*, FunctorType&&, VarTypes...)
 	{
 		return {};
@@ -194,12 +273,12 @@ struct FNullConsoleVariableDelegate
 	}
 
 	template <typename UserClass, typename... VarTypes>
-	inline static DerivedType CreateSP(const TSharedRef<UserClass, ESPMode::Fast>&, typename TMemFunPtrType<false, UserClass, void (ParamTypes..., VarTypes...)>::Type, VarTypes...)
+	inline static DerivedType CreateSP(const TSharedRef<UserClass>&, typename TMemFunPtrType<false, UserClass, void (ParamTypes..., VarTypes...)>::Type, VarTypes...)
 	{
 		return {};
 	}
 	template <typename UserClass, typename... VarTypes>
-	inline static DerivedType CreateSP(const TSharedRef<UserClass, ESPMode::Fast>&, typename TMemFunPtrType<true, UserClass, void (ParamTypes..., VarTypes...)>::Type, VarTypes...)
+	inline static DerivedType CreateSP(const TSharedRef<UserClass>&, typename TMemFunPtrType<true, UserClass, void (ParamTypes..., VarTypes...)>::Type, VarTypes...)
 	{
 		return {};
 	}
@@ -265,13 +344,14 @@ struct FNullConsoleVariableDelegate
 	}
 };
 
-struct FConsoleVariableDelegate                            : FNullConsoleVariableDelegate<FConsoleVariableDelegate, IConsoleVariable*> {};
-struct FConsoleCommandDelegate                             : FNullConsoleVariableDelegate<FConsoleCommandDelegate> {};
-struct FConsoleCommandWithArgsDelegate                     : FNullConsoleVariableDelegate<FConsoleCommandWithArgsDelegate, const TArray<FString>&> {};
-struct FConsoleCommandWithWorldDelegate                    : FNullConsoleVariableDelegate<FConsoleCommandWithWorldDelegate, UWorld*> {};
-struct FConsoleCommandWithWorldAndArgsDelegate             : FNullConsoleVariableDelegate<FConsoleCommandWithWorldAndArgsDelegate, const TArray<FString>&, UWorld*> {};
-struct FConsoleCommandWithWorldArgsAndOutputDeviceDelegate : FNullConsoleVariableDelegate<FConsoleCommandWithWorldArgsAndOutputDeviceDelegate, const TArray<FString>&, UWorld*, FOutputDevice&> {};
-struct FConsoleCommandWithOutputDeviceDelegate             : FNullConsoleVariableDelegate<FConsoleCommandWithOutputDeviceDelegate, FOutputDevice&> {};
+struct FConsoleVariableDelegate								: FNullConsoleVariableDelegate<FConsoleVariableDelegate, IConsoleVariable*> {};
+struct FConsoleCommandDelegate								: FNullConsoleVariableDelegate<FConsoleCommandDelegate> {};
+struct FConsoleCommandWithArgsDelegate						: FNullConsoleVariableDelegate<FConsoleCommandWithArgsDelegate, const TArray<FString>&> {};
+struct FConsoleCommandWithWorldDelegate						: FNullConsoleVariableDelegate<FConsoleCommandWithWorldDelegate, UWorld*> {};
+struct FConsoleCommandWithWorldAndArgsDelegate				: FNullConsoleVariableDelegate<FConsoleCommandWithWorldAndArgsDelegate, const TArray<FString>&, UWorld*> {};
+struct FConsoleCommandWithArgsAndOutputDeviceDelegate		: FNullConsoleVariableDelegate<FConsoleCommandWithArgsAndOutputDeviceDelegate, const TArray<FString>&, FOutputDevice&> {};
+struct FConsoleCommandWithWorldArgsAndOutputDeviceDelegate	: FNullConsoleVariableDelegate<FConsoleCommandWithWorldArgsAndOutputDeviceDelegate, const TArray<FString>&, UWorld*, FOutputDevice&> {};
+struct FConsoleCommandWithOutputDeviceDelegate				: FNullConsoleVariableDelegate<FConsoleCommandWithOutputDeviceDelegate, FOutputDevice&> {};
 
 #endif
 
@@ -329,6 +409,14 @@ public:
 		return ((uint32)GetFlags() & (uint32)Value) != 0;
 	}
 
+	/**
+	 * If the object has a parent (for instance the main cvar that owns an other-platform cvar), return it
+	 */
+	virtual IConsoleObject* GetParentObject() const
+	{
+		return nullptr;
+	}
+	
 	/**
 	 * Casts this object to an IConsoleVariable, returns 0 if it's not
 	 */
@@ -400,8 +488,17 @@ public:
 	/**
 	 * Set the internal value from the specified string. 
 	 * @param SetBy anything in ECVF_LastSetMask e.g. ECVF_SetByScalability
+	 * @param Tag optional Tag to set with the value - only useful when UE_ALLOW_CVAR_HISTORY is set, and when setting in an ARRAY type SetBy
 	 **/
-	virtual void Set(const TCHAR* InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode) = 0;
+	virtual void Set(const TCHAR* InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode, FName Tag = NAME_None) = 0;
+
+	/**
+	 * Unsets the value at a certain SetBy priority (this is only useful when UE_ALLOW_CVAR_HISTORY is set). The value of the CVar
+	 * will be recalculated based on remaining History levels
+	 * @param SetBy anything in ECVF_LastSetMask e.g. ECVF_SetByScalability
+	 * @param Tag tag used to remove a setting from an ARRAY type SetBy
+	 **/
+	virtual void Unset(EConsoleVariableFlags SetBy, FName Tag = NAME_None) = 0;
 
 	/**
 	 * Get the internal value as a bool, works on bools, ints and floats.
@@ -449,50 +546,89 @@ public:
 
 	virtual FConsoleVariableMulticastDelegate& OnChangedDelegate() = 0;
 
+	/**
+	 * Get the saved off default value, in a cvar variable, if one was created
+	 */
+	UE_DEPRECATED(5.4, "Use GetDefaultValue() instead")
+	virtual IConsoleVariable* GetDefaultValueVariable()
+	{
+		return nullptr;
+	}
+
+	/**
+	 * Get the value this CVar was constructed with
+	 */
+	virtual FString GetDefaultValue() = 0;
+
+#if ALLOW_OTHER_PLATFORM_CONFIG
+
+	/**
+	 * Get a CVar opject that matches this cvar, but contains the value of the platform given. This will trigger a lof of all cvars for this platform/DP if it doesn't exist
+	 * Note: If this causes a compile error due to pure virtual, make sure your IConsoleVariable subclass inherits from FConsoleVariableExtendedData
+	 */
+	virtual TSharedPtr<IConsoleVariable> GetPlatformValueVariable(FName PlatformName, const FString& DeviceProfileName=FString()) = 0;
+
+	/**
+	 * Checks if the CVar has a cached value for the given platform
+	 */
+	virtual bool HasPlatformValueVariable(FName PlatformName, const FString& DeviceProfileName=FString()) = 0;
+
+	/**
+	 * Used only for debugging/iterating, this will clear all of the other platform's cvar objects, which will 
+	 * force a fresh lookup (with fresh ini files, likely) on next call to GetPlatformValueVariable
+	 */
+	virtual void ClearPlatformVariables(FName PlatformName=NAME_None)
+	{
+	}
+	
+#endif
+
 	// convenience methods
 
 	/** Set the internal value from the specified bool. */
-	void Set(bool InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode)
+	void Set(bool InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode, FName Tag=NAME_None)
 	{
 		// NOTE: Bool needs to use 1 and 0 here rather than true/false, as this may be a int32 or something
 		// and eventually this code calls, TTypeFromString<T>::FromString which won't handle the true/false,
 		// but 1 and 0 will work for whatever.
 		// inefficient but no common code path
-		Set(InValue ? TEXT("1") : TEXT("0"), SetBy);
+		Set(InValue ? TEXT("1") : TEXT("0"), SetBy, Tag);
 	}
 	/** Set the internal value from the specified int. */
-	void Set(int32 InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode)
+	void Set(int32 InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode, FName Tag=NAME_None)
 	{
 		// inefficient but no common code path
-		Set(*FString::Printf(TEXT("%d"), InValue), SetBy);
+		Set(*FString::Printf(TEXT("%d"), InValue), SetBy, Tag);
 	}
 	/** Set the internal value from the specified float. */
-	void Set(float InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode)
+	void Set(float InValue, EConsoleVariableFlags SetBy = ECVF_SetByCode, FName Tag=NAME_None)
 	{
 		// inefficient but no common code path
-		Set(*FString::Printf(TEXT("%g"), InValue), SetBy);
+		Set(*FString::Printf(TEXT("%g"), InValue), SetBy, Tag);
 	}
 
-	void SetWithCurrentPriority(bool InValue)
+	void SetWithCurrentPriority(bool InValue, FName Tag=NAME_None)
 	{
 		EConsoleVariableFlags CurFlags = (EConsoleVariableFlags)(GetFlags() & ECVF_SetByMask);
-		Set(InValue, CurFlags);
+		Set(InValue, CurFlags, Tag);
 	}
-	void SetWithCurrentPriority(int32 InValue)
+	void SetWithCurrentPriority(int32 InValue, FName Tag=NAME_None)
 	{
 		EConsoleVariableFlags CurFlags = (EConsoleVariableFlags)(GetFlags() & ECVF_SetByMask);
-		Set(InValue, CurFlags);
+		Set(InValue, CurFlags, Tag);
 	}
-	void SetWithCurrentPriority(float InValue)
+	void SetWithCurrentPriority(float InValue, FName Tag=NAME_None)
 	{
 		EConsoleVariableFlags CurFlags = (EConsoleVariableFlags)(GetFlags() & ECVF_SetByMask);
-		Set(InValue, CurFlags);
+		Set(InValue, CurFlags, Tag);
 	}
-	void SetWithCurrentPriority(const TCHAR* InValue)
+	void SetWithCurrentPriority(const TCHAR* InValue, FName Tag=NAME_None)
 	{
 		EConsoleVariableFlags CurFlags = (EConsoleVariableFlags)(GetFlags() & ECVF_SetByMask);
-		Set(InValue, CurFlags);
+		Set(InValue, CurFlags, Tag);
 	}
+
+
 };
 
 /**
@@ -631,13 +767,18 @@ public:
 	* Returns the hotkey for this executor
 	*/
 	virtual struct FInputChord GetHotKey() const = 0;
+	/**
+	* Returns the hotkey to switch to the next executor. This is usually the same hotkey as GetHotKey but with a modifier,
+	* such as "`" turning into "Ctrl + `".
+	*/
+	virtual struct FInputChord GetIterateExecutorHotKey() const = 0;
 };
 
 
 /**
  * handles console commands and variables, registered console variables are released on destruction
  */
-struct CORE_API IConsoleManager
+struct IConsoleManager
 {
 	/**
 	 * Create a bool console variable
@@ -779,7 +920,17 @@ struct CORE_API IConsoleManager
 	* @param	Flags		Optional flags bitmask
 	*/
 	virtual IConsoleCommand* RegisterConsoleCommand(const TCHAR* Name, const TCHAR* Help, const FConsoleCommandWithWorldAndArgsDelegate& Command, uint32 Flags = ECVF_Default) = 0;
-
+	
+	/**
+	* Register a console command that takes arguments
+	*
+	* @param	Name		The name of this command (must not be nullptr)
+	* @param	Help		Help text for this command
+	* @param	Command		The user function to call when this command is executed
+	* @param	Flags		Optional flags bitmask
+	*/
+	virtual IConsoleCommand* RegisterConsoleCommand(const TCHAR* Name, const TCHAR* Help, const FConsoleCommandWithArgsAndOutputDeviceDelegate& Command, uint32 Flags = ECVF_Default) = 0;
+	
 	/**
 	* Register a console command that takes arguments
 	*
@@ -838,6 +989,25 @@ struct CORE_API IConsoleManager
 	* @return 0 if the object wasn't found
 	*/
 	virtual IConsoleObject* FindConsoleObject(const TCHAR* Name, bool bTrackFrequentCalls = true) const = 0;
+
+	/**
+	 * Lookup the name of a console object by its pointer 
+	 * @param Object to lookup
+	 * @return Name of the object, or an empty string if the object can't be found
+	 */
+	virtual FString FindConsoleObjectName(const IConsoleObject* Obj) const = 0;
+
+	/**
+	 * Find a typed console variable (faster access to the value, no virtual function call)
+	 * @param Name must not be 0
+	 * @return 0 if the object wasn't found
+	 */
+	TConsoleVariableData<bool>* FindTConsoleVariableDataBool(const TCHAR* Name) const
+	{
+		IConsoleVariable* P = FindConsoleVariable(Name);
+
+		return P ? P->AsVariableBool() : 0;
+	}
 
 	/**
 	 * Find a typed console variable (faster access to the value, no virtual function call)
@@ -921,22 +1091,64 @@ struct CORE_API IConsoleManager
 		return *Singleton;
 	}
 
+#if ALLOW_OTHER_PLATFORM_CONFIG
+	/**
+	 * Walks over the best set of ini sections for another platform that can be used to emulate cvars as the platform
+	 * will have set
+	 * It also won't include any UserSettings
+	 *
+	 * @param PlatformName The platform name (the ini name, so Windows, not Win64)
+	 * @param DeviceProfileName If this is non-empty, the given deviceprofile will be loaded from the platform's inis and inserted into the CVars
+	 * @param Visit the callback to run for each CVar found
+	 */
+	static CORE_API bool VisitPlatformCVarsForEmulation(FName PlatformName, const FString& DeviceProfileName, TFunctionRef<void(const FString& CVarName, const FString& CVarValue, EConsoleVariableFlags SetBy)> Visit);
+	
+	/**
+	 * Loads all platform cvars, which can be retrieved with IConsoleVariable::GetPlatformValueVariable. If DeviceProfileName is empty, it will use the
+	 *  DevicePlatform named the same as the Platform
+	 */
+	virtual void LoadAllPlatformCVars(FName PlatformName, const FString& DeviceProfileName=FString()) = 0;
+	
+	/**
+	 * Applies the cvars from the platform/DeviceProfile pair (can be blank to use the platform's named DP) and sets into the SetByPreview  priority, with the PreviewModeTag
+	 * to be unset later
+	 */
+	virtual void PreviewPlatformCVars(FName PlatformName, const FString& DeviceProfileName, FName PreviewModeTag) = 0;
+
+	/**
+	 * Empties the cache for the given Platform/DP for all CVars. If using NAME_None for Platofrm, this will wipe every cached platform/DP value. If DeviceProfileName
+	 * is empty, it will use the PlatfomName as the DeviceProfile name
+	 */
+	virtual void ClearAllPlatformCVars(FName PlatformName=NAME_None, const FString& DeviceProfileName=FString()) = 0;
+
+#endif
+
+	/**
+	  * When a plugin is unmounted, it needs to unset cvars that it had set when it was mounted. This will unset and fixup all
+	  * variables with the given Tag
+	  * @param Priority If set, then the internal search for CVars is restricted to this SetBy. This is an optimization, only to be used if you _know_ that all CVars set with this tag were set at this priority. Any other priorites cannot be unset
+	 */
+	virtual void UnsetAllConsoleVariablesWithTag(FName Tag, EConsoleVariableFlags Priority=ECVF_SetByMask) = 0;
+	
+	virtual FConsoleVariableMulticastDelegate& OnCVarUnregistered() = 0;
+	virtual FConsoleObjectWithNameMulticastDelegate& OnConsoleObjectUnregistered() = 0;
+
 protected:
 	virtual ~IConsoleManager() { }
 
 private:
 	/** Singleton for the console manager **/
-	static IConsoleManager* Singleton;
+	static CORE_API IConsoleManager* Singleton;
 
 	/** Function to create the singleton **/
-	static void SetupSingleton();
+	static CORE_API void SetupSingleton();
 };
 
 
 /**
  * auto registering console variable sinks (register a callback function that is called when ever a cvar is changes by the user, changes are grouped and happen in specific engine spots during the frame/main loop)
  */
-class CORE_API FAutoConsoleVariableSink
+class FAutoConsoleVariableSink
 {
 public:
 	/** Constructor, saves the argument for future removal from the console variable system **/
@@ -959,7 +1171,7 @@ public:
 /**
  * Base class for autoregistering console commands.
  */
-class CORE_API FAutoConsoleObject
+class FAutoConsoleObject
 {
 protected:
 	/** Constructor, saves the argument for future removal from the console variable system **/
@@ -967,14 +1179,30 @@ protected:
 		: Target(InTarget)
 	{
 		check(Target);
+		if (Target->TestFlags(ECVF_GeneralShaderChange))
+		{
+			AccessGeneralShaderChangeCvars().Add(this);
+		}
+		else if (Target->TestFlags(ECVF_MobileShaderChange))
+		{
+			AccessMobileShaderChangeCvars().Add(this);
+		}
+		else if (Target->TestFlags(ECVF_DesktopShaderChange))
+		{
+			AccessDesktopShaderChangeCvars().Add(this);
+		}
 	}
+public:
 	/** Destructor, removes the console object **/
 	virtual ~FAutoConsoleObject()
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(Target);
 	}
 
-public:
+	static CORE_API TArray<const FAutoConsoleObject*>& AccessGeneralShaderChangeCvars();
+	static CORE_API TArray<const FAutoConsoleObject*>& AccessMobileShaderChangeCvars();
+	static CORE_API TArray<const FAutoConsoleObject*>& AccessDesktopShaderChangeCvars();
+
 	/** returns the contained console object as an IConsoleVariable **/
 	FORCEINLINE IConsoleVariable* AsVariable()
 	{
@@ -997,7 +1225,7 @@ private:
 /**
  * Autoregistering float, int or string console variable
  */
-class CORE_API FAutoConsoleVariable : private FAutoConsoleObject
+class FAutoConsoleVariable : private FAutoConsoleObject
 {
 public:
 	/**
@@ -1113,7 +1341,7 @@ public:
 	}
 };
 #else
-class CORE_API FAutoConsoleVariable
+class FAutoConsoleVariable
 {
 public:
 	FAutoConsoleVariable(const TCHAR* Name, int32 DefaultValue, const TCHAR* Help, uint32 Flags = ECVF_Default)
@@ -1134,7 +1362,7 @@ public:
 /**
  * Autoregistering float, int, bool, FString REF variable class...this changes that value when the console variable is changed. 
  */
-class CORE_API FAutoConsoleVariableRef : private FAutoConsoleObject
+class FAutoConsoleVariableRef : private FAutoConsoleObject
 {
 public:
 	/**
@@ -1253,7 +1481,7 @@ public:
 	}
 };
 #else
-class CORE_API FAutoConsoleVariableRef
+class FAutoConsoleVariableRef
 {
 public:
 	FAutoConsoleVariableRef(const TCHAR* Name, int32& RefValue, const TCHAR* Help, uint32 Flags = ECVF_Default)
@@ -1310,6 +1538,7 @@ public:
 	// faster than GetValueOnAnyThread()
 	T GetValueOnGameThread() const
 	{
+		UE::AccessDetection::ReportAccess(UE::AccessDetection::EType::CVar);
 		// compiled out in shipping for performance (we can change in development later), if this get triggered you need to call GetValueOnRenderThread() or GetValueOnAnyThread(), the last one is a bit slower
 		cvarCheckCode(ensure(GetShadowIndex() == 0));	// ensure to not block content creators, #if to optimize in shipping
 		return ShadowedValue[0];
@@ -1318,6 +1547,7 @@ public:
 	// faster than GetValueOnAnyThread()
 	T GetValueOnRenderThread() const
 	{
+		UE::AccessDetection::ReportAccess(UE::AccessDetection::EType::CVar);
 #if !defined(__clang__) // @todo Mac: figure out how to make this compile
 		// compiled out in shipping for performance (we can change in development later), if this get triggered you need to call GetValueOnGameThread() or GetValueOnAnyThread(), the last one is a bit slower
 		cvarCheckCode(ensure(IsInParallelRenderingThread()));	// ensure to not block content creators, #if to optimize in shipping
@@ -1328,6 +1558,7 @@ public:
 	// convenient, for better performance consider using GetValueOnGameThread() or GetValueOnRenderThread()
 	T GetValueOnAnyThread(bool bForceGameThread = false) const
 	{
+		UE::AccessDetection::ReportAccess(UE::AccessDetection::EType::CVar);
 		return ShadowedValue[GetShadowIndex(bForceGameThread)];
 	}
 
@@ -1344,12 +1575,13 @@ private: // ----------------------------------------------------
 			cvarCheckCode(ensure(!IsInActualRenderingThread()));
 			return 0;
 		}
-		return IsInGameThread() ? 0 : 1;
+		return IsInParallelGameThread() || IsInGameThread() ? 0 : 1;
 	}
 
 	// needed for FConsoleVariable and FConsoleVariableRef2, intentionally not public
 	T& GetReferenceOnAnyThread(bool bForceGameThread = false)
 	{
+		UE::AccessDetection::ReportAccess(UE::AccessDetection::EType::CVar);
 		return ShadowedValue[GetShadowIndex(bForceGameThread)];
 	}
 
@@ -1371,7 +1603,43 @@ public:
 	 * @param Help must not be 0
 	 * @param Flags bitmask combined from EConsoleVariableFlags
 	 */
-	TAutoConsoleVariable(const TCHAR* Name, const T& DefaultValue, const TCHAR* Help, uint32 Flags = ECVF_Default);
+	TAutoConsoleVariable(const TCHAR* Name, const T& DefaultValue, const TCHAR* Help, uint32 Flags = ECVF_Default)
+		: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleVariable(Name, DefaultValue, Help, Flags)) 
+	{
+		if constexpr (std::is_same_v<T, bool>)
+		{
+			Ref = AsVariable()->AsVariableBool();
+		}
+		else if constexpr (std::is_same_v<T, int32>)
+		{
+			Ref = AsVariable()->AsVariableInt();
+		}
+		else if constexpr (std::is_same_v<T, float>)
+		{
+			Ref = AsVariable()->AsVariableFloat();
+		}
+		else if constexpr (std::is_same_v<T, FString>)
+		{
+			Ref = AsVariable()->AsVariableString();
+		}
+		else
+		{
+			static_assert(sizeof(T) == 0, "Not supported");
+		}
+	}
+
+	/**
+	 * Create a float, int or string console variable
+	 * @param Name must not be 0
+	 * @param Help must not be 0
+	 * @param Callback Delegate called when the variable changes. @see IConsoleVariable::SetOnChangedCallback
+	 * @param Flags bitmask combined from EConsoleVariableFlags
+	 */
+	TAutoConsoleVariable(const TCHAR* Name, const T& DefaultValue, const TCHAR* Help, const FConsoleVariableDelegate& Callback, uint32 Flags = ECVF_Default)
+		: TAutoConsoleVariable(Name, DefaultValue, Help, Flags)
+	{
+		AsVariable()->SetOnChangedCallback(Callback);
+	}
 
 	T GetValueOnGameThread() const
 	{
@@ -1410,33 +1678,6 @@ private:
 	TConsoleVariableData<T>* Ref;
 };
 
-template <>
-inline TAutoConsoleVariable<bool>::TAutoConsoleVariable(const TCHAR* Name, const bool& DefaultValue, const TCHAR* Help, uint32 Flags)
-	: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleVariable(Name, DefaultValue, Help, Flags))
-{
-	Ref = AsVariable()->AsVariableBool();
-}
-
-template <>
-inline TAutoConsoleVariable<int32>::TAutoConsoleVariable(const TCHAR* Name, const int32& DefaultValue, const TCHAR* Help, uint32 Flags)
-	: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleVariable(Name, DefaultValue, Help, Flags))
-{
-	Ref = AsVariable()->AsVariableInt();
-}
-
-template <>
-inline TAutoConsoleVariable<float>::TAutoConsoleVariable(const TCHAR* Name, const float& DefaultValue, const TCHAR* Help, uint32 Flags)
-	: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleVariable(Name, DefaultValue, Help, Flags))
-{
-	Ref = AsVariable()->AsVariableFloat();
-}
-
-template <>
-inline TAutoConsoleVariable<FString>::TAutoConsoleVariable(const TCHAR* Name, const FString& DefaultValue, const TCHAR* Help, uint32 Flags)
-	: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleVariable(Name, DefaultValue, Help, Flags))
-{
-	Ref = AsVariable()->AsVariableString();
-}
 #else
 template <class T>
 class TAutoConsoleVariable : public IConsoleVariable
@@ -1489,7 +1730,7 @@ public:
 	virtual class TConsoleVariableData<float>*		AsVariableFloat()	override { return AsImpl<float>(); }
 	virtual class TConsoleVariableData<FString>*	AsVariableString()	override { return AsImpl<FString>(); }
 
-	virtual bool		IsVariableInt() const override	{ return TIsSame<int32, T>::Value; }
+	virtual bool		IsVariableInt() const override	{ return std::is_same_v<int32, T>; }
 	virtual int32		GetInt()		const override	{ return GetImpl<int32>(); }
 	virtual float		GetFloat()		const override	{ return GetImpl<float>(); }
 	virtual FString		GetString()		const override	{ return GetImpl<FString>(); }
@@ -1543,29 +1784,31 @@ private:
 	EConsoleVariableFlags Flags = EConsoleVariableFlags::ECVF_Default;
 
 	template<class Y>
-	typename TEnableIf<!TIsSame<T, Y>::Value, Y>::Type GetImpl() const
+	Y GetImpl() const
 	{
-		check(false);
-		return Y();
+		if constexpr (std::is_same_v<T, Y>)
+		{
+			return GetValueOnAnyThread();
+		}
+		else
+		{
+			check(false);
+			return Y();
+		}
 	}
 
 	template<class Y>
-	typename TEnableIf<TIsSame<T, Y>::Value, Y>::Type GetImpl() const
+	TConsoleVariableData<T>* AsImpl()
 	{
-		return GetValueOnAnyThread();
-	}
-
-	template<class Y>
-	typename TEnableIf<!TIsSame<T, Y>::Value, TConsoleVariableData<Y>*>::Type AsImpl()
-	{
-		check(false);
-		return nullptr;
-	}
-
-	template<class Y>
-	typename TEnableIf<TIsSame<T, Y>::Value, TConsoleVariableData<T>*>::Type AsImpl()
-	{
-		return &Value;
+		if constexpr (std::is_same_v<T, Y>)
+		{
+			return &Value;
+		}
+		else
+		{
+			check(false);
+			return nullptr;
+		}
 	}
 };
 #endif // NO_CVARS
@@ -1574,7 +1817,7 @@ private:
 /**
  * Autoregistering console command
  */
-class CORE_API FAutoConsoleCommand : private FAutoConsoleObject
+class FAutoConsoleCommand : private FAutoConsoleObject
 {
 public:
 	/**
@@ -1604,6 +1847,32 @@ public:
 	}
 
 	/**
+	* Register a console command that takes an output device
+	*
+	* @param	Name		The name of this command (must not be nullptr)
+	* @param	Help		Help text for this command
+	* @param	Command		The user function to call when this command is executed
+	* @param	Flags		Optional flags bitmask
+	*/
+	FAutoConsoleCommand(const TCHAR* Name, const TCHAR* Help, const FConsoleCommandWithOutputDeviceDelegate& Command, uint32 Flags = ECVF_Default)
+		: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleCommand(Name, Help, Command, Flags))
+	{
+	}
+
+	/**
+	* Register a console command that takes a world argument
+	*
+	* @param	Name		The name of this command (must not be nullptr)
+	* @param	Help		Help text for this command
+	* @param	Command		The user function to call when this command is executed
+	* @param	Flags		Optional flags bitmask
+	*/
+	FAutoConsoleCommand(const TCHAR* Name, const TCHAR* Help, const FConsoleCommandWithWorldDelegate& Command, uint32 Flags = ECVF_Default)
+		: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleCommand(Name, Help, Command, Flags))
+	{
+	}
+
+	/**
 	* Register a console command that takes arguments, a world argument and an output device
 	*
 	* @param	Name		The name of this command (must not be nullptr)
@@ -1617,7 +1886,7 @@ public:
 	}
 };
 #else
-class CORE_API FAutoConsoleCommand
+class FAutoConsoleCommand
 {
 public:
 	FAutoConsoleCommand(const TCHAR* Name, const TCHAR* Help, const FConsoleCommandDelegate& Command, uint32 Flags = ECVF_Default)
@@ -1639,7 +1908,7 @@ public:
 /**
  * Autoregistering console command with a world
  */
-class CORE_API FAutoConsoleCommandWithWorld : private FAutoConsoleObject
+class FAutoConsoleCommandWithWorld : private FAutoConsoleObject
 {
 public:
 	/**
@@ -1661,7 +1930,7 @@ public:
 /**
  * Autoregistering console command with a world and arguments
  */
-class CORE_API FAutoConsoleCommandWithWorldAndArgs : private FAutoConsoleObject
+class FAutoConsoleCommandWithWorldAndArgs : private FAutoConsoleObject
 {
 public:	
 	/**
@@ -1679,9 +1948,22 @@ public:
 };
 
 /**
+ * Autoregistering console command with args and an output device
+ */
+class FAutoConsoleCommandWithArgsAndOutputDevice : private FAutoConsoleObject
+{
+public:
+	
+	FAutoConsoleCommandWithArgsAndOutputDevice(const TCHAR* Name, const TCHAR* Help, const FConsoleCommandWithArgsAndOutputDeviceDelegate& Command, uint32 Flags = ECVF_Default)
+		: FAutoConsoleObject(IConsoleManager::Get().RegisterConsoleCommand(Name, Help, Command, Flags))
+	{
+	}
+};
+
+/**
  * Autoregistering console command with an output device
  */
-class CORE_API FAutoConsoleCommandWithOutputDevice : private FAutoConsoleObject
+class FAutoConsoleCommandWithOutputDevice : private FAutoConsoleObject
 {
 public:
 	/**
@@ -1701,7 +1983,7 @@ public:
 /**
  * Autoregistering console command with world, args, an output device
  */
-class CORE_API FAutoConsoleCommandWithWorldArgsAndOutputDevice : private FAutoConsoleObject
+class FAutoConsoleCommandWithWorldArgsAndOutputDevice : private FAutoConsoleObject
 {
 public:
 	/**

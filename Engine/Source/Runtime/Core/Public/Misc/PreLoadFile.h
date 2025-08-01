@@ -2,25 +2,30 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Misc/DelayedAutoRegister.h"
 
-struct CORE_API FPreLoadFile : public FDelayedAutoRegisterHelper
-{
-	FPreLoadFile(const TCHAR* InPath);
+class FEvent;
 
-	void* TakeOwnershipOfLoadedData(int64* OutFileSize=nullptr);
-	static void* TakeOwnershipOfLoadedDataByPath(const TCHAR* Filename, int64* OutFileSize);
+struct FPreLoadFile : public FDelayedAutoRegisterHelper
+{
+	CORE_API FPreLoadFile(const TCHAR* InPath);
+
+	CORE_API void* TakeOwnershipOfLoadedData(int64* OutFileSize=nullptr);
+	static CORE_API void* TakeOwnershipOfLoadedDataByPath(const TCHAR* Filename, int64* OutFileSize);
 
 protected:
-	void KickOffRead();
+	CORE_API void KickOffRead();
 
 	bool bIsComplete;
 	bool bFailedToOpenInKickOff;
-	static bool bSystemNoLongerTakingRequests;
+	static CORE_API bool bSystemNoLongerTakingRequests;
 	void* Data;
 	int64 FileSize;
 	FString Path;
 	FEvent* CompletionEvent;
-	class IAsyncReadFileHandle* AsyncReadHandle;
+	class IAsyncReadFileHandle* AsyncReadHandle = nullptr;
+	class IAsyncReadRequest* SizeRequestHandle = nullptr;
 };

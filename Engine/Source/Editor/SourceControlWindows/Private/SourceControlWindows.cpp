@@ -2,9 +2,10 @@
 
 #include "SourceControlWindows.h"
 #include "SSourceControlSubmit.h"
-
+#include "AssetViewUtils.h"
 #include "FileHelpers.h"
 #include "ISourceControlModule.h"
+#include "ISourceControlWindowsModule.h"
 #include "SourceControlHelpers.h"
 #include "SourceControlOperations.h"
 #include "Framework/Application/SlateApplication.h"
@@ -13,9 +14,8 @@
 #include "Logging/TokenizedMessage.h"
 #include "Misc/MessageDialog.h"
 #include "Widgets/Notifications/SNotificationList.h"
-
-
-IMPLEMENT_MODULE( FDefaultModuleImpl, SourceControlWindows );
+#include "SourceControlSettings.h"
+#include "Bookmarks/BookmarkScoped.h"
 
 #if SOURCE_CONTROL_WITH_SLATE
 
@@ -33,39 +33,44 @@ FCheckinResultInfo::FCheckinResultInfo()
 
 
 //---------------------------------------------------------------------------------------
+// Helper function(s)
+
+static bool SaveDirtyPackages(bool bUseDialog)
+{
+	const bool bPromptUserToSave = bUseDialog;
+	const bool bSaveMapPackages = true;
+	const bool bSaveContentPackages = true;
+	const bool bFastSave = false;
+	const bool bNotifyNoPackagesSaved = false;
+	const bool bCanBeDeclined = true; // If the user clicks "don't save" this will continue and lose their changes
+
+	bool bSaved = FEditorFileUtils::SaveDirtyPackages(bPromptUserToSave, bSaveMapPackages, bSaveContentPackages, bFastSave, bNotifyNoPackagesSaved, bCanBeDeclined);
+
+	// bSaved can be true if the user selects to not save an asset by unchecking it and clicking "save"
+	if (bSaved)
+	{
+		TArray<UPackage*> DirtyPackages;
+		FEditorFileUtils::GetDirtyWorldPackages(DirtyPackages);
+		FEditorFileUtils::GetDirtyContentPackages(DirtyPackages);
+
+		bSaved = DirtyPackages.Num() == 0;
+	}
+
+	return bSaved;
+}
+
+
+//---------------------------------------------------------------------------------------
 // FSourceControlWindows
 
 TWeakPtr<SNotificationItem> FSourceControlWindows::ChoosePackagesToCheckInNotification;
-
-TArray<FString> FSourceControlWindows::GetSourceControlLocations(const bool bContentOnly)
-{
-	TArray<FString> SourceControlLocations;
-
-	{
-		TArray<FString> RootPaths;
-		FPackageName::QueryRootContentPaths(RootPaths);
-		for (const FString& RootPath : RootPaths)
-		{
-			const FString RootPathOnDisk = FPackageName::LongPackageNameToFilename(RootPath);
-			SourceControlLocations.Add(FPaths::ConvertRelativePathToFull(RootPathOnDisk));
-		}
-	}
-
-	if (!bContentOnly)
-	{
-		SourceControlLocations.Add(FPaths::ConvertRelativePathToFull(FPaths::ProjectConfigDir()));
-		SourceControlLocations.Add(FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));
-	}
-
-	return SourceControlLocations;
-}
 
 bool FSourceControlWindows::ChoosePackagesToCheckIn(const FSourceControlWindowsOnCheckInComplete& OnCompleteDelegate)
 {
 	if (!ISourceControlModule::Get().IsEnabled())
 	{
 		FCheckinResultInfo ResultInfo;
-		ResultInfo.Description = LOCTEXT("SourceControlDisabled", "Source control is not enabled.");
+		ResultInfo.Description = LOCTEXT("SourceControlDisabled", "Revision control is not enabled.");
 		OnCompleteDelegate.ExecuteIfBound(ResultInfo);
 
 		return false;
@@ -74,7 +79,7 @@ bool FSourceControlWindows::ChoosePackagesToCheckIn(const FSourceControlWindowsO
 	if (!ISourceControlModule::Get().GetProvider().IsAvailable())
 	{
 		FCheckinResultInfo ResultInfo;
-		ResultInfo.Description = LOCTEXT("NoSCCConnection", "No connection to source control available!");
+		ResultInfo.Description = LOCTEXT("NoSCCConnection", "No connection to revision control available!");
 
 		FMessageLog EditorErrors("EditorErrors");
 		EditorErrors.Warning(ResultInfo.Description)->AddToken(
@@ -86,11 +91,17 @@ bool FSourceControlWindows::ChoosePackagesToCheckIn(const FSourceControlWindowsO
 		return false;
 	}
 
+	if (ISourceControlModule::Get().GetProvider().UsesSnapshots())
+	{
+		SaveDirtyPackages(/*bUseDialog=*/false);
+	}
+
 	// Start selection process...
 
 	// make sure we update the SCC status of all packages (this could take a long time, so we will run it as a background task)
-	TArray<FString> Filenames = GetSourceControlLocations();
-
+	TArray<FString> Filenames = SourceControlHelpers::GetSourceControlLocations();
+	
+	// make sure the SourceControlProvider state cache is populated as well
 	ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
 	FSourceControlOperationRef Operation = ISourceControlOperation::Create<FUpdateStatus>();
 	SourceControlProvider.Execute(
@@ -131,7 +142,84 @@ bool FSourceControlWindows::ChoosePackagesToCheckIn(const FSourceControlWindowsO
 
 bool FSourceControlWindows::CanChoosePackagesToCheckIn()
 {
-	return !ChoosePackagesToCheckInNotification.IsValid();
+	ISourceControlModule& SourceControlModule = ISourceControlModule::Get();
+	
+	if (ISourceControlModule::Get().IsEnabled() &&
+		ISourceControlModule::Get().GetProvider().IsAvailable() &&
+		!ChoosePackagesToCheckInNotification.IsValid())
+	{
+		if (SourceControlModule.GetProvider().GetNumLocalChanges().IsSet())
+		{
+			return SourceControlModule.GetProvider().GetNumLocalChanges().GetValue() > 0;
+		}
+		else
+		{
+			return true;
+		}
+	}
+ 
+	return false;
+}
+
+bool FSourceControlWindows::ShouldChoosePackagesToCheckBeVisible()
+{
+	return GetDefault<USourceControlSettings>()->bEnableSubmitContentMenuAction;
+}
+
+bool FSourceControlWindows::SyncLatest()
+{
+	return SyncRevision(TEXT(""));
+}
+
+bool FSourceControlWindows::SyncRevision(const FString& InRevision)
+{
+	bool bSaved = SaveDirtyPackages(/*bUseDialog=*/true);
+
+	// if not properly saved, ask for confirmation from the user before continuing.
+	if (!bSaved)
+	{
+		FText DialogText = NSLOCTEXT("SourceControlCommands", "UnsavedWarningText", "Warning: There are modified assets which are not being saved. If you sync to latest you may lose your unsaved changes. Do you want to continue?");
+		FText DialogTitle = NSLOCTEXT("SourceControlCommands", "UnsavedWarningTitle", "Unsaved changes");
+
+		EAppReturnType::Type DialogResult = FMessageDialog::Open(EAppMsgType::YesNo, DialogText, DialogTitle);
+
+		bSaved = (DialogResult == EAppReturnType::Yes);
+	}
+
+	// if properly saved or confirmation given, find all packages and use source control to update them.
+	if (bSaved)
+	{
+		bool bSuccess = AssetViewUtils::SyncRevisionFromSourceControl(InRevision);
+		if (!bSuccess)
+		{
+			FText Message(LOCTEXT("SCC_Sync_Failed", "Failed to sync files!"));
+			FMessageLog("SourceControl").Notify(Message);
+		}
+		return bSuccess;
+	}
+
+	return false;
+}
+
+
+bool FSourceControlWindows::CanSyncLatest()
+{
+	ISourceControlModule& SourceControlModule = ISourceControlModule::Get();
+
+	if (SourceControlModule.IsEnabled() &&
+		SourceControlModule.GetProvider().IsAvailable())
+	{
+		if (SourceControlModule.GetProvider().IsAtLatestRevision().IsSet())
+		{
+			return !SourceControlModule.GetProvider().IsAtLatestRevision().GetValue();
+		}
+		else
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 
@@ -205,10 +293,19 @@ bool FSourceControlWindows::PromptForCheckin(FCheckinResultInfo& OutResultInfo, 
 		.SupportsMaximize(true)
 		.SupportsMinimize(false);
 
-	TSharedRef<SSourceControlSubmitWidget> SourceControlWidget = 
+	TSharedRef<SSourceControlSubmitWidget> SourceControlWidget =
 		SNew(SSourceControlSubmitWidget)
 		.ParentWindow(NewWindow)
-		.Items(States);
+		.Items(States)
+		.AllowUncheckFiles_Lambda([&]() 
+			{ 
+				if (SourceControlProvider.IsAvailable())
+				{
+					return !SourceControlProvider.UsesSnapshots();
+				}
+				return true;
+			})
+		.AllowDiffAgainstDepot(SourceControlProvider.AllowsDiffAgainstDepot());
 
 	NewWindow->SetContent(
 		SourceControlWidget
@@ -227,6 +324,37 @@ bool FSourceControlWindows::PromptForCheckin(FCheckinResultInfo& OutResultInfo, 
 		return false;
 	}
 
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	// Sync to latest if using snapshots.
+	if (ISourceControlModule::Get().GetProvider().UsesSnapshots())
+	{
+		const bool bSyncNeeded = FSourceControlWindows::CanSyncLatest();
+		if (bSyncNeeded)
+		{
+			FBookmarkScoped BookmarkScoped; // Preserve viewport camera orientation.
+
+			if (!FSourceControlWindows::SyncLatest())
+			{
+				OutResultInfo.Description = LOCTEXT("SCC_Checkin_Aborted_Sync", "File check in aborted because the sync to the latest snapshot failed.");
+				return false;
+			}
+
+			TArray<FSourceControlStateRef> Conflicts = ISourceControlModule::Get().GetProvider().GetCachedStateByPredicate(
+				[](const FSourceControlStateRef& State)
+				{
+					return State->IsConflicted();
+				}
+			);
+
+			const bool bConflictsRemaining = (Conflicts.Num() > 0);
+			if (bConflictsRemaining)
+			{
+				OutResultInfo.Description = LOCTEXT("SCC_Checkin_Aborted_Conflicts", "File check in aborted because the sync to the latest snapshot resulted in conflicts that need to be resolved.");
+				return false;
+			}
+		}
+	}
+
 
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	// Get description from the dialog
@@ -240,24 +368,32 @@ bool FSourceControlWindows::PromptForCheckin(FCheckinResultInfo& OutResultInfo, 
 	{
 		SourceControlHelpers::RevertUnchangedFiles(SourceControlProvider, Description.FilesForSubmit);
 
-		// Make sure all files are still checked out
-		for (int32 VerifyIndex = Description.FilesForSubmit.Num()-1; VerifyIndex >= 0; --VerifyIndex)
+		if (!ISourceControlModule::Get().UsesCustomProjectDir())
 		{
-			FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(Description.FilesForSubmit[VerifyIndex], EStateCacheUsage::Use);
-			if( SourceControlState.IsValid() && !SourceControlState->IsCheckedOut() && !SourceControlState->IsAdded() && !SourceControlState->IsDeleted() )
+			// Make sure all files are still checked out
+			for (int32 VerifyIndex = Description.FilesForSubmit.Num() - 1; VerifyIndex >= 0; --VerifyIndex)
 			{
-				Description.FilesForSubmit.RemoveAt(VerifyIndex);
+				FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(Description.FilesForSubmit[VerifyIndex], EStateCacheUsage::Use);
+				if (SourceControlState.IsValid() && !SourceControlState->IsCheckedOut() && !SourceControlState->IsAdded() && !SourceControlState->IsDeleted())
+				{
+					Description.FilesForSubmit.RemoveAt(VerifyIndex);
+				}
 			}
 		}
+		else
+		{
+			// For project-based source control, we want to go through with a check in attempt even when 
+			// files are not checked out by the current user, and generate a warning dialog
+		}
 	}
-
 
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 	// Mark files for add as needed
 	
 	bool bSuccess = true;  // Overall success
-    bool bAddSuccess = true;
-    bool bCheckinSuccess = true;
+	bool bAddSuccess = true;
+	bool bCheckinSuccess = true;
+	bool bCheckinCancelled = false;
 
 	TArray<FString> CombinedFileList = Description.FilesForAdd;
 	CombinedFileList.Append(Description.FilesForSubmit);
@@ -290,12 +426,60 @@ bool FSourceControlWindows::PromptForCheckin(FCheckinResultInfo& OutResultInfo, 
 		return bSuccess;
 	}
 
-	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	// first check if there is a submit override bound
+	if (ISourceControlWindowsModule::Get().SubmitOverrideDelegate.IsBound())
+	{
+		SSubmitOverrideParameters SubmitOverrideParameters;
+		SubmitOverrideParameters.Description = Description.Description.ToString();
+		SubmitOverrideParameters.ToSubmit.SetSubtype<TArray<FString>>(CombinedFileList);
+
+		FSubmitOverrideReply SubmitOverrideReply = ISourceControlWindowsModule::Get().SubmitOverrideDelegate.Execute(SubmitOverrideParameters);
+		switch (SubmitOverrideReply)
+		{
+			//////////////////////////////////////////////////////////
+			case FSubmitOverrideReply::Handled:
+			{
+				OutResultInfo.Result = ECommandResult::Succeeded;
+				OutResultInfo.Description = LOCTEXT("SCC_Checkin_SubmitOverride_Succeeded", "Successfully invoked the submit override!");
+				return true;
+			}
+
+			//////////////////////////////////////////////////////////
+			case FSubmitOverrideReply::Error:
+			{
+				OutResultInfo.Result = ECommandResult::Failed;
+				OutResultInfo.Description = LOCTEXT("SCC_Checkin_SubmitOverride_Failed", "Failed to invoke the submit override!");
+				return false;
+			}
+			
+			//////////////////////////////////////////////////////////
+			case FSubmitOverrideReply::ProviderNotSupported:
+			default:
+				// continue default flow
+				break;
+		}
+	}
+
+	FText VirtualizationFailureMsg;
+	if (!TryToVirtualizeFilesToSubmit(CombinedFileList, Description.Description, VirtualizationFailureMsg))
+	{
+		FMessageLog("SourceControl").Notify(VirtualizationFailureMsg);
+
+		OutResultInfo.Result = ECommandResult::Failed;
+		OutResultInfo.Description = VirtualizationFailureMsg;
+
+		return false;
+	}
+
 	// Check in files
 	TSharedRef<FCheckIn, ESPMode::ThreadSafe> CheckInOperation = ISourceControlOperation::Create<FCheckIn>();
 	CheckInOperation->SetDescription(Description.Description);
+	CheckInOperation->SetKeepCheckedOut(SourceControlWidget->WantToKeepCheckedOut());
 
-	bCheckinSuccess = SourceControlProvider.Execute(CheckInOperation, CombinedFileList) == ECommandResult::Succeeded;
+	ECommandResult::Type CheckInResult = SourceControlProvider.Execute(CheckInOperation, CombinedFileList);
+	bCheckinSuccess = CheckInResult == ECommandResult::Succeeded;
+	bCheckinCancelled = CheckInResult == ECommandResult::Cancelled;
+
 	bSuccess &= bCheckinSuccess;
 
 	if (bCheckinSuccess)
@@ -310,8 +494,21 @@ bool FSourceControlWindows::PromptForCheckin(FCheckinResultInfo& OutResultInfo, 
 		// also add to the log
 		FMessageLog("SourceControl").Info(CheckInOperation->GetSuccessMessage());
 
+		OutResultInfo.Result         = ECommandResult::Succeeded;
 		OutResultInfo.Description    = CheckInOperation->GetSuccessMessage();
 		OutResultInfo.FilesSubmitted = Description.FilesForSubmit;
+	}
+
+	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+	// Abort if cancelled
+	if (bCheckinCancelled)
+	{
+		FText Message(LOCTEXT("CheckinCancelled", "File check in cancelled."));
+
+		OutResultInfo.Result      = ECommandResult::Cancelled;
+		OutResultInfo.Description = Message;
+
+		return false;
 	}
 	
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -329,21 +526,6 @@ bool FSourceControlWindows::PromptForCheckin(FCheckinResultInfo& OutResultInfo, 
 		}
 
 		return false;
-	}
-
-	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-	// Do we want to to re-check out the files we just checked in?
-	if (SourceControlWidget->WantToKeepCheckedOut())
-	{
-		// Re-check out files
-		if (SourceControlProvider.Execute(ISourceControlOperation::Create<FCheckOut>(), CombinedFileList) == ECommandResult::Succeeded)
-		{
-			OutResultInfo.bAutoCheckedOut = true;
-		}
-		else
-		{
-			FMessageDialog::Open(EAppMsgType::Ok, LOCTEXT("SCC_Checkin_ReCheckOutFailed", "Failed to re-check out files."));
-		}
 	}
 
 	SourceControlWidget->ClearChangeListDescription();
@@ -393,9 +575,9 @@ void FSourceControlWindows::ChoosePackagesToCheckInCompleted(const TArray<UPacka
 		return;
 	}
 
-	TArray<FString> PendingDeletePaths = GetSourceControlLocations();
+	bool bUseSourceControlStateCache = true;
+	TArray<FString> PendingDeletePaths = SourceControlHelpers::GetSourceControlLocations();
 
-	const bool bUseSourceControlStateCache = true;
 	PromptForCheckin(OutResultInfo, PackageNames, PendingDeletePaths, ConfigFiles, bUseSourceControlStateCache);
 }
 
@@ -432,7 +614,7 @@ void FSourceControlWindows::ChoosePackagesToCheckInCallback(const FSourceControl
 
 			case ECommandResult::Failed:
 			{
-				ResultInfo.Description = LOCTEXT("CheckInOperationFailed", "Failed checking source control status!");
+				ResultInfo.Description = LOCTEXT("CheckInOperationFailed", "Failed checking revision control status!");
 				FMessageLog EditorErrors("EditorErrors");
 				EditorErrors.Warning(ResultInfo.Description);
 				EditorErrors.Notify();
@@ -451,26 +633,26 @@ void FSourceControlWindows::ChoosePackagesToCheckInCallback(const FSourceControl
 	FEditorFileUtils::FindAllSubmittablePackageFiles(PackageStates, true);
 
 	TArray<FString> ConfigFilesToSubmit;
-	const FString ProjectFilePath = FPaths::GetProjectFilePath();
 
 	for (TMap<FString, FSourceControlStatePtr>::TConstIterator PackageIter(PackageStates); PackageIter; ++PackageIter)
 	{
 		const FString PackageName = *PackageIter.Key();
-		const FSourceControlStatePtr CurPackageSCCState = PackageIter.Value();
-
-		if (PackageName == ProjectFilePath)
-		{
-			ConfigFilesToSubmit.Add(PackageName);
-			continue;
-		}
 
 		UPackage* Package = FindPackage(nullptr, *PackageName);
 		if (Package != nullptr)
 		{
 			LoadedPackages.Add(Package);
 		}
-			
+
 		PackageNames.Add(PackageName);
+	}
+
+	// Get a list of all the checked out project files
+	TMap<FString, FSourceControlStatePtr> ProjectFileStates;
+	FEditorFileUtils::FindAllSubmittableProjectFiles(ProjectFileStates);
+	for (TMap<FString, FSourceControlStatePtr>::TConstIterator It(ProjectFileStates); It; ++It)
+	{
+		ConfigFilesToSubmit.Add(It.Key());
 	}
 
 	// Get a list of all the checked out config files

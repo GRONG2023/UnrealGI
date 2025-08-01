@@ -3,6 +3,9 @@
 
 #include "Sound/SoundNodeBranch.h"
 #include "ActiveSound.h"
+#include "IAudioParameterTransmitter.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeBranch)
 
 #define LOCTEXT_NAMESPACE "SoundNodeBranch"
 
@@ -14,16 +17,15 @@ USoundNodeBranch::USoundNodeBranch(const FObjectInitializer& ObjectInitializer)
 {
 }
 
-void USoundNodeBranch::ParseNodes( FAudioDevice* AudioDevice, const UPTRINT NodeWaveInstanceHash, FActiveSound& ActiveSound, const FSoundParseParameters& ParseParams, TArray<FWaveInstance*>& WaveInstances )
+void USoundNodeBranch::ParseNodes(FAudioDevice* AudioDevice, const UPTRINT NodeWaveInstanceHash, FActiveSound& ActiveSound, const FSoundParseParameters& ParseParams, TArray<FWaveInstance*>& WaveInstances)
 {
 	BranchPurpose BranchToUse = BranchPurpose::ParameterUnset;
-	bool bParamValue = false;
 
-	if (ActiveSound.GetBoolParameter( BoolParameterName, bParamValue ))
+	FAudioParameter ParamValue;
+	if (ActiveSound.GetTransmitter()->GetParameter(BoolParameterName, ParamValue))
 	{
-		BranchToUse = (bParamValue ? BranchPurpose::ParameterTrue : BranchPurpose::ParameterFalse);
+		BranchToUse = (ParamValue.BoolParam ? BranchPurpose::ParameterTrue : BranchPurpose::ParameterFalse);
 	}
-
 
 	const int32 ChildNodeIndex = (int32)BranchToUse;
 	if (ChildNodeIndex < ChildNodes.Num() && ChildNodes[ChildNodeIndex])
@@ -62,3 +64,4 @@ FText USoundNodeBranch::GetTitle() const
 #endif //WITH_EDITOR
 
 #undef LOCTEXT_NAMESPACE
+

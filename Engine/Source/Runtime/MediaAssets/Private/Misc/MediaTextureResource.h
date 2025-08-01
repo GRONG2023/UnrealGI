@@ -17,25 +17,17 @@
 #include "Async/Async.h"
 #include "RenderingThread.h"
 #include "RendererInterface.h"
+#include "ColorSpace.h"
 
 class FMediaPlayerFacade;
 class IMediaPlayer;
 class IMediaTextureSample;
 class UMediaTexture;
 struct FGenerateMipsStruct;
+struct FPriorSamples;
 
 enum class EMediaTextureSinkFormat;
 enum class EMediaTextureSinkMode;
-
-#if PLATFORM_WINDOWS || (defined(PLATFORM_PS4) && PLATFORM_PS4) || (defined(PLATFORM_PS5) && PLATFORM_PS5)
-#define USE_LIMITED_FENCEWAIT	1
-#else
-#define USE_LIMITED_FENCEWAIT	0
-#endif
-
-#if USE_LIMITED_FENCEWAIT
-static const double MaxWaitForFence = 2.0;	// HACK: wait a max of 2s for a GPU fence, then assume we will never see it signal & pretent it did signal
-#endif
 
 /**
  * Texture resource type for media textures.
@@ -57,7 +49,7 @@ public:
 	 * @param bEnableGenMips If true mips generation will be enabled (possibly optimizing for NumMips == 1 case)
 	 * @param InNumMips The initial number of mips to be generated for the output texture
 	 */
-	FMediaTextureResource(UMediaTexture& InOwner, FIntPoint& InOwnerDim, SIZE_T& InOwnerSize, FLinearColor InClearColor, FGuid InTextureGuid, bool bEnableGenMips, uint8 InNumMips);
+	MEDIAASSETS_API FMediaTextureResource(UMediaTexture& InOwner, FIntPoint& InOwnerDim, SIZE_T& InOwnerSize, FLinearColor InClearColor, FGuid InTextureGuid, bool bEnableGenMips, uint8 InNumMips, UE::Color::EColorSpace OverrideColorSpaceType);
 
 	/** Virtual destructor. */
 	virtual ~FMediaTextureResource() 
@@ -113,6 +105,15 @@ public:
 	 */
 	void FlushPendingData();
 
+	/** Sets the just in time render parameters for later use when JustInTimeRender() gets called */
+	void SetJustInTimeRenderParams(const FRenderParams& InJustInTimeRenderParams);
+
+	/** Clears the just in time render params, in which case calling JustInTimeRender() would have no effect */
+	void ResetJustInTimeRenderParams();
+
+	/** Render the texture using the cached FRenderParams. Call from render thread only. */
+	void JustInTimeRender();
+
 public:
 
 	//~ FRenderTarget interface
@@ -126,8 +127,8 @@ public:
 	virtual FString GetFriendlyName() const override;
 	virtual uint32 GetSizeX() const override;
 	virtual uint32 GetSizeY() const override;
-	virtual void InitDynamicRHI() override;
-	virtual void ReleaseDynamicRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
+	virtual void ReleaseRHI() override;
 
 protected:
 
@@ -173,10 +174,10 @@ protected:
 	void UpdateTextureReference(FRHITexture2D* NewTexture);
 
 	/**
-	 * Create/update output render target as needed
+	 * Create/update intermediate render target as needed. If no color conversion is needed, the RT will be used as the output.
 	 */
-	void CreateOutputRenderTarget(const FIntPoint & InDim, EPixelFormat InPixelFormat, bool bInSRGB, const FLinearColor & InClearColor, uint8 InNumMips);
-
+	void CreateIntermediateRenderTarget(const FIntPoint & InDim, EPixelFormat InPixelFormat, bool bInSRGB, const FLinearColor & InClearColor, uint8 InNumMips, bool bNeedsUAVSupport);
+	
 	/**
 	 * Caches next available sample from queue in MediaTexture owner to keep single consumer access
 	 *
@@ -193,6 +194,9 @@ protected:
 	bool RequiresConversion(const TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe>& Sample, uint8 numMips) const;
 	bool RequiresConversion(const FTexture2DRHIRef& SampleTexture, const FIntPoint & OutputDim, uint8 numMips) const;
 
+	/** Compute CS conversion martix based on sample's data */
+	void GetColorSpaceConversionMatrixForSample(const TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe> Sample, FMatrix44f& ColorSpaceMtx);
+
 private:
 
 	/** Platform uses GL/ES ImageExternal */
@@ -208,10 +212,13 @@ private:
 	FGuid InitialTextureGuid;
 
 	/** Input render target if the texture samples don't provide one (for conversions). */
-	TRefCountPtr<FRHITexture2D> InputTarget;
+	TRefCountPtr<FRHITexture> InputTarget;
 
-	/** Output render target if the texture samples don't provide one. */
-	TRefCountPtr<FRHITexture2D> OutputTarget;
+	/** Holds the intermediate render target if the texture samples don't provide one, or final render target when not using a texture sample color converter. */
+	TRefCountPtr<FRHITexture> IntermediateTarget;
+
+	/** Output render target where the texture sample color converter writes. */
+	TRefCountPtr<FRHITexture> OutputTarget;
 
 	/** The media texture that owns this resource. */
 	UMediaTexture& Owner;
@@ -231,6 +238,9 @@ private:
 	/** Current texture sampler filter value */
 	ESamplerFilter CurrentSamplerFilter;
 
+	/** Current texture sampler mip bias. */
+	float CurrentMipMapBias;
+
 	/** The current media player facade to get video samples from. */
 	TWeakPtr<FMediaPlayerFacade, ESPMode::ThreadSafe> PlayerFacadePtr;
 
@@ -238,127 +248,19 @@ private:
 	TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe> CurrentSample;
 
 	/** prior samples not yet ready for retirement as GPU may still actively use them */
-	template<typename ObjectRefType> struct TGPUsyncedDataDeleter
-	{
-		~TGPUsyncedDataDeleter()
-		{
-			Flush();
-		}
-
-		void Retire(const ObjectRefType& Object)
-		{
-			FRHICommandListImmediate& CommandList = FRHICommandListExecutor::GetImmediateCommandList();
-
-			// Prep "retirement package"
-			FRetiringObjectInfo Info;
-			Info.Object = Object;
-			Info.GPUFence = CommandList.CreateGPUFence(TEXT("MediaTextureResourceReuseFence"));
-			Info.RetireTime = FPlatformTime::Seconds();
-
-			// Insert fence. We assume that GPU-workload-wise this marks the spot usage of the sample is done
-			CommandList.WriteGPUFence(Info.GPUFence);
-
-			// Recall for later checking...
-			FScopeLock Lock(&CS);
-			Objects.Push(Info);
-		}
-
-		bool Update()
-		{
-			FScopeLock Lock(&CS);
-
-			// Check for any retired samples that are not done being touched by the GPU...
-			int32 Idx = 0;
-			for (; Idx < Objects.Num(); ++Idx)
-			{
-#if USE_LIMITED_FENCEWAIT
-				double Now = FPlatformTime::Seconds();
-#endif
-
-				// Either no fence present or the fence has been signaled?
-				if (Objects[Idx].GPUFence.IsValid() && !Objects[Idx].GPUFence->Poll())
-				{
-					// No. This one is still busy, we can stop...
-
-#if USE_LIMITED_FENCEWAIT
-					// HACK: But how long has this been going on? Might we have a fence that never will signal?
-					if ((Now - Objects[Idx].RetireTime) < MaxWaitForFence)
-#else
-					if (1)
-#endif
-					{
-						break;
-					}
-				}
-			}
-			// Remove (hence return to the pool / free up fence) all the finished ones...
-			if (Idx != 0)
-			{
-				Objects.RemoveAt(0, Idx);
-			}
-			return Objects.Num() != 0;
-		}
-
-		void Flush()
-		{
-			// See if all samples are ready to be retired now...
-			if (!Update())
-			{
-				// They are. No need for any async task...
-				return;
-			}
-
-			// Some samples still need the GPU to get done. Use async task to get this done...
-			TFunction<void()> FlushTask = [LastObjects{ MoveTemp(Objects) }]()
-			{
-				while (1)
-				{
-#if USE_LIMITED_FENCEWAIT
-					double Now = FPlatformTime::Seconds();
-#endif
-					int32 Idx = 0;
-					for (; Idx < LastObjects.Num(); ++Idx)
-					{
-						// Still not signaled?
-						if (LastObjects[Idx].GPUFence.IsValid() && !LastObjects[Idx].GPUFence->Poll())
-						{
-#if USE_LIMITED_FENCEWAIT
-							// HACK: But how long has this been going on? Might we have a fence that never will signal?
-							if ((Now - LastObjects[Idx].RetireTime) < MaxWaitForFence)
-#else
-							if (1)
-#endif
-							{
-								break;
-							}
-						}
-					}
-					if (Idx == LastObjects.Num())
-					{
-						break;
-					}
-
-					FPlatformProcess::Sleep(5.0f / 1000.0f);
-				}
-			};
-			Async(EAsyncExecution::ThreadPool, MoveTemp(FlushTask));
-		}
-
-		struct FRetiringObjectInfo
-		{
-			ObjectRefType Object;
-			FGPUFenceRHIRef GPUFence;
-			double RetireTime;
-		};
-
-		TArray<FRetiringObjectInfo> Objects;
-		FCriticalSection CS;
-	};
-
-	typedef TGPUsyncedDataDeleter<TSharedPtr<IMediaTextureSample, ESPMode::ThreadSafe>> FPriorSamples;
-
 	TSharedRef<FPriorSamples, ESPMode::ThreadSafe> PriorSamples;
+	/** prior samples CS */
+	FCriticalSection PriorSamplesCS;
 
 	/** cached params etc. for use with mip generator */
 	TRefCountPtr<IPooledRenderTarget> MipGenerationCache;
+
+	/** Cached FRenderParams, used when JustInTimeRender() gets called. */
+	TUniquePtr<FRenderParams> JustInTimeRenderParams;
+
+	/** Colorspace to override standard proejct "working color space' */
+	TUniquePtr<UE::Color::FColorSpace> OverrideColorSpace;
+
+	/** Used to keep track of whether we should re-create the output target because the intermediate target has changed. */
+	bool bRecreateOutputTarget = false;
 };

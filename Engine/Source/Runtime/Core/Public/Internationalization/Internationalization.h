@@ -1,22 +1,24 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreTypes.h"
 #include "Containers/Array.h"
 #include "Containers/UnrealString.h"
-#include "Templates/SharedPointer.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
-#include "Internationalization/Text.h"
+#include "Internationalization/CulturePointer.h"
 #include "Internationalization/LocTesting.h"
-
+#include "Internationalization/Text.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/Tuple.h"
 #include "Templates/UniqueObj.h"
+#include "UObject/NameTypes.h"
 
 #define LOC_DEFINE_REGION
 
 class FCulture;
-class ICustomCulture;
 class FICUInternationalization;
 class FLegacyInternationalization;
+class ICustomCulture;
 
 class FInternationalization
 {
@@ -54,7 +56,7 @@ public:
 	 * Get the current culture.
 	 * @note This function exists for legacy API parity with SetCurrentCulture and is equivalent to GetCurrentLanguage. It should *never* be used in internal localization/internationalization code!
 	 */
-	CORE_API FCultureRef GetCurrentCulture() const
+	FCultureRef GetCurrentCulture() const
 	{
 		return CurrentLanguage.ToSharedRef();
 	}
@@ -68,7 +70,7 @@ public:
 	/**
 	 * Get the current language (for localization).
 	 */
-	CORE_API FCultureRef GetCurrentLanguage() const
+	FCultureRef GetCurrentLanguage() const
 	{
 		return CurrentLanguage.ToSharedRef();
 	}
@@ -82,7 +84,7 @@ public:
 	/**
 	 * Get the current locale (for internationalization).
 	 */
-	CORE_API FCultureRef GetCurrentLocale() const
+	FCultureRef GetCurrentLocale() const
 	{
 		return CurrentLocale.ToSharedRef();
 	}
@@ -118,7 +120,7 @@ public:
 	 * Get the default culture specified by the OS.
 	 * @note This function exists for legacy API parity with GetCurrentCulture and is equivalent to GetDefaultLanguage. It should *never* be used in internal localization/internationalization code!
 	 */
-	CORE_API FCultureRef GetDefaultCulture() const
+	FCultureRef GetDefaultCulture() const
 	{
 		return DefaultLanguage.ToSharedRef();
 	}
@@ -126,7 +128,7 @@ public:
 	/**
 	 * Get the default language specified by the OS.
 	 */
-	CORE_API FCultureRef GetDefaultLanguage() const
+	FCultureRef GetDefaultLanguage() const
 	{
 		return DefaultLanguage.ToSharedRef();
 	}
@@ -134,7 +136,7 @@ public:
 	/**
 	 * Get the default locale specified by the OS.
 	 */
-	CORE_API FCultureRef GetDefaultLocale() const
+	FCultureRef GetDefaultLocale() const
 	{
 		return DefaultLocale.ToSharedRef();
 	}
@@ -142,7 +144,7 @@ public:
 	/**
 	 * Get the invariant culture that can be used when you don't care about localization/internationalization.
 	 */
-	CORE_API FCultureRef GetInvariantCulture() const
+	FCultureRef GetInvariantCulture() const
 	{
 		return InvariantCulture.ToSharedRef();
 	}
@@ -162,7 +164,7 @@ public:
 	 */
 	CORE_API void RestoreCultureState(const FCultureStateSnapshot& InSnapshot);
 
-	CORE_API bool IsInitialized() const {return bIsInitialized;}
+	bool IsInitialized() const {return bIsInitialized;}
 
 	/** Load and cache the data needed for every culture we know about (this is usually done per-culture as required) */
 	CORE_API void LoadAllCultureData();
@@ -206,7 +208,7 @@ public:
 
 	/** Broadcasts whenever the current culture changes */
 	DECLARE_EVENT(FInternationalization, FCultureChangedEvent)
-	CORE_API FCultureChangedEvent& OnCultureChanged() { return CultureChangedEvent; }
+	FCultureChangedEvent& OnCultureChanged() { return CultureChangedEvent; }
 
 private:
 	FInternationalization();
@@ -269,9 +271,9 @@ private:
 	TArray<FCultureRef> CustomCultures;
 };
 
-namespace UE4LocGen_Private
+namespace UE::Private::LocGen
 {
-	inline FCulturePtr GetCultureImpl(const TCHAR* InCulture)
+	inline FCulturePtr GetCultureByName(const TCHAR* InCulture)
 	{
 		return (InCulture && *InCulture)
 			? FInternationalization::Get().GetCulture(InCulture)
@@ -305,10 +307,10 @@ namespace UE4LocGen_Private
  * @param InCulture		The culture code to use, or an empty string to use the active locale.
  * @param InOpts		Custom formatting options specified as chained setter functions of FNumberFormattingOptions (eg, SetAlwaysSign(true).SetUseGrouping(false)).
  */
-#define LOCGEN_NUMBER(InNum, InCulture) FText::AsNumber(InNum, nullptr, UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_NUMBER_GROUPED(InNum, InCulture) FText::AsNumber(InNum, &FNumberFormattingOptions::DefaultWithGrouping(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_NUMBER_UNGROUPED(InNum, InCulture) FText::AsNumber(InNum, &FNumberFormattingOptions::DefaultNoGrouping(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_NUMBER_CUSTOM(InNum, InOpts, InCulture) FText::AsNumber(InNum, &FNumberFormattingOptions().InOpts, UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
+#define LOCGEN_NUMBER(InNum, InCulture) FText::AsNumber(InNum, nullptr, UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_NUMBER_GROUPED(InNum, InCulture) FText::AsNumber(InNum, &FNumberFormattingOptions::DefaultWithGrouping(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_NUMBER_UNGROUPED(InNum, InCulture) FText::AsNumber(InNum, &FNumberFormattingOptions::DefaultNoGrouping(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_NUMBER_CUSTOM(InNum, InOpts, InCulture) FText::AsNumber(InNum, &FNumberFormattingOptions().InOpts, UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
 
 /**
  * Generate an FText representation of the given number as a percentage (alias for FText::AsPercent).
@@ -317,10 +319,10 @@ namespace UE4LocGen_Private
  * @param InCulture		The culture code to use, or an empty string to use the active locale.
  * @param InOpts		Custom formatting options specified as chained setter functions of FNumberFormattingOptions (eg, SetAlwaysSign(true).SetUseGrouping(false)).
  */
-#define LOCGEN_PERCENT(InNum, InCulture) FText::AsPercent(InNum, nullptr, UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_PERCENT_GROUPED(InNum, InCulture) FText::AsPercent(InNum, &FNumberFormattingOptions::DefaultWithGrouping(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_PERCENT_UNGROUPED(InNum, InCulture) FText::AsPercent(InNum, &FNumberFormattingOptions::DefaultNoGrouping(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_PERCENT_CUSTOM(InNum, InOpts, InCulture) FText::AsPercent(InNum, &FNumberFormattingOptions().InOpts, UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
+#define LOCGEN_PERCENT(InNum, InCulture) FText::AsPercent(InNum, nullptr, UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_PERCENT_GROUPED(InNum, InCulture) FText::AsPercent(InNum, &FNumberFormattingOptions::DefaultWithGrouping(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_PERCENT_UNGROUPED(InNum, InCulture) FText::AsPercent(InNum, &FNumberFormattingOptions::DefaultNoGrouping(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_PERCENT_CUSTOM(InNum, InOpts, InCulture) FText::AsPercent(InNum, &FNumberFormattingOptions().InOpts, UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
 
 /**
  * Generate an FText representation of the given number as a currency (alias for FText::AsCurrencyBase).
@@ -329,7 +331,7 @@ namespace UE4LocGen_Private
  * @param InCurrency	The currency code (eg, USD, GBP, EUR).
  * @param InCulture		The culture code to use, or an empty string to use the active locale.
  */
-#define LOCGEN_CURRENCY(InNum, InCurrency, InCulture) FText::AsCurrencyBase(InNum, TEXT(InCurrency), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
+#define LOCGEN_CURRENCY(InNum, InCurrency, InCulture) FText::AsCurrencyBase(InNum, TEXT(InCurrency), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
 
 /**
  * Generate an FText representation of the given timestamp as a date (alias for FText::AsDate).
@@ -339,8 +341,8 @@ namespace UE4LocGen_Private
  * @param InTimeZone	The timezone to display the timestamp in.
  * @param InCulture		The culture code to use, or an empty string to use the active locale.
  */
-#define LOCGEN_DATE_UTC(InUnixTime, InDateStyle, InTimeZone, InCulture) FText::AsDate(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, TEXT(InTimeZone), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_DATE_LOCAL(InUnixTime, InDateStyle, InCulture) FText::AsDate(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, FText::GetInvariantTimeZone(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
+#define LOCGEN_DATE_UTC(InUnixTime, InDateStyle, InTimeZone, InCulture) FText::AsDate(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, TEXT(InTimeZone), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_DATE_LOCAL(InUnixTime, InDateStyle, InCulture) FText::AsDate(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, FText::GetInvariantTimeZone(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
 
 /**
  * Generate an FText representation of the given timestamp as a time (alias for FText::AsTime).
@@ -350,8 +352,8 @@ namespace UE4LocGen_Private
  * @param InTimeZone	The timezone to display the timestamp in.
  * @param InCulture		The culture code to use, or an empty string to use the active locale.
  */
-#define LOCGEN_TIME_UTC(InUnixTime, InTimeStyle, InTimeZone, InCulture) FText::AsTime(FDateTime::FromUnixTimestamp(InUnixTime), InTimeStyle, TEXT(InTimeZone), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_TIME_LOCAL(InUnixTime, InTimeStyle, InCulture) FText::AsTime(FDateTime::FromUnixTimestamp(InUnixTime), InTimeStyle, FText::GetInvariantTimeZone(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
+#define LOCGEN_TIME_UTC(InUnixTime, InTimeStyle, InTimeZone, InCulture) FText::AsTime(FDateTime::FromUnixTimestamp(InUnixTime), InTimeStyle, TEXT(InTimeZone), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_TIME_LOCAL(InUnixTime, InTimeStyle, InCulture) FText::AsTime(FDateTime::FromUnixTimestamp(InUnixTime), InTimeStyle, FText::GetInvariantTimeZone(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
 
 /**
  * Generate an FText representation of the given timestamp as a date and time (alias for FText::AsDateTime).
@@ -362,8 +364,19 @@ namespace UE4LocGen_Private
  * @param InTimeZone	The timezone to display the timestamp in.
  * @param InCulture		The culture code to use, or an empty string to use the active locale.
  */
-#define LOCGEN_DATETIME_UTC(InUnixTime, InDateStyle, InTimeStyle, InTimeZone, InCulture) FText::AsDateTime(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, InTimeStyle, TEXT(InTimeZone), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
-#define LOCGEN_DATETIME_LOCAL(InUnixTime, InDateStyle, InTimeStyle, InCulture) FText::AsDateTime(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, InTimeStyle, FText::GetInvariantTimeZone(), UE4LocGen_Private::GetCultureImpl(TEXT(InCulture)))
+#define LOCGEN_DATETIME_UTC(InUnixTime, InDateStyle, InTimeStyle, InTimeZone, InCulture) FText::AsDateTime(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, InTimeStyle, TEXT(InTimeZone), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_DATETIME_LOCAL(InUnixTime, InDateStyle, InTimeStyle, InCulture) FText::AsDateTime(FDateTime::FromUnixTimestamp(InUnixTime), InDateStyle, InTimeStyle, FText::GetInvariantTimeZone(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+
+ /**
+  * Generate an FText representation of the given timestamp as a date and time (alias for FText::AsDateTime).
+  * This macro exists to allow UHT to parse C++ default FText arguments in UFunctions (as this macro matches the syntax used by FTextStringHelper when exporting/importing stringified FText) and should not be used generally.
+  * @param InUnixTime	The Unix timestamp to generate the FText from.
+  * @param InPattern	The custom strftime-like pattern for the date/time string (see FDateTime::ToFormattedString).
+  * @param InTimeZone	The timezone to display the timestamp in.
+  * @param InCulture		The culture code to use, or an empty string to use the active locale.
+  */
+#define LOCGEN_DATETIME_CUSTOM_UTC(InUnixTime, InPattern, InTimeZone, InCulture) FText::AsDateTime(FDateTime::FromUnixTimestamp(InUnixTime), TEXT(InPattern), TEXT(InTimeZone), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
+#define LOCGEN_DATETIME_CUSTOM_LOCAL(InUnixTime, InPattern, InCulture) FText::AsDateTime(FDateTime::FromUnixTimestamp(InUnixTime), TEXT(InPattern), FText::GetInvariantTimeZone(), UE::Private::LocGen::GetCultureByName(TEXT(InCulture)))
 
 /**
  * Generate an FText representation of the given FText when transformed into upper-case (alias for FText::ToUpper).

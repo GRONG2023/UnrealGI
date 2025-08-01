@@ -62,11 +62,10 @@ void FStreamingLevelCustomization::CustomizeDetails(IDetailLayoutBuilder& Detail
 		.ValueContent()
 			.MinDesiredWidth(500)
 		[
-			SNew(SVectorInputBox)
+			SNew(SNumericVectorInputBox<FVector::FReal>)
 			.IsEnabled(this, &FStreamingLevelCustomization::LevelEditTextTransformAllowed)
-			.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+			.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 			.bColorAxisLabels(true)
-			.AllowResponsiveLayout(true)
 			.AllowSpin(false)
 			.X(this, &FStreamingLevelCustomization::OnGetLevelPosition, 0)
 			.Y(this, &FStreamingLevelCustomization::OnGetLevelPosition, 1)
@@ -99,7 +98,7 @@ void FStreamingLevelCustomization::CustomizeDetails(IDetailLayoutBuilder& Detail
 				SNew(SNumericEntryBox<int32>)
 
 				.IsEnabled(this, &FStreamingLevelCustomization::LevelEditTextTransformAllowed)
-				.Font(FEditorStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
+				.Font(FAppStyle::GetFontStyle(TEXT("PropertyWindow.NormalFont")))
 				.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
 				.AllowSpin(true)
 				.MinValue(0)
@@ -297,7 +296,7 @@ FUIAction FStreamingLevelCustomization::CreatePasteAction(ELevelTransformField::
 		FUIAction(FExecuteAction::CreateSP(const_cast<FStreamingLevelCustomization*>(this), &FStreamingLevelCustomization::OnPaste, TransformField));
 }
 
-void FStreamingLevelCustomization::OnSetLevelPosition( float NewValue, ETextCommit::Type CommitInfo, int32 Axis )
+void FStreamingLevelCustomization::OnSetLevelPosition(FVector::FReal NewValue, ETextCommit::Type CommitInfo, int32 Axis )
 {
 	if (CommitInfo == ETextCommit::Default)
 	{
@@ -347,15 +346,15 @@ void FStreamingLevelCustomization::OnSetLevelPosition(FVector NewValue)
 	}
 }
 
-TOptional<float> FStreamingLevelCustomization::OnGetLevelPosition( int32 Axis ) const
+TOptional<FVector::FReal> FStreamingLevelCustomization::OnGetLevelPosition( int32 Axis ) const
 {
-	float AxisVal = 0.f;
+	FVector::FReal AxisVal = 0.f;
 	if (LevelPositionProperty->GetChildHandle(Axis)->GetValue(AxisVal) == FPropertyAccess::Success)
 	{
 		return AxisVal;
 	}
 	
-	return TOptional<float>();
+	return TOptional<FVector::FReal>();
 }
 
 void FStreamingLevelCustomization::OnChangedLevelRotation(int32 NewValue)

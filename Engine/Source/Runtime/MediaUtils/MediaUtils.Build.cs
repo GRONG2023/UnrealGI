@@ -13,17 +13,12 @@ namespace UnrealBuildTool.Rules
 					"CoreUObject",
 					"ImageWrapper",
 					"Media",
+					"SignalProcessing"
 				});
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[] {
-					"CoreUObject",
 					"ImageWriteQueue",
-				});
-
-			PrivateIncludePaths.AddRange(
-				new string[] {
-					"Runtime/MediaUtils/Private",
 				});
 		}
 	}

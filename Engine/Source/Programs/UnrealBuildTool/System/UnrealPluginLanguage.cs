@@ -2,13 +2,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Xml;
 using System.Xml.Linq;
-using System.Diagnostics;
-using System.IO;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -79,7 +81,9 @@ namespace UnrealBuildTool
 	 *	<setBoolFromProperty result="" ini="" section="" property="" default=""/>
 	 *	<setBoolFromPropertyContains result="" ini="" section="" property="" default="" contains=""/>
 	 *	<setIntFromProperty result="" ini="" section="" property="" default=""/>
+	 *	<setIntFromPropertyArrayNum result="" ini="" section="" property=""/>
 	 *	<setStringFromProperty result="" ini="" section="" property="" default=""/>
+	 *	<setStringFromPropertyArray result="" ini="" section="" property="" index="" default=""/>
      *	
      * Strings may also be set from an environment variable using the <setStringFromEnvVar> node.
 	 * The environment variable must be specified as the 'value' attribute and wrapped in a pair
@@ -119,7 +123,14 @@ namespace UnrealBuildTool
 	 * 
  	 *	<setStringAdd result="" arg1="" arg2=""/>
 	 *	<setStringSubstring result="" source="" start="" length=""/>
+	 *	<setStringSubstringAfterFind result="" source="" find="" length="" default=""/>
 	 *	<setStringReplace result="" source="" find="" with=""/>
+	 *	<setStringToLower result="" source=""/>
+	 *	<setStringToUpper result="" source=""/>
+	 *	
+	 * <setStringSubstringAfterFind> is equivalent to calling setStringSubstring with "start" set to
+	 * the index of the character immediately following the find string. Passing -1 for length (or
+	 * omitting it) will return the entire string to the right of the find string.
 	 * 
 	 * String length may be retrieved with:
 	 * 
@@ -389,11 +400,17 @@ namespace UnrealBuildTool
 	 * 	<!-- optional additions to GameActivity onCreate metadata reading in GameActivity.java -->
 	 * 	<gameActivityReadMetadata> </gameActivityReadMetadata>
 	 * 
+	 * 	<!-- optional additions to the very earliest point in GameActivity onCreate in GameActivity.java -->
+	 *	<gameActivityOnCreateBeginningAdditions> </gameActivityOnCreateBeginningAdditions>
+	 *	
 	 *	<!-- optional additions to GameActivity onCreate in GameActivity.java -->
 	 *	<gameActivityOnCreateAdditions> </gameActivityOnCreateAdditions>
 	 * 	
 	 * 	<!-- optional additions to GameActivity onDestroy in GameActivity.java -->
 	 * 	<gameActivityOnDestroyAdditions> </gameActivityOnDestroyAdditions>
+	 * 	
+	 * 	<!-- optional additions to GameActivity onConfigurationChanged in GameActivity.java -->
+	 * 	<gameActivityonConfigurationChangedAdditions> </gameActivityonConfigurationChangedAdditions>
 	 * 	
 	 * 	<!-- optional additions to GameActivity onStart in GameActivity.java -->
 	 * 	<gameActivityOnStartAdditions> </gameActivityOnStartAdditions>
@@ -413,7 +430,7 @@ namespace UnrealBuildTool
 	 * 	<!-- optional additions to GameActivity onActivityResult in GameActivity.java -->
 	 * 	<gameActivityOnActivityResultAdditions>	</gameActivityOnActivityResultAdditions>
 	 * 	
-	 * 	<!-- optional libraries to load in GameActivity.java before libUE4.so -->
+	 * 	<!-- optional libraries to load in GameActivity.java before libUnreal.so -->
 	 * 	<soLoadLibrary>	</soLoadLibrary>
 	 * 	
 	 * 
@@ -429,7 +446,7 @@ namespace UnrealBuildTool
 	 * <log text=""/>
 	 * <insert> </insert>
 	 * <insertValue value=""/>
-	 * <replace find="" with""/>
+	 * <replace find="" with=""/>
 	 * <copyFile src="" dst=""/>
 	 * <copyDir src="" dst=""/>
 	 * <loadLibrary name="" failmsg=""/>
@@ -449,6 +466,7 @@ namespace UnrealBuildTool
 	 * <setInt result="" value=""/>
 	 * <setIntFrom result="" value=""/>
 	 * <setIntFromProperty result="" ini="" section="" property="" default=""/>
+	 * <setIntFromPropertyArrayNum result="" ini="" section="" property=""/>
 	 * <setIntAdd result="" arg1="" arg2=""/>
 	 * <setIntSubtract result="" arg1="" arg2=""/>
 	 * <setIntMultiply result="" arg1="" arg2=""/>
@@ -459,9 +477,13 @@ namespace UnrealBuildTool
 	 * <setStringFrom result="" value=""/>
      * <setStringFromEnvVar result="" value=""/>
 	 * <setStringFromProperty result="" ini="" section="" property="" default=""/>
+	 * <setStringFromPropertyArray result="" ini="" section="" property="" index="" default=""/>
 	 * <setStringAdd result="" arg1="" arg2=""/>
 	 * <setStringSubstring result="" source="" index="" length=""/>
+	 * <setStringSubstringAfterFind result="" source="" find="" length="" default=""/>
 	 * <setStringReplace result="" source="" find="" with=""/>
+	 * <setStringToLower result="" source=""/>
+	 * <setStringToUpper result="" source=""/>
 	 * 
 	 */
 
@@ -477,15 +499,18 @@ namespace UnrealBuildTool
 		private UnrealTargetPlatform TargetPlatform;
 
 		/** Trace flag to enable debugging */
-		static private bool bGlobalTrace = false;
+		private static bool bGlobalTrace = false;
+		private static bool bGlobalTraceFilename = false;
 
 		/** Project file reference */
-		private FileReference ProjectFile;
-		
-		static private XDocument XMLDummy = XDocument.Parse("<manifest></manifest>");
+		private FileReference? ProjectFile;
+
+		private static XDocument XMLDummy = XDocument.Parse("<manifest></manifest>");
 
 		private class UPLContext
 		{
+			public string Filename;
+
 			/** Variable state */
 			public Dictionary<string, bool> BoolVariables;
 			public Dictionary<string, int> IntVariables;
@@ -494,15 +519,18 @@ namespace UnrealBuildTool
 
 			/** Local context trace */
 			public bool bTrace;
+			public bool bTraceFilename;
 
-			public UPLContext(string Architecture, string PluginDir)
+			public UPLContext(string inFilename, string Architecture, string PluginDir)
 			{
+				Filename = inFilename;
+
 				BoolVariables = new Dictionary<string, bool>();
 				IntVariables = new Dictionary<string, int>();
 				StringVariables = new Dictionary<string, string>();
 				ElementVariables = new Dictionary<string, XElement>();
 
-				if (PluginDir == null || PluginDir == "")
+				if (PluginDir == null || String.IsNullOrEmpty(PluginDir))
 				{
 					PluginDir = ".";
 				}
@@ -512,22 +540,25 @@ namespace UnrealBuildTool
 				StringVariables["Architecture"] = Architecture;
 
 				bTrace = false;
+				bTraceFilename = false;
 			}
 		}
 
 		private UPLContext GlobalContext;
 		private Dictionary<string, UPLContext> Contexts;
 		private int ContextIndex;
-		private String LastError;
+		private string? LastError;
+		private ILogger Logger;
 
-		public UnrealPluginLanguage(FileReference InProjectFile, List<string> InXMLFiles, List<string> InArchitectures, string InXMLNameSpace, string InRootDefinition, UnrealTargetPlatform InTargetPlatform)
+		public UnrealPluginLanguage(FileReference? InProjectFile, List<string> InXMLFiles, List<string> InArchitectures, string InXMLNameSpace, string InRootDefinition, UnrealTargetPlatform InTargetPlatform, ILogger InLogger)
 		{
 			ProjectFile = InProjectFile;
+			Logger = InLogger;
 
 			LastError = null;
 
 			Contexts = new Dictionary<string, UPLContext>();
-			GlobalContext = new UPLContext("", "");
+			GlobalContext = new UPLContext("", "", "");
 			ContextIndex = 0;
 
 			XMLNameSpace = InXMLNameSpace;
@@ -540,60 +571,72 @@ namespace UnrealBuildTool
 			foreach (string Basename in InXMLFiles)
 			{
 				string Filename = Path.Combine(PathPrefix, Basename.Replace("\\", "/"));
-				Log.TraceInformation("UPL: {0}", Filename);
+				Logger.LogInformation("UPL: {FileName}", Filename);
 				if (File.Exists(Filename))
 				{
-					string PluginDir = Path.GetDirectoryName(Filename);
+					string PluginDir = Path.GetDirectoryName(Filename)!;
 					try
 					{
-						XDocument MergeDoc = XDocument.Load(Filename);
-						MergeXML(MergeDoc, PluginDir, InArchitectures);
+						XDocument MergeDoc = XDocument.Load(Filename, LoadOptions.SetLineInfo);
+						MergeXML(MergeDoc, Filename, PluginDir, InArchitectures);
 					}
 					catch (Exception e)
 					{
 						LastError = String.Format("Unreal Plugin file {0} parsing failed! {1}", Filename, e);
-						Log.TraceError("\n{0}", LastError);
+						Logger.LogError("\n{LastError}", LastError);
 					}
 				}
 				else
 				{
 					LastError = String.Format("Unreal Plugin file {0} missing!", Filename);
-					Log.TraceError("\n{0}", LastError);
-					Log.TraceInformation("\nCWD: {0}", Directory.GetCurrentDirectory());
+					Logger.LogError("\n{LastError}", LastError);
+					Logger.LogInformation("\nCWD: {Cwd}", Directory.GetCurrentDirectory());
 				}
 			}
 		}
 
-		public String GetLastError() { return LastError; }
+		public String? GetLastError() { return LastError; }
 
 		public bool GetTrace() { return bGlobalTrace; }
 		public void SetTrace() { bGlobalTrace = true; }
 		public void ClearTrace() { bGlobalTrace = false; }
+		public bool GetTraceFilename() { return bGlobalTraceFilename; }
+		public void SetTraceFilename() { bGlobalTraceFilename = true; }
+		public void ClearTraceFilename() { bGlobalTraceFilename = false; }
 
 		public string GetUPLHash()
 		{
-			return XDoc.ToString().GetHashCode().ToString();
+			return ContentHash.MD5(XDoc.ToString()).ToString();
 		}
 
-		public bool MergeXML(XDocument MergeDoc, string PluginDir, List<string> Architectures)
+		public bool MergeXML(XDocument MergeDoc, string Filename, string PluginDir, List<string> Architectures)
 		{
 			if (MergeDoc == null)
 			{
 				return false;
 			}
-	
+
 			// create a context for each architecture
 			ContextIndex++;
 			foreach (string Architecture in Architectures)
 			{
-				UPLContext Context = new UPLContext(Architecture, PluginDir);
+				UPLContext Context = new UPLContext(Filename, Architecture, PluginDir);
 				Contexts[Architecture + "_" + ContextIndex] = Context;
 			}
 
-			// merge in the nodes
-			foreach (XElement Element in MergeDoc.Root.Elements())
+			// line numbers are lost in the merge so add them as an attribute for later tracing of warnings/errors
+			foreach (XElement Element in MergeDoc.Root!.Descendants())
 			{
-				XElement Parent = XDoc.Root.Element(Element.Name);
+				if (((IXmlLineInfo)Element).HasLineInfo())
+				{
+					Element.Add(new XAttribute("__line", ((IXmlLineInfo)Element).LineNumber));
+				}
+			}
+
+			// merge in the nodes
+			foreach (XElement Element in MergeDoc.Root!.Elements())
+			{
+				XElement? Parent = XDoc.Root!.Element(Element.Name);
 				if (Parent != null)
 				{
 					XElement Entry = new XElement("Context", new XAttribute("index", ContextIndex.ToString()));
@@ -626,19 +669,19 @@ namespace UnrealBuildTool
 			StringBuilder Text = new StringBuilder();
 			foreach (KeyValuePair<string, bool> Variable in Context.BoolVariables)
 			{
-				Text.AppendLine(string.Format("\tbool {0} = {1}", Variable.Key, Variable.Value.ToString().ToLower()));
+				Text.AppendLine(String.Format("\tbool {0} = {1}", Variable.Key, Variable.Value.ToString().ToLower()));
 			}
 			foreach (KeyValuePair<string, int> Variable in Context.IntVariables)
 			{
-				Text.AppendLine(string.Format("\tint {0} = {1}", Variable.Key, Variable.Value));
+				Text.AppendLine(String.Format("\tint {0} = {1}", Variable.Key, Variable.Value));
 			}
 			foreach (KeyValuePair<string, string> Variable in Context.StringVariables)
 			{
-				Text.AppendLine(string.Format("\tstring {0} = {1}", Variable.Key, Variable.Value));
+				Text.AppendLine(String.Format("\tstring {0} = {1}", Variable.Key, Variable.Value));
 			}
 			foreach (KeyValuePair<string, XElement> Variable in Context.ElementVariables)
 			{
-				Text.AppendLine(string.Format("\telement {0} = {1}", Variable.Key, Variable.Value));
+				Text.AppendLine(String.Format("\telement {0} = {1}", Variable.Key, Variable.Value));
 			}
 			return Text.ToString();
 		}
@@ -653,14 +696,20 @@ namespace UnrealBuildTool
 			return Result;
 		}
 
-		private bool GetCondition(UPLContext Context, XElement Node, string Condition, out bool Result)
+		private bool GetCondition(UPLContext Context, XElement Node, string? Condition, out bool Result)
 		{
 			Result = false;
+
+			if (Condition == null)
+			{
+				return false;
+			}
+
 			if (!Context.BoolVariables.TryGetValue(Condition, out Result))
 			{
 				if (!GlobalContext.BoolVariables.TryGetValue(Condition, out Result))
 				{
-					Log.TraceWarning("\nMissing condition '{0}' in '{1}' (skipping instruction)", Condition, TraceNodeString(Node));
+					Logger.LogWarning("\nMissing condition '{Condition}' in '{Node}' (skipping instruction)", Condition, TraceNodeString(Context, Node));
 					return false;
 				}
 			}
@@ -735,7 +784,7 @@ namespace UnrealBuildTool
 				string Name = Result.Substring(Idx + 3, EndIdx - (Idx + 3));
 
 				// Find the value for it, either from the dictionary or the environment block
-				string Value;
+				string? Value;
 				if (!Context.StringVariables.TryGetValue(Name, out Value))
 				{
 					if (!GlobalContext.StringVariables.TryGetValue(Name, out Value))
@@ -761,7 +810,7 @@ namespace UnrealBuildTool
 				string Name = Result.Substring(Idx + 3, EndIdx - (Idx + 3));
 
 				// Find the value for it, either from the dictionary or the environment block
-				XElement Value;
+				XElement? Value;
 				if (!Context.ElementVariables.TryGetValue(Name, out Value))
 				{
 					if (!GlobalContext.ElementVariables.TryGetValue(Name, out Value))
@@ -777,17 +826,36 @@ namespace UnrealBuildTool
 			return Result;
 		}
 
-		private string TraceNodeString(XElement Node)
+		private string TraceNodeString(UPLContext Context, XElement Node, bool ShowFilename = true)
 		{
+			XAttribute? LineAttrib = null;
 			string Result = Node.Name.ToString();
 			foreach (XAttribute Attrib in Node.Attributes())
 			{
-				Result += " " + Attrib.ToString();
+				string AttribStr = Attrib.ToString();
+				if (AttribStr.StartsWith("__line="))
+				{
+					LineAttrib = Attrib;
+				}
+				else
+				{
+					Result += " " + AttribStr;
+				}
 			}
+
+			if (ShowFilename)
+			{
+				Result += ", File: " + Context.Filename;
+			}
+			if (LineAttrib != null)
+			{
+				Result += ", Line: " + LineAttrib.Value;
+			}
+
 			return Result;
 		}
 
-		private bool StringToBool(string Input)
+		private bool StringToBool(string? Input)
 		{
 			if (Input == null)
 			{
@@ -797,24 +865,25 @@ namespace UnrealBuildTool
 			return !(Input.Equals("0") || Input.Equals("false") || Input.Equals("off") || Input.Equals("no"));
 		}
 
-		private int StringToInt(string Input, XElement Node)
+		private int StringToInt(UPLContext Context, XElement Node, string? Input)
 		{
 			int Result = 0;
-			if (!int.TryParse(Input, out Result))
+			if (!Int32.TryParse(Input, out Result))
 			{
-				Log.TraceWarning("\nInvalid integer '{0}' in '{1}' (defaulting to 0)", Input, TraceNodeString(Node));
+				Logger.LogWarning("\nInvalid integer '{Input}' in '{Node}' (defaulting to 0)", Input, TraceNodeString(Context, Node));
 			}
 			return Result;
 		}
 
-		private string GetAttribute(UPLContext Context, XElement Node, string AttributeName, bool bExpand = true, bool bRequired = true, string Fallback = null)
+		[return: NotNullIfNotNull("Fallback")]
+		private string? GetAttribute(UPLContext Context, XElement Node, string AttributeName, bool bExpand = true, bool bRequired = true, string? Fallback = null)
 		{
-			XAttribute Attribute = Node.Attribute(AttributeName);
+			XAttribute? Attribute = Node.Attribute(AttributeName);
 			if (Attribute == null)
 			{
 				if (bRequired)
 				{
-					Log.TraceWarning("\nMissing attribute '{0}' in '{1}' (skipping instruction)", AttributeName, TraceNodeString(Node));
+					Logger.LogWarning("\nMissing attribute '{Attribute}' in '{Node}' (skipping instruction)", AttributeName, TraceNodeString(Context, Node));
 				}
 				return Fallback;
 			}
@@ -822,14 +891,15 @@ namespace UnrealBuildTool
 			return bExpand ? ExpandVariables(Context, Result) : Result;
 		}
 
-		private string GetAttributeWithNamespace(UPLContext Context, XElement Node, XNamespace Namespace, string AttributeName, bool bExpand = true, bool bRequired = true, string Fallback = null)
+		[return: NotNullIfNotNull("Fallback")]
+		private string? GetAttributeWithNamespace(UPLContext Context, XElement Node, XNamespace Namespace, string AttributeName, bool bExpand = true, bool bRequired = true, string? Fallback = null)
 		{
-			XAttribute Attribute = Node.Attribute(Namespace + AttributeName);
+			XAttribute? Attribute = Node.Attribute(Namespace + AttributeName);
 			if (Attribute == null)
 			{
 				if (bRequired)
 				{
-					Log.TraceWarning("\nMissing attribute '{0}' in '{1}' (skipping instruction)", AttributeName, TraceNodeString(Node));
+					Logger.LogWarning("\nMissing attribute '{Attribute}' in '{Node}' (skipping instruction)", AttributeName, TraceNodeString(Context, Node));
 				}
 				return Fallback;
 			}
@@ -837,7 +907,7 @@ namespace UnrealBuildTool
 			return bExpand ? ExpandVariables(Context, Result) : Result;
 		}
 
-		static private Dictionary<string, ConfigCacheIni_UPL> ConfigCache = null;
+		private static Dictionary<string, ConfigCacheIni_UPL>? ConfigCache = null;
 
 		private ConfigCacheIni_UPL GetConfigCacheIni_UPL(string baseIniName)
 		{
@@ -845,23 +915,23 @@ namespace UnrealBuildTool
 			{
 				ConfigCache = new Dictionary<string, ConfigCacheIni_UPL>();
 			}
-			ConfigCacheIni_UPL config = null;
+			ConfigCacheIni_UPL? config = null;
 			if (!ConfigCache.TryGetValue(baseIniName, out config))
 			{
 				// note: use our own ConfigCacheIni since EngineConfiguration.cs only parses RequiredSections!
-				config = ConfigCacheIni_UPL.CreateConfigCacheIni_UPL(TargetPlatform, baseIniName, DirectoryReference.FromFile(ProjectFile));
+				config = ConfigCacheIni_UPL.CreateConfigCacheIni_UPL(TargetPlatform, baseIniName, DirectoryReference.FromFile(ProjectFile), Logger);
 				ConfigCache.Add(baseIniName, config);
 			}
 			return config;
 		}
 
-		private static bool FilesAreDifferent(string SourceFilename, string DestFilename)
+		private static bool FilesAreDifferent(string SourceFilename, string DestFilename, ILogger Logger)
 		{
 			// source must exist
 			FileInfo SourceInfo = new FileInfo(SourceFilename);
 			if (!SourceInfo.Exists)
 			{
-				Log.TraceInformation("File {0} does not exist", SourceFilename);
+				Logger.LogInformation("File {SourceFilename} does not exist", SourceFilename);
 				return false;
 			}
 
@@ -889,7 +959,7 @@ namespace UnrealBuildTool
 			return false;
 		}
 
-		private static void CopyFileDirectory(string SourceDir, string DestDir, bool bForce = false)
+		private static void CopyFileDirectory(string SourceDir, string DestDir, ILogger Logger, bool bForce = false)
 		{
 			if (!Directory.Exists(SourceDir))
 			{
@@ -902,7 +972,7 @@ namespace UnrealBuildTool
 				// make the dst filename with the same structure as it was in SourceDir
 				string DestFilename = Path.Combine(DestDir, Utils.MakePathRelativeTo(Filename, SourceDir));
 
-				if (bForce || FilesAreDifferent(Filename, DestFilename))
+				if (bForce || FilesAreDifferent(Filename, DestFilename, Logger))
 				{
 					if (File.Exists(DestFilename))
 					{
@@ -911,7 +981,7 @@ namespace UnrealBuildTool
 					}
 
 					// make the subdirectory if needed
-					string DestSubdir = Path.GetDirectoryName(DestFilename);
+					string DestSubdir = Path.GetDirectoryName(DestFilename)!;
 					if (!Directory.Exists(DestSubdir))
 					{
 						Directory.CreateDirectory(DestSubdir);
@@ -927,9 +997,9 @@ namespace UnrealBuildTool
 			}
 		}
 
-		private static void DeleteFiles(string Filespec)
+		private static void DeleteFiles(string Filespec, ILogger Logger)
 		{
-			string BaseDir = Path.GetDirectoryName(Filespec);
+			string BaseDir = Path.GetDirectoryName(Filespec)!;
 			string Mask = Path.GetFileName(Filespec);
 
 			if (!Directory.Exists(BaseDir))
@@ -942,13 +1012,13 @@ namespace UnrealBuildTool
 			{
 				File.SetAttributes(Filename, FileAttributes.Normal);
 				File.Delete(Filename);
-				Log.TraceInformation("\nDeleted file {0}", Filename);
+				Logger.LogInformation("\nDeleted file {Filename}", Filename);
 			}
 		}
 
 		private void AddAttribute(XElement Element, string Name, string Value)
 		{
-			XAttribute Attribute;
+			XAttribute? Attribute;
 			int Index = Name.IndexOf(":");
 			if (Index >= 0)
 			{
@@ -979,7 +1049,7 @@ namespace UnrealBuildTool
 
 		private void RemoveAttribute(XElement Element, string Name)
 		{
-			XAttribute Attribute;
+			XAttribute? Attribute;
 			int Index = Name.IndexOf(":");
 			if (Index >= 0)
 			{
@@ -1003,7 +1073,7 @@ namespace UnrealBuildTool
 			{
 				foreach (XElement Index in Source.Elements())
 				{
-//					if (Target.Element(Index.Name) == null)
+					//					if (Target.Element(Index.Name) == null)
 					{
 						Target.Add(Index);
 					}
@@ -1020,7 +1090,7 @@ namespace UnrealBuildTool
 		{
 			// add all instructions to execution list
 			Stack<XElement> ExecutionStack = new Stack<XElement>();
-			XElement StartNode = XDoc.Root.Element(NodeName);
+			XElement? StartNode = XDoc.Root!.Element(NodeName);
 			if (StartNode != null)
 			{
 				foreach (XElement Instruction in StartNode.Elements().Reverse())
@@ -1049,19 +1119,24 @@ namespace UnrealBuildTool
 				XElement Node = ExecutionStack.Pop();
 				if (bGlobalTrace || CurrentContext.bTrace)
 				{
-					Log.TraceInformation("Execute: '{0}'", TraceNodeString(Node));
+					Logger.LogInformation("Execute: '{Node}'", TraceNodeString(CurrentContext, Node, bGlobalTraceFilename || CurrentContext.bTraceFilename));
 				}
 				switch (Node.Name.ToString())
 				{
 					case "trace":
 						{
-							string Enable = GetAttribute(CurrentContext, Node, "enable");
+							string? TraceFilename = GetAttribute(CurrentContext, Node, "filename");
+							if (TraceFilename != null)
+							{
+								CurrentContext.bTraceFilename = StringToBool(TraceFilename);
+							}
+							string? Enable = GetAttribute(CurrentContext, Node, "enable");
 							if (Enable != null)
 							{
 								CurrentContext.bTrace = StringToBool(Enable);
 								if (!bGlobalTrace && CurrentContext.bTrace)
 								{
-									Log.TraceInformation("Context: '{0}' using Architecture='{1}', NodeName='{2}', Input='{3}'", CurrentContext.StringVariables["PluginDir"], Architecture, NodeName, Input);
+									Logger.LogInformation("Context: '{Context}' using Architecture='{Arch}', NodeName='{NodeName}', Input='{Input}'", CurrentContext.StringVariables["PluginDir"], Architecture, NodeName, Input);
 								}
 							}
 						}
@@ -1071,16 +1146,16 @@ namespace UnrealBuildTool
 						{
 							if (!bGlobalTrace && !CurrentContext.bTrace)
 							{
-								Log.TraceInformation("Context: '{0}' using Architecture='{1}', NodeName='{2}', Input='{3}'", CurrentContext.StringVariables["PluginDir"], Architecture, NodeName, Input);
+								Logger.LogInformation("Context: '{Context}' using Architecture='{Arch}', NodeName='{NodeName}', Input='{Input}'", CurrentContext.StringVariables["PluginDir"], Architecture, NodeName, Input);
 							}
-							Log.TraceInformation("Variables:\n{0}", DumpContext(CurrentContext));
+							Logger.LogInformation("Variables:\n{Variables}", DumpContext(CurrentContext));
 						}
 						break;
 
 					case "Context":
 						{
 							ContextStack.Push(CurrentContext);
-							string index = GetAttribute(CurrentContext, Node, "index");
+							string? index = GetAttribute(CurrentContext, Node, "index");
 							CurrentContext = Contexts[Architecture + "_" + index];
 							ExecutionStack.Push(new XElement("PopContext"));
 							foreach (XElement instruction in Node.Elements().Reverse())
@@ -1090,7 +1165,7 @@ namespace UnrealBuildTool
 
 							if (bGlobalTrace || CurrentContext.bTrace)
 							{
-								Log.TraceInformation("Context: '{0}' using Architecture='{1}', NodeName='{2}', Input='{3}'", CurrentContext.StringVariables["PluginDir"], Architecture, NodeName, Input);
+								Logger.LogInformation("Context: '{Context}' using Architecture='{Arch}', NodeName='{NodeName}', Input='{Input}'", CurrentContext.StringVariables["PluginDir"], Architecture, NodeName, Input);
 							}
 						}
 						break;
@@ -1109,7 +1184,7 @@ namespace UnrealBuildTool
 
 					case "isArch":
 						{
-							string arch = GetAttribute(CurrentContext, Node, "arch");
+							string? arch = GetAttribute(CurrentContext, Node, "arch");
 							if (arch != null && arch.Equals(Architecture))
 							{
 								foreach (XElement instruction in Node.Elements().Reverse())
@@ -1141,7 +1216,7 @@ namespace UnrealBuildTool
 							bool Result;
 							if (GetCondition(CurrentContext, Node, GetAttribute(CurrentContext, Node, "condition"), out Result))
 							{
-								XElement ResultNode = Node.Element(Result ? "true" : "false");
+								XElement? ResultNode = Node.Element(Result ? "true" : "false");
 								if (ResultNode != null)
 								{
 									foreach (XElement Instruction in ResultNode.Elements().Reverse())
@@ -1214,17 +1289,17 @@ namespace UnrealBuildTool
 
 					case "log":
 						{
-							string Text = GetAttribute(CurrentContext, Node, "text");
+							string? Text = GetAttribute(CurrentContext, Node, "text");
 							if (Text != null)
 							{
-								Log.TraceInformation("{0}", Text);
+								Logger.LogInformation("{Message}", Text);
 							}
 						}
 						break;
 
 					case "loopElements":
 						{
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
 							ElementStack.Push(CurrentElement);
 							ExecutionStack.Push(new XElement("PopElement"));
 							IEnumerable<XElement> WorkList = (Tag == "$") ? CurrentElement.Elements().Reverse() : CurrentElement.Descendants(Tag).Reverse();
@@ -1242,26 +1317,26 @@ namespace UnrealBuildTool
 
 					case "addAttribute":
 						{
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
-							string Name = GetAttribute(CurrentContext, Node, "name");
-							string Value = GetAttribute(CurrentContext, Node, "value");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Name = GetAttribute(CurrentContext, Node, "name");
+							string? Value = GetAttribute(CurrentContext, Node, "value");
 							if (Tag != null && Name != null && Value != null)
 							{
 								if (Tag.StartsWith("$"))
 								{
-									XElement Target = CurrentElement;
+									XElement? Target = CurrentElement;
 									if (Tag.Length > 1)
 									{
 										if (!CurrentContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogWarning("Missing element variable '{Tag}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
 									}
-									AddAttribute(Target, Name, Value);
+									AddAttribute(Target!, Name, Value);
 								}
 								else
 								{
@@ -1280,20 +1355,20 @@ namespace UnrealBuildTool
 
 					case "removeAttribute":
 						{
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
-							string Name = GetAttribute(CurrentContext, Node, "name");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Name = GetAttribute(CurrentContext, Node, "name");
 							if (Tag != null && Name != null)
 							{
 								if (Tag.StartsWith("$"))
 								{
-									XElement Target = CurrentElement;
+									XElement? Target = CurrentElement;
 									if (Tag.Length > 1)
 									{
 										if (!CurrentContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogInformation("\nMissing element variable '{Tag}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
@@ -1317,14 +1392,14 @@ namespace UnrealBuildTool
 
 					case "addPermission":
 						{
-							string Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
+							string? Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
 							if (Name != null)
 							{
 								// make sure it isn't already added
 								bool bFound = false;
 								foreach (XElement Element in XMLWork.Descendants("uses-permission"))
 								{
-									XAttribute Attribute = Element.Attribute(XMLNameSpace + "name");
+									XAttribute? Attribute = Element.Attribute(XMLNameSpace + "name");
 									if (Attribute != null)
 									{
 										if (Attribute.Value == Name)
@@ -1346,7 +1421,7 @@ namespace UnrealBuildTool
 										Attribute.SetValue(NewValue);
 									}
 
-									XMLWork.Element("manifest").Add(new XElement("uses-permission", AttributeList));
+									XMLWork.Element("manifest")?.Add(new XElement("uses-permission", AttributeList));
 								}
 							}
 						}
@@ -1354,12 +1429,12 @@ namespace UnrealBuildTool
 
 					case "removePermission":
 						{
-							string Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
+							string? Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
 							if (Name != null)
 							{
 								foreach (XElement Element in XMLWork.Descendants("uses-permission"))
 								{
-									XAttribute Attribute = Element.Attribute(XMLNameSpace + "name");
+									XAttribute? Attribute = Element.Attribute(XMLNameSpace + "name");
 									if (Attribute != null)
 									{
 										if (Attribute.Value == Name)
@@ -1375,14 +1450,14 @@ namespace UnrealBuildTool
 
 					case "addFeature":
 						{
-							string Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
+							string? Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
 							if (Name != null)
 							{
 								// make sure it isn't already added
 								bool bFound = false;
 								foreach (XElement Element in XMLWork.Descendants("uses-feature"))
 								{
-									XAttribute Attribute = Element.Attribute(XMLNameSpace + "name");
+									XAttribute? Attribute = Element.Attribute(XMLNameSpace + "name");
 									if (Attribute != null)
 									{
 										if (Attribute.Value == Name)
@@ -1404,7 +1479,7 @@ namespace UnrealBuildTool
 										Attribute.SetValue(NewValue);
 									}
 
-									XMLWork.Element("manifest").Add(new XElement("uses-feature", AttributeList));
+									XMLWork.Element("manifest")?.Add(new XElement("uses-feature", AttributeList));
 								}
 							}
 						}
@@ -1412,12 +1487,12 @@ namespace UnrealBuildTool
 
 					case "removeFeature":
 						{
-							string Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
+							string? Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
 							if (Name != null)
 							{
 								foreach (XElement Element in XMLWork.Descendants("uses-feature"))
 								{
-									XAttribute Attribute = Element.Attribute(XMLNameSpace + "name");
+									XAttribute? Attribute = Element.Attribute(XMLNameSpace + "name");
 									if (Attribute != null)
 									{
 										if (Attribute.Value == Name)
@@ -1433,14 +1508,14 @@ namespace UnrealBuildTool
 
 					case "addLibrary":
 						{
-							string Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
+							string? Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
 							if (Name != null)
 							{
 								// make sure it isn't already added
 								bool bFound = false;
 								foreach (XElement Element in XMLWork.Descendants("uses-library"))
 								{
-									XAttribute Attribute = Element.Attribute(XMLNameSpace + "name");
+									XAttribute? Attribute = Element.Attribute(XMLNameSpace + "name");
 									if (Attribute != null)
 									{
 										if (Attribute.Value == Name)
@@ -1462,7 +1537,7 @@ namespace UnrealBuildTool
 										Attribute.SetValue(NewValue);
 									}
 
-									XMLWork.Element("manifest").Element("application").Add(new XElement("uses-library", AttributeList));
+									XMLWork.Element("manifest")?.Element("application")?.Add(new XElement("uses-library", AttributeList));
 								}
 							}
 						}
@@ -1470,12 +1545,12 @@ namespace UnrealBuildTool
 
 					case "removeLibrary":
 						{
-							string Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
+							string? Name = GetAttributeWithNamespace(CurrentContext, Node, XMLNameSpace, "name");
 							if (Name != null)
 							{
 								foreach (XElement Element in XMLWork.Descendants("uses-library"))
 								{
-									XAttribute Attribute = Element.Attribute(XMLNameSpace + "name");
+									XAttribute? Attribute = Element.Attribute(XMLNameSpace + "name");
 									if (Attribute != null)
 									{
 										if (Attribute.Value == Name)
@@ -1491,13 +1566,13 @@ namespace UnrealBuildTool
 
 					case "removeElement":
 						{
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
 							bool bOnce = StringToBool(GetAttribute(CurrentContext, Node, "once", true, false));
 							if (Tag != null)
 							{
 								if (Tag == "$")
 								{
-									XElement Parent = CurrentElement.Parent;
+									XElement Parent = CurrentElement.Parent!;
 									CurrentElement.Remove();
 									CurrentElement = Parent;
 								}
@@ -1519,30 +1594,30 @@ namespace UnrealBuildTool
 
 					case "addElement":
 						{
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
-							string Name = GetAttribute(CurrentContext, Node, "name");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Name = GetAttribute(CurrentContext, Node, "name");
 							bool bOnce = StringToBool(GetAttribute(CurrentContext, Node, "once", true, false));
 							if (Tag != null && Name != null)
 							{
-								XElement Element;
+								XElement? Element;
 								if (!CurrentContext.ElementVariables.TryGetValue(Name, out Element))
 								{
 									if (!GlobalContext.ElementVariables.TryGetValue(Name, out Element))
 									{
-										Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Name, TraceNodeString(Node));
+										Logger.LogWarning("Missing element variable '{Name}' in '{Node}' (skipping instruction)", Name, TraceNodeString(CurrentContext, Node));
 										continue;
 									}
 								}
 								if (Tag.StartsWith("$"))
 								{
-									XElement Target = CurrentElement;
+									XElement? Target = CurrentElement;
 									if (Tag.Length > 1)
 									{
 										if (!CurrentContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogWarning("Missing element variable '{Name}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
@@ -1577,20 +1652,20 @@ namespace UnrealBuildTool
 
 					case "addElements":
 						{
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
 							bool bOnce = StringToBool(GetAttribute(CurrentContext, Node, "once", true, false));
 							if (Tag != null)
 							{
 								if (Tag.StartsWith("$"))
 								{
-									XElement Target = CurrentElement;
+									XElement? Target = CurrentElement;
 									if (Tag.Length > 1)
 									{
 										if (!CurrentContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Target))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogWarning("Missing element variable '{Tag}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
@@ -1669,7 +1744,7 @@ namespace UnrealBuildTool
 
 					case "insertValue":
 						{
-							string Value = GetAttribute(CurrentContext, Node, "value");
+							string? Value = GetAttribute(CurrentContext, Node, "value");
 							if (Value != null)
 							{
 								GlobalContext.StringVariables["Output"] += Value;
@@ -1679,8 +1754,8 @@ namespace UnrealBuildTool
 
 					case "replace":
 						{
-							string Find = GetAttribute(CurrentContext, Node, "find");
-							string With = GetAttribute(CurrentContext, Node, "with");
+							string? Find = GetAttribute(CurrentContext, Node, "find");
+							string? With = GetAttribute(CurrentContext, Node, "with");
 							if (Find != null && With != null)
 							{
 								GlobalContext.StringVariables["Output"] = GlobalContext.StringVariables["Output"].Replace(Find, With);
@@ -1690,24 +1765,24 @@ namespace UnrealBuildTool
 
 					case "copyFile":
 						{
-							string Src = GetAttribute(CurrentContext, Node, "src");
-							string Dst = GetAttribute(CurrentContext, Node, "dst");
+							string? Src = GetAttribute(CurrentContext, Node, "src");
+							string? Dst = GetAttribute(CurrentContext, Node, "dst");
 							bool bForce = StringToBool(GetAttribute(CurrentContext, Node, "force", true, false, "true"));
 							if (Src != null && Dst != null)
 							{
 								if (File.Exists(Src))
 								{
 									// check to see if newer than last time we copied
-									if (bForce || FilesAreDifferent(Src, Dst))
+									if (bForce || FilesAreDifferent(Src, Dst, Logger))
 									{
 										if (File.Exists(Dst))
 										{
 											File.SetAttributes(Dst, FileAttributes.Normal);
 											File.Delete(Dst);
 										}
-										Directory.CreateDirectory(Path.GetDirectoryName(Dst));
+										Directory.CreateDirectory(Path.GetDirectoryName(Dst)!);
 										File.Copy(Src, Dst, true);
-										Log.TraceInformation("\nFile {0} copied to {1}", Src, Dst);
+										Logger.LogInformation("File {Src} copied to {Dst}", Src, Dst);
 
 										// remove any read only flags and keep timestamp
 										FileInfo DestFileInfo = new FileInfo(Dst);
@@ -1717,7 +1792,7 @@ namespace UnrealBuildTool
 								}
 								else
 								{
-									Log.TraceInformation("\nFile {0} does not exist, not copied!", Src);
+									Logger.LogInformation("File {Src} does not exist, not copied!", Src);
 								}
 							}
 						}
@@ -1725,30 +1800,30 @@ namespace UnrealBuildTool
 
 					case "copyDir":
 						{
-							string Src = GetAttribute(CurrentContext, Node, "src");
-							string Dst = GetAttribute(CurrentContext, Node, "dst");
+							string? Src = GetAttribute(CurrentContext, Node, "src");
+							string? Dst = GetAttribute(CurrentContext, Node, "dst");
 							bool bForce = StringToBool(GetAttribute(CurrentContext, Node, "force", true, false, "true"));
 							if (Src != null && Dst != null)
 							{
-								CopyFileDirectory(Src, Dst, bForce);
-								Log.TraceInformation("\nDirectory {0} copied to {1}", Src, Dst, bForce);
+								CopyFileDirectory(Src, Dst, Logger, bForce);
+								Logger.LogInformation("\nDirectory {Src} copied to {Dst} ({Force})", Src, Dst, bForce);
 							}
 						}
 						break;
 
 					case "deleteFiles":
 						{
-							string Filespec = GetAttribute(CurrentContext, Node, "filespec");
+							string? Filespec = GetAttribute(CurrentContext, Node, "filespec");
 							if (Filespec != null)
 							{
-								if (Filespec.Contains(":") || Filespec.Contains(".."))
+								if (Filespec.Contains(':') || Filespec.Contains(".."))
 								{
-									Log.TraceInformation("\nFilespec {0} not allowed; ignored.", Filespec);
+									Logger.LogInformation("\nFilespec {FileSpec} not allowed; ignored.", Filespec);
 								}
 								else
 								{
 									// force relative to BuildDir (and only from global context so someone doesn't try to be clever)
-									DeleteFiles(Path.Combine(GlobalContext.StringVariables["BuildDir"], Filespec));
+									DeleteFiles(Path.Combine(GlobalContext.StringVariables["BuildDir"], Filespec), Logger);
 								}
 							}
 						}
@@ -1756,8 +1831,8 @@ namespace UnrealBuildTool
 
 					case "loadLibrary":
 						{
-							string Name = GetAttribute(CurrentContext, Node, "name");
-							string FailMsg = GetAttribute(CurrentContext, Node, "failmsg", true, false);
+							string? Name = GetAttribute(CurrentContext, Node, "name");
+							string? FailMsg = GetAttribute(CurrentContext, Node, "failmsg", true, false);
 							if (Name != null)
 							{
 								string Work = "\t\ttry\n" +
@@ -1778,7 +1853,7 @@ namespace UnrealBuildTool
 
 					case "setBool":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Value = GetAttribute(CurrentContext, Node, "value", true, false, "false");
 							if (Result != null)
 							{
@@ -1789,8 +1864,8 @@ namespace UnrealBuildTool
 
 					case "setBoolEnvVarDefined":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Value = GetAttribute(CurrentContext, Node, "value");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Value = GetAttribute(CurrentContext, Node, "value");
 							if (Result != null)
 							{
 								CurrentContext.BoolVariables[Result] = (Value != null && Environment.ExpandEnvironmentVariables(Value).Length > 0);
@@ -1800,7 +1875,7 @@ namespace UnrealBuildTool
 
 					case "setBoolFrom":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Value = GetAttribute(CurrentContext, Node, "value", true, false, "false");
 							if (Result != null)
 							{
@@ -1812,10 +1887,10 @@ namespace UnrealBuildTool
 
 					case "setBoolFromProperty":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Ini = GetAttribute(CurrentContext, Node, "ini");
-							string Section = GetAttribute(CurrentContext, Node, "section");
-							string Property = GetAttribute(CurrentContext, Node, "property");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Ini = GetAttribute(CurrentContext, Node, "ini");
+							string? Section = GetAttribute(CurrentContext, Node, "section");
+							string? Property = GetAttribute(CurrentContext, Node, "property");
 							string DefaultVal = GetAttribute(CurrentContext, Node, "default", true, false, "false");
 							if (Result != null && Ini != null && Section != null && Property != null)
 							{
@@ -1836,10 +1911,10 @@ namespace UnrealBuildTool
 
 					case "setBoolFromPropertyContains":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Ini = GetAttribute(CurrentContext, Node, "ini");
-							string Section = GetAttribute(CurrentContext, Node, "section");
-							string Property = GetAttribute(CurrentContext, Node, "property");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Ini = GetAttribute(CurrentContext, Node, "ini");
+							string? Section = GetAttribute(CurrentContext, Node, "section");
+							string? Property = GetAttribute(CurrentContext, Node, "property");
 							string DefaultVal = GetAttribute(CurrentContext, Node, "default", true, false, "false");
 							string Contains = GetAttribute(CurrentContext, Node, "contains", true, true, "");
 							if (Result != null && Ini != null && Section != null && Property != null)
@@ -1849,7 +1924,7 @@ namespace UnrealBuildTool
 								ConfigCacheIni_UPL ConfigIni = GetConfigCacheIni_UPL(Ini);
 								if (ConfigIni != null)
 								{
-									List<string> StringList;
+									List<string>? StringList;
 									if (ConfigIni.GetArray(Section, Property, out StringList))
 									{
 										Value = false;
@@ -1870,7 +1945,7 @@ namespace UnrealBuildTool
 
 					case "setBoolContains":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
 							string Find = GetAttribute(CurrentContext, Node, "find", true, false, "");
 							if (Result != null)
@@ -1882,7 +1957,7 @@ namespace UnrealBuildTool
 
 					case "setBoolStartsWith":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
 							string Find = GetAttribute(CurrentContext, Node, "find", true, false, "");
 							if (Result != null)
@@ -1894,7 +1969,7 @@ namespace UnrealBuildTool
 
 					case "setBoolEndsWith":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
 							string Find = GetAttribute(CurrentContext, Node, "find", true, false, "");
 							if (Result != null)
@@ -1906,7 +1981,7 @@ namespace UnrealBuildTool
 
 					case "setBoolNot":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "false");
 							if (Result != null)
 							{
@@ -1917,7 +1992,7 @@ namespace UnrealBuildTool
 
 					case "setBoolAnd":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "false");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "false");
 							if (Result != null)
@@ -1929,7 +2004,7 @@ namespace UnrealBuildTool
 
 					case "setBoolOr":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "false");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "false");
 							if (Result != null)
@@ -1941,7 +2016,7 @@ namespace UnrealBuildTool
 
 					case "setBoolIsEqual":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "");
 							if (Result != null)
@@ -1953,56 +2028,56 @@ namespace UnrealBuildTool
 
 					case "setBoolIsLess":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
-							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
+							string? Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
 							if (Result != null)
 							{
-								CurrentContext.BoolVariables[Result] = (StringToInt(Arg1, Node) < StringToInt(Arg2, Node));
+								CurrentContext.BoolVariables[Result] = (StringToInt(CurrentContext, Node, Arg1) < StringToInt(CurrentContext, Node, Arg2));
 							}
 						}
 						break;
 
 					case "setBoolIsLessEqual":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
-							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
+							string? Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
 							if (Result != null)
 							{
-								CurrentContext.BoolVariables[Result] = (StringToInt(Arg1, Node) <= StringToInt(Arg2, Node));
+								CurrentContext.BoolVariables[Result] = (StringToInt(CurrentContext, Node, Arg1) <= StringToInt(CurrentContext, Node, Arg2));
 							}
 						}
 						break;
 
 					case "setBoolIsGreater":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
-							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
+							string? Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
 							if (Result != null)
 							{
-								CurrentContext.BoolVariables[Result] = (StringToInt(Arg1, Node) > StringToInt(Arg2, Node));
+								CurrentContext.BoolVariables[Result] = (StringToInt(CurrentContext, Node, Arg1) > StringToInt(CurrentContext, Node, Arg2));
 							}
 						}
 						break;
 
 					case "setBoolIsGreaterEqual":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
-							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false);
+							string? Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false);
 							if (Result != null)
 							{
-								CurrentContext.BoolVariables[Result] = (StringToInt(Arg1, Node) >= StringToInt(Arg2, Node));
+								CurrentContext.BoolVariables[Result] = (StringToInt(CurrentContext, Node, Arg1) >= StringToInt(CurrentContext, Node, Arg2));
 							}
 						}
 						break;
 
 					case "setBoolFileExists":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string FilePath = GetAttribute(CurrentContext, Node, "file");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? FilePath = GetAttribute(CurrentContext, Node, "file");
 							if (Result != null && FilePath != null)
 							{
 								CurrentContext.BoolVariables[Result] = File.Exists(FilePath);
@@ -2012,42 +2087,70 @@ namespace UnrealBuildTool
 
 					case "setInt":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Value = GetAttribute(CurrentContext, Node, "value", true, false, "0");
 							if (Result != null)
 							{
-								CurrentContext.IntVariables[Result] = StringToInt(Value, Node);
+								CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Value);
 							}
 						}
 						break;
 
 					case "setIntFrom":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Value = GetAttribute(CurrentContext, Node, "value", true, false, "0");
 							if (Result != null)
 							{
 								Value = ExpandVariables(CurrentContext, "$I(" + Value + ")");
-								CurrentContext.IntVariables[Result] = StringToInt(Value, Node);
+								CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Value);
 							}
 						}
 						break;
 
 					case "setIntFromProperty":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Ini = GetAttribute(CurrentContext, Node, "ini");
-							string Section = GetAttribute(CurrentContext, Node, "section");
-							string Property = GetAttribute(CurrentContext, Node, "property");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Ini = GetAttribute(CurrentContext, Node, "ini");
+							string? Section = GetAttribute(CurrentContext, Node, "section");
+							string? Property = GetAttribute(CurrentContext, Node, "property");
 							string DefaultVal = GetAttribute(CurrentContext, Node, "default", true, false, "0");
 							if (Result != null && Ini != null && Section != null && Property != null)
 							{
-								int Value = StringToInt(DefaultVal, Node);
+								int DefaultInt = StringToInt(CurrentContext, Node, DefaultVal);
+								int Value = DefaultInt;
 
 								ConfigCacheIni_UPL ConfigIni = GetConfigCacheIni_UPL(Ini);
 								if (ConfigIni != null)
 								{
-									ConfigIni.GetInt32(Section, Property, out Value);
+									if (!ConfigIni.GetInt32(Section, Property, out Value))
+									{
+										Value = DefaultInt;
+									}
+								}
+								CurrentContext.IntVariables[Result] = Value;
+							}
+						}
+						break;
+
+					case "setIntFromPropertyArrayNum":
+						{
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Ini = GetAttribute(CurrentContext, Node, "ini");
+							string? Section = GetAttribute(CurrentContext, Node, "section");
+							string? Property = GetAttribute(CurrentContext, Node, "property");
+							if (Result != null && Ini != null && Section != null && Property != null)
+							{
+								int Value = 0;
+
+								ConfigCacheIni_UPL ConfigIni = GetConfigCacheIni_UPL(Ini);
+								if (ConfigIni != null)
+								{
+									List<string>? StringList;
+									if (ConfigIni.GetArray(Section, Property, out StringList))
+									{
+										Value = StringList.Count;
+									}
 								}
 								CurrentContext.IntVariables[Result] = Value;
 							}
@@ -2056,55 +2159,55 @@ namespace UnrealBuildTool
 
 					case "setIntAdd":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "0");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "0");
 							if (Result != null)
 							{
-								CurrentContext.IntVariables[Result] = StringToInt(Arg1, Node) + StringToInt(Arg2, Node);
+								CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Arg1) + StringToInt(CurrentContext, Node, Arg2);
 							}
 						}
 						break;
 
 					case "setIntSubtract":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "0");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "0");
 							if (Result != null)
 							{
-								CurrentContext.IntVariables[Result] = StringToInt(Arg1, Node) - StringToInt(Arg2, Node);
+								CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Arg1) - StringToInt(CurrentContext, Node, Arg2);
 							}
 						}
 						break;
 
 					case "setIntMultiply":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "1");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "1");
 							if (Result != null)
 							{
-								CurrentContext.IntVariables[Result] = StringToInt(Arg1, Node) * StringToInt(Arg2, Node);
+								CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Arg1) * StringToInt(CurrentContext, Node, Arg2);
 							}
 						}
 						break;
 
 					case "setIntDivide":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "1");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "1");
 							if (Result != null)
 							{
-								int Denominator = StringToInt(Arg2, Node);
+								int Denominator = StringToInt(CurrentContext, Node, Arg2);
 								if (Denominator == 0)
 								{
-									CurrentContext.IntVariables[Result] = StringToInt(Arg1, Node);
+									CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Arg1);
 								}
 								else
 								{
-									CurrentContext.IntVariables[Result] = StringToInt(Arg1, Node) / Denominator;
+									CurrentContext.IntVariables[Result] = StringToInt(CurrentContext, Node, Arg1) / Denominator;
 								}
 							}
 						}
@@ -2112,7 +2215,7 @@ namespace UnrealBuildTool
 
 					case "setIntLength":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
 							if (Result != null)
 							{
@@ -2123,7 +2226,7 @@ namespace UnrealBuildTool
 
 					case "setIntFindString":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
 							string Find = GetAttribute(CurrentContext, Node, "find", true, false, "");
 							if (Result != null)
@@ -2135,7 +2238,7 @@ namespace UnrealBuildTool
 
 					case "setString":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Value = GetAttribute(CurrentContext, Node, "value", true, false, "");
 							if (Result != null)
 							{
@@ -2153,7 +2256,7 @@ namespace UnrealBuildTool
 
 					case "setStringFrom":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Value = GetAttribute(CurrentContext, Node, "value", true, false, "0");
 							if (Result != null)
 							{
@@ -2165,8 +2268,8 @@ namespace UnrealBuildTool
 
 					case "setStringFromEnvVar":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Value = GetAttribute(CurrentContext, Node, "value");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Value = GetAttribute(CurrentContext, Node, "value");
 							if (Result != null && Value != null)
 							{
 								CurrentContext.StringVariables[Result] = Environment.ExpandEnvironmentVariables(Value);
@@ -2176,11 +2279,11 @@ namespace UnrealBuildTool
 
 					case "setStringFromTag":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Tag = GetAttribute(CurrentContext, Node, "tag", true, false, "$");
 							if (Result != null)
 							{
-								XElement Element = CurrentElement;
+								XElement? Element = CurrentElement;
 								if (Tag.StartsWith("$"))
 								{
 									if (Tag.Length > 1)
@@ -2189,7 +2292,7 @@ namespace UnrealBuildTool
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Element))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogWarning("Missing element variable '{Tag}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
@@ -2202,12 +2305,12 @@ namespace UnrealBuildTool
 
 					case "setStringFromAttribute":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Tag = GetAttribute(CurrentContext, Node, "tag");
-							string Name = GetAttribute(CurrentContext, Node, "name");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Tag = GetAttribute(CurrentContext, Node, "tag");
+							string? Name = GetAttribute(CurrentContext, Node, "name");
 							if (Result != null && Tag != null && Name != null)
 							{
-								XElement Element = CurrentElement;
+								XElement? Element = CurrentElement;
 								if (Tag.StartsWith("$"))
 								{
 									if (Tag.Length > 1)
@@ -2216,14 +2319,14 @@ namespace UnrealBuildTool
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Element))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogWarning("Missing element variable '{Tag}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
 									}
 								}
 
-								XAttribute Attribute;
+								XAttribute? Attribute;
 								int Index = Name.IndexOf(":");
 								if (Index >= 0)
 								{
@@ -2242,11 +2345,11 @@ namespace UnrealBuildTool
 
 					case "setStringFromTagText":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Tag = GetAttribute(CurrentContext, Node, "tag", true, false, "$");
 							if (Result != null)
 							{
-								XElement Element = CurrentElement;
+								XElement? Element = CurrentElement;
 								if (Tag.StartsWith("$"))
 								{
 									if (Tag.Length > 1)
@@ -2255,7 +2358,7 @@ namespace UnrealBuildTool
 										{
 											if (!GlobalContext.ElementVariables.TryGetValue(Tag.Substring(1), out Element))
 											{
-												Log.TraceWarning("\nMissing element variable '{0}' in '{1}' (skipping instruction)", Tag, TraceNodeString(Node));
+												Logger.LogWarning("Missing element variable '{Tag}' in '{Node}' (skipping instruction)", Tag, TraceNodeString(CurrentContext, Node));
 												continue;
 											}
 										}
@@ -2264,7 +2367,7 @@ namespace UnrealBuildTool
 
 								if (Element.Value == null)
 								{
-									Log.TraceWarning("\nExpected text in element '{0}' in '{1}' but found none (skipping instruction)", Element.Name.ToString(), TraceNodeString(Node));
+									Logger.LogWarning("Expected text in element '{Element}' in '{Node}' but found none (skipping instruction)", Element.Name.ToString(), TraceNodeString(CurrentContext, Node));
 									continue;
 								}
 
@@ -2275,10 +2378,10 @@ namespace UnrealBuildTool
 
 					case "setStringFromProperty":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Ini = GetAttribute(CurrentContext, Node, "ini");
-							string Section = GetAttribute(CurrentContext, Node, "section");
-							string Property = GetAttribute(CurrentContext, Node, "property");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Ini = GetAttribute(CurrentContext, Node, "ini");
+							string? Section = GetAttribute(CurrentContext, Node, "section");
+							string? Property = GetAttribute(CurrentContext, Node, "property");
 							string DefaultVal = GetAttribute(CurrentContext, Node, "default", true, false, "");
 							if (Result != null && Ini != null && Section != null && Property != null)
 							{
@@ -2306,9 +2409,46 @@ namespace UnrealBuildTool
 						}
 						break;
 
+					case "setStringFromPropertyArray":
+						{
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Ini = GetAttribute(CurrentContext, Node, "ini");
+							string? Section = GetAttribute(CurrentContext, Node, "section");
+							string? Property = GetAttribute(CurrentContext, Node, "property");
+							string? IndexStr = GetAttribute(CurrentContext, Node, "index", true);
+							string DefaultVal = GetAttribute(CurrentContext, Node, "default", true, false, "");
+							if (Result != null && Ini != null && Section != null && Property != null && IndexStr != null)
+							{
+								string Value = DefaultVal;
+
+								ConfigCacheIni_UPL ConfigIni = GetConfigCacheIni_UPL(Ini);
+								if (ConfigIni != null)
+								{
+									List<string>? StringList;
+									if (ConfigIni.GetArray(Section, Property, out StringList))
+									{
+										int Index = StringToInt(CurrentContext, Node, IndexStr);
+										if (Index >= 0 && Index < StringList.Count)
+										{
+											Value = StringList.ElementAt(Index);
+										}
+									}
+								}
+								if (Result == "Output")
+								{
+									GlobalContext.StringVariables["Output"] = Value;
+								}
+								else
+								{
+									CurrentContext.StringVariables[Result] = Value;
+								}
+							}
+						}
+						break;
+
 					case "setStringAdd":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Arg1 = GetAttribute(CurrentContext, Node, "arg1", true, false, "");
 							string Arg2 = GetAttribute(CurrentContext, Node, "arg2", true, false, "");
 							if (Result != null)
@@ -2328,14 +2468,14 @@ namespace UnrealBuildTool
 
 					case "setStringSubstring":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
 							string Start = GetAttribute(CurrentContext, Node, "start", true, false, "0");
 							string Length = GetAttribute(CurrentContext, Node, "length", true, false, "0");
 							if (Result != null && Source != null)
 							{
-								int Index = StringToInt(Start, Node);
-								int Count = StringToInt(Length, Node);
+								int Index = StringToInt(CurrentContext, Node, Start);
+								int Count = StringToInt(CurrentContext, Node, Length);
 								Index = (Index < 0) ? 0 : (Index > Source.Length) ? Source.Length : Index;
 								Count = (Index + Count > Source.Length) ? Source.Length - Index : Count;
 								string Value = Source.Substring(Index, Count);
@@ -2351,11 +2491,41 @@ namespace UnrealBuildTool
 						}
 						break;
 
+					case "setStringSubstringAfterFind":
+						{
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
+							string Find = GetAttribute(CurrentContext, Node, "find", true, false, "");
+							string Length = GetAttribute(CurrentContext, Node, "length", true, false, "-1");
+							string DefaultVal = GetAttribute(CurrentContext, Node, "default", true, false, "");
+							if (Result != null)
+							{
+								string Value = DefaultVal;
+								int Index = Source.IndexOf(Find);
+								if (Index != -1)
+								{
+									Index += Find.Length;
+									int Count = StringToInt(CurrentContext, Node, Length);
+									Count = Count == -1 || (Index + Count > Source.Length) ? Source.Length - Index : Count;
+									Value = Source.Substring(Index, Count);
+								}
+								if (Result == "Output")
+								{
+									GlobalContext.StringVariables["Output"] = Value;
+								}
+								else
+								{
+									CurrentContext.StringVariables[Result] = Value;
+								}
+							}
+						}
+						break;
+
 					case "setStringReplace":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
+							string? Result = GetAttribute(CurrentContext, Node, "result");
 							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
-							string Find = GetAttribute(CurrentContext, Node, "find");
+							string? Find = GetAttribute(CurrentContext, Node, "find");
 							string With = GetAttribute(CurrentContext, Node, "with", true, false, "");
 							if (Result != null && Find != null)
 							{
@@ -2372,12 +2542,50 @@ namespace UnrealBuildTool
 						}
 						break;
 
+					case "setStringToLower":
+						{
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
+							if (Result != null)
+							{
+								string Value = Source.ToLower();
+								if (Result == "Output")
+								{
+									GlobalContext.StringVariables["Output"] = Value;
+								}
+								else
+								{
+									CurrentContext.StringVariables[Result] = Value;
+								}
+							}
+						}
+						break;
+
+					case "setStringToUpper":
+						{
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string Source = GetAttribute(CurrentContext, Node, "source", true, false, "");
+							if (Result != null)
+							{
+								string Value = Source.ToUpper();
+								if (Result == "Output")
+								{
+									GlobalContext.StringVariables["Output"] = Value;
+								}
+								else
+								{
+									CurrentContext.StringVariables[Result] = Value;
+								}
+							}
+						}
+						break;
+
 					case "setElement":
 						{
-							string Result = GetAttribute(CurrentContext, Node, "result");
-							string Value = GetAttribute(CurrentContext, Node, "value", true, false);
-							string Text = GetAttribute(CurrentContext, Node, "text", true, false);
-							string Parse = GetAttribute(CurrentContext, Node, "xml", true, false);
+							string? Result = GetAttribute(CurrentContext, Node, "result");
+							string? Value = GetAttribute(CurrentContext, Node, "value", true, false);
+							string? Text = GetAttribute(CurrentContext, Node, "text", true, false);
+							string? Parse = GetAttribute(CurrentContext, Node, "xml", true, false);
 							if (Result != null)
 							{
 								if (Value != null)
@@ -2397,7 +2605,7 @@ namespace UnrealBuildTool
 									}
 									catch (Exception e)
 									{
-										Log.TraceError("\nXML parsing {0} failed! {1} (skipping instruction)", Parse, e);
+										Logger.LogError(e, "XML parsing {Parse} failed! {Ex} (skipping instruction)", Parse, e);
 									}
 								}
 							}
@@ -2405,7 +2613,7 @@ namespace UnrealBuildTool
 						break;
 
 					default:
-						Log.TraceWarning("\nUnknown command: {0}", Node.Name);
+						Logger.LogWarning("Unknown command: {Name}", Node.Name);
 						break;
 				}
 			}
@@ -2414,7 +2622,7 @@ namespace UnrealBuildTool
 		}
 
 		public void Init(List<string> Architectures, bool bDistribution, string EngineDirectory, string BuildDirectory, string ProjectDirectory, string Configuration, bool bIsEmbedded,
-			bool bPerArchBuildDir=false, Dictionary<string, string> ArchRemapping = null)
+			bool bPerArchBuildDir = false, Dictionary<string, string>? ArchRemapping = null)
 		{
 			GlobalContext.BoolVariables["Distribution"] = bDistribution;
 			GlobalContext.BoolVariables["IsEmbedded"] = bIsEmbedded;
@@ -2471,13 +2679,13 @@ namespace UnrealBuildTool
 					}
 				}
 
-				Log.TraceInformation("UPL Init: {0}", Arch);
+				Logger.LogInformation("UPL Init: {Arch}", Arch);
 				ProcessPluginNode(Arch, "init", "");
 			}
 
 			if (bGlobalTrace)
 			{
-				Log.TraceInformation("\nVariables:\n{0}", DumpVariables());
+				Logger.LogInformation("\nVariables:\n{Variables}", DumpVariables());
 			}
 		}
 
@@ -2524,25 +2732,24 @@ namespace UnrealBuildTool
 			{ }
 		}
 
-
 		/// <summary>
 		/// command class for being able to create config caches over and over without needing to read the ini files
 		/// </summary>
 		public class Command
 		{
-			public string TrimmedLine;
+			public string? TrimmedLine;
 		}
 
 		class SectionCommand : Command
 		{
-			public FileReference Filename;
+			public FileReference? Filename;
 			public int LineIndex;
 		}
 
 		class KeyValueCommand : Command
 		{
-			public string Key;
-			public string Value;
+			public string? Key;
+			public string? Value;
 			public ParseAction LastAction;
 		}
 
@@ -2552,17 +2759,17 @@ namespace UnrealBuildTool
 		static Dictionary<string, ConfigCacheIni_UPL> BaseIniCache = new Dictionary<string, ConfigCacheIni_UPL>();
 
 		// static creation functions for ini files
-		public static ConfigCacheIni_UPL CreateConfigCacheIni_UPL(UnrealTargetPlatform Platform, string BaseIniName, DirectoryReference ProjectDirectory, DirectoryReference EngineDirectory = null)
+		public static ConfigCacheIni_UPL CreateConfigCacheIni_UPL(UnrealTargetPlatform Platform, string BaseIniName, DirectoryReference? ProjectDirectory, ILogger Logger, DirectoryReference? EngineDirectory = null)
 		{
 			if (EngineDirectory == null)
 			{
-				EngineDirectory = UnrealBuildTool.EngineDirectory;
+				EngineDirectory = Unreal.EngineDirectory;
 			}
 
 			// cache base ini for use as the seed for the rest
 			if (!BaseIniCache.ContainsKey(BaseIniName))
 			{
-				BaseIniCache.Add(BaseIniName, new ConfigCacheIni_UPL(BuildHostPlatform.Current.Platform, BaseIniName, null, EngineDirectory, EngineOnly: true));
+				BaseIniCache.Add(BaseIniName, new ConfigCacheIni_UPL(BuildHostPlatform.Current.Platform, BaseIniName, null, Logger, EngineDirectory, EngineOnly: true));
 			}
 
 			// build the new ini and cache it for later re-use
@@ -2570,7 +2777,7 @@ namespace UnrealBuildTool
 			string Key = GetIniPlatformName(Platform) + BaseIniName + EngineDirectory.FullName + (ProjectDirectory != null ? ProjectDirectory.FullName : "");
 			if (!IniCache.ContainsKey(Key))
 			{
-				IniCache.Add(Key, new ConfigCacheIni_UPL(Platform, BaseIniName, ProjectDirectory, EngineDirectory, BaseCache: BaseCache));
+				IniCache.Add(Key, new ConfigCacheIni_UPL(Platform, BaseIniName, ProjectDirectory, Logger, EngineDirectory, BaseCache: BaseCache));
 			}
 			return IniCache[Key];
 		}
@@ -2625,82 +2832,78 @@ namespace UnrealBuildTool
 		/// </summary>
 		Dictionary<string, IniSection> Sections;
 
-		/// <summary>
-		/// Constructor. Parses a single ini file. No Platform settings, no engine hierarchy. Do not use this with ini files that have hierarchy!
-		/// </summary>
-		/// <param name="Filename">The ini file to load</param>
-		public ConfigCacheIni_UPL(FileReference Filename)
-		{
-			Init(Filename);
-		}
-
-		/// <summary>
-		/// Constructor. Parses ini hierarchy for the specified project.  No Platform settings.
-		/// </summary>
-		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
-		/// <param name="ProjectDirectory">Project path</param>
-		/// <param name="EngineDirectory"></param>
-		public ConfigCacheIni_UPL(string BaseIniName, string ProjectDirectory, string EngineDirectory = null)
-		{
-			Init(BuildHostPlatform.Current.Platform, BaseIniName, (ProjectDirectory == null) ? null : new DirectoryReference(ProjectDirectory), (EngineDirectory == null) ? null : new DirectoryReference(EngineDirectory));
-		}
-
-		/// <summary>
-		/// Constructor. Parses ini hierarchy for the specified project.  No Platform settings.
-		/// </summary>
-		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
-		/// <param name="ProjectDirectory">Project path</param>
-		/// <param name="EngineDirectory"></param>
-		public ConfigCacheIni_UPL(string BaseIniName, DirectoryReference ProjectDirectory, DirectoryReference EngineDirectory = null)
-		{
-			Init(BuildHostPlatform.Current.Platform, BaseIniName, ProjectDirectory, EngineDirectory);
-		}
-
-		/// <summary>
-		/// Constructor. Parses ini hierarchy for the specified platform and project.
-		/// </summary>
-		/// <param name="ProjectDirectory">Project path</param>
-		/// <param name="Platform">Target platform</param>
-		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
-		/// <param name="EngineDirectory"></param>
-		public ConfigCacheIni_UPL(UnrealTargetPlatform Platform, string BaseIniName, string ProjectDirectory, string EngineDirectory = null)
-		{
-			Init(Platform, BaseIniName, (ProjectDirectory == null) ? null : new DirectoryReference(ProjectDirectory), (EngineDirectory == null) ? null : new DirectoryReference(EngineDirectory));
-		}
-
-		/// <summary>
-		/// Constructor. Parses ini hierarchy for the specified platform and project.
-		/// </summary>
-		/// <param name="ProjectDirectory">Project path</param>
-		/// <param name="Platform">Target platform</param>
-		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
-		/// <param name="EngineDirectory"></param>
-		/// <param name="EngineOnly"></param>
-		/// <param name="BaseCache"></param>
-		public ConfigCacheIni_UPL(UnrealTargetPlatform Platform, string BaseIniName, DirectoryReference ProjectDirectory, DirectoryReference EngineDirectory = null, bool EngineOnly = false, ConfigCacheIni_UPL BaseCache = null)
-		{
-			Init(Platform, BaseIniName, ProjectDirectory, EngineDirectory, EngineOnly, BaseCache);
-		}
-
-		private void InitCommon()
+		private ConfigCacheIni_UPL()
 		{
 			Sections = new Dictionary<string, IniSection>(StringComparer.InvariantCultureIgnoreCase);
 		}
 
-		private void Init(FileReference IniFileName)
+		/// <summary>
+		/// Constructor. Parses a single ini file. No Platform settings, no engine hierarchy. Do not use this with ini files that have hierarchy!
+		/// </summary>
+		/// <param name="Filename">The ini file to load</param>
+		/// <param name="Logger"></param>
+		public ConfigCacheIni_UPL(FileReference Filename, ILogger Logger) : this()
 		{
-			InitCommon();
 			bIsMergingConfigs = false;
-			ParseIniFile(IniFileName);
+			ParseIniFile(Filename, Logger);
 		}
 
-		private void Init(UnrealTargetPlatform Platform, string BaseIniName, DirectoryReference ProjectDirectory, DirectoryReference EngineDirectory, bool EngineOnly = false, ConfigCacheIni_UPL BaseCache = null)
+		/// <summary>
+		/// Constructor. Parses ini hierarchy for the specified project.  No Platform settings.
+		/// </summary>
+		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
+		/// <param name="ProjectDirectory">Project path</param>
+		/// <param name="Logger">Logger for </param>
+		/// <param name="EngineDirectory"></param>
+		public ConfigCacheIni_UPL(string BaseIniName, string? ProjectDirectory, ILogger Logger, string? EngineDirectory = null)
+			: this(BuildHostPlatform.Current.Platform, BaseIniName, ProjectDirectory, Logger, EngineDirectory)
 		{
-			InitCommon();
+		}
+
+		/// <summary>
+		/// Constructor. Parses ini hierarchy for the specified project.  No Platform settings.
+		/// </summary>
+		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
+		/// <param name="ProjectDirectory">Project path</param>
+		/// <param name="Logger">Logger for output</param>
+		/// <param name="EngineDirectory"></param>
+		public ConfigCacheIni_UPL(string BaseIniName, DirectoryReference ProjectDirectory, ILogger Logger, DirectoryReference? EngineDirectory = null)
+			: this(BuildHostPlatform.Current.Platform, BaseIniName, ProjectDirectory, Logger, EngineDirectory)
+		{
+		}
+
+		/// <summary>
+		/// Constructor. Parses ini hierarchy for the specified platform and project.
+		/// </summary>
+		/// <param name="ProjectDirectory">Project path</param>
+		/// <param name="Platform">Target platform</param>
+		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
+		/// <param name="Logger"></param>
+		/// <param name="EngineDirectory"></param>
+		public ConfigCacheIni_UPL(UnrealTargetPlatform Platform, string BaseIniName, string? ProjectDirectory, ILogger Logger, string? EngineDirectory = null)
+			: this(Platform, BaseIniName,
+				  (ProjectDirectory == null) ? null : new DirectoryReference(ProjectDirectory),
+				  Logger,
+				  (EngineDirectory == null) ? null : new DirectoryReference(EngineDirectory))
+		{
+		}
+
+		/// <summary>
+		/// Constructor. Parses ini hierarchy for the specified platform and project.
+		/// </summary>
+		/// <param name="ProjectDirectory">Project path</param>
+		/// <param name="Platform">Target platform</param>
+		/// <param name="BaseIniName">Ini name (Engine, Editor, etc)</param>
+		/// <param name="Logger"></param>
+		/// <param name="EngineDirectory"></param>
+		/// <param name="EngineOnly"></param>
+		/// <param name="BaseCache"></param>
+		public ConfigCacheIni_UPL(UnrealTargetPlatform Platform, string BaseIniName, DirectoryReference? ProjectDirectory, ILogger Logger, DirectoryReference? EngineDirectory = null, bool EngineOnly = false, ConfigCacheIni_UPL? BaseCache = null) : this()
+		{
 			bIsMergingConfigs = true;
 			if (EngineDirectory == null)
 			{
-				EngineDirectory = UnrealBuildTool.EngineDirectory;
+				EngineDirectory = Unreal.EngineDirectory;
 			}
 
 			if (BaseCache != null)
@@ -2716,7 +2919,7 @@ namespace UnrealBuildTool
 				{
 					if (FileReference.Exists(IniFileName))
 					{
-						ParseIniFile(IniFileName);
+						ParseIniFile(IniFileName, Logger);
 					}
 				}
 			}
@@ -2726,7 +2929,7 @@ namespace UnrealBuildTool
 				{
 					if (FileReference.Exists(IniFileName))
 					{
-						ParseIniFile(IniFileName);
+						ParseIniFile(IniFileName, Logger);
 					}
 				}
 			}
@@ -2737,9 +2940,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="SectionName"></param>
 		/// <returns>Found section or null</returns>
-		public IniSection FindSection(string SectionName)
+		public IniSection? FindSection(string SectionName)
 		{
-			IniSection Section;
+			IniSection? Section;
 			Sections.TryGetValue(SectionName, out Section);
 			return Section;
 		}
@@ -2747,19 +2950,22 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Finds values associated with the specified key (does not copy the list)
 		/// </summary>
-		private bool GetList(string SectionName, string Key, out IniValues Value)
+		private bool GetList(string SectionName, string Key, [NotNullWhen(true)] out IniValues? Value)
 		{
-			bool Result = false;
-			IniSection Section = FindSection(SectionName);
 			Value = null;
-			if (Section != null)
+
+			IniSection? Section = FindSection(SectionName);
+			if (Section == null)
 			{
-				if (Section.TryGetValue(Key, out Value))
-				{
-					Result = true;
-				}
+				return false;
 			}
-			return Result;
+
+			if (Section.TryGetValue(Key, out Value) && Value != null)
+			{
+				return true;
+			}
+
+			return false;
 		}
 
 		/// <summary>
@@ -2769,16 +2975,15 @@ namespace UnrealBuildTool
 		/// <param name="Key">Key name</param>
 		/// <param name="Value">Copy of the list containing all values associated with the specified key</param>
 		/// <returns>True if the key exists</returns>
-		public bool GetArray(string SectionName, string Key, out List<string> Value)
+		public bool GetArray(string SectionName, string Key, [NotNullWhen(true)] out List<string>? Value)
 		{
 			Value = null;
-			IniValues ValueList;
-			bool Result = GetList(SectionName, Key, out ValueList);
-			if (Result)
+			if (GetList(SectionName, Key, out IniValues? ValueList) && ValueList != null)
 			{
 				Value = new List<string>(ValueList);
+				return true;
 			}
-			return Result;
+			return false;
 		}
 
 		/// <summary>
@@ -2791,7 +2996,7 @@ namespace UnrealBuildTool
 		public bool GetString(string SectionName, string Key, out string Value)
 		{
 			Value = String.Empty;
-			IniValues ValueList;
+			IniValues? ValueList;
 			bool Result = GetList(SectionName, Key, out ValueList);
 			if (Result && ValueList != null && ValueList.Count > 0)
 			{
@@ -3015,10 +3220,10 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Loads and parses ini file.
 		/// </summary>
-		public void ParseIniFile(FileReference Filename)
+		public void ParseIniFile(FileReference Filename, ILogger Logger)
 		{
-			String[] IniLines = null;
-			List<Command> Commands = null;
+			String[]? IniLines = null;
+			List<Command>? Commands = null;
 			if (!FileCache.ContainsKey(Filename.FullName))
 			{
 				try
@@ -3029,7 +3234,7 @@ namespace UnrealBuildTool
 				}
 				catch (Exception ex)
 				{
-					Log.TraceInformation("Error reading ini file: " + Filename + " Exception: " + ex.Message);
+					Logger.LogInformation("Error reading ini file: {Filename} Exception: {Ex}", Filename, ex.Message);
 				}
 			}
 			else
@@ -3038,13 +3243,13 @@ namespace UnrealBuildTool
 			}
 			if (IniLines != null && Commands != null)
 			{
-				IniSection CurrentSection = null;
+				IniSection? CurrentSection = null;
 
 				// Line Index for exceptions
 				int LineIndex = 1;
 				bool bMultiLine = false;
 				string SingleValue = "";
-				string  Key = "";
+				string Key = "";
 				ParseAction LastAction = ParseAction.None;
 
 				// Parse each line
@@ -3116,19 +3321,19 @@ namespace UnrealBuildTool
 			}
 			else if (Commands != null)
 			{
-				IniSection CurrentSection = null;
+				IniSection? CurrentSection = null;
 
 				// run each command
 				for (int Idx = 0; Idx < Commands.Count; ++Idx)
 				{
 					Command Command = Commands[Idx];
-					if (Command is SectionCommand)
+					if (Command is SectionCommand SectionCommand)
 					{
-						CurrentSection = FindOrAddSection((Command as SectionCommand).TrimmedLine, (Command as SectionCommand).Filename, (Command as SectionCommand).LineIndex);
+						CurrentSection = FindOrAddSection(SectionCommand.TrimmedLine!, SectionCommand.Filename!, SectionCommand.LineIndex);
 					}
-					else if (Command is KeyValueCommand)
+					else if (Command is KeyValueCommand KeyValueCommand)
 					{
-						ProcessKeyValuePair(CurrentSection, (Command as KeyValueCommand).Key, (Command as KeyValueCommand).Value, (Command as KeyValueCommand).LastAction);
+						ProcessKeyValuePair(CurrentSection!, KeyValueCommand.Key!, KeyValueCommand.Value!, KeyValueCommand.LastAction);
 					}
 				}
 			}
@@ -3172,7 +3377,7 @@ namespace UnrealBuildTool
 				case ParseAction.New:
 					{
 						// New/replace
-						IniValues Value;
+						IniValues? Value;
 						if (CurrentSection.TryGetValue(Key, out Value) == false)
 						{
 							Value = new IniValues();
@@ -3184,7 +3389,7 @@ namespace UnrealBuildTool
 					break;
 				case ParseAction.Add:
 					{
-						IniValues Value;
+						IniValues? Value;
 						if (CurrentSection.TryGetValue(Key, out Value) == false)
 						{
 							Value = new IniValues();
@@ -3195,7 +3400,7 @@ namespace UnrealBuildTool
 					break;
 				case ParseAction.Remove:
 					{
-						IniValues Value;
+						IniValues? Value;
 						if (CurrentSection.TryGetValue(Key, out Value))
 						{
 							int ExistingIndex = Value.FindIndex(X => (String.Compare(SingleValue, X, true) == 0));
@@ -3215,17 +3420,19 @@ namespace UnrealBuildTool
 		private IniSection FindOrAddSection(string TrimmedLine, FileReference Filename, int LineIndex)
 		{
 			int SectionEndIndex = TrimmedLine.IndexOf(']');
-			if (SectionEndIndex != (TrimmedLine.Length - 1))
+			if (SectionEndIndex < 1)
 			{
 				throw new IniParsingException("Mismatched brackets when parsing section name in {0}, line {1}: {2}", Filename, LineIndex, TrimmedLine);
 			}
-			string SectionName = TrimmedLine.Substring(1, TrimmedLine.Length - 2);
+
+			// comment could follow the ] but will just be trimmed out
+			string SectionName = TrimmedLine.Substring(1, SectionEndIndex - 1);
 			if (String.IsNullOrEmpty(SectionName))
 			{
 				throw new IniParsingException("Empty section name when parsing {0}, line {1}: {2}", Filename, LineIndex, TrimmedLine);
 			}
 			{
-				IniSection CurrentSection;
+				IniSection? CurrentSection;
 				if (Sections.TryGetValue(SectionName, out CurrentSection) == false)
 				{
 					CurrentSection = new IniSection();
@@ -3250,11 +3457,10 @@ namespace UnrealBuildTool
 			yield return FileReference.Combine(EngineDirectory, "Restricted", "NotForLicensees", "Config", "Base" + BaseIniName + ".ini");
 		}
 
-
 		/// <summary>
 		/// Returns a list of INI filenames for the given project
 		/// </summary>
-		private static IEnumerable<FileReference> EnumerateCrossPlatformIniFileNames(DirectoryReference ProjectDirectory, DirectoryReference EngineDirectory, UnrealTargetPlatform Platform, string BaseIniName, bool SkipEngine)
+		private static IEnumerable<FileReference> EnumerateCrossPlatformIniFileNames(DirectoryReference? ProjectDirectory, DirectoryReference EngineDirectory, UnrealTargetPlatform Platform, string BaseIniName, bool SkipEngine)
 		{
 			if (!SkipEngine)
 			{
@@ -3293,35 +3499,18 @@ namespace UnrealBuildTool
 				yield return FileReference.Combine(ProjectDirectory, "Config", PlatformName, PlatformName + BaseIniName + ".ini");
 			}
 
-			DirectoryReference UserSettingsFolder = Utils.GetUserSettingDirectory(); // Match FPlatformProcess::UserSettingsDir()
-			DirectoryReference PersonalFolder = null; // Match FPlatformProcess::UserDir()
-			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Mac)
-			{
-				PersonalFolder = new DirectoryReference(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), "Documents"));
-			}
-			else if (Environment.OSVersion.Platform == PlatformID.Unix)
-			{
-				PersonalFolder = new DirectoryReference(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Personal), "Documents"));
-			}
-			else
-			{
-				// Not all user accounts have a local application data directory (eg. SYSTEM, used by Jenkins for builds).
-				string PersonalFolderSetting = Environment.GetFolderPath(Environment.SpecialFolder.Personal);
-				if(!String.IsNullOrEmpty(PersonalFolderSetting))
-				{
-					PersonalFolder = new DirectoryReference(PersonalFolderSetting);
-				}
-			}
+			DirectoryReference? UserSettingsFolder = Unreal.UserSettingDirectory; // Match FPlatformProcess::UserSettingsDir()
+			DirectoryReference? PersonalFolder = Unreal.UserDirectory; // Match FPlatformProcess::UserDir()
 
-			if(UserSettingsFolder != null)
+			if (UserSettingsFolder != null)
 			{
-				// <AppData>/UE4/EngineConfig/User* ini
+				// <AppData>/Unreal/EngineConfig/User* ini
 				yield return FileReference.Combine(UserSettingsFolder, "Unreal Engine", "Engine", "Config", "User" + BaseIniName + ".ini");
 			}
 
-			if(PersonalFolder != null)
+			if (PersonalFolder != null)
 			{
-				// <Documents>/UE4/EngineConfig/User* ini
+				// <Documents>/Unreal/EngineConfig/User* ini
 				yield return FileReference.Combine(PersonalFolder, "Unreal Engine", "Engine", "Config", "User" + BaseIniName + ".ini");
 			}
 
@@ -3337,7 +3526,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		private static string GetIniPlatformName(UnrealTargetPlatform TargetPlatform)
 		{
-			if (TargetPlatform == UnrealTargetPlatform.Win32 || TargetPlatform == UnrealTargetPlatform.Win64)
+			if (TargetPlatform == UnrealTargetPlatform.Win64)
 			{
 				return "Windows";
 			}
@@ -3347,5 +3536,4 @@ namespace UnrealBuildTool
 			}
 		}
 	}
-
 }

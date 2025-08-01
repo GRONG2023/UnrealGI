@@ -3,6 +3,7 @@
 #include "SLayerBrowser.h"
 #include "Modules/ModuleManager.h"
 #include "Framework/Application/SlateApplication.h"
+#include "WorldPartition/WorldPartitionSubsystem.h"
 #include "Editor.h"
 #include "SLayerStats.h"
 #include "SceneOutlinerModule.h"
@@ -32,7 +33,7 @@ void SLayerBrowser::Construct(const FArguments& InArgs)
 	//	Layers View Section
 	SAssignNew(LayersSection, SBorder)
 		.Padding(5)
-		.BorderImage(FEditorStyle::GetBrush("NoBrush"))
+		.BorderImage(FAppStyle::GetBrush("NoBrush"))
 		.Content()
 		[
 			SNew(SVerticalBox)
@@ -58,7 +59,7 @@ void SLayerBrowser::Construct(const FArguments& InArgs)
 	//////////////////////////////////////////////////////////////////////////
 	//	Layer Contents Header
 	SAssignNew(LayerContentsHeader, SBorder)
-		.BorderImage(FEditorStyle::GetBrush("LayerBrowser.LayerContentsQuickbarBackground"))
+		.BorderImage(FAppStyle::GetBrush("LayerBrowser.LayerContentsQuickbarBackground"))
 		.Visibility(TAttribute< EVisibility >(this, &SLayerBrowser::GetLayerContentsHeaderVisibility))
 		.Content()
 		[
@@ -69,7 +70,7 @@ void SLayerBrowser::Construct(const FArguments& InArgs)
 			[
 				SAssignNew(ToggleModeButton, SButton)
 				.ContentPadding(FMargin(2, 0, 2, 0))
-				.ButtonStyle(FEditorStyle::Get(), "LayerBrowserButton")
+				.ButtonStyle(FAppStyle::Get(), "LayerBrowserButton")
 				.OnClicked(this, &SLayerBrowser::ToggleLayerContents)
 				.ForegroundColor(FSlateColor::UseForeground())
 				.VAlign(VAlign_Center)
@@ -123,23 +124,35 @@ void SLayerBrowser::Construct(const FArguments& InArgs)
 	//	Layer Contents Section
 	FSceneOutlinerModule& SceneOutlinerModule = FModuleManager::LoadModuleChecked< FSceneOutlinerModule >("SceneOutliner");
 	
-	using namespace SceneOutliner;
-	FInitializationOptions InitOptions;
+	FSceneOutlinerInitializationOptions InitOptions;
 	{
-		InitOptions.Mode = ESceneOutlinerMode::ActorBrowsing;
-
 		// We hide the header row to keep the UI compact.
 		InitOptions.bShowHeaderRow = false;
 		InitOptions.bShowParentTree = false;
 		InitOptions.bShowCreateNewFolder = false;
-		InitOptions.CustomDelete = FCustomSceneOutlinerDeleteDelegate::CreateSP(this, &SLayerBrowser::RemoveActorsFromSelectedLayer);
+
+		auto CustomDelete = [this](TArray<TWeakPtr<ISceneOutlinerTreeItem>> Items)
+		{
+			TArray<TWeakObjectPtr<AActor>> Actors;
+			Actors.Reserve(Items.Num());
+			for (const TWeakPtr<ISceneOutlinerTreeItem>& Item : Items)
+			{
+				if (FActorTreeItem* ActorItem = Item.Pin()->CastTo<FActorTreeItem>())
+				{
+					Actors.Add(ActorItem->Actor);
+				}
+			}
+			RemoveActorsFromSelectedLayer(Actors);
+		};
+
+		InitOptions.CustomDelete = FCustomSceneOutlinerDeleteDelegate::CreateLambda(CustomDelete);
 
 		// Outliner Gutter
-		InitOptions.ColumnMap.Add(FBuiltInColumnTypes::Gutter(), FColumnInfo(EColumnVisibility::Visible, 0) );
+		InitOptions.ColumnMap.Add(FSceneOutlinerBuiltInColumnTypes::Gutter(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 0) );
 		// Actor Label
-		InitOptions.ColumnMap.Add(FBuiltInColumnTypes::Label(), FColumnInfo(EColumnVisibility::Visible, 10) );
+		InitOptions.ColumnMap.Add(FSceneOutlinerBuiltInColumnTypes::Label(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 10) );
 		// Layer Contents
-		InitOptions.ColumnMap.Add(FSceneOutlinerLayerContentsColumn::GetID(), FColumnInfo(SceneOutliner::EColumnVisibility::Visible, 20,
+		InitOptions.ColumnMap.Add(FSceneOutlinerLayerContentsColumn::GetID(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible, 20,
 			FCreateSceneOutlinerColumn::CreateSP( this, &SLayerBrowser::CreateCustomLayerColumn )) );
 
 		InitOptions.Filters->Add(SelectedLayersFilter);
@@ -147,10 +160,10 @@ void SLayerBrowser::Construct(const FArguments& InArgs)
 
 	SAssignNew(LayerContentsSection, SBorder)
 		.Padding(5)
-		.BorderImage(FEditorStyle::GetBrush("NoBrush"))
+		.BorderImage(FAppStyle::GetBrush("NoBrush"))
 		.Content()
 		[
-			SceneOutlinerModule.CreateSceneOutliner(InitOptions, FOnActorPicked())
+			SceneOutlinerModule.CreateActorBrowser(InitOptions)
 		];
 
 
@@ -159,6 +172,7 @@ void SLayerBrowser::Construct(const FArguments& InArgs)
 	ChildSlot
 		[
 			SAssignNew(ContentAreaBox, SVerticalBox)
+			.IsEnabled_Lambda([]() { return !UWorld::IsPartitionedWorld(GWorld); })
 		];
 
 	SetupLayersMode();

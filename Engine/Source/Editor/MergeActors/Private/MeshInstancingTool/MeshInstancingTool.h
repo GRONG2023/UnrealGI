@@ -6,7 +6,7 @@
 #include "UObject/Object.h"
 #include "Widgets/SWidget.h"
 #include "Engine/MeshMerging.h"
-#include "IMergeActorsTool.h"
+#include "MergeActorsTool.h"
 
 #include "MeshInstancingTool.generated.h"
 
@@ -41,7 +41,7 @@ public:
 			if (UObjectInitialized() && DefaultSettings)
 			{
 				DefaultSettings->RemoveFromRoot();
-				DefaultSettings->MarkPendingKill();
+				DefaultSettings->MarkAsGarbage();
 			}
 
 			DefaultSettings = nullptr;
@@ -62,7 +62,7 @@ public:
 /**
  * Mesh Instancing Tool
  */
-class FMeshInstancingTool : public IMergeActorsTool
+class FMeshInstancingTool : public FMergeActorsTool
 {
 	friend class SMeshInstancingDialog;
 
@@ -73,14 +73,18 @@ public:
 
 	// IMergeActorsTool interface
 	virtual TSharedRef<SWidget> GetWidget() override;
-	virtual FName GetIconName() const override { return "MergeActors.MeshInstancingTool"; }
+	virtual FName GetIconName() const override;
+	virtual FText GetToolNameText() const override;
 	virtual FText GetTooltipText() const override;
 	virtual FString GetDefaultPackageName() const override;
-	virtual bool CanMerge() const override;
-	virtual bool RunMerge(const FString& PackageName) override;
 
 	/** Runs the merging logic to determine predicted results */
 	FText GetPredictedResultsText();
+
+protected:
+	virtual bool RunMerge(const FString& PackageName, const TArray<TSharedPtr<FMergeComponentData>>& SelectedComponents) override;
+	virtual const TArray<TSharedPtr<FMergeComponentData>>& GetSelectedComponentsInWidget() const override;
+
 private:
 	/** Pointer to the mesh instancing dialog containing settings for the merge */
 	TSharedPtr<SMeshInstancingDialog> InstancingDialog;

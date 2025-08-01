@@ -7,23 +7,26 @@
  *  The typical use case is for structs used in the renderer and also in script code.
  */
 
-#include "CoreMinimal.h"
+#include "Async/TaskGraphFwd.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/Object.h"
 #include "UObject/Class.h"
 #include "UObject/WeakObjectPtr.h"
 #include "Misc/CoreMisc.h"
-#include "Async/TaskGraphInterfaces.h"
+#include "Net/Core/Connection/NetEnums.h"
+#include <atomic>
+
 #include "EngineBaseTypes.generated.h"
 
 class UActorComponent;
+struct FSlateBrush;
 struct FTickContext;
 
 //
 //	EInputEvent
 //
 UENUM( BlueprintType, meta=(ScriptName="InputEventType"))
-enum EInputEvent
+enum EInputEvent : int
 {
 	IE_Pressed              =0,
 	IE_Released             =1,
@@ -76,7 +79,7 @@ enum ELevelTick
 
 /** Determines which ticking group a tick function belongs to. */
 UENUM(BlueprintType)
-enum ETickingGroup
+enum ETickingGroup : int
 {
 	/** Any item that needs to be executed before physics simulation starts. */
 	TG_PrePhysics UMETA(DisplayName="Pre Physics"),
@@ -165,7 +168,7 @@ struct FTickPrerequisite
 * Abstract Base class for all tick functions.
 **/
 USTRUCT()
-struct ENGINE_API FTickFunction
+struct FTickFunction
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -259,11 +262,11 @@ private:
 		/** Internal data to track if we have started visiting this tick function yet this frame **/
 		int32 TickVisitedGFrameCounter;
 
-		/** Internal data to track if we have finshed visiting this tick function yet this frame **/
-		int32 TickQueuedGFrameCounter;
+		/** Internal data to track if we have finished visiting this tick function yet this frame **/
+		std::atomic<int32> TickQueuedGFrameCounter;
 
 		/** Pointer to the task, only used during setup. This is often stale. **/
-		void* TaskPointer;
+		FBaseGraphTask* TaskPointer;
 
 		/** The next function in the cooling down list for ticks with an interval*/
 		FTickFunction* Next;
@@ -289,35 +292,35 @@ private:
 
 public:
 	/** Default constructor, intitalizes to reasonable defaults **/
-	FTickFunction();
+	ENGINE_API FTickFunction();
 	/** Destructor, unregisters the tick function **/
-	virtual ~FTickFunction();
+	ENGINE_API virtual ~FTickFunction();
 
 	/** 
-	 * Adds the tick function to the master list of tick functions. 
+	 * Adds the tick function to the primary list of tick functions. 
 	 * @param Level - level to place this tick function in
 	 **/
-	void RegisterTickFunction(class ULevel* Level);
-	/** Removes the tick function from the master list of tick functions. **/
-	void UnRegisterTickFunction();
+	ENGINE_API void RegisterTickFunction(class ULevel* Level);
+	/** Removes the tick function from the primary list of tick functions. **/
+	ENGINE_API void UnRegisterTickFunction();
 	/** See if the tick function is currently registered */
 	bool IsTickFunctionRegistered() const { return (InternalData && InternalData->bRegistered); }
 
 	/** Enables or disables this tick function. **/
-	void SetTickFunctionEnable(bool bInEnabled);
+	ENGINE_API void SetTickFunctionEnable(bool bInEnabled);
 	/** Returns whether the tick function is currently enabled */
 	bool IsTickFunctionEnabled() const { return TickState != ETickState::Disabled; }
 	/** Returns whether it is valid to access this tick function's completion handle */
 	bool IsCompletionHandleValid() const { return (InternalData && InternalData->TaskPointer); }
 	/** Update tick interval in the system and overwrite the current cooldown if any. */
-	void UpdateTickIntervalAndCoolDown(float NewTickInterval);
+	ENGINE_API void UpdateTickIntervalAndCoolDown(float NewTickInterval);
 
 	/**
 	* Gets the current completion handle of this tick function, so it can be delayed until a later point when some additional
 	* tasks have been completed.  Only valid after TG_PreAsyncWork has started and then only until the TickFunction finishes
 	* execution
 	**/
-	FGraphEventRef GetCompletionHandle() const;
+	ENGINE_API FGraphEventRef GetCompletionHandle() const;
 
 	/** 
 	* Gets the action tick group that this function will be elligible to start in.
@@ -343,18 +346,18 @@ public:
 	 * @param TargetObject - UObject containing this tick function. Only used to verify that the other pointer is still usable
 	 * @param TargetTickFunction - Actual tick function to use as a prerequisite
 	 **/
-	void AddPrerequisite(UObject* TargetObject, struct FTickFunction& TargetTickFunction);
+	ENGINE_API void AddPrerequisite(UObject* TargetObject, struct FTickFunction& TargetTickFunction);
 	/** 
 	 * Removes a prerequisite that was previously added.
 	 * @param TargetObject - UObject containing this tick function. Only used to verify that the other pointer is still usable
 	 * @param TargetTickFunction - Actual tick function to use as a prerequisite
 	 **/
-	void RemovePrerequisite(UObject* TargetObject, struct FTickFunction& TargetTickFunction);
+	ENGINE_API void RemovePrerequisite(UObject* TargetObject, struct FTickFunction& TargetTickFunction);
 	/** 
 	 * Sets this function to hipri and all prerequisites recursively
 	 * @param bInHighPriority - priority to set
 	 **/
-	void SetPriorityIncludingPrerequisites(bool bInHighPriority);
+	ENGINE_API void SetPriorityIncludingPrerequisites(bool bInHighPriority);
 
 	/**
 	 * @return a reference to prerequisites for this tick function.
@@ -379,22 +382,22 @@ private:
 	 * Queues a tick function for execution from the game thread
 	 * @param TickContext - context to tick in
 	 */
-	void QueueTickFunction(class FTickTaskSequencer& TTS, const FTickContext& TickContext);
+	ENGINE_API void QueueTickFunction(class FTickTaskSequencer& TTS, const FTickContext& TickContext);
 
 	/**
 	 * Queues a tick function for execution from the game thread
 	 * @param TickContext - context to tick in
 	 * @param StackForCycleDetection - Stack For Cycle Detection
 	 */
-	void QueueTickFunctionParallel(const FTickContext& TickContext, TArray<FTickFunction*, TInlineAllocator<8> >& StackForCycleDetection);
+	ENGINE_API void QueueTickFunctionParallel(const FTickContext& TickContext, TArray<FTickFunction*, TInlineAllocator<8> >& StackForCycleDetection);
 
 	/** Returns the delta time to use when ticking this function given the TickContext */
-	float CalculateDeltaTime(const FTickContext& TickContext);
+	ENGINE_API float CalculateDeltaTime(const FTickContext& TickContext);
 
 	/** 
 	 * Logs the prerequisites
 	 */
-	void ShowPrerequistes(int32 Indent = 1);
+	ENGINE_API void ShowPrerequistes(int32 Indent = 1);
 
 	/** 
 	 * Abstract function actually execute the tick. 
@@ -403,9 +406,9 @@ private:
 	 * @param CurrentThread - thread we are executing on, useful to pass along as new tasks are created
 	 * @param MyCompletionGraphEvent - completion event for this task. Useful for holding the completetion of this task until certain child tasks are complete.
 	 **/
-	virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent) PURE_VIRTUAL(,);
+	ENGINE_API virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent) PURE_VIRTUAL(,);
 	/** Abstract function to describe this tick. Used to print messages about illegal cycles in the dependency graph **/
-	virtual FString DiagnosticMessage() PURE_VIRTUAL(, return TEXT("DiagnosticMessage() not implemented"););
+	ENGINE_API virtual FString DiagnosticMessage() PURE_VIRTUAL(, return TEXT("DiagnosticMessage() not implemented"););
 	/** Function to give a 'context' for this tick, used for grouped active tick reporting */
 	virtual FName DiagnosticContext(bool bDetailed)
 	{
@@ -512,75 +515,11 @@ struct TStructOpsTypeTraits<FActorComponentTickFunction> : public TStructOpsType
 	};
 };
 
-/** Types of network failures broadcast from the engine */
-UENUM(BlueprintType)
-namespace ENetworkFailure
-{
-	enum Type
-	{
-		/** A relevant net driver has already been created for this service */
-		NetDriverAlreadyExists,
-		/** The net driver creation failed */
-		NetDriverCreateFailure,
-		/** The net driver failed its Listen() call */
-		NetDriverListenFailure,
-		/** A connection to the net driver has been lost */
-		ConnectionLost,
-		/** A connection to the net driver has timed out */
-		ConnectionTimeout,
-		/** The net driver received an NMT_Failure message */
-		FailureReceived,
-		/** The client needs to upgrade their game */
-		OutdatedClient,
-		/** The server needs to upgrade their game */
-		OutdatedServer,
-		/** There was an error during connection to the game */
-		PendingConnectionFailure,
-		/** NetGuid mismatch */
-		NetGuidMismatch,
-		/** Network checksum mismatch */
-		NetChecksumMismatch
-	};
-}
-
-
-namespace ENetworkFailure
-{
-	inline const TCHAR* ToString(ENetworkFailure::Type FailureType)
-	{
-		switch (FailureType)
-		{
-		case NetDriverAlreadyExists:
-			return TEXT("NetDriverAlreadyExists");
-		case NetDriverCreateFailure:
-			return TEXT("NetDriverCreateFailure");
-		case NetDriverListenFailure:
-			return TEXT("NetDriverListenFailure");
-		case ConnectionLost:
-			return TEXT("ConnectionLost");
-		case ConnectionTimeout:
-			return TEXT("ConnectionTimeout");
-		case FailureReceived:
-			return TEXT("FailureReceived");
-		case OutdatedClient:
-			return TEXT("OutdatedClient");
-		case OutdatedServer:
-			return TEXT("OutdatedServer");
-		case PendingConnectionFailure:
-			return TEXT("PendingConnectionFailure");
-		case NetGuidMismatch:
-			return TEXT("NetGuidMismatch");
-		case NetChecksumMismatch:
-			return TEXT("NetChecksumMismatch");
-		}
-		return TEXT("Unknown ENetworkFailure error occurred.");
-	}
-}
 
 UENUM()
 namespace ENetworkLagState
 {
-	enum Type
+	enum Type : int
 	{
 		/** The net driver is operating normally or it is not possible to tell if it is lagging */
 		NotLagging,
@@ -609,7 +548,7 @@ namespace ENetworkLagState
 UENUM(BlueprintType)
 namespace ETravelFailure
 {
-	enum Type
+	enum Type : int
 	{
 		/** No level found in the loaded package */
 		NoLevel,
@@ -675,7 +614,7 @@ namespace ETravelFailure
 
 // Traveling from server to server.
 UENUM()
-enum ETravelType
+enum ETravelType : int
 {
 	/** Absolute URL. */
 	TRAVEL_Absolute,
@@ -690,7 +629,7 @@ enum ETravelType
 UENUM(BlueprintType)
 namespace EDemoPlayFailure
 {
-	enum Type
+	enum UE_DEPRECATED(5.1, "No longer used in favor of EReplayResult") Type : int
 	{
 		/** A Generic failure. */
 		Generic,
@@ -715,6 +654,8 @@ namespace EDemoPlayFailure
 
 namespace EDemoPlayFailure
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	UE_DEPRECATED(5.1, "EDemoPlayFailure is now deprecated")
 	inline const TCHAR* ToString(EDemoPlayFailure::Type FailureType)
 	{
 		switch (FailureType)
@@ -741,11 +682,12 @@ namespace EDemoPlayFailure
 
 		return TEXT("Unknown EDemoPlayFailure error occurred.");
 	}
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 //URL structure.
 USTRUCT()
-struct ENGINE_API FURL
+struct FURL
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -781,8 +723,8 @@ struct ENGINE_API FURL
 	FString Portal;
 
 	// Statics.
-	static FUrlConfig UrlConfig;
-	static bool bDefaultsInitialized;
+	static ENGINE_API FUrlConfig UrlConfig;
+	static ENGINE_API bool bDefaultsInitialized;
 
 	/**
 	 * Prevent default from being generated.
@@ -792,22 +734,22 @@ struct ENGINE_API FURL
 	/**
 	 * Construct a purely default, local URL from an optional filename.
 	 */
-	FURL( const TCHAR* Filename=nullptr );
+	ENGINE_API FURL( const TCHAR* Filename=nullptr );
 
 	/**
 	 * Construct a URL from text and an optional relative base.
 	 */
-	FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type );
+	ENGINE_API FURL( FURL* Base, const TCHAR* TextURL, ETravelType Type );
 
-	static void StaticInit();
-	static void StaticExit();
+	static ENGINE_API void StaticInit();
+	static ENGINE_API void StaticExit();
 
 	/**
 	 * Static: Removes any special URL characters from the specified string
 	 *
 	 * @param Str String to be filtered
 	 */
-	static void FilterURLString( FString& Str );
+	static ENGINE_API void FilterURLString( FString& Str );
 
 	/**
 	 * Returns whether this URL corresponds to an internal object, i.e. an Unreal
@@ -815,18 +757,18 @@ struct ENGINE_API FURL
 	 * is false, the URL refers to an object that a remote application like Internet
 	 * Explorer can execute.
 	 */
-	bool IsInternal() const;
+	ENGINE_API bool IsInternal() const;
 
 	/**
 	 * Returns whether this URL corresponds to an internal object on this local 
 	 * process. In this case, no Internet use is necessary.
 	 */
-	bool IsLocalInternal() const;
+	ENGINE_API bool IsLocalInternal() const;
 
 	/**
 	 * Tests if the URL contains an option string.
 	 */
-	bool HasOption( const TCHAR* Test ) const;
+	ENGINE_API bool HasOption( const TCHAR* Test ) const;
 
 	/**
 	 * Returns the value associated with an option.
@@ -836,37 +778,37 @@ struct ENGINE_API FURL
 	 *
 	 * @return The value of the named option, or Default if the option wasn't found.
 	 */
-	const TCHAR* GetOption( const TCHAR* Match, const TCHAR* Default ) const;
+	ENGINE_API const TCHAR* GetOption( const TCHAR* Match, const TCHAR* Default ) const;
 
 	/**
 	 * Load URL from config.
 	 */
-	void LoadURLConfig( const TCHAR* Section, const FString& Filename=GGameIni );
+	ENGINE_API void LoadURLConfig( const TCHAR* Section, const FString& Filename=GGameIni );
 
 	/**
 	 * Save URL to config.
 	 */
-	void SaveURLConfig( const TCHAR* Section, const TCHAR* Item, const FString& Filename=GGameIni ) const;
+	ENGINE_API void SaveURLConfig( const TCHAR* Section, const TCHAR* Item, const FString& Filename=GGameIni ) const;
 
 	/**
 	 * Add a unique option to the URL, replacing any existing one.
 	 */
-	void AddOption( const TCHAR* Str );
+	ENGINE_API void AddOption( const TCHAR* Str );
 
 	/**
 	 * Remove an option from the URL
 	 */
-	void RemoveOption( const TCHAR* Key, const TCHAR* Section = nullptr, const FString& Filename = GGameIni);
+	ENGINE_API void RemoveOption( const TCHAR* Key, const TCHAR* Section = nullptr, const FString& Filename = GGameIni);
 
 	/**
 	 * Convert this URL to text.
 	 */
-	FString ToString( bool FullyQualified=0 ) const;
+	ENGINE_API FString ToString( bool FullyQualified=0 ) const;
 
 	/**
 	 * Prepares the Host and Port values into a standards compliant string
 	 */
-	FString GetHostPortString() const;
+	ENGINE_API FString GetHostPortString() const;
 
 	/**
 	 * Serializes a FURL to or from an archive.
@@ -876,7 +818,7 @@ struct ENGINE_API FURL
 	/**
 	 * Compare two URLs to see if they refer to the same exact thing.
 	 */
-	bool operator==( const FURL& Other ) const;
+	ENGINE_API bool operator==( const FURL& Other ) const;
 };
 
 /**
@@ -908,12 +850,12 @@ enum ENetMode
  * Don't change the order, the ID is serialized with the editor
  */
 UENUM()
-enum EViewModeIndex
+enum EViewModeIndex : int
 {
 	/** Wireframe w/ brushes. */
-	VMI_BrushWireframe = 0 UMETA(DisplayName = "Brush Wireframe"),
+	VMI_BrushWireframe = 0 UMETA(DisplayName = "Wireframe"),
 	/** Wireframe w/ BSP. */
-	VMI_Wireframe = 1 UMETA(DisplayName = "Wireframe"),
+	VMI_Wireframe = 1 UMETA(DisplayName = "CSG Wireframe"),
 	/** Unlit. */
 	VMI_Unlit = 2 UMETA(DisplayName = "Unlit"),
 	/** Lit. */
@@ -965,6 +907,27 @@ enum EViewModeIndex
 	/** Run ray tracing debug pipeline */
 	VMI_RayTracingDebug = 28 UMETA(DisplayName = "Ray Tracing Debug"),
 
+	/** Visualize various aspects of Nanite */
+	VMI_VisualizeNanite = 29 UMETA(DisplayName = "Nanite Visualization"),
+
+	/** Compare the required texture resolution to the actual resolution. */
+	VMI_VirtualTexturePendingMips = 30 UMETA(DisplayName = "Virtual Texture Pending Mips"),
+
+	/** Visualize Lumen debug views */
+	VMI_VisualizeLumen = 31 UMETA(DisplayName = "Lumen Visualization"),
+
+	/** Visualize virtual shadow map */
+	VMI_VisualizeVirtualShadowMap = 32 UMETA(DisplayName = "Virtual Shadow Map Visualization"),
+
+	/** Visualize Skin Cache. */
+	VMI_VisualizeGPUSkinCache = 33 UMETA(DisplayName = "GPU Skin Cache Visualization"),
+
+	/** Visualize Substrate debug views */
+	VMI_VisualizeSubstrate = 34 UMETA(DisplayName = "Substrate Visualization"),
+
+	/** Visualize Groom debug views */
+	VMI_VisualizeGroom = 35 UMETA(DisplayName = "Groom Visualization"),
+
 	VMI_Max UMETA(Hidden),
 
 	// VMI_Unknown - The value assigned to VMI_Unknown must be the highest possible of any member of EViewModeIndex, or GetViewModeName might seg-fault
@@ -974,8 +937,8 @@ enum EViewModeIndex
 /**
  * Class containing a static util function to help with EViewModeIndex
  */
-UCLASS(config = Engine)
-class ENGINE_API UViewModeUtils : public UObject
+UCLASS(config = Engine, MinimalAPI)
+class UViewModeUtils : public UObject
 {
 	GENERATED_BODY()
 
@@ -983,7 +946,8 @@ public:
 	/**
 	 * Get the display name associated with a particular EViewModeIndex
 	 */
-	static FText GetViewModeDisplayName(const EViewModeIndex ViewModeIndex);
+	static ENGINE_API FText GetViewModeDisplayName(const EViewModeIndex ViewModeIndex);
+	static ENGINE_API const FSlateBrush* GetViewModeDisplayIcon(const EViewModeIndex ViewModeIndex);
 };
 
 
@@ -1014,7 +978,7 @@ struct FExposureSettings
 		TCHAR Buffer[BUFFER_SIZE];
 		check((Comma-In)+1 < BUFFER_SIZE);
 		
-		FCString::Strncpy(Buffer, In, (Comma-In)+1);
+		FCString::Strncpy(Buffer, In, UE_PTRDIFF_TO_INT32((Comma-In)+1));
 		FixedEV100 = FCString::Atof(Buffer);
 		bFixed = !!FCString::Atoi(Comma+1);
 	}
@@ -1035,3 +999,7 @@ class UEngineBaseTypes : public UObject
 
 };
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "Async/TaskGraphInterfaces.h"
+#include "CoreMinimal.h"
+#endif

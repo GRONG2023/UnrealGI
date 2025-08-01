@@ -22,6 +22,12 @@ static FAutoConsoleVariableRef CVarEnableSafeZoneScale(
 	ECVF_Default
 );
 
+SSafeZone::SSafeZone()
+	: Padding(*this, 0.f)
+{
+	SetCanTick(false);
+	bCanSupportFocus = false;
+}
 
 void SSafeZone::SetGlobalSafeZoneScale(TOptional<float> InScale)
 {
@@ -55,7 +61,7 @@ void SSafeZone::Construct( const FArguments& InArgs )
 		]
 	);
 
-	Padding = InArgs._Padding;
+	Padding.Assign(*this, InArgs._Padding);
 	SafeAreaScale = InArgs._SafeAreaScale;
 	bIsTitleSafe = InArgs._IsTitleSafe;
 	bPadLeft = InArgs._PadLeft;
@@ -85,7 +91,7 @@ void SSafeZone::SetTitleSafe( bool InIsTitleSafe )
 	UpdateSafeMargin();
 }
 
-void SSafeZone::UpdateSafeMargin() const
+void SSafeZone::UpdateSafeMargin()
 {
 	bSafeMarginNeedsUpdate = true;
 
@@ -127,6 +133,7 @@ void SSafeZone::UpdateSafeMargin() const
 
 	SafeMargin = FMargin(bPadLeft ? SafeMargin.Left : 0.0f, bPadTop ? SafeMargin.Top : 0.0f, bPadRight ? SafeMargin.Right : 0.0f, bPadBottom ? SafeMargin.Bottom : 0.0f);
 
+	Invalidate(EInvalidateWidgetReason::Layout);
 	bSafeMarginNeedsUpdate = false;
 }
 
@@ -160,7 +167,7 @@ FMargin SSafeZone::GetSafeMargin(float InLayoutScale) const
 {
 	if (bSafeMarginNeedsUpdate)
 	{
-		UpdateSafeMargin();
+		const_cast<SSafeZone*>(this)->UpdateSafeMargin();
 	}
 
 	const FMargin SlotPadding = Padding.Get() + (ComputeScaledSafeMargin(InLayoutScale) * SafeAreaScale);

@@ -6,9 +6,11 @@ using System.IO;
 using System.Linq;
 using AutomationTool;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using System.Text.RegularExpressions;
 using System.Threading;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
 [Help("Attempts to sync UGS binaries for the specified project at the currently synced CL of the project/engine folders")]
 [Help("project=<FortniteGame>", "Project to sync. Will search current path and paths in ueprojectdirs.")]
@@ -54,12 +56,10 @@ class SyncBinariesFromUGS : SyncProjectBase
 		string DepotBinaryPath = GetZippedBinaryPathFromUGSConfig(ProjectFile.Directory, ProjectRecord.DepotFile);
 
 		// get the CL
-		int CompatibleChangeList = 0;
-		int CurrentChangeList = 0;
-		
-		GetCurrentAndCompatibleChangeLists(ProjectRecord.DepotFile, out CurrentChangeList, out CompatibleChangeList);
+		int CurrentChangeList = P4Env.Changelist;
+		int CompatibleChangeList = P4Env.CodeChangelist;
 
-		LogInformation("Current CL: {0}, Required Compatible CL: {1}", CurrentChangeList, CompatibleChangeList);
+		Logger.LogInformation("Current CL: {CurrentChangeList}, Required Compatible CL: {CompatibleChangeList}", CurrentChangeList, CompatibleChangeList);
 
 		List<P4Connection.ChangeRecord> BinaryChanges;
 		P4.Changes(out BinaryChanges, DepotBinaryPath, AllowSpew: false);
@@ -74,7 +74,7 @@ class SyncBinariesFromUGS : SyncProjectBase
 
 			if (M == null)
 			{
-				LogWarning("Change description for {0} did not include expected format of [CL xxxx]", R.CL);
+				Logger.LogWarning("Change description for {Arg0} did not include expected format of [CL xxxx]", R.CL);
 				return false;
 			}
 
@@ -93,7 +93,7 @@ class SyncBinariesFromUGS : SyncProjectBase
 
 		string VersionedFile = string.Format("{0}@{1}", DepotBinaryPath, CheckedInBinaryCL);
 
-		LogInformation("Will sync and extract binaries from {0}", VersionedFile);
+		Logger.LogInformation("Will sync and extract binaries from {VersionedFile}", VersionedFile);
 
 		if (!Preview)
 		{
@@ -103,7 +103,7 @@ class SyncBinariesFromUGS : SyncProjectBase
 			{
 				P4.PrintToFile(VersionedFile, TmpFile);
 
-				LogInformation("Unzipping to {0}", CommandUtils.RootDirectory);
+				Logger.LogInformation("Unzipping to {Arg0}", Unreal.RootDirectory);
 
 				// we can't use helpers as unlike UGS we don't want to extract anything for UAT, since that us running us....
 				// That should be fine since we are either being run from the source CL that has already been syned to, or the 
@@ -116,11 +116,11 @@ class SyncBinariesFromUGS : SyncProjectBase
 				{
 					foreach (Ionic.Zip.ZipEntry Entry in Zip.Entries.Where(x => !x.IsDirectory))
 					{
-						string OutputFileName = Path.Combine(CommandUtils.RootDirectory.FullName, Entry.FileName);
+						string OutputFileName = Path.Combine(Unreal.RootDirectory.FullName, Entry.FileName);
 
 						if (Entry.FileName.Replace("\\", "/").StartsWith(UATDirectory, StringComparison.OrdinalIgnoreCase))
 						{
-							LogInformation("Skipping {0} as UAT is running", OutputFileName);
+							Logger.LogInformation("Skipping {OutputFileName} as UAT is running", OutputFileName);
 						}
 						else
 						{
@@ -129,13 +129,13 @@ class SyncBinariesFromUGS : SyncProjectBase
 							{
 								Entry.Extract(OutputStream);
 							}
-							LogInformation("Extracted {0}", OutputFileName);
+							Logger.LogInformation("Extracted {OutputFileName}", OutputFileName);
 							FileCount++;
 						}
 					}
 				}
 
-				LogInformation("Unzipped {0} files", FileCount);
+				Logger.LogInformation("Unzipped {FileCount} files", FileCount);
 			}
 			catch (Exception Ex)
 			{
@@ -152,13 +152,13 @@ class SyncBinariesFromUGS : SyncProjectBase
 				}
 				catch
 				{
-					LogInformation("Failed to remove tmp file {0}", TmpFile);
+					Logger.LogInformation("Failed to remove tmp file {TmpFile}", TmpFile);
 				}
 			}
 
 			// Update version files with our current and compatible CLs
-			LogInformation("Updating Version files to CL: {0} CompatibleCL: {1}", CurrentChangeList, CompatibleChangeList);
-			UE4Build Build = new UE4Build(this);
+			Logger.LogInformation("Updating Version files to CL: {CurrentChangeList} CompatibleCL: {CompatibleChangeList}", CurrentChangeList, CompatibleChangeList);
+			UnrealBuild Build = new UnrealBuild(this);
 			Build.UpdateVersionFiles(ActuallyUpdateVersionFiles: true, ChangelistNumberOverride: CurrentChangeList, CompatibleChangelistNumberOverride: CompatibleChangeList, IsPromotedOverride: false);
 		}
 
@@ -203,92 +203,5 @@ class SyncBinariesFromUGS : SyncProjectBase
 		}
 
 		return BinaryPath;
-	}
-
-	bool GetCurrentAndCompatibleChangeLists(string P4ProjectFilePath, out int OutCurrentChangeList, out int OutCompatibleChangeList)
-	{
-		OutCurrentChangeList = 0;
-		OutCompatibleChangeList = 0;
-
-		string[] CurrentChangeListPaths =
-		{
-			"<project>/...#have",
-			"<engine>/...#have"
-		};
-
-		string[] CompatibleChangeListPaths =
-		{
-			"<project>/Plugins/...#have",
-			"<project>/Source/...#have",
-			"<engine>/...#have"
-		};
-
-
-		string P4ProjectRoot = null;
-
-		if (P4ProjectFilePath.IndexOf(".uproject", StringComparison.CurrentCultureIgnoreCase) < 0)
-		{
-			throw new AutomationException("P4ProjectFilePath should end in .uproject");
-		}
-
-		P4WhereRecord Record = P4.Where(P4ProjectFilePath, AllowSpew: false).FirstOrDefault(x => x.DepotFile != null && !x.bUnmap);
-
-		P4ProjectRoot = Record.DepotFile.Substring(0, Record.DepotFile.LastIndexOf("/"));
-
-		// assume for now that if the project is in //depot/<some_path> that the engine is in //Engine;
-		string P4EngineRoot = "//" + P4ProjectRoot.Split(new char[] { '/' }, StringSplitOptions.RemoveEmptyEntries).First() + "/Engine";
-
-		// Transform the compatible changelist paths queries with the now-known project and engine paths
-		CompatibleChangeListPaths = CompatibleChangeListPaths.Select(S => {
-			string Result = S.Replace("<project>", P4ProjectRoot);
-			Result = Result.Replace("<engine>", P4EngineRoot);
-			return Result;
-		})
-		.ToArray();
-
-		// Transform the current changelist paths queries with the now-known project and engine paths
-		CurrentChangeListPaths = CurrentChangeListPaths.Select(S =>
-		{
-			string Result = S.Replace("<project>", P4ProjectRoot);
-			Result = Result.Replace("<engine>", P4EngineRoot);
-			return Result;
-		})
-		.ToArray();
-	
-		// get the most recent changes for all the compatible paths
-		List<P4Connection.ChangeRecord> ChangeRecords;
-		string CompatiblePathArg = string.Join(" ", CompatibleChangeListPaths);
-		P4.Changes(out ChangeRecords, "-m1 " + CompatiblePathArg);
-
-		if (ChangeRecords.Any() == false)
-		{
-			throw new AutomationException("No changes returned for P4 paths {0}", CompatiblePathArg);
-		}
-
-		int SortRecordsDescending (P4Connection.ChangeRecord lhs, P4Connection.ChangeRecord rhs)
-		{
-			return lhs.CL.CompareTo(rhs.CL) * -1;
-		};
-
-		// sort descending to get the most recent CL first
-		ChangeRecords.Sort(SortRecordsDescending);
-
-		// this is the CL we need for compatibility
-		OutCompatibleChangeList = ChangeRecords.First().CL;
-
-		// get records for the entire project and engine paths
-		ChangeRecords.Clear();
-		string CurrentPathArg = string.Join(" ", CurrentChangeListPaths);
-		P4.Changes(out ChangeRecords, "-m1 " + CurrentPathArg);
-
-		if (ChangeRecords.Any() == false)
-		{
-			throw new AutomationException("No changes returned for P4 paths {0}", CurrentPathArg);
-		}
-
-		ChangeRecords.Sort(SortRecordsDescending);
-		OutCurrentChangeList = ChangeRecords.First().CL;
-
-		return OutCompatibleChangeList != 0 && OutCurrentChangeList != 0;
 	}
 }

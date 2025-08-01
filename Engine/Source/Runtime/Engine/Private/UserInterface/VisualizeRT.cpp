@@ -4,25 +4,9 @@
 	VisualizeRT.cpp: Implements the VisualizeRT Slate window
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Templates/RefCounting.h"
+#include "Framework/Views/TableViewMetadata.h"
 #include "Modules/ModuleManager.h"
-#include "Widgets/SWidget.h"
-#include "GameFramework/PlayerController.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Engine/GameViewportClient.h"
-#include "RendererInterface.h"
-#include "Brushes/SlateColorBrush.h"
-#include "Widgets/SCompoundWidget.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/SWindow.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SSplitter.h"
-#include "Widgets/Views/SHeaderRow.h"
-#include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
 #include "VisualizeTexture.h"
 
@@ -63,7 +47,7 @@ struct FRTInfo : public FRefCountedObject
 		// Current Desc Info format: (DIM W[xH[xD]] FMT[ RT]) NUM NAME SIZEkB
 		if ( !Text.IsEmpty() && Text.Split(TEXT(" "), &Dimensions, &Text, ESearchCase::CaseSensitive))
 		{
-			Dimensions.MidInline(1, MAX_int32, false);
+			Dimensions.MidInline(1, MAX_int32, EAllowShrinking::No);
 			if (Dimensions.StartsWith(TEXT("Cube")))
 			{
 				if (!Text.Split(TEXT(" "), &Width, &Text, ESearchCase::CaseSensitive))
@@ -111,7 +95,7 @@ struct FRTInfo : public FRefCountedObject
 						if (Found > 0)
 						{
 							Type = Format.Mid(Found + 1);
-							Format.MidInline(0, Found, false);
+							Format.MidInline(0, Found, EAllowShrinking::No);
 						}
 						return true;
 					}

@@ -50,10 +50,11 @@ public:
 	virtual void Shutdown() override;
 	virtual void RegisterMajorTabs(IUnrealInsightsModule& InsightsModule) override;
 	virtual void UnregisterMajorTabs() override;
+	virtual void OnWindowClosedEvent() override;
 
 	//////////////////////////////////////////////////
 
-	/** @returns UI command list for the Loading Profiler manager. */
+	/** @return UI command list for the Loading Profiler manager. */
 	const TSharedRef<FUICommandList> GetCommandList() const;
 
 	/** @return an instance of the Loading Profiler commands. */
@@ -62,23 +63,13 @@ public:
 	/** @return an instance of the Loading Profiler action manager. */
 	static FLoadingProfilerActionManager& GetActionManager();
 
-	void AssignProfilerWindow(const TSharedRef<SLoadingProfilerWindow>& InProfilerWindow)
-	{
-		ProfilerWindow = InProfilerWindow;
-	}
-
-	void RemoveProfilerWindow()
-	{
-		ProfilerWindow.Reset();
-	}
-
 	/**
 	 * Converts profiler window weak pointer to a shared pointer and returns it.
 	 * Make sure the returned pointer is valid before trying to dereference it.
 	 */
-	TSharedPtr<class SLoadingProfilerWindow> GetProfilerWindow() const
+	TSharedPtr<SLoadingProfilerWindow> GetProfilerWindow() const
 	{
-		return ProfilerWindow.Pin();
+		return ProfilerWindowWeakPtr.Pin();
 	}
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -118,6 +109,8 @@ public:
 
 	void OnSessionChanged();
 
+	const FName& GetLogListingName() const { return LogListingName; }
+
 private:
 	/** Binds our UI commands to delegates. */
 	void BindCommands();
@@ -133,6 +126,16 @@ private:
 	/** Updates this manager, done through FCoreTicker. */
 	bool Tick(float DeltaTime);
 
+	void AssignProfilerWindow(const TSharedRef<SLoadingProfilerWindow>& InProfilerWindow)
+	{
+		ProfilerWindowWeakPtr = InProfilerWindow;
+	}
+
+	void RemoveProfilerWindow()
+	{
+		ProfilerWindowWeakPtr.Reset();
+	}
+
 private:
 	bool bIsInitialized;
 	bool bIsAvailable;
@@ -142,7 +145,7 @@ private:
 	FTickerDelegate OnTick;
 
 	/** Handle to the registered OnTick. */
-	FDelegateHandle OnTickHandle;
+	FTSTicker::FDelegateHandle OnTickHandle;
 
 	/** List of UI commands for this manager. This will be filled by this and corresponding classes. */
 	TSharedRef<FUICommandList> CommandList;
@@ -150,8 +153,8 @@ private:
 	/** An instance of the Loading Profiler action manager. */
 	FLoadingProfilerActionManager ActionManager;
 
-	/** A weak pointer to the Loading Profiler window. */
-	TWeakPtr<class SLoadingProfilerWindow> ProfilerWindow;
+	/** A weak pointer to the Asset Loading Insights window. */
+	TWeakPtr<SLoadingProfilerWindow> ProfilerWindowWeakPtr;
 
 	/** If the Timing view is visible or hidden. */
 	bool bIsTimingViewVisible;
@@ -170,6 +173,9 @@ private:
 
 	/** If the Requests tree view is visible or hidden. */
 	bool bIsRequestsTreeViewVisible;
+
+	/** The name of the Loading Insights log listing. */
+	FName LogListingName;
 
 	/** A shared pointer to the global instance of the Loading Profiler manager. */
 	static TSharedPtr<FLoadingProfilerManager> Instance;

@@ -46,17 +46,17 @@ void FSlateUpdatableInstanceBuffer::FRenderProxy::Update(FRHICommandListImmediat
 	InstanceBufferResource.PreFillBuffer(Data.Num(), false);
 
 	// Enqueue the lock/unlock to the RHI thread
-	FRHIVertexBuffer* VertexBuffer = InstanceBufferResource.VertexBufferRHI;
+	FRHIBuffer* VertexBuffer = InstanceBufferResource.VertexBufferRHI;
 	RHICmdList.EnqueueLambda([VertexBuffer, LocalData = MoveTemp(Data)](FRHICommandListImmediate& InRHICmdList)
 	{
 		SCOPE_CYCLE_COUNTER(STAT_SlateUpdateInstanceBuffer_RHIT);
 
 		int32 RequiredVertexBufferSize = LocalData.Num() * LocalData.GetTypeSize();
-		uint8* InstanceBufferData = (uint8*)InRHICmdList.LockVertexBuffer(VertexBuffer, 0, RequiredVertexBufferSize, RLM_WriteOnly);
+		uint8* InstanceBufferData = (uint8*)InRHICmdList.LockBuffer(VertexBuffer, 0, RequiredVertexBufferSize, RLM_WriteOnly);
 
 		FMemory::Memcpy(InstanceBufferData, LocalData.GetData(), RequiredVertexBufferSize);
 	
-		InRHICmdList.UnlockVertexBuffer(VertexBuffer);
+		InRHICmdList.UnlockBuffer(VertexBuffer);
 	});
 
 	RHICmdList.RHIThreadFence(true);
@@ -64,5 +64,5 @@ void FSlateUpdatableInstanceBuffer::FRenderProxy::Update(FRHICommandListImmediat
 
 void FSlateUpdatableInstanceBuffer::FRenderProxy::BindStreamSource(FRHICommandList& RHICmdList, int32 StreamIndex, uint32 InstanceOffset)
 {
-	RHICmdList.SetStreamSource(StreamIndex, InstanceBufferResource.VertexBufferRHI, InstanceOffset * sizeof(FVector4));
+	RHICmdList.SetStreamSource(StreamIndex, InstanceBufferResource.VertexBufferRHI, InstanceOffset * sizeof(FVector4f));
 }

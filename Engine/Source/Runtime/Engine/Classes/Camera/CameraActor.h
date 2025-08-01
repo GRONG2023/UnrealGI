@@ -9,13 +9,11 @@
 
 #include "CameraActor.generated.h"
 
-class UCameraAnim;
-
 /** 
  * A CameraActor is a camera viewpoint that can be placed in a level.
  */
-UCLASS(ClassGroup=Common, hideCategories=(Input, Rendering), showcategories=("Input|MouseInput", "Input|TouchInput"), Blueprintable)
-class ENGINE_API ACameraActor : public AActor
+UCLASS(ClassGroup=Common, hideCategories=(Input, Rendering), showcategories=("Input|MouseInput", "Input|TouchInput"), Blueprintable, MinimalAPI)
+class ACameraActor : public AActor
 {
 	GENERATED_UCLASS_BODY()
 
@@ -29,18 +27,15 @@ private:
 
 	/** The camera component for this camera */
 	UPROPERTY(Category = CameraActor, VisibleAnywhere, BlueprintReadOnly, meta = (AllowPrivateAccess = "true"))
-	class UCameraComponent* CameraComponent;
+	TObjectPtr<class UCameraComponent> CameraComponent;
 
 	UPROPERTY(Category = CameraActor, VisibleAnywhere, BlueprintReadOnly, meta = (AllowPrivateAccess = "true"))
-	class USceneComponent* SceneComponent;
+	TObjectPtr<class USceneComponent> SceneComponent;
 public:
-
-	/** If this CameraActor is being used to preview a CameraAnim in the editor, this is the anim being previewed. */
-	TWeakObjectPtr<class UCameraAnim> PreviewedCameraAnim;
 
 	/** Returns index of the player for whom we auto-activate, or INDEX_NONE (-1) if disabled. */
 	UFUNCTION(BlueprintCallable, Category="AutoPlayerActivation")
-	int32 GetAutoActivatePlayerIndex() const;
+	ENGINE_API int32 GetAutoActivatePlayerIndex() const;
 
 private:
 
@@ -61,20 +56,18 @@ private:
 
 public:
 	//~ Begin UObject Interface
-	virtual void Serialize(FArchive& Ar) override;
+	ENGINE_API virtual void Serialize(FArchive& Ar) override;
 
 #if WITH_EDITOR
-	virtual void PostLoadSubobjects(FObjectInstancingGraph* OuterInstanceGraph) override;
-
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	ENGINE_API virtual void PostLoadSubobjects(FObjectInstancingGraph* OuterInstanceGraph) override;
 #endif
 
-	virtual class USceneComponent* GetDefaultAttachComponent() const override;
+	ENGINE_API virtual class USceneComponent* GetDefaultAttachComponent() const override;
 	//~ End UObject Interface
 
 protected:
 	//~ Begin AActor Interface
-	virtual void BeginPlay() override;
+	ENGINE_API virtual void BeginPlay() override;
 	//~ End AActor Interface
 
 public:

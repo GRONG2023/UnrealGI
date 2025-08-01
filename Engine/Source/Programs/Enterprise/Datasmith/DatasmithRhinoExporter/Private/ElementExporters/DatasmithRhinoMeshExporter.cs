@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using DatasmithRhino.ExportContext;
 using Rhino.Geometry;
 using System.Collections.Generic;
+using System.Drawing;
 
 namespace DatasmithRhino.ElementExporters
 {
@@ -90,12 +92,37 @@ namespace DatasmithRhino.ElementExporters
 
 		private static void ParseMesh(FDatasmithFacadeMeshElement DatasmithMeshElement, FDatasmithFacadeMesh DatasmithMesh, DatasmithMeshInfo MeshInfo, List<DatasmithMaterialInfo> MaterialInfos)
 		{
+			List<Mesh> MeshSections = MeshInfo.RhinoMeshes;
+
+			// UVs need to be fixed first, before parsing topology
+			// Since calling SetTextureCoordinates may sometimes re-tessellate mesh changing vertices count!
+			for (int MeshIndex = 0; MeshIndex < MeshSections.Count; ++MeshIndex)
+			{
+				Mesh RhinoMesh = MeshSections[MeshIndex];
+
+				if (MeshInfo.TextureMappings.Count > 0)
+				{
+					foreach (DatasmithTextureMappingData TextureMappingData in MeshInfo.TextureMappings)
+					{
+						// Since we are offsetting the meshes before exporting them, we must apply the same correction to the UV transform.
+						Transform InverveOffsetTranform;
+						MeshInfo.OffsetTransform.TryGetInverse(out InverveOffsetTranform);
+						Transform CorrectedTransform = InverveOffsetTranform * TextureMappingData.ObjectTransform;
+
+						// Rhino gives no guarantee on the state of the texture mapping in a given mesh.
+						// We must make sure that UV is set to the channel we are exporting.
+						const bool bLazyLoad = false;
+						RhinoMesh.SetTextureCoordinates(TextureMappingData.RhinoTextureMapping, CorrectedTransform, bLazyLoad);
+					}
+				}
+			}
+
 			int VertexIndexOffset = 0;
 			int FaceIndexOffset = 0;
 			int UVIndexOffset = 0;
-			List<Mesh> MeshSections = MeshInfo.RhinoMeshes;
+			int NumberOfUVChannels = System.Math.Max(1, MeshInfo.TextureMappings.Count);
 			List<DatasmithMaterialInfo> UniqueMaterialInfo = new List<DatasmithMaterialInfo>();
-			InitializeDatasmithMesh(DatasmithMesh, MeshSections, MeshInfo.TextureMappings.Count);
+			InitializeDatasmithMesh(DatasmithMesh, MeshSections, NumberOfUVChannels);
 
 			for (int MeshIndex = 0; MeshIndex < MeshSections.Count; ++MeshIndex )
 			{
@@ -124,6 +151,7 @@ namespace DatasmithRhino.ElementExporters
 				}
 
 				bool bUseFaceNormals = RhinoMesh.Normals.Count != RhinoMesh.Vertices.Count && RhinoMesh.FaceNormals.Count == RhinoMesh.Faces.Count;
+				bool bHasVertexColor = RhinoMesh.VertexColors.Count == RhinoMesh.Vertices.Count;
 
 				//Add triangles and normals to the mesh.
 				for (int FaceIndex = 0, FaceQuadOffset = 0; FaceIndex < RhinoMesh.Faces.Count; ++FaceIndex)
@@ -141,6 +169,11 @@ namespace DatasmithRhino.ElementExporters
 						DatasmithMesh.SetFaceSmoothingMask(DatasmithFaceIndex + 1, 0);
 						DatasmithMesh.SetFace(DatasmithFaceIndex + 1, VertexIndexOffset + Face.A, VertexIndexOffset + Face.C, VertexIndexOffset + Face.D, MaterialIndex);
 						DatasmithMesh.SetFaceUV(DatasmithFaceIndex + 1, 0, VertexIndexOffset + Face.A, VertexIndexOffset + Face.C, VertexIndexOffset + Face.D);
+					}
+
+					if (bHasVertexColor)
+					{
+						AddVertexColorToMesh(DatasmithMesh, RhinoMesh, Face, DatasmithFaceIndex, VertexIndexOffset);
 					}
 
 					if (bUseFaceNormals)
@@ -166,25 +199,18 @@ namespace DatasmithRhino.ElementExporters
 					}
 				}
 
-				for (int UVChannel = 0; UVChannel < MeshInfo.TextureMappings.Count; ++UVChannel)
+				if (MeshInfo.TextureMappings.Count > 0)
 				{
-					// Since we are offsetting the meshes before exporting them, we must apply the same correction to the UV transform.
-					Transform InverveOffsetTranform;
-					MeshInfo.OffsetTransform.TryGetInverse(out InverveOffsetTranform);
-					DatasmithTextureMappingData TextureMappingData = MeshInfo.TextureMappings[UVChannel];
-					Transform CorrectedTransform = InverveOffsetTranform * TextureMappingData.ObjectTransform;
-
-					// Rhino gives no guarantee on the state of the texture mapping in a given mesh.
-					// We must make sure that UV is set to the channel we are exporting.
-					const bool bLazyLoad = false;
-					RhinoMesh.SetTextureCoordinates(TextureMappingData.RhinoTextureMapping, CorrectedTransform, bLazyLoad);
-
-					// Add the UV coordinates for the triangles we just added.
-					for (int UVIndex = 0; UVIndex < RhinoMesh.TextureCoordinates.Count; ++UVIndex)
+					for (int UVChannel = 0; UVChannel < MeshInfo.TextureMappings.Count; ++UVChannel)
 					{
-						Point2f UV = RhinoMesh.TextureCoordinates[UVIndex];
-						DatasmithMesh.SetUV(UVChannel, UVIndex + UVIndexOffset, UV.X, 1 - UV.Y);
+						// Add the UV coordinates to the current channel.
+						AddUVsToMesh(DatasmithMesh, RhinoMesh, UVChannel, UVIndexOffset);
 					}
+				}
+				else
+				{
+					// No custom TextureMapping, just export the current UV coordinate in channel 0.
+					AddUVsToMesh(DatasmithMesh, RhinoMesh, 0, UVIndexOffset);
 				}
 
 				VertexIndexOffset += RhinoMesh.Vertices.Count;
@@ -216,6 +242,26 @@ namespace DatasmithRhino.ElementExporters
 			}
 		}
 
+		private static void AddVertexColorToMesh(FDatasmithFacadeMesh DatasmithMesh, Mesh RhinoMesh, MeshFace Face, int FaceIndex, int VertexIndexOffset)
+		{
+			int VertexInstanceIndex = (FaceIndex * 3) + VertexIndexOffset;
+
+			Color ColorA = RhinoMesh.VertexColors[Face.A];
+			Color ColorB = RhinoMesh.VertexColors[Face.B];
+			Color ColorC = RhinoMesh.VertexColors[Face.C];
+			DatasmithMesh.SetVertexColor(VertexInstanceIndex + 0, ColorA.R, ColorA.G, ColorA.B, ColorA.A);
+			DatasmithMesh.SetVertexColor(VertexInstanceIndex + 1, ColorB.R, ColorB.G, ColorB.B, ColorB.A);
+			DatasmithMesh.SetVertexColor(VertexInstanceIndex + 2, ColorC.R, ColorC.G, ColorC.B, ColorC.A);
+
+			if (Face.IsQuad)
+			{
+				Color ColorD = RhinoMesh.VertexColors[Face.D];
+				DatasmithMesh.SetVertexColor(VertexInstanceIndex + 3, ColorA.R, ColorA.G, ColorA.B, ColorA.A);
+				DatasmithMesh.SetVertexColor(VertexInstanceIndex + 4, ColorC.R, ColorC.G, ColorC.B, ColorC.A);
+				DatasmithMesh.SetVertexColor(VertexInstanceIndex + 5, ColorD.R, ColorD.G, ColorD.B, ColorD.A);
+			}
+		}
+
 		private static void AddNormalsToMesh(FDatasmithFacadeMesh Mesh, int FaceIndex, Vector3f Normal)
 		{
 			AddNormalsToMesh(Mesh, FaceIndex, Normal, Normal, Normal);
@@ -227,6 +273,16 @@ namespace DatasmithRhino.ElementExporters
 			Mesh.SetNormal(NormalIndex, NormalA.X, NormalA.Y, NormalA.Z);
 			Mesh.SetNormal(NormalIndex + 1, NormalB.X, NormalB.Y, NormalB.Z);
 			Mesh.SetNormal(NormalIndex + 2, NormalC.X, NormalC.Y, NormalC.Z);
+		}
+
+		private static void AddUVsToMesh(FDatasmithFacadeMesh DatasmithMesh, Mesh RhinoMesh, int UVChannel, int UVIndexOffset)
+		{
+			// Add the UV coordinates for the triangles we just added.
+			for (int UVIndex = 0; UVIndex < RhinoMesh.TextureCoordinates.Count; ++UVIndex)
+			{
+				Point2f UV = RhinoMesh.TextureCoordinates[UVIndex];
+				DatasmithMesh.SetUV(UVChannel, UVIndex + UVIndexOffset, UV.X, 1 - UV.Y);
+			}
 		}
 	}
 }

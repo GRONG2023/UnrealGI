@@ -17,7 +17,7 @@
 #include "Algo/Find.h"
 #include "Containers/Set.h"
 #include "HAL/FileManager.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "Math/UnrealMathUtility.h"
 #include "Misc/Paths.h"
 #include "Misc/SecureHash.h"
@@ -46,11 +46,6 @@ public:
 	FString Name;
 	FString OutputPath;
 	FString AssetsOutputPath;
-	FString Host;
-	FString Vendor;
-	FString ProductName;
-	FString ProductVersion;
-	FString Renderer;
 
 	uint64 ExportStartCycles;
 
@@ -90,7 +85,7 @@ void FDatasmithSceneExporterImpl::UpdateTextureElements( TSharedRef< IDatasmithS
 		}
 
 		FString& NewFilename = HashFilePathMap.FindOrAdd(TextureElement->GetFileHash());
-		
+
 		// If this texture has not been exported yet, find a unique name for it and copy its file to the asset output path.
 		if (NewFilename.IsEmpty())
 		{
@@ -100,7 +95,10 @@ void FDatasmithSceneExporterImpl::UpdateTextureElements( TSharedRef< IDatasmithS
 			NewFilename = FPaths::Combine(AssetsOutputPath, UniqueFileName + FileExtension);
 
 			// Copy image file to new location
-			PlatformFile.CopyFile(*NewFilename, *TextureFileName);
+			if (!FPaths::IsSamePath(*NewFilename, *TextureFileName))
+			{
+				PlatformFile.CopyFile(*NewFilename, *TextureFileName);
+			}
 		}
 
 		// Update texture element
@@ -217,13 +215,10 @@ FString FDatasmithSceneExporterImpl::GetFileNameWithHash(const FString& FullPath
 FDatasmithSceneExporter::FDatasmithSceneExporter()
 	: Impl( MakeUnique< FDatasmithSceneExporterImpl >() )
 {
-	Reset();
 }
 
-FDatasmithSceneExporter::~FDatasmithSceneExporter()
-{
-	Reset();
-}
+FDatasmithSceneExporter::~FDatasmithSceneExporter() = default;
+
 
 void FDatasmithSceneExporter::PreExport()
 {
@@ -322,8 +317,6 @@ void FDatasmithSceneExporter::Export( TSharedRef< IDatasmithScene > DatasmithSce
 
 void FDatasmithSceneExporter::Reset()
 {
-	Impl->Host = TEXT("");
-	Impl->Renderer = TEXT("");
 	Impl->ProgressManager = nullptr;
 	Impl->Logger = nullptr;
 

@@ -15,10 +15,12 @@ struct FRichCurve;
 struct FKeyDrawParams;
 struct FMovieSceneChannel;
 struct FMovieSceneChannelProxy;
+struct FSequencerChannelPaintArgs;
 struct FSequencerPasteEnvironment;
 struct ISequencerChannelInterface;
 struct FMovieSceneChannelMetaData;
 struct FMovieSceneClipboardEnvironment;
+struct FGeometry;
 
 class SWidget;
 class ISequencer;
@@ -28,6 +30,7 @@ class ISequencerSection;
 class UMovieSceneSection;
 class FMovieSceneClipboardBuilder;
 class FMovieSceneClipboardKeyTrack;
+class FSequencerSectionPainter;
 
 /**
  * Interface that should be implemented for the UI portion of a key area within a section
@@ -129,6 +132,13 @@ public:
 	 * @return The owning section interface, or nullptr if it has been destroyed
 	 */
 	TSharedPtr<ISequencerSection> GetSectionInterface() const;
+
+	/**
+	 * Check whether we should show this key area's curve on its channel UI or not
+	 *
+	 * @return True to show the curve, false otherwise
+	 */
+	bool ShouldShowCurve() const;
 
 public:
 
@@ -239,6 +249,14 @@ public:
 	 */
 	void CopyKeys(FMovieSceneClipboardBuilder& ClipboardBuilder, TArrayView<const FKeyHandle> KeyMask) const;
 
+	/**
+	 * Draw additional content in addition to keys for a particular IKeyArea
+	 *
+	 * @param PaintArgs	       Paint arguments containing the draw element list, time-to-pixel converter and other structures
+	 * @param LayerId          The slate layer to paint onto
+	 * @return The new slate layer ID for subsequent elements to paint onto
+	 */
+	int32 DrawExtra(const FSequencerChannelPaintArgs& PaintArgs, int32 LayerId) const;
 
 	/**
 	 * Paste the specified key track into this key area
@@ -247,7 +265,7 @@ public:
 	 * @param SrcEnvironment   The environment the source data was copied from
 	 * @param DstEnvironment   The environment we're pasting into
 	 */
-	void PasteKeys(const FMovieSceneClipboardKeyTrack& KeyTrack, const FMovieSceneClipboardEnvironment& SrcEnvironment, const FSequencerPasteEnvironment& DstEnvironment);
+	TArray<FKeyHandle> PasteKeys(const FMovieSceneClipboardKeyTrack& KeyTrack, const FMovieSceneClipboardEnvironment& SrcEnvironment, const FSequencerPasteEnvironment& DstEnvironment);
 
 
 	/**

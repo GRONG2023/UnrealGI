@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SAnimTimelineTransportControls.h"
+#include "AnimTimeline/SAnimTimelineTransportControls.h"
 #include "EditorWidgetsModule.h"
 #include "AnimationEditorPreviewScene.h"
 #include "Animation/DebugSkelMeshComponent.h"
@@ -62,12 +62,12 @@ FReply SAnimTimelineTransportControls::OnClick_Forward_Step()
 	}
 	else if (SMC)
 	{
-		UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimSequenceBase);
-		const float TargetFramerate = AnimSequence ? AnimSequence->GetFrameRate() : 30.0f;
+		const UAnimSequence* AnimSequence = Cast<UAnimSequence>(AnimSequenceBase);
+		const FFrameRate TargetFramerate = AnimSequence ? AnimSequence->GetSamplingFrameRate() : FFrameRate(30, 1);
 
 		// Advance a single frame, leaving it paused afterwards
 		SMC->GlobalAnimRateScale = 1.0f;
-		SMC->TickAnimation(1.0f / TargetFramerate, false);
+		SMC->TickAnimation(static_cast<float>(TargetFramerate.AsInterval()), false);
 		SMC->GlobalAnimRateScale = 0.0f;
 	}
 

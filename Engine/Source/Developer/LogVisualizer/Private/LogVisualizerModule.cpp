@@ -10,10 +10,12 @@
 #include "VisualLoggerDatabase.h"
 #include "LogVisualizerStyle.h"
 #include "SVisualLogger.h"
+#include "SVisualLoggerTab.h"
 #include "VisualLoggerCommands.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "LogVisualizerPrivate.h"
+#include "LogVisualizerPublic.h"
 #include "Features/IModularFeatures.h"
+
 #if WITH_EDITOR
 #include "ISettingsModule.h"
 #include "WorkspaceMenuStructure.h"
@@ -51,7 +53,7 @@ void FLogVisualizerModule::StartupModule()
 	FGlobalTabmanager::Get()->RegisterNomadTabSpawner(
 		VisualLoggerTabName, 
 		FOnSpawnTab::CreateRaw(this, &FLogVisualizerModule::SpawnLogVisualizerTab))
-		.SetGroup(WorkspaceMenu::GetMenuStructure().GetDeveloperToolsMiscCategory())
+		.SetGroup(WorkspaceMenu::GetMenuStructure().GetDeveloperToolsDebugCategory())
 		.SetDisplayName(NSLOCTEXT("LogVisualizerApp", "TabTitle", "Visual Logger"))
 		.SetTooltipText(NSLOCTEXT("LogVisualizerApp", "TooltipText", "Opens Visual Logger tool."))
 		.SetIcon(FSlateIcon(FLogVisualizerStyle::GetStyleSetName(), "LogVisualizerApp.TabIcon"));
@@ -61,7 +63,7 @@ void FLogVisualizerModule::StartupModule()
 	{
 		SettingsModule->RegisterSettings("Editor", "Advanced", "VisualLogger",
 			LOCTEXT("AIToolsSettingsName", "Visual Logger"),
-			LOCTEXT("AIToolsSettingsDescription", "General settings for UE4 AI Tools."),
+			LOCTEXT("AIToolsSettingsDescription", "General settings for UE AI Tools."),
 			ULogVisualizerSettings::StaticClass()->GetDefaultObject()
 			);
 	}
@@ -69,7 +71,7 @@ void FLogVisualizerModule::StartupModule()
 
 void FLogVisualizerModule::ShutdownModule()
 {
-	FGlobalTabmanager::Get()->UnregisterTabSpawner(VisualLoggerTabName);
+	FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(VisualLoggerTabName);
 	FVisualLoggerCommands::Unregister();
 	IModularFeatures::Get().UnregisterModularFeature(VisualLoggerTabName, this);
 	

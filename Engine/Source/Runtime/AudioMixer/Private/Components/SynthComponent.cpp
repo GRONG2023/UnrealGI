@@ -1,13 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/SynthComponent.h"
+
 #include "AudioDevice.h"
 #include "AudioMixerLog.h"
+#include "Engine/World.h"
 #include "Sound/AudioSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SynthComponent)
+
 
 USynthSound::USynthSound(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
-	, OwningSynthComponent(nullptr)
 {
 }
 
@@ -19,18 +23,7 @@ void USynthSound::Init(USynthComponent* InSynthComponent, const int32 InNumChann
 	VirtualizationMode = EVirtualizationMode::PlayWhenSilent;
 	NumChannels = InNumChannels;
 	NumSamplesToGeneratePerCallback = InCallbackSize;
-	// Turn off async generation in old audio engine on mac.
-#if PLATFORM_MAC
-	const FAudioDevice* AudioDevice = InSynthComponent->GetAudioDevice();
-	if (AudioDevice && !AudioDevice->IsAudioMixerEnabled())
-	{
-		bCanProcessAsync = false;
-	}
-	else
-#endif // #if PLATFORM_MAC
-	{
-		bCanProcessAsync = true;
-	}
+	bCanProcessAsync = true;
 
 	Duration = INDEFINITELY_LOOPING_DURATION;
 	bLooping = true;
@@ -39,13 +32,11 @@ void USynthSound::Init(USynthComponent* InSynthComponent, const int32 InNumChann
 
 void USynthSound::StartOnAudioDevice(FAudioDevice* InAudioDevice)
 {
-	check(InAudioDevice != nullptr);
-	bAudioMixer = InAudioDevice->IsAudioMixerEnabled();
 }
 
 void USynthSound::OnBeginGenerate()
 {
-	if (ensure(OwningSynthComponent))
+	if (ensure(OwningSynthComponent.IsValid()))
 	{
 		OwningSynthComponent->OnBeginGenerate();
 	}
@@ -57,61 +48,33 @@ int32 USynthSound::OnGeneratePCMAudio(TArray<uint8>& OutAudio, int32 NumSamples)
 
 	OutAudio.Reset();
 
-	if (bAudioMixer)
+	// If running with audio mixer, the output audio buffer will be in floats already
+	OutAudio.AddZeroed(NumSamples * sizeof(float));
+
+	// Mark pending kill can null this out on the game thread in rare cases.
+	if (!OwningSynthComponent.IsValid())
 	{
-		// If running with audio mixer, the output audio buffer will be in floats already
-		OutAudio.AddZeroed(NumSamples * sizeof(float));
-
-		// Mark pending kill can null this out on the game thread in rare cases.
-		if (!OwningSynthComponent)
-		{
-			return 0;
-		}
-
-		return OwningSynthComponent->OnGeneratePCMAudio((float*)OutAudio.GetData(), NumSamples);
-	}
-	else
-	{
-		// Use the float scratch buffer instead of the out buffer directly
-		FloatBuffer.Reset();
-		FloatBuffer.AddZeroed(NumSamples * sizeof(float));
-
-		// Mark pending kill can null this out on the game thread in rare cases.
-		if (!OwningSynthComponent)
-		{
-			return 0;
-		}
-
-		float* FloatBufferDataPtr = FloatBuffer.GetData();
-		int32 NumSamplesGenerated = OwningSynthComponent->OnGeneratePCMAudio(FloatBufferDataPtr, NumSamples);
-
-		// Convert the float buffer to int16 data
-		OutAudio.AddZeroed(NumSamples * sizeof(int16));
-		int16* OutAudioBuffer = (int16*)OutAudio.GetData();
-		for (int32 i = 0; i < NumSamples; ++i)
-		{
-			OutAudioBuffer[i] = (int16)(32767.0f * FMath::Clamp(FloatBufferDataPtr[i], -1.0f, 1.0f));
-		}
-		return NumSamplesGenerated;
+		return 0;
 	}
 
-	return NumSamples;
-}
+	return OwningSynthComponent->OnGeneratePCMAudio((float*)OutAudio.GetData(), NumSamples);
+
+}	
 
 void USynthSound::OnEndGenerate()
 {
 	// Mark pending kill can null this out on the game thread in rare cases.
-	if (OwningSynthComponent)
+	if (OwningSynthComponent.IsValid())
 	{
 		OwningSynthComponent->OnEndGenerate();
 	}
 }
 
-ISoundGeneratorPtr USynthSound::CreateSoundGenerator(int32 InSampleRate, int32 InNumChannels)
+ISoundGeneratorPtr USynthSound::CreateSoundGenerator(const FSoundGeneratorInitParams& InParams)
 {
-	if (OwningSynthComponent)
+	if (OwningSynthComponent.IsValid())
 	{
-		return OwningSynthComponent->CreateSoundGeneratorInternal(SampleRate, NumChannels);
+		return OwningSynthComponent->CreateSoundGeneratorInternal(InParams);
 	}
 	return nullptr;
 }
@@ -119,7 +82,7 @@ ISoundGeneratorPtr USynthSound::CreateSoundGenerator(int32 InSampleRate, int32 I
 Audio::EAudioMixerStreamDataFormat::Type USynthSound::GetGeneratedPCMDataFormat() const
 {
 	// Only audio mixer supports return float buffers
-	return bAudioMixer ? Audio::EAudioMixerStreamDataFormat::Float : Audio::EAudioMixerStreamDataFormat::Int16;
+	return Audio::EAudioMixerStreamDataFormat::Float;
 }
 
 USynthComponent::USynthComponent(const FObjectInitializer& ObjectInitializer)
@@ -221,17 +184,17 @@ void USynthComponent::Initialize(int32 SampleRateOverride)
 		// Initialize the synth component
 		Init(SampleRate);
 
-		if (NumChannels < 0 || NumChannels > 2)
+		if (NumChannels < 0 || NumChannels > 8)
 		{
-			UE_LOG(LogAudioMixer, Error, TEXT("Synthesis component '%s' has set an invalid channel count '%d' (only mono and stereo currently supported)."), *GetName(), NumChannels);
+			UE_LOG(LogAudioMixer, Error, TEXT("Synthesis component '%s' has set an invalid channel count '%d'."), *GetName(), NumChannels);
 		}
 
-		NumChannels = FMath::Clamp(NumChannels, 1, 2);
+		NumChannels = FMath::Clamp(NumChannels, 1, 8);
 #endif
 
 		if (!Synth)
 		{
-			Synth = NewObject<USynthSound>(this, TEXT("Synth"));
+			Synth = NewObject<USynthSound>();
 		}
 
 		// Copy sound base data to the sound
@@ -264,7 +227,8 @@ void USynthComponent::CreateAudioComponent()
 	if (!AudioComponent)
 	{
 		// Create the audio component which will be used to play the procedural sound wave
-		AudioComponent = NewObject<UAudioComponent>(this);
+		AudioComponent = NewObject<UAudioComponent>(this, NAME_None, RF_Transactional | RF_Transient | RF_TextExportTransient);
+		AudioComponent->CreationMethod = CreationMethod;
 
 		AudioComponent->OnAudioSingleEnvelopeValueNative.AddUObject(this, &USynthComponent::OnAudioComponentEnvelopeValue);
 
@@ -345,6 +309,21 @@ void USynthComponent::OnUnregister()
 		AudioComponent->DestroyComponent();
 		AudioComponent = nullptr;
 	}
+
+	// Clear out the synth component's reference to the sound generator or it will leak until it gets GC'd
+	// Normally this is ok to wait till GC but some derived synths might need for the handle to be released
+	SoundGenerator.Reset();
+}
+
+void USynthComponent::EndPlay(const EEndPlayReason::Type Reason) 
+{	
+	Super::EndPlay(Reason);
+
+	if (GetOwner() && (Reason == EEndPlayReason::LevelTransition || Reason == EEndPlayReason::RemovedFromWorld || Reason == EEndPlayReason::Destroyed))
+	{
+		// If our world or sublevel is going away, stop immediately to prevent the containing world/level from being leaked via hard references from the audio device.
+		Stop();
+	}
 }
 
 USoundClass* USynthComponent::GetSoundClass()
@@ -415,6 +394,7 @@ void USynthComponent::Serialize(FArchive& Ar)
 		}
 	}
 #endif // WITH_EDITORONLY_DATA
+
 }
 
 void USynthComponent::PumpPendingMessages()
@@ -492,6 +472,7 @@ void USynthComponent::Start()
 		AudioComponent->SoundClassOverride = SoundClass;
 		AudioComponent->EnvelopeFollowerAttackTime = EnvelopeFollowerAttackTime;
 		AudioComponent->EnvelopeFollowerReleaseTime = EnvelopeFollowerReleaseTime;
+		AudioComponent->ModulationRouting = ModulationRouting;
 
 		// Copy sound base data to the sound
 		Synth->AttenuationSettings = AttenuationSettings;
@@ -548,6 +529,38 @@ void USynthComponent::SetSubmixSend(USoundSubmixBase* Submix, float SendLevel)
 	}
 }
 
+void USynthComponent::SetSourceBusSendPreEffect(USoundSourceBus* SoundSourceBus, float SourceBusSendLevel)
+{
+	if (AudioComponent)
+	{
+		AudioComponent->SetSourceBusSendPreEffect(SoundSourceBus, SourceBusSendLevel);
+	}
+}
+
+void USynthComponent::SetSourceBusSendPostEffect(USoundSourceBus* SoundSourceBus, float SourceBusSendLevel)
+{
+	if (AudioComponent)
+	{
+		AudioComponent->SetSourceBusSendPostEffect(SoundSourceBus, SourceBusSendLevel);
+	}
+}
+
+void USynthComponent::SetAudioBusSendPreEffect(UAudioBus* AudioBus, float AudioBusSendLevel)
+{
+	if (AudioComponent)
+	{
+		AudioComponent->SetAudioBusSendPreEffect(AudioBus, AudioBusSendLevel);
+	}
+}
+
+void USynthComponent::SetAudioBusSendPostEffect(UAudioBus* AudioBus, float AudioBusSendLevel)
+{
+	if (AudioComponent)
+	{
+		AudioComponent->SetAudioBusSendPostEffect(AudioBus, AudioBusSendLevel);
+	}
+}
+
 void USynthComponent::SetLowPassFilterEnabled(bool InLowPassFilterEnabled)
 {
 	if (AudioComponent)
@@ -572,6 +585,47 @@ void USynthComponent::SetOutputToBusOnly(bool bInOutputToBusOnly)
 	}
 }
 
+void USynthComponent::FadeIn(float FadeInDuration, float FadeVolumeLevel/* = 1.0f*/, float StartTime/* = 0.0f*/, const EAudioFaderCurve FadeCurve/* = EAudioFaderCurve::Linear*/) const
+{
+	if(AudioComponent)
+	{
+		AudioComponent->FadeIn(FadeInDuration, FadeVolumeLevel, StartTime, FadeCurve);
+	}
+}
+
+void USynthComponent::FadeOut(float FadeOutDuration, float FadeVolumeLevel, const EAudioFaderCurve FadeCurve/* = EAudioFaderCurve::Linear*/) const
+{
+	if(AudioComponent)
+	{
+		AudioComponent->FadeOut(FadeOutDuration, FadeVolumeLevel, FadeCurve);
+	}
+}
+
+void USynthComponent::AdjustVolume(float AdjustVolumeDuration, float AdjustVolumeLevel, const EAudioFaderCurve FadeCurve/* = EAudioFaderCurve::Linear*/) const
+{
+	if(AudioComponent)
+	{
+		AudioComponent->AdjustVolume(AdjustVolumeDuration, AdjustVolumeLevel, FadeCurve);
+	}
+}
+
+void USynthComponent::SetModulationRouting(const TSet<USoundModulatorBase*>& Modulators, const EModulationDestination Destination, const EModulationRouting RoutingMethod)
+{
+	if (AudioComponent)
+	{
+		AudioComponent->SetModulationRouting(Modulators, Destination, RoutingMethod);
+	}
+}
+
+TSet<USoundModulatorBase*> USynthComponent::GetModulators(const EModulationDestination Destination)
+{
+	if (AudioComponent)
+	{
+		return AudioComponent->GetModulators(Destination);
+	}
+
+	return TSet<USoundModulatorBase*>();
+}
 
 void USynthComponent::SynthCommand(TFunction<void()> Command)
 {
@@ -585,9 +639,9 @@ void USynthComponent::SynthCommand(TFunction<void()> Command)
 	}
 }
 
-ISoundGeneratorPtr USynthComponent::CreateSoundGeneratorInternal(int32 InSampleRate, int32 InNumChannels)
-{	
-	LLM_SCOPE(ELLMTag::AudioSynthesis);
-
-	return SoundGenerator = CreateSoundGenerator(InSampleRate, InNumChannels);
+ISoundGeneratorPtr USynthComponent::CreateSoundGeneratorInternal(const FSoundGeneratorInitParams& InParams)
+{
+	LLM_SCOPE(ELLMTag::AudioSynthesis);	
+	return SoundGenerator = CreateSoundGenerator(InParams);
 }
+

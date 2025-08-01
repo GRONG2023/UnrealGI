@@ -20,8 +20,8 @@ class UActorFactoryAnimationAsset : public UActorFactorySkeletalMesh
 protected:
 	//~ Begin UActorFactory Interface
 	virtual void PostSpawnActor( UObject* Asset, AActor* NewActor ) override;
-	virtual void PostCreateBlueprint( UObject* Asset, AActor* CDO ) override;
-	virtual bool CanCreateActorFrom( const FAssetData& AssetData, FText& OutErrorMsg ) override;
+	virtual bool CanCreateActorFrom(const FAssetData& AssetData, FText& OutErrorMsg) override;
+	virtual UObject* GetAssetFromActorInstance(AActor* ActorInstance);
 	//~ End UActorFactory Interface
 
 	virtual USkeletalMesh* GetSkeletalMeshFromAsset( UObject* Asset ) override;

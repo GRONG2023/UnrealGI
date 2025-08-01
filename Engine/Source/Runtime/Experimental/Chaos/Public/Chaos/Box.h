@@ -6,6 +6,7 @@
 #include "Chaos/ImplicitObject.h"
 #include "Chaos/AABB.h"
 #include "Chaos/ConvexHalfEdgeStructureData.h"
+#include "Chaos/Plane.h"
 #include "Chaos/Transform.h"
 #include "ChaosArchive.h"
 #include "UObject/ExternalPhysicsCustomObjectVersion.h"
@@ -90,12 +91,17 @@ namespace Chaos
 
 		virtual ~TBox() {}
 
-		virtual TUniquePtr<FImplicitObject> Copy() const override
+		virtual Chaos::FImplicitObjectPtr CopyGeometry() const override
 		{
-			return TUniquePtr<FImplicitObject>(new TBox<T,d>(*this));
+			return Chaos::FImplicitObjectPtr(new TBox<T,d>(*this));
 		}
 
-		FReal GetRadius() const
+		virtual Chaos::FImplicitObjectPtr CopyGeometryWithScale(const FVec3& Scale) const override
+		{
+			return Chaos::FImplicitObjectPtr(new TBox<T, d>(AABB.Min() * Scale, AABB.Max() * Scale, Margin * Scale.Min()));
+		}
+
+		virtual FReal GetRadius() const override
 		{
 			return 0.0f;
 		}
@@ -139,9 +145,10 @@ namespace Chaos
 		}
 
 		// Extents
-		FORCEINLINE const TAABB<T, d> BoundingBox() const
+		FORCEINLINE const TAABB<FReal, 3> BoundingBox() const
 		{
-			return AABB;
+			// LWC - necessary if T is different from FReal
+			return TAABB<FReal, 3>(AABB);
 		}
 
 		// Apply a limit to the specified margin that prevents the box inverting
@@ -152,12 +159,12 @@ namespace Chaos
 		}
 
 		// Return the distance and normal is the closest point on the surface to Pos. Negative for penetration.
-		virtual T PhiWithNormal(const TVector<T, d>& Pos, TVector<T, d>& Normal) const override
+		virtual FReal PhiWithNormal(const FVec3& Pos, FVec3& Normal) const override
 		{
 			return AABB.PhiWithNormal(Pos, Normal);
 		}
 
-		virtual T PhiWithNormalScaled(const TVector<T, d>& Pos, const TVector<T, d>& Scale, TVector<T, d>& Normal) const override
+		virtual FReal PhiWithNormalScaled(const FVec3& Pos, const FVec3& Scale, FVec3& Normal) const override
 		{
 			return TAABB<T, d>(Scale * AABB.Min(), Scale * AABB.Max()).PhiWithNormal(Pos, Normal);
 		}
@@ -167,7 +174,7 @@ namespace Chaos
 			return TAABB<T, d>(InMin, InMax).RaycastFast(StartPoint, Dir, InvDir, bParallel, Length, InvLength, OutTime, OutPosition);
 		}
 
-		virtual bool CHAOS_API Raycast(const TVector<T, d>& StartPoint, const TVector<T, d>& Dir, const T Length, const T Thickness, T& OutTime, TVector<T, d>& OutPosition, TVector<T, d>& OutNormal, int32& OutFaceIndex) const override
+		virtual bool Raycast(const FVec3& StartPoint, const FVec3& Dir, const FReal Length, const FReal Thickness, FReal& OutTime, FVec3& OutPosition, FVec3& OutNormal, int32& OutFaceIndex) const override
 		{
 			if (AABB.Raycast(StartPoint, Dir, Length, Thickness, OutTime, OutPosition, OutNormal, OutFaceIndex))
 			{
@@ -181,12 +188,12 @@ namespace Chaos
 			return AABB.FindClosestPoint(StartPoint, Thickness);
 		}
 
-		virtual Pair<TVector<T, d>, bool> FindClosestIntersectionImp(const TVector<T, d>& StartPoint, const TVector<T, d>& EndPoint, const T Thickness) const override
+		virtual Pair<FVec3, bool> FindClosestIntersectionImp(const FVec3& StartPoint, const FVec3& EndPoint, const FReal Thickness) const override
 		{
 			return AABB.FindClosestIntersectionImp(StartPoint, EndPoint, Thickness);
 		}
 
-		virtual TVector<T, d> FindGeometryOpposingNormal(const TVector<T, d>& DenormDir, int32 FaceIndex, const TVector<T, d>& OriginalNormal) const override
+		virtual FVec3 FindGeometryOpposingNormal(const FVec3& DenormDir, int32 FaceIndex, const FVec3& OriginalNormal) const override
 		{
 			return AABB.FindGeometryOpposingNormal(DenormDir, FaceIndex, OriginalNormal);
 		}
@@ -194,8 +201,9 @@ namespace Chaos
 		// Get the index of the plane that most opposes the normal
 		int32 GetMostOpposingPlane(const TVector<T, d>& Normal) const
 		{
+			// NOTE: Index returned here must match indices as set up in SNormals (see Box.cpp)
 			int32 AxisIndex = FVec3(Normal.GetAbs()).MaxAxis();
-			if (Normal[AxisIndex] > 0.0f)
+			if (Normal[AxisIndex] < 0.0f)
 			{
 				AxisIndex += 3;
 			}
@@ -208,8 +216,9 @@ namespace Chaos
 			return GetMostOpposingPlane(Normal);
 		}
 
-		// Get the nearest point on an edge
-		TVector<T, d> GetClosestEdgePosition(int32 PlaneIndexHint, const TVector<T, d>& Position) const
+		// Get the nearest point on an edge and the edge vertices
+		// Used for manifold generation
+		FVec3 GetClosestEdge(int32 PlaneIndexHint, const FVec3& Position, FVec3& OutEdgePos0, FVec3& OutEdgePos1) const
 		{
 			TVector<T, d> ClosestEdgePosition = FVec3(0);
 			if (PlaneIndexHint >= 0)
@@ -232,6 +241,8 @@ namespace Chaos
 						{
 							ClosestDistanceSq = EdgeDistanceSq;
 							ClosestEdgePosition = EdgePosition;
+							OutEdgePos0 = P0;
+							OutEdgePos1 = P1;
 						}
 
 						P0 = P1;
@@ -244,6 +255,13 @@ namespace Chaos
 				check(false);
 			}
 			return ClosestEdgePosition;
+		}
+
+		// Get the nearest point on an edge
+		TVector<T, d> GetClosestEdgePosition(int32 PlaneIndexHint, const TVector<T, d>& Position) const
+		{
+			TVector<T, d> Unused0, Unused1;
+			return GetClosestEdge(PlaneIndexHint, Position, Unused0, Unused1);
 		}
 
 		bool GetClosestEdgeVertices(int32 PlaneIndexHint, const FVec3& Position, int32& OutVertexIndex0, int32& OutVertexIndex1) const
@@ -293,6 +311,13 @@ namespace Chaos
 		{
 			return SStructureData.FindVertexPlanes(VertexIndex, OutVertexPlanes, MaxVertexPlanes);
 		}
+		
+		// Get up to the 3  plane indices that belong to a vertex
+		// Returns the number of planes found.
+		int32 GetVertexPlanes3(int32 VertexIndex, int32& PlaneIndex0, int32& PlaneIndex1, int32& PlaneIndex2) const
+		{
+			return SStructureData.GetVertexPlanes3(VertexIndex, PlaneIndex0, PlaneIndex1, PlaneIndex2);
+		}
 
 		// The number of vertices that make up the corners of the specified face
 		int32 NumPlaneVertices(int32 PlaneIndex) const
@@ -323,11 +348,17 @@ namespace Chaos
 		int32 NumVertices() const { return SVertices.Num(); }
 
 		// Get the plane at the specified index (e.g., indices from FindVertexPlanes)
-		const TPlaneConcrete<FReal, 3> GetPlane(int32 FaceIndex) const
+		const TPlaneConcrete<FReal> GetPlane(int32 FaceIndex) const
 		{
 			const FVec3& PlaneN = SNormals[FaceIndex];
 			const FVec3 PlaneX = AABB.Center() + 0.5f * (PlaneN * AABB.Extents());
-			return TPlaneConcrete<FReal, 3>(PlaneX, PlaneN);
+			return TPlaneConcrete<FReal>(PlaneX, PlaneN);
+		}
+
+		void GetPlaneNX(const int32 FaceIndex, FVec3& OutN, FVec3& OutX) const
+		{
+			OutN = SNormals[FaceIndex];
+			OutX = AABB.Center() + 0.5f * (SNormals[FaceIndex] * AABB.Extents());
 		}
 
 		// Get the vertex at the specified index (e.g., indices from GetPlaneVertexs)
@@ -338,23 +369,39 @@ namespace Chaos
 		}
 
 		// Returns a position on the shape
-		FORCEINLINE_DEBUGGABLE TVector<T, d> Support(const TVector<T, d>& Direction, const T Thickness) const
+		FORCEINLINE_DEBUGGABLE TVector<T, d> Support(const TVector<T, d>& Direction, const T Thickness, int32& VertexIndex) const
 		{
-			return AABB.Support(Direction, Thickness);
+			return AABB.Support(Direction, Thickness, VertexIndex);
 		}
 
 		// Returns a position on the core shape excluding the margin
-		FORCEINLINE_DEBUGGABLE TVector<T, d> SupportCore(const TVector<T, d>& Direction, FReal InMargin) const
+		FORCEINLINE_DEBUGGABLE TVector<T, d> SupportCore(const TVector<T, d>& Direction, const FReal InMargin, FReal* OutSupportDelta, int32& VertexIndex) const
 		{
-			return AABB.SupportCore(Direction, InMargin);
+			return AABB.SupportCore(Direction, InMargin, OutSupportDelta, VertexIndex);
 		}
 
-		FORCEINLINE_DEBUGGABLE TVector<T, d> SupportCoreScaled(const TVector<T, d>& Direction, FReal InMargin, const TVector<T, d>& Scale) const
+		// Returns a position on the core shape excluding the margin
+		FORCEINLINE_DEBUGGABLE VectorRegister4Float SupportCoreSimd(const VectorRegister4Float& Direction, const FReal InMargin) const
 		{
+			FVec3 DirectionVec3;
+			VectorStoreFloat3(Direction, &DirectionVec3);
+			int32 VertexIndex = INDEX_NONE;
+			FVec3 SupportVert = AABB.SupportCore(DirectionVec3, InMargin, nullptr, VertexIndex);
+			return MakeVectorRegisterFloatFromDouble(MakeVectorRegister(SupportVert.X, SupportVert.Y, SupportVert.Z, 0.0));
+		}
+
+		FORCEINLINE_DEBUGGABLE TVector<T, d> SupportCoreScaled(const TVector<T, d>& Direction, const FReal InMargin, const TVector<T, d>& Scale, T* OutSupportDelta, int32& VertexIndex) const
+		{
+			return AABB.SupportCoreScaled(Direction, InMargin, Scale, OutSupportDelta, VertexIndex);
 			// @todo(chaos): Needs to operate in scaled space as margin is not non-uniform scalable
-			const FReal InvScale = 1.0f / Scale[0];
-			const FReal NetMargin = InvScale * InMargin;
-			return AABB.SupportCore(Direction * Scale, NetMargin) * Scale;
+			//const FReal InvScale = 1.0f / Scale[0];
+			//const FReal NetMargin = InvScale * InMargin;
+			//const FVec3 CoreVertex = AABB.SupportCore(Direction * Scale, NetMargin, OutSupportDelta);
+			//if (OutSupportDelta != nullptr)
+			//{
+			//	*OutSupportDelta = *OutSupportDelta * Scale[0];
+			//}
+			//return CoreVertex * Scale;
 		}
 
 		// Returns a winding order multiplier used in the manifold clipping and required when we have negative scales (See ImplicitObjectScaled)
@@ -396,7 +443,10 @@ namespace Chaos
 			return TAABB<T, d>::GetRotationOfMass();
 		}
 
-		virtual FString ToString() const { return FString::Printf(TEXT("TAABB Min:%s, Max:%s, Margin:%f"), *Min().ToString(), *Max().ToString(), GetMargin()); }
+		virtual FString ToString() const override
+		{ 
+			return FString::Printf(TEXT("Box: Min: [%s], Max: [%s], Margin: %f"), *Min().ToString(), *Max().ToString(), GetMargin());
+		}
 
 		FORCEINLINE void SerializeImp(FArchive& Ar)
 		{
@@ -406,7 +456,10 @@ namespace Chaos
 			Ar.UsingCustomVersion(FReleaseObjectVersion::GUID);
 			if (Ar.CustomVer(FReleaseObjectVersion::GUID) >= FReleaseObjectVersion::MarginAddedToConvexAndBox)
 			{
-				Ar << FImplicitObject::Margin;
+				// LWC_TODO : potential precision loss, to be changed when we can serialize FReal as double
+				FRealSingle MarginFloat = (FRealSingle)FImplicitObject::Margin;
+				Ar << MarginFloat;
+				FImplicitObject::Margin = (T)MarginFloat;
 			}
 		}
 
@@ -428,22 +481,45 @@ namespace Chaos
 		}
 
 		// See comments on SerializeAsAABB
-		static void SerializeAsAABBs(FArchive& Ar, TArray<TAABB<T, d>>& AABBs)
+		template<typename OtherType>
+		static void SerializeAsAABBs(FArchive& Ar, TArray<TAABB<OtherType, d>>& AABBs)
 		{
 			Ar.UsingCustomVersion(FExternalPhysicsCustomObjectVersion::GUID);
 			if (Ar.CustomVer(FExternalPhysicsCustomObjectVersion::GUID) < FExternalPhysicsCustomObjectVersion::TBoxReplacedWithTAABB)
 			{
 				TArray<TBox<T, d>> Tmp;
 				Ar << Tmp;
-				AABBs.Reserve(Tmp.Num());
+				AABBs.Reset(Tmp.Num());
 				for (const TBox<T, d>& Box : Tmp)
 				{
-					AABBs.Add(Box.AABB);
+					AABBs.Emplace(TAABB<OtherType, d>(Box.AABB));
+				}
+			}
+			else if (std::is_same_v<T, OtherType>)
+			{
+				Ar << AABBs;
+			}
+			else if (Ar.IsLoading())
+			{
+				// Reload to a different floating point type
+				TArray<TAABB<T, d>> TmpAABBs;
+				Ar << TmpAABBs;
+				AABBs.Reset(TmpAABBs.Num());
+				for (const TAABB<T, d>& TmpAABB : TmpAABBs)
+				{
+					AABBs.Emplace(TAABB<OtherType, d>(TmpAABB));
 				}
 			}
 			else
 			{
-				Ar << AABBs;
+				// Serialize from a different floating point type
+				TArray<TAABB<T, d>> TmpAABBs;
+				TmpAABBs.Reserve(AABBs.Num());
+				for (const TAABB<OtherType, d>& AABB : AABBs)
+				{
+					TmpAABBs.Emplace(TAABB<T, d>(AABB));
+				}
+				Ar << TmpAABBs;
 			}
 		}
 
@@ -488,5 +564,49 @@ namespace Chaos
 		static TArray<FVec3> SNormals;
 		static TArray<FVec3> SVertices;
 		static FConvexHalfEdgeStructureDataS16 SStructureData;
+	};
+
+
+	class FBoxFloat3: public FImplicitObject
+	{
+	public:
+
+		FBoxFloat3()
+			: FImplicitObject(EImplicitObject::FiniteConvex, ImplicitObjectType::Box)
+		{}
+
+		virtual FReal PhiWithNormal(const FVec3& x, FVec3& Normal) const override
+		{
+			check(false); // should not be called - empty shell class for legacy serialization
+			return 0.;
+		}
+
+		FORCEINLINE void SerializeImp(FArchive& Ar)
+		{
+			FImplicitObject::SerializeImp(Ar);
+			Ar << MMin << MMax;
+
+			Ar.UsingCustomVersion(FReleaseObjectVersion::GUID);
+			if (Ar.CustomVer(FReleaseObjectVersion::GUID) >= FReleaseObjectVersion::MarginAddedToConvexAndBox)
+			{
+				Ar << FImplicitObject::Margin;
+			}
+		}
+
+		virtual void Serialize(FChaosArchive& Ar) override
+		{
+			FChaosArchiveScopedMemory ScopedMemory(Ar, GetTypeName());
+			SerializeImp(Ar);
+		}
+
+		virtual void Serialize(FArchive& Ar) override { SerializeImp(Ar); }
+
+		virtual uint32 GetTypeHash() const override
+		{
+			return HashCombine(Chaos::GetTypeHash(MMin), Chaos::GetTypeHash(MMax));
+		}
+
+	private:
+		TVector<float, 3> MMin, MMax;
 	};
 }

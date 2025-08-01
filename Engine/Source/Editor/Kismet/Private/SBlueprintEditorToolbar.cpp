@@ -2,39 +2,67 @@
 
 
 #include "SBlueprintEditorToolbar.h"
-#include "Framework/Commands/UIAction.h"
-#include "Framework/Commands/UICommandList.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Misc/CoreMisc.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Misc/MessageDialog.h"
-#include "Modules/ModuleManager.h"
-#include "UObject/UObjectHash.h"
+
+#include "AssetToolsModule.h"
 #include "BlueprintEditor.h"
-#include "Widgets/Layout/SSpacer.h"
-#include "ISourceControlModule.h"
-#include "SourceControlHelpers.h"
 #include "BlueprintEditorCommands.h"
-#include "Kismet2/DebuggerCommands.h"
+#include "BlueprintEditorContext.h"
+#include "DiffUtils.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "Engine/Blueprint.h"
 #include "Engine/LevelScriptBlueprint.h"
-#include "Kismet2/BlueprintEditorUtils.h"
+#include "FindInBlueprintManager.h"
+#include "Framework/Commands/InputChord.h"
+#include "Framework/Commands/UIAction.h"
+#include "Framework/Commands/UICommandInfo.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Framework/SlateDelegates.h"
 #include "GraphEditorActions.h"
+#include "HAL/PlatformMath.h"
+#include "HAL/PlatformMisc.h"
 #include "IAssetTools.h"
 #include "IAssetTypeActions.h"
-#include "AssetToolsModule.h"
-#include "BlueprintEditorModes.h"
-#include "Widgets/SToolTip.h"
-#include "IDocumentation.h"
-#include "SBlueprintEditorSelectedDebugObjectWidget.h"
-#include "DesktopPlatformModule.h"
-#include "SBlueprintRevisionMenu.h"
-#include "ToolMenus.h"
-#include "BlueprintEditorContext.h"
-#include "FindInBlueprintManager.h"
-#include "ISourceCodeAccessor.h"
 #include "ISourceCodeAccessModule.h"
+#include "ISourceCodeAccessor.h"
+#include "ISourceControlModule.h"
+#include "ISourceControlProvider.h"
+#include "ISourceControlRevision.h"
+#include "ISourceControlState.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/DebuggerCommands.h"
+#include "Layout/Margin.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "SBlueprintEditorSelectedDebugObjectWidget.h"
+#include "SBlueprintRevisionMenu.h"
+#include "SourceControlHelpers.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/Casts.h"
+#include "ToolMenu.h"
+#include "ToolMenuDelegates.h"
+#include "ToolMenuEntry.h"
+#include "ToolMenuMisc.h"
+#include "ToolMenuSection.h"
 #include "ToolMenus.h"
-#include "BlueprintEditorContext.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/Package.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UObjectHash.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Layout/SBorder.h"
+
+class FUICommandList;
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "KismetToolbar"
 
@@ -51,7 +79,7 @@ public:
 	{
 		SBorder::Construct(
 			SBorder::FArguments()
-			.BorderImage(FEditorStyle::GetBrush("BlueprintEditor.PipelineSeparator"))
+			.BorderImage(FAppStyle::GetBrush("BlueprintEditor.PipelineSeparator"))
 			.Padding(0.0f)
 			);
 	}
@@ -79,11 +107,6 @@ void FKismet2Menu::FillFileMenuBlueprintSection(UToolMenu* InMenu)
 		Section.AddMenuEntry( FBlueprintEditorCommands::Get().CompileBlueprint );
 		Section.AddMenuEntry( FBlueprintEditorCommands::Get().RefreshAllNodes );
 		Section.AddMenuEntry( FBlueprintEditorCommands::Get().ReparentBlueprint );
-		Section.AddSubMenu(
-			"Diff",
-			LOCTEXT("Diff", "Diff"),
-			LOCTEXT("BlueprintEditorDiffToolTip", "Diff against previous revisions"),
-			FNewToolMenuWidget::CreateStatic(&FKismet2Menu::MakeDiffMenu));
 		Section.AddMenuEntry(FBlueprintEditorCommands::Get().BeginBlueprintMerge);
 	}
 
@@ -110,11 +133,6 @@ void FKismet2Menu::FillDeveloperMenu(UToolMenu* InMenu)
 	{
 		FToolMenuSection& Section = InMenu->AddSection("FileDeveloperCompilerSettings", LOCTEXT("CompileOptionsHeading", "Compiler Settings"));
 		Section.AddMenuEntry( FBlueprintEditorCommands::Get().SaveIntermediateBuildProducts );
-	}
-
-	{
-		FToolMenuSection& Section = InMenu->AddSection("GenerateNativeCode", LOCTEXT("Cpp", "C++"));
-		Section.AddMenuEntry(FBlueprintEditorCommands::Get().GenerateNativeCode);
 	}
 
 	if (FFindInBlueprintSearchManager::Get().ShouldEnableDeveloperMenuTools())
@@ -169,6 +187,16 @@ void FKismet2Menu::FillViewMenu(UToolMenu* InMenu)
 
 void FKismet2Menu::FillDebugMenu(UToolMenu* InMenu)
 {
+	{
+		FToolMenuSection& Section = InMenu->AddSection("BlueprintDebugger", LOCTEXT("BlueprintDebugger_Heading", "Blueprint Debugger"));
+		Section.AddMenuEntry(
+			FBlueprintEditorCommands::Get().OpenBlueprintDebugger,
+			/* InLabelOverride = */ LOCTEXT("BpDebuggerTitle", "Blueprint Debugger"),
+			/* InTooltipOverride = */ LOCTEXT("BpDebuggerTooltip","Open the Blueprint Debugger."),
+			FSlateIcon(FAppStyle::GetAppStyleSetName(), "BlueprintDebugger.TabIcon")
+		);
+	}
+	
 	{
 		FToolMenuSection& Section = InMenu->AddSection("DebugBreakpoints", LOCTEXT("DebugMenu_BreakpointHeading", "Breakpoints"));
 		Section.AddMenuEntry( FBlueprintEditorCommands::Get().DisableAllBreakpoints );
@@ -230,111 +258,6 @@ void FKismet2Menu::SetupBlueprintEditorMenu(const FName MainMenuName)
 	}
 }
 
-/** Delegate called to diff a specific revision with the current */
-static void OnDiffRevisionPicked(FRevisionInfo const& RevisionInfo, TWeakObjectPtr<UBlueprint> BlueprintObj)
-{
-	if (BlueprintObj.IsValid())
-	{
-		bool const bIsLevelScriptBlueprint = FBlueprintEditorUtils::IsLevelScriptBlueprint(BlueprintObj.Get());
-		FString const Filename = SourceControlHelpers::PackageFilename(bIsLevelScriptBlueprint ? BlueprintObj.Get()->GetOuter()->GetPathName() : BlueprintObj.Get()->GetPathName());
-
-		ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
-
-		// Get the SCC state
-		FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(Filename, EStateCacheUsage::Use);
-		if (SourceControlState.IsValid())
-		{
-			for (int32 HistoryIndex = 0; HistoryIndex < SourceControlState->GetHistorySize(); HistoryIndex++)
-			{
-				TSharedPtr<ISourceControlRevision, ESPMode::ThreadSafe> Revision = SourceControlState->GetHistoryItem(HistoryIndex);
-				check(Revision.IsValid());
-				if (Revision->GetRevision() == RevisionInfo.Revision)
-				{
-					// Get the revision of this package from source control
-					FString PreviousTempPkgName;
-					if (Revision->Get(PreviousTempPkgName))
-					{
-						// Try and load that package
-						UPackage* PreviousTempPkg = LoadPackage(NULL, *PreviousTempPkgName, LOAD_ForDiff|LOAD_DisableCompileOnLoad);
-
-						if (PreviousTempPkg != NULL)
-						{
-							UObject* PreviousAsset = NULL;
-
-							// If its a levelscript blueprint, find the previous levelscript blueprint in the map
-							if (bIsLevelScriptBlueprint)
-							{
-								TArray<UObject *> ObjectsInOuter;
-								GetObjectsWithOuter(PreviousTempPkg, ObjectsInOuter);
-
-								// Look for the level script blueprint for this package
-								for (int32 Index = 0; Index < ObjectsInOuter.Num(); Index++)
-								{
-									UObject* Obj = ObjectsInOuter[Index];
-									if (ULevelScriptBlueprint* ObjAsBlueprint = Cast<ULevelScriptBlueprint>(Obj))
-									{
-										PreviousAsset = ObjAsBlueprint;
-										break;
-									}
-								}
-							}
-							// otherwise its a normal Blueprint
-							else
-							{
-								FString PreviousAssetName = FPaths::GetBaseFilename(Filename, true);
-								PreviousAsset = FindObject<UObject>(PreviousTempPkg, *PreviousAssetName);
-							}
-
-							if (PreviousAsset != NULL)
-							{
-								FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
-								FRevisionInfo OldRevision = { Revision->GetRevision(), Revision->GetCheckInIdentifier(), Revision->GetDate() };
-								FRevisionInfo CurrentRevision = { TEXT(""), Revision->GetCheckInIdentifier(), Revision->GetDate() };
-								AssetToolsModule.Get().DiffAssets(PreviousAsset, BlueprintObj.Get(), OldRevision, CurrentRevision);
-							}
-						}
-						else
-						{
-							FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("SourceControl.HistoryWindow", "UnableToLoadAssets", "Unable to load assets to diff. Content may no longer be supported?"));
-						}
-					}
-					break;
-				}
-			}
-		}
-	}
-}
-
-TSharedRef<SWidget> FKismet2Menu::MakeDiffMenu(const FToolMenuContext& InToolMenuContext)
-{
-	if (ISourceControlModule::Get().IsEnabled() && ISourceControlModule::Get().GetProvider().IsAvailable())
-	{
-		UBlueprintEditorToolMenuContext* Context = InToolMenuContext.FindContext<UBlueprintEditorToolMenuContext>();
-		UBlueprint* BlueprintObj = Context ? Context->GetBlueprintObj() : nullptr;
-		if(BlueprintObj)
-		{
-			TWeakObjectPtr<UBlueprint> BlueprintPtr = BlueprintObj;
-			// Add our async SCC task widget
-			return SNew(SBlueprintRevisionMenu, BlueprintObj)
-				.OnRevisionSelected_Static(&OnDiffRevisionPicked, BlueprintPtr);
-		}
-		else
-		{
-			// if BlueprintObj is null then this means that multiple blueprints are selected
-			FMenuBuilder MenuBuilder(true, NULL);
-			MenuBuilder.AddMenuEntry( LOCTEXT("NoRevisionsForMultipleBlueprints", "Multiple blueprints selected"), 
-				FText(), FSlateIcon(), FUIAction() );
-			return MenuBuilder.MakeWidget();
-		}
-	}
-
-	FMenuBuilder MenuBuilder(true, NULL);
-	MenuBuilder.AddMenuEntry( LOCTEXT("SourceControlDisabled", "Source control is disabled"), 
-		FText(), FSlateIcon(), FUIAction() );
-	return MenuBuilder.MakeWidget();
-}
-
-
 
 //////////////////////////////////////////////////////////////////////////
 // FFullBlueprintEditorCommands
@@ -351,7 +274,7 @@ void FFullBlueprintEditorCommands::RegisterCommands()
 	UI_COMMAND(SwitchToBlueprintDefaultsMode, "Defaults", "Switches to Class Defaults Mode", EUserInterfaceActionType::ToggleButton, FInputChord());
 	UI_COMMAND(SwitchToComponentsMode, "Components", "Switches to Components Mode", EUserInterfaceActionType::ToggleButton, FInputChord());
 
-	UI_COMMAND(EditGlobalOptions, "Class Settings", "Edit Class Settings (Previously known as Blueprint Props)", EUserInterfaceActionType::ToggleButton, FInputChord());
+	UI_COMMAND(EditGlobalOptions, "Class Settings", "Edit Class Settings", EUserInterfaceActionType::ToggleButton, FInputChord());
 	UI_COMMAND(EditClassDefaults, "Class Defaults", "Edit the initial values of your class.", EUserInterfaceActionType::ToggleButton, FInputChord());
 
 	UI_COMMAND(JumpToErrorNode, "Jump to Error Node", "When enabled, then the Blueprint will snap focus to nodes producing an error during compilation", EUserInterfaceActionType::ToggleButton, FInputChord());
@@ -362,46 +285,48 @@ void FFullBlueprintEditorCommands::RegisterCommands()
 
 namespace BlueprintEditorToolbarImpl
 {
-	static TSharedRef<SWidget> GenerateCompileOptionsWidget(TSharedRef<FUICommandList> CommandList);
-	static void MakeSaveOnCompileSubMenu(FMenuBuilder& InMenuBuilder);
-	static void MakeCompileDeveloperSubMenu(FMenuBuilder& InMenuBuilder);
+	static void GenerateCompileOptionsMenu(UToolMenu* InMenu);
+	static void MakeSaveOnCompileSubMenu(UToolMenu* InMenu);
+	static void MakeCompileDeveloperSubMenu(UToolMenu* InMenu);
 };
 
-static TSharedRef<SWidget> BlueprintEditorToolbarImpl::GenerateCompileOptionsWidget(TSharedRef<FUICommandList> CommandList)
+static void BlueprintEditorToolbarImpl::GenerateCompileOptionsMenu(UToolMenu* InMenu)
 {
-	FMenuBuilder MenuBuilder(/*bShouldCloseWindowAfterMenuSelection =*/true, CommandList);
-
+	FToolMenuSection& Section = InMenu->AddSection("Section");
 	const FFullBlueprintEditorCommands& Commands = FFullBlueprintEditorCommands::Get();
 
 	// @TODO: disable the menu and change up the tooltip when all sub items are disabled
-	MenuBuilder.AddSubMenu(
+	Section.AddSubMenu(
+		"SaveOnCompile",
 		LOCTEXT("SaveOnCompileSubMenu", "Save on Compile"),
 		LOCTEXT("SaveOnCompileSubMenu_ToolTip", "Determines how the Blueprint is saved whenever you compile it."),
-		FNewMenuDelegate::CreateStatic(&BlueprintEditorToolbarImpl::MakeSaveOnCompileSubMenu));
+		FNewToolMenuDelegate::CreateStatic(&BlueprintEditorToolbarImpl::MakeSaveOnCompileSubMenu));
 
-	MenuBuilder.AddMenuEntry(Commands.JumpToErrorNode);
+	Section.AddMenuEntry(Commands.JumpToErrorNode);
 
-// 	MenuBuilder.AddSubMenu(
+// 	Section.AddSubMenu(
+// 		"DevCompile",
 // 		LOCTEXT("DevCompileSubMenu", "Developer"),
 // 		LOCTEXT("DevCompileSubMenu_ToolTip", "Advanced settings that aid in devlopment/debugging of the Blueprint system as a whole."),
 // 		FNewMenuDelegate::CreateStatic(&BlueprintEditorToolbarImpl::MakeCompileDeveloperSubMenu));
 
-	return MenuBuilder.MakeWidget();
 }
 
-static void BlueprintEditorToolbarImpl::MakeSaveOnCompileSubMenu(FMenuBuilder& InMenuBuilder)
+static void BlueprintEditorToolbarImpl::MakeSaveOnCompileSubMenu(UToolMenu* InMenu)
 {
+	FToolMenuSection& Section = InMenu->AddSection("Section");
 	const FFullBlueprintEditorCommands& Commands = FFullBlueprintEditorCommands::Get();
-	InMenuBuilder.AddMenuEntry(Commands.SaveOnCompile_Never);
-	InMenuBuilder.AddMenuEntry(Commands.SaveOnCompile_SuccessOnly);
-	InMenuBuilder.AddMenuEntry(Commands.SaveOnCompile_Always);
+	Section.AddMenuEntry(Commands.SaveOnCompile_Never);
+	Section.AddMenuEntry(Commands.SaveOnCompile_SuccessOnly);
+	Section.AddMenuEntry(Commands.SaveOnCompile_Always);
 }
 
-static void BlueprintEditorToolbarImpl::MakeCompileDeveloperSubMenu(FMenuBuilder& InMenuBuilder)
+static void BlueprintEditorToolbarImpl::MakeCompileDeveloperSubMenu(UToolMenu* InMenu)
 {
+	FToolMenuSection& Section = InMenu->AddSection("Section");
 	const FBlueprintEditorCommands& EditorCommands = FBlueprintEditorCommands::Get();
-	InMenuBuilder.AddMenuEntry(EditorCommands.SaveIntermediateBuildProducts);
-	InMenuBuilder.AddMenuEntry(EditorCommands.ShowActionMenuItemSignatures);
+	Section.AddMenuEntry(EditorCommands.SaveIntermediateBuildProducts);
+	Section.AddMenuEntry(EditorCommands.ShowActionMenuItemSignatures);
 }
 
 
@@ -410,12 +335,12 @@ static void BlueprintEditorToolbarImpl::MakeCompileDeveloperSubMenu(FMenuBuilder
 
 void FBlueprintEditorToolbar::AddBlueprintGlobalOptionsToolbar(UToolMenu* InMenu, bool bRegisterViewport)
 {
-	FToolMenuSection& Section = InMenu->AddSection("Settings");
+	FToolMenuSection& Section = InMenu->FindOrAddSection("Settings");
 	Section.InsertPosition = FToolMenuInsert("Asset", EToolMenuInsertType::After);
 
 	Section.AddDynamicEntry("BlueprintGlobalOptions", FNewToolMenuSectionDelegate::CreateLambda([bRegisterViewport](FToolMenuSection& InSection)
 	{
-		UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
+		const UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
 		if (Context && Context->GetBlueprintObj())
 		{
 			const FFullBlueprintEditorCommands& Commands = FFullBlueprintEditorCommands::Get();
@@ -437,7 +362,7 @@ void FBlueprintEditorToolbar::AddCompileToolbar(UToolMenu* InMenu)
 
 	Section.AddDynamicEntry("CompileCommands", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
 	{
-		UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
+		const UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
 		if (Context && Context->BlueprintEditor.IsValid() && Context->GetBlueprintObj())
 		{
 			TSharedPtr<class FBlueprintEditorToolbar> BlueprintEditorToolbar = Context->BlueprintEditor.Pin()->GetToolbarBuilder();
@@ -445,26 +370,50 @@ void FBlueprintEditorToolbar::AddCompileToolbar(UToolMenu* InMenu)
 			{
 				const FFullBlueprintEditorCommands& Commands = FFullBlueprintEditorCommands::Get();
 
-				InSection.AddEntry(FToolMenuEntry::InitToolBarButton(
+				FToolMenuEntry& CompileButton = InSection.AddEntry(FToolMenuEntry::InitToolBarButton(
 					Commands.Compile,
 					TAttribute<FText>(),
 					TAttribute<FText>(BlueprintEditorToolbar.ToSharedRef(), &FBlueprintEditorToolbar::GetStatusTooltip),
 					TAttribute<FSlateIcon>(BlueprintEditorToolbar.ToSharedRef(), &FBlueprintEditorToolbar::GetStatusImage),
-					"CompileBlueprint"
-				));
+					"CompileBlueprint"));
+				CompileButton.StyleNameOverride = "CalloutToolbar";
 
-				InSection.AddEntry(FToolMenuEntry::InitComboButton(
-					"BlueprintCompileOptions",
+				FToolMenuEntry& CompileOptions = InSection.AddEntry(FToolMenuEntry::InitComboButton(
+					"CompileComboButton",
 					FUIAction(),
-					FOnGetContent::CreateStatic(&BlueprintEditorToolbarImpl::GenerateCompileOptionsWidget, Context->BlueprintEditor.Pin()->GetToolkitCommands()),
-					LOCTEXT("BlupeintCompileOptions_ToolbarName",    "Compile Options"),
-					LOCTEXT("BlupeintCompileOptions_ToolbarTooltip", "Options to customize how Blueprints compile"),
-					TAttribute<FSlateIcon>(),
-					/*bSimpleComboBox =*/true
+					FNewToolMenuDelegate::CreateStatic(&BlueprintEditorToolbarImpl::GenerateCompileOptionsMenu),
+					LOCTEXT("BlupeintCompileOptions_ToolbarTooltip", "Options to customize how Blueprints compile")
 				));
+				CompileOptions.StyleNameOverride = "CalloutToolbar";
+				CompileOptions.ToolBarData.bSimpleComboBox = true;
 			}
 		}
 	}));
+
+	// We want the diff menu to be on any blueprint toolbar that also contains compile
+	FToolMenuSection& DiffSection = InMenu->AddSection("SourceControl");
+	DiffSection.InsertPosition = FToolMenuInsert("Asset", EToolMenuInsertType::After);
+
+	DiffSection.AddDynamicEntry("SourceControlCommands", FNewToolMenuSectionDelegate::CreateLambda([](FToolMenuSection& InSection)
+		{
+			const UBlueprintEditorToolMenuContext* Context = InSection.FindContext<UBlueprintEditorToolMenuContext>();
+			if (Context && Context->BlueprintEditor.IsValid() && Context->GetBlueprintObj())
+			{
+				TSharedPtr<class FBlueprintEditorToolbar> BlueprintEditorToolbar = Context->BlueprintEditor.Pin()->GetToolbarBuilder();
+				if (BlueprintEditorToolbar.IsValid())
+				{
+					FToolMenuEntry& DiffEntry = InSection.AddEntry(FToolMenuEntry::InitComboButton(
+						"Diff",
+						FUIAction(),
+						FOnGetContent::CreateStatic(&FBlueprintEditorToolbar::MakeDiffMenu, Context),
+						LOCTEXT("Diff", "Diff"),
+						LOCTEXT("BlueprintEditorDiffToolTip", "Diff against previous revisions"),
+						FSlateIcon(FAppStyle::Get().GetStyleSetName(), "BlueprintDiff.ToolbarIcon")
+					));
+					DiffEntry.StyleNameOverride = "CalloutToolbar";
+				}
+			}
+		}));
 }
 
 void FBlueprintEditorToolbar::AddNewToolbar(UToolMenu* InMenu)
@@ -504,7 +453,7 @@ void FBlueprintEditorToolbar::AddScriptingToolbar(UToolMenu* InMenu)
 				FBlueprintEditorCommands::Get().ToggleHideUnrelatedNodes,
 				TAttribute<FText>(),
 				TAttribute<FText>(),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "GraphEditor.ToggleHideUnrelatedNodes")
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "GraphEditor.ToggleHideUnrelatedNodes")
 			));
 
 			InSection.AddEntry(FToolMenuEntry::InitComboButton(
@@ -552,18 +501,25 @@ FSlateIcon FBlueprintEditorToolbar::GetStatusImage() const
 		Status = BS_UpToDate;
 	}
 
+	
+	static const FName CompileStatusBackground("Blueprint.CompileStatus.Background");
+	static const FName CompileStatusUnknown("Blueprint.CompileStatus.Overlay.Unknown");
+	static const FName CompileStatusError("Blueprint.CompileStatus.Overlay.Error");
+	static const FName CompileStatusGood("Blueprint.CompileStatus.Overlay.Good");
+	static const FName CompileStatusWarning("Blueprint.CompileStatus.Overlay.Warning");
+
 	switch (Status)
 	{
 	default:
 	case BS_Unknown:
 	case BS_Dirty:
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Status.Unknown");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), CompileStatusBackground, NAME_None, CompileStatusUnknown);
 	case BS_Error:
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Status.Error");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), CompileStatusBackground, NAME_None, CompileStatusError);
 	case BS_UpToDate:
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Status.Good");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), CompileStatusBackground, NAME_None, CompileStatusGood);
 	case BS_UpToDateWithWarnings:
-		return FSlateIcon(FEditorStyle::GetStyleSetName(), "Kismet.Status.Warning");
+		return FSlateIcon(FAppStyle::GetAppStyleSetName(), CompileStatusBackground, NAME_None, CompileStatusWarning);
 	}
 }
 
@@ -593,5 +549,107 @@ FText FBlueprintEditorToolbar::GetStatusTooltip() const
 		return LOCTEXT("GoodToGoWarning_Status", "There was a warning during compilation, see the log for details");
 	}
 }
+
+
+/** Delegate called to diff a specific revision with the current */
+static void OnDiffRevisionPicked(FRevisionInfo const& RevisionInfo, TWeakObjectPtr<UBlueprint> BlueprintObj)
+{
+	if (BlueprintObj.IsValid())
+	{
+		bool const bIsLevelScriptBlueprint = FBlueprintEditorUtils::IsLevelScriptBlueprint(BlueprintObj.Get());
+		FString const Filename = SourceControlHelpers::PackageFilename(bIsLevelScriptBlueprint ? BlueprintObj.Get()->GetOuter()->GetPathName() : BlueprintObj.Get()->GetPathName());
+
+		ISourceControlProvider& SourceControlProvider = ISourceControlModule::Get().GetProvider();
+
+		// Get the SCC state
+		FSourceControlStatePtr SourceControlState = SourceControlProvider.GetState(Filename, EStateCacheUsage::Use);
+		if (SourceControlState.IsValid())
+		{
+			for (int32 HistoryIndex = 0; HistoryIndex < SourceControlState->GetHistorySize(); HistoryIndex++)
+			{
+				TSharedPtr<ISourceControlRevision, ESPMode::ThreadSafe> Revision = SourceControlState->GetHistoryItem(HistoryIndex);
+				check(Revision.IsValid());
+				if (Revision->GetRevision() == RevisionInfo.Revision)
+				{
+					// Get the revision of this package from source control
+					if (UPackage* PreviousTempPkg = DiffUtils::LoadPackageForDiff(Revision))
+					{
+						UObject* PreviousAsset = nullptr;
+
+						// If its a levelscript blueprint, find the previous levelscript blueprint in the map
+						if (bIsLevelScriptBlueprint)
+						{
+							TArray<UObject*> ObjectsInOuter;
+							GetObjectsWithOuter(PreviousTempPkg, ObjectsInOuter);
+
+							// Look for the level script blueprint for this package
+							for (int32 Index = 0; Index < ObjectsInOuter.Num(); Index++)
+							{
+								UObject* Obj = ObjectsInOuter[Index];
+								if (ULevelScriptBlueprint* ObjAsBlueprint = Cast<ULevelScriptBlueprint>(Obj))
+								{
+									PreviousAsset = ObjAsBlueprint;
+									break;
+								}
+							}
+							if (!PreviousAsset)
+							{
+								UE_LOG(LogSourceControl, Warning, TEXT("Revision %s of %s doesn't have a LevelScriptBlueprint"), *Revision->GetRevision(), *Revision->GetFilename());
+							}
+						}
+						// otherwise its a normal Blueprint
+						else
+						{
+							FString PreviousAssetName = FPaths::GetBaseFilename(Filename, true);
+							PreviousAsset = FindObject<UObject>(PreviousTempPkg, *PreviousAssetName);
+						}
+
+						if (PreviousAsset != nullptr)
+						{
+							FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools"));
+							FRevisionInfo OldRevision = { Revision->GetRevision(), Revision->GetCheckInIdentifier(), Revision->GetDate() };
+							FRevisionInfo CurrentRevision = { TEXT(""), Revision->GetCheckInIdentifier(), Revision->GetDate() };
+							AssetToolsModule.Get().DiffAssets(PreviousAsset, BlueprintObj.Get(), OldRevision, CurrentRevision);
+						}
+					}
+					else
+					{
+						FMessageDialog::Open(EAppMsgType::Ok, NSLOCTEXT("SourceControl.HistoryWindow", "UnableToLoadAssets", "Unable to load assets to diff. Content may no longer be supported?"));
+					}
+					break;
+				}
+			}
+		}
+	}
+}
+
+TSharedRef<SWidget> FBlueprintEditorToolbar::MakeDiffMenu(const UBlueprintEditorToolMenuContext* InContext)
+{
+	if (ISourceControlModule::Get().IsEnabled() && ISourceControlModule::Get().GetProvider().IsAvailable())
+	{
+		UBlueprint* BlueprintObj =  InContext ? InContext->GetBlueprintObj() : nullptr;
+		if (BlueprintObj)
+		{
+			TWeakObjectPtr<UBlueprint> BlueprintPtr = BlueprintObj;
+			// Add our async SCC task widget
+			return SNew(SBlueprintRevisionMenu, BlueprintObj)
+				.OnRevisionSelected_Static(&OnDiffRevisionPicked, BlueprintPtr);
+		}
+		else
+		{
+			// if BlueprintObj is null then this means that multiple blueprints are selected
+			FMenuBuilder MenuBuilder(true, NULL);
+			MenuBuilder.AddMenuEntry(LOCTEXT("NoRevisionsForMultipleBlueprints", "Multiple blueprints selected"),
+				FText(), FSlateIcon(), FUIAction());
+			return MenuBuilder.MakeWidget();
+		}
+	}
+
+	FMenuBuilder MenuBuilder(true, NULL);
+	MenuBuilder.AddMenuEntry(LOCTEXT("SourceControlDisabled", "Revision control is disabled"),
+		FText(), FSlateIcon(), FUIAction());
+	return MenuBuilder.MakeWidget();
+}
+
 
 #undef LOCTEXT_NAMESPACE

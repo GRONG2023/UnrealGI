@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/CompositeCurveTable.h"
+#include "Engine/CurveTable.h"
 #include "Misc/MessageDialog.h"
 #include "UObject/LinkerLoad.h"
 
-#include "EditorFramework/AssetImportData.h"
 #if WITH_EDITOR
 #include "CurveTableEditorUtils.h"
 #endif
 
-#include "HAL/IConsoleManager.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(CompositeCurveTable)
 
 #define LOCTEXT_NAMESPACE "CompositeCurveTables"
 
@@ -23,11 +24,11 @@ UCompositeCurveTable::UCompositeCurveTable(const FObjectInitializer& ObjectIniti
 void UCompositeCurveTable::GetPreloadDependencies(TArray<UObject*>& OutDeps)
 {
 	Super::GetPreloadDependencies(OutDeps);
-	for (const TSoftObjectPtr<UCurveTable>& ParentTable : ParentTables)
+	for (const TObjectPtr<UCurveTable>& ParentTable : ParentTables)
 	{
-		if (UCurveTable* Parent = ParentTable.Get())
+		if (ParentTable)
 		{
-			OutDeps.Add(Parent);
+			OutDeps.Add(ParentTable);
 		}
 	}
 }
@@ -142,6 +143,8 @@ void UCompositeCurveTable::UpdateCachedRowMap(bool bWarnOnInvalidChildren)
 					RowMap.Add(CurveName, NewCurve);
 				}
 			};
+
+			FScopeLock ScopeLock(&UCurveTable::GetCurveTableChangeCriticalSection());
 
 			// If we are using simple curves we know all our parents are also simple
 			if (CurveTableMode == ECurveTableMode::SimpleCurves)
@@ -264,10 +267,10 @@ const UCompositeCurveTable* UCompositeCurveTable::FindLoops(TArray<const UCompos
 {
 	AlreadySeenTables.Add(this);
 
-	for (const TSoftObjectPtr<UCurveTable>& CurveTable : ParentTables)
+	for (const TObjectPtr<UCurveTable>& CurveTable : ParentTables)
 	{
 		// we only care about composite tables since regular tables terminate the chain and can't be in loops
-		if (UCompositeCurveTable* CompositeCurveTable = Cast<UCompositeCurveTable>(CurveTable.Get()))
+		if (UCompositeCurveTable* CompositeCurveTable = Cast<UCompositeCurveTable>(CurveTable))
 		{
 			// if we've seen this table before then we have a loop
 			for (const UCompositeCurveTable* SeenTable : AlreadySeenTables)
@@ -291,3 +294,4 @@ const UCompositeCurveTable* UCompositeCurveTable::FindLoops(TArray<const UCompos
 }
 
 #undef LOCTEXT_NAMESPACE
+

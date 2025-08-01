@@ -10,9 +10,7 @@ public class DeveloperSettings : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
-                "SlateCore",
-				"RenderCore",
-				"RHI"
+				"Projects"
 			}
 		);
 	}

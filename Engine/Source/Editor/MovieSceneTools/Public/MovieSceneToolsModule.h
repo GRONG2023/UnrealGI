@@ -18,6 +18,8 @@ class UMovieScene;
 class UMovieSceneSection;
 class UMovieSceneEventSectionBase;
 class IMovieSceneToolsTrackImporter;
+class ULevelSequence;
+class IStructureDetailsView;
 
 class IMovieSceneToolsTakeData
 {
@@ -35,6 +37,13 @@ public:
 	virtual void PreEvaluation(UMovieScene* MovieScene, FFrameNumber Frame) {};
 	virtual void PostEvaluation(UMovieScene* MovieScene, FFrameNumber Frame) {};
 	virtual void StopBaking(UMovieScene* MovieScene) {};
+};
+
+// Interface to allow external modules to register additional key struct instanced property type customizations
+class IMovieSceneToolsKeyStructInstancedPropertyTypeCustomizer
+{
+public:
+	virtual void RegisterKeyStructInstancedPropertyTypeCustomization(TSharedRef<IStructureDetailsView> StructureDetailsView, TWeakObjectPtr<UMovieSceneSection> WeakOwningSection) {};
 };
 
 /**
@@ -70,13 +79,23 @@ public:
 	bool ImportAnimatedProperty(const FString& InPropertyName, const FRichCurve& InCurve, FGuid InBinding, UMovieScene* InMovieScene);
 	bool ImportStringProperty(const FString& InPropertyName, const FString& InPropertyValue, FGuid InBinding, UMovieScene* InMovieScene);
 
+	void RegisterKeyStructInstancedPropertyTypeCustomizer(IMovieSceneToolsKeyStructInstancedPropertyTypeCustomizer*);
+	void UnregisterKeyStructInstancedPropertyTypeCustomizer(IMovieSceneToolsKeyStructInstancedPropertyTypeCustomizer*);
+
+	// Called By SKeyEditInterface to allow external modules to add key struct instanced property type customizations
+	void CustomizeKeyStructInstancedPropertyTypes(TSharedRef<IStructureDetailsView> StructureDetailsView, TWeakObjectPtr<UMovieSceneSection> Section);
+
 private:
 
 	void RegisterClipboardConversions();
 
 	static void FixupPayloadParameterNameForSection(UMovieSceneEventSectionBase* Section, UK2Node* InNode, FName OldPinName, FName NewPinName);
+	static void FixupPayloadParameterNameForDynamicBinding(UMovieScene* MovieScene, UK2Node* InNode, FName OldPinName, FName NewPinName);
 	static bool UpgradeLegacyEventEndpointForSection(UMovieSceneEventSectionBase* Section);
 	static void PostDuplicateEventSection(UMovieSceneEventSectionBase* Section);
+	static void RemoveForCookEventSection(UMovieSceneEventSectionBase* Section);
+	static bool IsTrackClassAllowed(UClass* InClass);
+	static void PostDuplicateEvent(ULevelSequence* LevelSequence);
 
 private:
 
@@ -85,8 +104,10 @@ private:
 	FDelegateHandle BytePropertyTrackCreateEditorHandle;
 	FDelegateHandle ColorPropertyTrackCreateEditorHandle;
 	FDelegateHandle FloatPropertyTrackCreateEditorHandle;
+	FDelegateHandle DoublePropertyTrackCreateEditorHandle;
 	FDelegateHandle IntegerPropertyTrackCreateEditorHandle;
-	FDelegateHandle VectorPropertyTrackCreateEditorHandle;
+	FDelegateHandle FloatVectorPropertyTrackCreateEditorHandle;
+	FDelegateHandle DoubleVectorPropertyTrackCreateEditorHandle;
 	FDelegateHandle TransformPropertyTrackCreateEditorHandle;
 	FDelegateHandle EulerTransformPropertyTrackCreateEditorHandle;
 	FDelegateHandle VisibilityPropertyTrackCreateEditorHandle;
@@ -110,14 +131,22 @@ private:
 	FDelegateHandle FadeTrackCreateEditorHandle;
 	FDelegateHandle SpawnTrackCreateEditorHandle;
 	FDelegateHandle LevelVisibilityTrackCreateEditorHandle;
-	FDelegateHandle CameraAnimTrackCreateEditorHandle;
+	FDelegateHandle DataLayerTrackCreateEditorHandle;
 	FDelegateHandle CameraShakeTrackCreateEditorHandle;
 	FDelegateHandle MPCTrackCreateEditorHandle;
 	FDelegateHandle PrimitiveMaterialCreateEditorHandle;
 	FDelegateHandle CameraShakeSourceShakeCreateEditorHandle;
+	FDelegateHandle CVarTrackCreateEditorHandle;
+	FDelegateHandle CustomPrimitiveDataTrackCreateEditorHandle;
+	FDelegateHandle BindingLifetimeTrackCreateEditorHandle;
+
+	FDelegateHandle CameraCutTrackModelHandle;
+	FDelegateHandle CinematicShotTrackModelHandle;
+	FDelegateHandle BindingLifetimeTrackModelHandle;
 
 	FDelegateHandle GenerateEventEntryPointsHandle;
-	FDelegateHandle FixupPayloadParameterNameHandle;
+	FDelegateHandle FixupDynamicBindingPayloadParameterNameHandle;
+	FDelegateHandle FixupEventSectionPayloadParameterNameHandle;
 	FDelegateHandle UpgradeLegacyEventEndpointHandle;
 
 	FDelegateHandle OnObjectsReplacedHandle;
@@ -126,4 +155,5 @@ private:
 	TArray<IMovieSceneToolsTrackImporter*> TrackImporters;
 
 	TArray<IMovieSceneToolsAnimationBakeHelper*> BakeHelpers;
+	TArray<IMovieSceneToolsKeyStructInstancedPropertyTypeCustomizer*> KeyStructInstancedPropertyTypeCustomizers;
 };

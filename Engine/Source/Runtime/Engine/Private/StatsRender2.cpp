@@ -5,19 +5,17 @@
  * This file contains the rendering functions used in the stats code
  */
 
-#include "CoreMinimal.h"
-#include "Misc/CoreMisc.h"
-#include "Stats/Stats.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
-#include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "Engine/Texture2D.h"
+#include "TextureResource.h"
+#include "ViewportClient.h"
 
 #if STATS
 
 #include "Stats/StatsData.h"
 #include "Performance/EnginePerformanceTargets.h"
+#include "GlobalRenderResources.h"
 
 TAutoConsoleVariable<int32> CVarNumStatsPerGroup(
 	TEXT("stats.MaxPerGroup"),
@@ -267,7 +265,7 @@ struct FStatRenderGlobals
 		else
 		{
 			UTexture2D* BackgroundTexture = UCanvas::StaticClass()->GetDefaultObject<UCanvas>()->GradientTexture0;
-			return (BackgroundTexture != nullptr) ? BackgroundTexture->Resource : nullptr;
+			return (BackgroundTexture != nullptr) ? BackgroundTexture->GetResource() : nullptr;
 		}
 	}
 };
@@ -296,9 +294,9 @@ static FString ShortenName( TCHAR const* LongName )
 /** Exec used to execute engine stats command on the game thread. */
 static class FStatCmdEngine : private FSelfRegisteringExec
 {
-public:
+protected:
 	/** Console commands. */
-	virtual bool Exec( UWorld*, const TCHAR* Cmd, FOutputDevice& Ar ) override
+	virtual bool Exec_Runtime( UWorld*, const TCHAR* Cmd, FOutputDevice& Ar ) override
 	{
 		if( FParse::Command( &Cmd, TEXT( "stat" ) ) )
 		{
@@ -426,9 +424,10 @@ static int32 RenderCycle( const FComplexStatMessage& Item, class FCanvas* Canvas
 
 static FString FormatStatValueFloat(const float Value)
 {
-	const float Frac = FMath::Frac(Value);
+	const float QuantizedValue = FMath::RoundToFloat(Value * 100.0f) / 100.0f;
+	const float Frac = FMath::Frac(QuantizedValue);
 	// #TODO: Move to stats thread, add support for int64 type, int32 may not be sufficient all the time.
-	const int32 Integer = FMath::FloorToInt(Value);
+	const int32 Integer = FMath::FloorToInt(QuantizedValue);
 	const FString IntString = FString::FormatAsNumber(Integer);
 	const FString FracString = FString::Printf(TEXT("%0.2f"), Frac);
 	const FString Result = FString::Printf(TEXT("%s.%s"), *IntString, *FracString.Mid(2));

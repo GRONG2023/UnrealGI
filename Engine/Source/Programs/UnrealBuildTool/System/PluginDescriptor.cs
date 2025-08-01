@@ -1,12 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
-using Tools.DotNETCommon;
+using System.Collections.Generic;
+using EpicGames.Core;
+using System.Text.Json;
 
 namespace UnrealBuildTool
 {
@@ -36,9 +35,9 @@ namespace UnrealBuildTool
 		ProjectPluginUnification = 3,
 
 		/// <summary>
-        /// This needs to be the last line, so we can calculate the value of Latest below
+		/// This needs to be the last line, so we can calculate the value of Latest below
 		/// </summary>
-        LatestPlusOne,
+		LatestPlusOne,
 
 		/// <summary>
 		/// The latest plugin descriptor version
@@ -67,52 +66,52 @@ namespace UnrealBuildTool
 		/// Name of the version for this plugin.  This is the front-facing part of the version number.  It doesn't need to match
 		/// the version number numerically, but should be updated when the version number is increased accordingly.
 		/// </summary>
-		public string VersionName;
+		public string? VersionName;
 
 		/// <summary>
 		/// Friendly name of the plugin
 		/// </summary>
-		public string FriendlyName;
+		public string? FriendlyName;
 
 		/// <summary>
 		/// Description of the plugin
 		/// </summary>
-		public string Description;
+		public string? Description;
 
 		/// <summary>
 		/// The name of the category this plugin
 		/// </summary>
-		public string Category;
+		public string? Category;
 
 		/// <summary>
 		/// The company or individual who created this plugin.  This is an optional field that may be displayed in the user interface.
 		/// </summary>
-		public string CreatedBy;
+		public string? CreatedBy;
 
 		/// <summary>
 		/// Hyperlink URL string for the company or individual who created this plugin.  This is optional.
 		/// </summary>
-		public string CreatedByURL;
+		public string? CreatedByURL;
 
 		/// <summary>
 		/// Documentation URL string.
 		/// </summary>
-		public string DocsURL;
+		public string? DocsURL;
 
 		/// <summary>
 		/// Marketplace URL for this plugin. This URL will be embedded into projects that enable this plugin, so we can redirect to the marketplace if a user doesn't have it installed.
 		/// </summary>
-		public string MarketplaceURL;
+		public string? MarketplaceURL;
 
 		/// <summary>
 		/// Support URL/email for this plugin.
 		/// </summary>
-		public string SupportURL;
+		public string? SupportURL;
 
 		/// <summary>
 		/// Sets the version of the engine that this plugin is compatible with.
 		/// </summary>
-		public string EngineVersion;
+		public string? EngineVersion;
 
 		/// <summary>4
 		/// If true, this plugin from a platform extension extending another plugin */
@@ -122,22 +121,38 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// List of platforms supported by this plugin. This list will be copied to any plugin reference from a project file, to allow filtering entire plugins from staged builds.
 		/// </summary>
-		public List<UnrealTargetPlatform> SupportedTargetPlatforms;
+		public List<UnrealTargetPlatform>? SupportedTargetPlatforms;
 
 		/// <summary>
 		/// List of programs supported by this plugin.
 		/// </summary>
-		public string[] SupportedPrograms;
+		public string[]? SupportedPrograms;
 
 		/// <summary>
 		/// List of all modules associated with this plugin
 		/// </summary>
-		public List<ModuleDescriptor> Modules;
+		public List<ModuleDescriptor>? Modules;
 
 		/// <summary>
 		/// List of all localization targets associated with this plugin
 		/// </summary>
-		public LocalizationTargetDescriptor[] LocalizationTargets;
+		public LocalizationTargetDescriptor[]? LocalizationTargets;
+
+		/// <summary>
+		/// The Verse path to the root of this plugin's content directory
+		/// </summary>
+		public string? VersePath;
+
+		/// <summary>
+		/// Origin/visibility of Verse code in this plugin's Content/Verse folder
+		/// </summary>
+		public VerseScope VerseScope = VerseScope.PublicUser;
+
+		/// <summary>
+		/// The version of the Verse language that this plugin targets.
+		/// If no value is specified, the latest stable version is used.
+		/// </summary>
+		public uint? VerseVersion;
 
 		/// <summary>
 		/// Whether this plugin should be enabled by default for all projects
@@ -148,6 +163,11 @@ namespace UnrealBuildTool
 		/// Can this plugin contain content?
 		/// </summary>
 		public bool bCanContainContent;
+
+		/// <summary>
+		/// Can this plugin contain Verse code (either in content directory or in any of its modules)?
+		/// </summary>
+		public bool bCanContainVerse;
 
 		/// <summary>
 		/// Marks the plugin as beta in the UI
@@ -165,9 +185,19 @@ namespace UnrealBuildTool
 		public bool bInstalled;
 
 		/// <summary>
-		/// For plugins that are under a platform folder (eg. /PS4/), determines whether compiling the plugin requires the build platform and/or SDK to be available
+		/// For plugins that are under a platform folder (eg. /IOS/), determines whether compiling the plugin requires the build platform and/or SDK to be available
 		/// </summary>
 		public bool bRequiresBuildPlatform;
+
+		/// <summary>
+		/// When true, prevents other plugins from depending on this plugin
+		/// </summary>
+		public bool bIsSealed;
+
+		/// <summary>
+		/// When true, this plugin should not contain any code or modules.
+		/// </summary>
+		public bool bNoCode;
 
 		/// <summary>
 		/// When true, this plugin's modules will not be loaded automatically nor will it's content be mounted automatically. It will load/mount when explicitly requested and LoadingPhases will be ignored
@@ -175,35 +205,45 @@ namespace UnrealBuildTool
 		public bool bExplicitlyLoaded;
 
 		/// <summary>
+		/// When true, an empty SupportedTargetPlatforms is interpreted as 'no platforms' with the expectation that explicit platforms will be added in plugin platform extensions
+		/// </summary>
+		public bool bHasExplicitPlatforms;
+
+		/// <summary>
 		/// Set of pre-build steps to execute, keyed by host platform name.
 		/// </summary>
-		public CustomBuildSteps PreBuildSteps;
+		public CustomBuildSteps? PreBuildSteps;
 
 		/// <summary>
 		/// Set of post-build steps to execute, keyed by host platform name.
 		/// </summary>
-		public CustomBuildSteps PostBuildSteps;
+		public CustomBuildSteps? PostBuildSteps;
 
 		/// <summary>
 		/// Additional plugins that this plugin depends on
 		/// </summary>
-		public List<PluginReferenceDescriptor> Plugins;
+		public List<PluginReferenceDescriptor>? Plugins;
 
 		/// <summary>
-		/// Private constructor. This object should not be created directly; read it from disk using FromFile() instead.
+		/// Plugins that this plugin should never depend on
 		/// </summary>
-		private PluginDescriptor()
-		{
-			FileVersion = (int)PluginDescriptorVersion.Latest;
-		}
+		public String[]? DisallowedPlugins;
+
+		/// <summary>
+		/// The JsonObject created from reading a .uplugin on disk or from parsing a json text 
+		/// This preserves the order of all the fields from the source json as well as account for any custom fields.
+		/// </summary>
+		private readonly JsonObject CachedJson;
 
 		/// <summary>
 		/// Reads a plugin descriptor from a json object
 		/// </summary>
 		/// <param name="RawObject">The object to read from</param>
+		/// <param name="PluginPath"></param>
 		/// <returns>New plugin descriptor</returns>
-		public PluginDescriptor(JsonObject RawObject)
+		public PluginDescriptor(JsonObject RawObject, FileReference PluginPath)
 		{
+			CachedJson = RawObject;
 			// Read the version
 			if (!RawObject.TryGetIntegerField("FileVersion", out FileVersion))
 			{
@@ -247,7 +287,7 @@ namespace UnrealBuildTool
 			RawObject.TryGetStringArrayField("SupportedPrograms", out SupportedPrograms);
 			RawObject.TryGetBoolField("bIsPluginExtension", out bIsPluginExtension);
 
-			string[] SupportedTargetPlatformNames;
+			string[]? SupportedTargetPlatformNames;
 			if (RawObject.TryGetStringArrayField("SupportedTargetPlatforms", out SupportedTargetPlatformNames))
 			{
 				SupportedTargetPlatforms = new List<UnrealTargetPlatform>();
@@ -260,82 +300,97 @@ namespace UnrealBuildTool
 					}
 					else
 					{
-						Log.TraceWarning("Unknown platform {0} listed in plugin with FriendlyName {1}", TargetPlatformName, FriendlyName);
+						Log.TraceWarningTask(PluginPath, $"Unknown platform {TargetPlatformName} listed in plugin with FriendlyName \"{FriendlyName}\"");
 					}
 				}
 			}
 
-			JsonObject[] ModulesArray;
+			JsonObject[]? ModulesArray;
 			if (RawObject.TryGetObjectArrayField("Modules", out ModulesArray))
 			{
-				Modules = Array.ConvertAll(ModulesArray, x => ModuleDescriptor.FromJsonObject(x)).ToList();
+				Modules = Array.ConvertAll(ModulesArray, x => ModuleDescriptor.FromJsonObject(x, PluginPath)).ToList();
 			}
 
-			JsonObject[] LocalizationTargetsArray;
+			JsonObject[]? LocalizationTargetsArray;
 			if (RawObject.TryGetObjectArrayField("LocalizationTargets", out LocalizationTargetsArray))
 			{
 				LocalizationTargets = Array.ConvertAll(LocalizationTargetsArray, x => LocalizationTargetDescriptor.FromJsonObject(x));
 			}
 
+			RawObject.TryGetStringField("VersePath", out VersePath);
+
+			VerseScope PluginVerseScope;
+			if (RawObject.TryGetEnumField<VerseScope>("VerseScope", out PluginVerseScope))
+			{
+				VerseScope = PluginVerseScope;
+			}
+
+			uint PluginVerseVersion;
+			if (RawObject.TryGetUnsignedIntegerField("VerseVersion", out PluginVerseVersion))
+			{
+				VerseVersion = PluginVerseVersion;
+			}
+
 			bool bEnabledByDefaultValue;
-			if(RawObject.TryGetBoolField("EnabledByDefault", out bEnabledByDefaultValue))
+			if (RawObject.TryGetBoolField("EnabledByDefault", out bEnabledByDefaultValue))
 			{
 				bEnabledByDefault = bEnabledByDefaultValue;
 			}
 
 			RawObject.TryGetBoolField("CanContainContent", out bCanContainContent);
+			RawObject.TryGetBoolField("CanContainVerse", out bCanContainVerse);
 			RawObject.TryGetBoolField("IsBetaVersion", out bIsBetaVersion);
 			RawObject.TryGetBoolField("IsExperimentalVersion", out bIsExperimentalVersion);
 			RawObject.TryGetBoolField("Installed", out bInstalled);
 
 			bool bCanBeUsedWithUnrealHeaderTool;
-			if(RawObject.TryGetBoolField("CanBeUsedWithUnrealHeaderTool", out bCanBeUsedWithUnrealHeaderTool) && bCanBeUsedWithUnrealHeaderTool)
+			if (RawObject.TryGetBoolField("CanBeUsedWithUnrealHeaderTool", out bCanBeUsedWithUnrealHeaderTool) && bCanBeUsedWithUnrealHeaderTool)
 			{
-				Array.Resize(ref SupportedPrograms, (SupportedPrograms == null)? 1 : SupportedPrograms.Length + 1);
+				Array.Resize(ref SupportedPrograms, (SupportedPrograms == null) ? 1 : SupportedPrograms.Length + 1);
 				SupportedPrograms[SupportedPrograms.Length - 1] = "UnrealHeaderTool";
 			}
 
 			RawObject.TryGetBoolField("RequiresBuildPlatform", out bRequiresBuildPlatform);
+			RawObject.TryGetBoolField("Sealed", out bIsSealed);
+			RawObject.TryGetBoolField("NoCode", out bNoCode);
 			RawObject.TryGetBoolField("ExplicitlyLoaded", out bExplicitlyLoaded);
+			RawObject.TryGetBoolField("HasExplicitPlatforms", out bHasExplicitPlatforms);
 
 			CustomBuildSteps.TryRead(RawObject, "PreBuildSteps", out PreBuildSteps);
 			CustomBuildSteps.TryRead(RawObject, "PostBuildSteps", out PostBuildSteps);
 
-			JsonObject[] PluginsArray;
-			if(RawObject.TryGetObjectArrayField("Plugins", out PluginsArray))
+			JsonObject[]? PluginsArray;
+			if (RawObject.TryGetObjectArrayField("Plugins", out PluginsArray))
 			{
 				Plugins = Array.ConvertAll(PluginsArray, x => PluginReferenceDescriptor.FromJsonObject(x)).ToList();
 			}
+
+			RawObject.TryGetStringArrayField("DisallowedPlugins", out DisallowedPlugins);
 		}
 
 		/// <summary>
-		/// Creates a plugin descriptor from a file on disk
+		/// Creates a plugin descriptor from a file on disk preserving all custom fields in the file.
 		/// </summary>
 		/// <param name="FileName">The filename to read</param>
 		/// <returns>New plugin descriptor</returns>
 		public static PluginDescriptor FromFile(FileReference FileName)
 		{
-			JsonObject RawObject = JsonObject.Read(FileName);
 			try
 			{
-				PluginDescriptor Descriptor = new PluginDescriptor(RawObject);
-				if (Descriptor.Modules != null)
-				{
-					foreach (ModuleDescriptor Module in Descriptor.Modules)
-					{
-						Module.Validate(FileName);
-					}
-				}
+				JsonObject RawObject = JsonObject.Read(FileName);
+
+				PluginDescriptor Descriptor = new PluginDescriptor(RawObject, FileName);
+				Descriptor.Validate(FileName);
 				return Descriptor;
 			}
-			catch (JsonParseException ParseException)
+			catch (JsonException ex)
 			{
-				throw new JsonParseException("{0} (in {1})", ParseException.Message, FileName);
+				throw new JsonException($"{ex.Message} (in {FileName})", ex.Source ?? FileName.FullName, ex.LineNumber, ex.BytePositionInLine, ex);
 			}
 		}
 
 		/// <summary>
-		/// Saves the descriptor to disk
+		/// Saves the descriptor to disk. This only saves the default fields in a .uplugin and does not account for cusotm fields.
 		/// </summary>
 		/// <param name="FileName">The filename to write to</param>
 		public void Save(string FileName)
@@ -346,6 +401,18 @@ namespace UnrealBuildTool
 				Write(Writer);
 				Writer.WriteObjectEnd();
 			}
+		}
+
+		/// <summary>
+		/// Saves the descriptor to disk preserving all custom fields that were read in.
+		/// </summary>
+		/// <param name="fileName">The filename to write to</param>
+		public void Save2(string fileName)
+		{
+			// @TODO: This should replace all instances of Save() at some point in the future. There's just still a lot of references to test and refactor that needs to be verified. 
+			UpdateJson();
+			string jsonString = CachedJson.ToJsonString();
+			File.WriteAllText(fileName, jsonString);
 		}
 
 		/// <summary>
@@ -365,15 +432,31 @@ namespace UnrealBuildTool
 			Writer.WriteValue("DocsURL", DocsURL);
 			Writer.WriteValue("MarketplaceURL", MarketplaceURL);
 			Writer.WriteValue("SupportURL", SupportURL);
-			if(!String.IsNullOrEmpty(EngineVersion))
+			if (!String.IsNullOrEmpty(EngineVersion))
 			{
 				Writer.WriteValue("EngineVersion", EngineVersion);
 			}
-			if(bEnabledByDefault.HasValue)
+			if (!String.IsNullOrEmpty(VersePath))
+			{
+				Writer.WriteValue("VersePath", VersePath);
+			}
+			if (VerseScope != VerseScope.PublicUser)
+			{
+				Writer.WriteValue("VerseScope", VerseScope.ToString());
+			}
+			if (VerseVersion.HasValue)
+			{
+				Writer.WriteValue("VerseVersion", VerseVersion.Value);
+			}
+			if (bEnabledByDefault.HasValue)
 			{
 				Writer.WriteValue("EnabledByDefault", bEnabledByDefault.Value);
 			}
 			Writer.WriteValue("CanContainContent", bCanContainContent);
+			if (bCanContainVerse)
+			{
+				Writer.WriteValue("CanContainVerse", bCanContainVerse);
+			}
 			if (bIsBetaVersion)
 			{
 				Writer.WriteValue("IsBetaVersion", bIsBetaVersion);
@@ -387,9 +470,19 @@ namespace UnrealBuildTool
 				Writer.WriteValue("Installed", bInstalled);
 			}
 
-			if(bRequiresBuildPlatform)
+			if (bRequiresBuildPlatform)
 			{
 				Writer.WriteValue("RequiresBuildPlatform", bRequiresBuildPlatform);
+			}
+
+			if (bIsSealed)
+			{
+				Writer.WriteValue("Sealed", bIsSealed);
+			}
+
+			if (bNoCode)
+			{
+				Writer.WriteValue("NoCode", bNoCode);
 			}
 
 			if (bExplicitlyLoaded)
@@ -397,7 +490,12 @@ namespace UnrealBuildTool
 				Writer.WriteValue("ExplicitlyLoaded", bExplicitlyLoaded);
 			}
 
-			if(SupportedTargetPlatforms != null && SupportedTargetPlatforms.Count > 0)
+			if (bHasExplicitPlatforms)
+			{
+				Writer.WriteValue("HasExplicitPlatforms", bHasExplicitPlatforms);
+			}
+
+			if (SupportedTargetPlatforms != null && SupportedTargetPlatforms.Count > 0)
 			{
 				Writer.WriteStringArrayField("SupportedTargetPlatforms", SupportedTargetPlatforms.Select<UnrealTargetPlatform, string>(x => x.ToString()).ToArray());
 			}
@@ -418,12 +516,12 @@ namespace UnrealBuildTool
 
 			LocalizationTargetDescriptor.WriteArray(Writer, "LocalizationTargets", LocalizationTargets);
 
-			if(PreBuildSteps != null)
+			if (PreBuildSteps != null)
 			{
 				PreBuildSteps.Write(Writer, "PreBuildSteps");
 			}
 
-			if(PostBuildSteps != null)
+			if (PostBuildSteps != null)
 			{
 				PostBuildSteps.Write(Writer, "PostBuildSteps");
 			}
@@ -431,6 +529,147 @@ namespace UnrealBuildTool
 			if (Plugins != null && Plugins.Count > 0)
 			{
 				PluginReferenceDescriptor.WriteArray(Writer, "Plugins", Plugins.ToArray());
+			}
+
+			if (DisallowedPlugins != null && DisallowedPlugins.Length > 0)
+			{
+				Writer.WriteStringArrayField("DisallowedPlugins", DisallowedPlugins);
+			}
+		}
+
+		private void UpdateJson()
+		{
+			CachedJson.AddOrSetFieldValue("FileVersion", (int)ProjectDescriptorVersion.Latest);
+			CachedJson.AddOrSetFieldValue("Version", Version);
+			CachedJson.AddOrSetFieldValue("VersionName", VersionName);
+			CachedJson.AddOrSetFieldValue("FriendlyName", FriendlyName);
+			CachedJson.AddOrSetFieldValue("Description", Description);
+			CachedJson.AddOrSetFieldValue("Category", Category);
+			CachedJson.AddOrSetFieldValue("CreatedBy", CreatedBy);
+			CachedJson.AddOrSetFieldValue("CreatedByURL", CreatedByURL);
+			CachedJson.AddOrSetFieldValue("DocsURL", DocsURL);
+			CachedJson.AddOrSetFieldValue("MarketplaceURL", MarketplaceURL);
+			CachedJson.AddOrSetFieldValue("SupportURL", SupportURL);
+			if (!String.IsNullOrEmpty(EngineVersion))
+			{
+				CachedJson.AddOrSetFieldValue("EngineVersion", EngineVersion);
+			}
+			if (!String.IsNullOrEmpty(VersePath))
+			{
+				CachedJson.AddOrSetFieldValue("VersePath", VersePath);
+			}
+			if (VerseScope != VerseScope.PublicUser)
+			{
+				CachedJson.AddOrSetFieldValue("VerseScope", VerseScope.ToString());
+			}
+			if (bEnabledByDefault.HasValue)
+			{
+				CachedJson.AddOrSetFieldValue("EnabledByDefault", bEnabledByDefault.Value);
+			}
+			CachedJson.AddOrSetFieldValue("CanContainContent", bCanContainContent);
+			if (bCanContainVerse)
+			{
+				CachedJson.AddOrSetFieldValue("CanContainVerse", bCanContainVerse);
+			}
+			if (bIsBetaVersion)
+			{
+				CachedJson.AddOrSetFieldValue("IsBetaVersion", bIsBetaVersion);
+			}
+			if (bIsExperimentalVersion)
+			{
+				CachedJson.AddOrSetFieldValue("IsExperimentalVersion", bIsExperimentalVersion);
+			}
+			if (bInstalled)
+			{
+				CachedJson.AddOrSetFieldValue("Installed", bInstalled);
+			}
+
+			if (bRequiresBuildPlatform)
+			{
+				CachedJson.AddOrSetFieldValue("RequiresBuildPlatform", bRequiresBuildPlatform);
+			}
+
+			if (bIsSealed)
+			{
+				CachedJson.AddOrSetFieldValue("Sealed", bIsSealed);
+			}
+
+			if (bExplicitlyLoaded)
+			{
+				CachedJson.AddOrSetFieldValue("ExplicitlyLoaded", bExplicitlyLoaded);
+			}
+
+			if (bHasExplicitPlatforms)
+			{
+				CachedJson.AddOrSetFieldValue("HasExplicitPlatforms", bHasExplicitPlatforms);
+			}
+
+			if (SupportedTargetPlatforms != null && SupportedTargetPlatforms.Count > 0)
+			{
+				CachedJson.AddOrSetFieldValue("SupportedTargetPlatforms", SupportedTargetPlatforms.Select<UnrealTargetPlatform, string>(x => x.ToString()).ToArray());
+			}
+
+			if (SupportedPrograms != null && SupportedPrograms.Length > 0)
+			{
+				CachedJson.AddOrSetFieldValue("SupportedPrograms", SupportedPrograms);
+			}
+			if (bIsPluginExtension)
+			{
+				CachedJson.AddOrSetFieldValue("bIsPluginExtension", bIsPluginExtension);
+			}
+
+			if (Modules != null && Modules.Count > 0)
+			{
+				ModuleDescriptor.UpdateJson(CachedJson, "Modules", Modules.ToArray());
+			}
+
+			LocalizationTargetDescriptor.UpdateJson(CachedJson, "LocalizationTargets", LocalizationTargets);
+
+			if (PreBuildSteps != null)
+			{
+				CachedJson.AddOrSetFieldValue("PreBuildSteps", PreBuildSteps.ToJsonObject());
+			}
+
+			if (PostBuildSteps != null)
+			{
+				CachedJson.AddOrSetFieldValue("PostBuildSteps", PostBuildSteps.ToJsonObject());
+			}
+
+			if (Plugins != null && Plugins.Count > 0)
+			{
+				PluginReferenceDescriptor.UpdateJson(CachedJson, "Plugins", Plugins.ToArray());
+			}
+			if (DisallowedPlugins != null && DisallowedPlugins.Length > 0)
+			{
+				CachedJson.AddOrSetFieldValue("DisallowedPlugins", DisallowedPlugins);
+			}
+		}
+
+		/// <summary>
+		/// Produces any warnings and errors for the plugin descriptor
+		/// </summary>
+		/// <param name="FileName">File containing the plugin</param>
+		public void Validate(FileReference FileName)
+		{
+			if (Modules != null)
+			{
+				foreach (ModuleDescriptor Module in Modules)
+				{
+					Module.Validate(FileName);
+				}
+
+				if (bIsPluginExtension)
+				{
+					foreach (ModuleDescriptor ChildModule in Modules)
+					{
+						if (ChildModule.bHasExplicitPlatforms && ChildModule.PlatformAllowList != null && ChildModule.PlatformAllowList.Count == 0)
+						{
+							// The order that child plugins are merged into the parent is undefined - there is no heirarchy. Only the PlatformAllowList and PlatformDenyList are currently merged into the parent
+							// Having an explicity-empty list here suggests someone is trying to create a heirarchy and may get caught out if their module declaration also includes TargetAllowList, ProgramAllowList etc. as these properties will be ignored
+							Log.TraceWarningOnce(FileName, $"Plugin extensions should not declare HasExplicitPlatforms with an empty PlatformAllowList. (module {ChildModule.Name})");
+						}
+					}
+				}
 			}
 		}
 
@@ -441,7 +680,23 @@ namespace UnrealBuildTool
 		/// <returns>True if the plugin should be enabled</returns>
 		public bool SupportsTargetPlatform(UnrealTargetPlatform Platform)
 		{
-			return SupportedTargetPlatforms == null || SupportedTargetPlatforms.Count == 0 || SupportedTargetPlatforms.Contains(Platform);
+			if (bHasExplicitPlatforms)
+			{
+				return SupportedTargetPlatforms != null && SupportedTargetPlatforms.Contains(Platform);
+			}
+			else
+			{
+				return SupportedTargetPlatforms == null || SupportedTargetPlatforms.Count == 0 || SupportedTargetPlatforms.Contains(Platform);
+			}
+		}
+
+		/// <summary>
+		/// Retrieve the list of supported target platforms as a string list
+		/// </summary>
+		/// <returns>String list of supported target platforms</returns>
+		public string[]? GetSupportedTargetPlatformNames()
+		{
+			return SupportedTargetPlatforms?.Select(P => P.ToString()).ToArray();
 		}
 	}
 }

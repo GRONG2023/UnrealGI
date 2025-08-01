@@ -114,16 +114,29 @@ public:
 
 	FMenuEntryBlock( const FName& InExtensionHook, const FUIAction& UIAction, const TAttribute<FText>& InLabel, const TAttribute<FText>& InToolTip, const FOnGetContent& InMenuBuilder, TSharedPtr<FExtender> InExtender, bool bInSubMenu, bool bInSubMenuOnClick, bool bInCloseSelfOnly, const FSlateIcon& InIcon = FSlateIcon(), bool bInShouldCloseWindowAfterMenuSelection = true);
 
+	/** Construct a menu entry given param struct */
+	FMenuEntryBlock(const FMenuEntryParams& InMenuEntryParams);
+
 	/** FMultiBlock interface */
 	virtual void CreateMenuEntry(class FMenuBuilder& MenuBuilder) const override;
 	virtual bool HasIcon() const override;
+	
+	/** the override for the checkbox style */
+	void SetCheckBoxStyle(FName InCheckBoxStyle);
 
+	/** Returns whether this menu entry block opens a sub-menu. */
+	bool IsSubMenu() const { return bIsSubMenu; }
+
+	/** Sets whether the menu search algorithm should walk down this menu sub-menus. */
+	void SetRecursivelySearchable(bool bInRecursivelySearchable) { bIsRecursivelySearchable = bInRecursivelySearchable; }
+
+	/** Returns whether the menu search algorithm should walk down this menu sub-menus. */
+	bool IsRecursivelySearchable() const { return bIsRecursivelySearchable; }
 
 private:
 
 	/** FMultiBlock private interface */
 	virtual TSharedRef< class IMultiBlockBaseWidget > ConstructWidget() const override;
-
 
 private:
 
@@ -136,6 +149,9 @@ private:
 
 	/** Optional overridden tool tip for this menu entry.  If not set, then the action's tool tip will be used instead. */
 	TAttribute<FText> ToolTipOverride;
+
+	/** Optional overridden input binding text for this menu entry.  If not set, then the UI action's binding will be used if available. */
+	TAttribute<FText> InputBindingOverride;
 
 	/** Optional overridden icon for this tool bar button.  IF not set, then the action's icon will be used instead. */
 	FSlateIcon IconOverride;
@@ -151,6 +167,9 @@ private:
 
 	/** True if this menu entry opens a sub-menu */
 	bool bIsSubMenu;
+
+	/** True if the search algorithm should walk down this menu sub menus. Usually true, unless the menu has circular/infinite expansion (happens in some menus generated on the fly by reflection). */
+	bool bIsRecursivelySearchable;
 
 	/** True if this menu entry opens a sub-menu by clicking on it only */
 	bool bOpenSubMenuOnClick;
@@ -170,6 +189,9 @@ private:
 
 	/** Whether to invert the label text's color on hover */
 	bool bInvertLabelOnHover;
+
+	/** override of the checkbox style */
+	FName CheckBoxStyle = NAME_None;
 };
 
 
@@ -178,7 +200,7 @@ private:
 /**
  * Menu entry MultiBlock widget
  */
-class SLATE_API SMenuEntryBlock
+class SMenuEntryBlock
 	: public SMultiBlockBaseWidget
 {
 
@@ -192,14 +214,22 @@ public:
 	/**
 	 * Builds this MultiBlock widget up from the MultiBlock associated with it
 	 */
-	virtual void BuildMultiBlockWidget(const ISlateStyle* StyleSet, const FName& StyleName) override;
+	SLATE_API virtual void BuildMultiBlockWidget(const ISlateStyle* StyleSet, const FName& StyleName) override;
 
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
+
+	/**
+	 * Called to create content for a pull-down or sub-menu window when it's summoned by the user
+	 *
+	 * @return	The widget content for the new menu
+	 */
+	SLATE_API TSharedRef< SWidget > MakeNewMenuWidget() const;
+
 
 protected:
 	/** Struct for creating menu entry widgets */
@@ -215,6 +245,8 @@ protected:
 		TAttribute<FText> Label;
 		/** The tooltip to display */
 		TAttribute<FText> ToolTip;
+		/** The input binding to display */
+		TAttribute<FText> InputBinding;
 		/** The style set to use */
 		const ISlateStyle* StyleSet;
 		/** The style name to use */
@@ -225,67 +257,62 @@ protected:
 	/**
 	 * Called by Slate when this menu entry's button is clicked
 	 */
-	FReply OnMenuItemButtonClicked();
+	SLATE_API FReply OnMenuItemButtonClicked();
 
 	/**
 	 * Called when a checkbox in the menu item or the menu item itself is clicked
 	 *
 	 * @param bCheckBoxClicked	true if a check box was clicked and not the menu item.  We dont close the menu when a check box is clicked
 	 */
-	void OnClicked( bool bCheckBoxClicked );
+	SLATE_API void OnClicked( bool bCheckBoxClicked );
 
 	/**
 	 * Called by Slate to determine if this menu entry is enabled
 	 * 
 	 * @return True if the menu entry is enabled, false otherwise
 	 */
-	bool IsEnabled() const;
+	SLATE_API bool IsEnabled() const;
 
 	/**
 	 * Called by Slate to determine if this menu entry is enabled (during menu editing)
 	 * 
 	 * @return True if the menu entry is enabled, false otherwise
 	 */
-	bool IsEnabledDuringEditMode() const;
+	SLATE_API bool IsEnabledDuringEditMode() const;
 
 	/**
 	 * Called by Slate when this check box button is toggled in a menu entry
 	 */
-	void OnCheckStateChanged( const ECheckBoxState NewCheckedState );
+	SLATE_API void OnCheckStateChanged( const ECheckBoxState NewCheckedState );
 
 	/**
 	 * Called by slate to determine if this menu entry should appear checked
 	 *
 	 * @return true if it should be checked, false if not.
 	 */
-	ECheckBoxState IsChecked() const;
+	SLATE_API ECheckBoxState IsChecked() const;
 
 	/**
 	 * In the case that we have an icon to show.  This function is called to get the image that indicates the menu item should appear checked
 	 * If we can show an actual check box, this function is not called
 	 */
-	const FSlateBrush* OnGetCheckImage() const;
+	SLATE_API const FSlateBrush* OnGetCheckImage() const;
 
 	// SWidget interface
-	virtual void OnMouseEnter( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
-	virtual void OnMouseLeave( const FPointerEvent& MouseEvent ) override;
-	virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& KeyEvent ) override;
+	SLATE_API virtual void OnMouseEnter( const FGeometry& MyGeometry, const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual void OnMouseLeave( const FPointerEvent& MouseEvent ) override;
+	SLATE_API virtual FReply OnKeyDown( const FGeometry& MyGeometry, const FKeyEvent& KeyEvent ) override;
 	//virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
 	// End of SWidget interface
 
-	/**
-	 * Called to create content for a pull-down or sub-menu window when it's summoned by the user
-	 *
-	 * @return	The widget content for the new menu
-	 */
-	TSharedRef< SWidget > MakeNewMenuWidget() const;
 
 	/**
 	 * Called to get the appropriate border for Buttons on Menu Bars based on whether or not submenu is open
 	 *
 	 * @return	The appropriate border to use
 	 */
-	const FSlateBrush* GetMenuBarButtonBorder( ) const;
+	SLATE_API const FSlateBrush* GetMenuBarButtonBorder() const;
+	SLATE_API FSlateColor GetMenuBarForegroundColor() const;
 
 	/**
 	 * Called to create content for a pull-down menu widget
@@ -293,7 +320,7 @@ protected:
 	 * @param InBuildParams	Parameters for how to build the widget
 	 * @return	The widget content for the new menu
 	 */
-	TSharedRef< SWidget > BuildMenuBarWidget( const FMenuEntryBuildParams& InBuildParams );
+	SLATE_API TSharedRef< SWidget > BuildMenuBarWidget( const FMenuEntryBuildParams& InBuildParams );
 	
 	/**
 	* Finds the STextBlock that gets displayed in the UI
@@ -301,7 +328,7 @@ protected:
 	* @param Content	Widget to check for an STextBlock
 	* @return	The STextBlock widget found
 	*/
-	TSharedRef<SWidget> FindTextBlockWidget(TSharedRef<SWidget> Content);
+	SLATE_API TSharedRef<SWidget> FindTextBlockWidget(TSharedRef<SWidget> Content);
 
 	/**
 	 * Called to create content for a menu entry inside a pull-down, context, or sub-menu
@@ -309,7 +336,7 @@ protected:
 	 * @param InBuildParams	Parameters for how to build the widget
 	 * @return The widget content for the new menu
 	 */
-	TSharedRef< SWidget > BuildMenuEntryWidget( const FMenuEntryBuildParams& InBuildParams );
+	SLATE_API TSharedRef< SWidget > BuildMenuEntryWidget( const FMenuEntryBuildParams& InBuildParams );
 
 	/**
 	 * Called to create content for a sub-menu widget (entry in a menu that opens another menu to the right of it)
@@ -317,7 +344,7 @@ protected:
 	 * @param InBuildParams	Parameters for how to build the widget
 	 * @return The widget content for the new menu
 	 */
-	TSharedRef< SWidget > BuildSubMenuWidget( const FMenuEntryBuildParams& InBuildParams );
+	SLATE_API TSharedRef< SWidget > BuildSubMenuWidget( const FMenuEntryBuildParams& InBuildParams );
 
 	/**
 	 * Requests that the sub-menu associated with this widget be toggled on or off.
@@ -326,18 +353,18 @@ protected:
 	 * @param bOpenMenu	true to open the menu, false to close the menu if one is currently open
 	 * @param bClobber true if we want to open a menu when another menu is already open
 	 */
-	void RequestSubMenuToggle( bool bOpenMenu, const bool bClobber );
+	SLATE_API void RequestSubMenuToggle( bool bOpenMenu, const bool bClobber );
 
 	/**
 	 * Cancels any open requests to toggle a sub-menu       
 	 */
-	void CancelPendingSubMenu();
+	SLATE_API void CancelPendingSubMenu();
 
 	/**
 	 * Returns whether or the sub-menu entry should appear hovered.  If the sub-menu is open we will always show the menu as hovered to indicate which sub-menu is open
 	 * In the case that the user is interacting in this menu we do not show the menu as hovered because we need to show what the user is actually selecting
 	 */
-	bool ShouldSubMenuAppearHovered() const;
+	SLATE_API bool ShouldSubMenuAppearHovered() const;
 	
 	/**
 	 * Called to query the tool tip text for this widget, but will return an empty text for menu bar items
@@ -347,17 +374,17 @@ protected:
 	 *
 	 * @return	Tool tip text, or an empty text if filtered out
 	 */
-	FText GetFilteredToolTipText( TAttribute<FText> ToolTipText ) const;
+	SLATE_API FText GetFilteredToolTipText( TAttribute<FText> ToolTipText ) const;
 
 
 	// Gets the visibility of the menu item
-	EVisibility GetVisibility() const;
+	SLATE_API EVisibility GetVisibility() const;
 
 	/** Get the selection color when the entry is hovered */
-	FSlateColor TintOnHover() const;
+	SLATE_API FSlateColor TintOnHover() const;
 
 	/** Get the inverted foreground color when the entry is hovered */
-	FSlateColor InvertOnHover() const;
+	SLATE_API FSlateColor InvertOnHover() const;
 
 	/** Updates state machine for sub-menu opening logic.  Called in the widget's Tick as well as on demand in some cases. */
 	//void UpdateSubMenuState();
@@ -378,20 +405,5 @@ private:
 	/** For pull-down or sub-menu entries, this stores a weak reference to the menu anchor widget that we'll use to summon the menu */
 	TWeakPtr< SMenuAnchor > MenuAnchor;
 	
-	/** The time until a SubMenu action is taken (open or close).  <0 means no action taken */
-	//float TimeToSubMenuOpen;
-
-	/** Style for menu bar button with sub menu opened */
-	const FSlateBrush* MenuBarButtonBorderSubmenuOpen;
-	/** Style for menu bar button with no sub menu opened */
-	const FSlateBrush* MenuBarButtonBorderSubmenuClosed;
-
-	///** The pending SubMenu request state */
-	//enum
-	//{
-	//	Idle,
-	//	WantOpen,
-	//	WantClose
-	//} 
-	//SubMenuRequestState;
+	const FButtonStyle* MenuBarButtonStyle;
 };

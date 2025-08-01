@@ -1,12 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreMinimal.h"
 #include "AudioCaptureDeviceInterface.h"
-#include "Modules/ModuleInterface.h"
-#include "HAL/ThreadSafeBool.h"
+#include "Containers/Array.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "DSP/Delay.h"
 #include "DSP/EnvelopeFollower.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/ThreadSafeBool.h"
+#include "Modules/ModuleInterface.h"
+#include "Templates/UniquePtr.h"
 
 namespace Audio
 {
@@ -39,7 +43,13 @@ namespace Audio
 		bool GetCaptureDeviceInfo(FCaptureDeviceInfo& OutInfo, int32 DeviceIndex = INDEX_NONE);
 
 		// Opens the audio capture stream with the given parameters
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		UE_DEPRECATED(5.3, "OpenCaptureStream is deprecated, please use OpenAudioCaptureStream instead.")
 		bool OpenCaptureStream(const FAudioCaptureDeviceParams& InParams, FOnCaptureFunction OnCapture, uint32 NumFramesDesired);
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		// Opens the audio capture stream with the given parameters
+		bool OpenAudioCaptureStream(const FAudioCaptureDeviceParams& InParams, FOnAudioCaptureFunction OnCapture, uint32 NumFramesDesired);
 
 		// Closes the audio capture stream
 		bool CloseStream();

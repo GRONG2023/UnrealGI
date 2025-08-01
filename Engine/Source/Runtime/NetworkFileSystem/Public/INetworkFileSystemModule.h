@@ -7,6 +7,10 @@
 #include "ShaderCompiler.h"
 
 class INetworkFileServer;
+namespace UE::Cook
+{
+	class ICookOnTheFlyNetworkServer;
+}
 
 /**
  * Delegate type for handling file requests from a network client.
@@ -15,39 +19,6 @@ class INetworkFileServer;
  * The second parameter will hold the list of unsolicited files to send back.
  */
 DECLARE_DELEGATE_ThreeParams(FFileRequestDelegate, FString&, const FString&, TArray<FString>&);
-
-struct FShaderRecompileData
-{
-	FString PlatformName;
-	/** The platform to compile shaders for, corresponds to EShaderPlatform, but a value of -1 indicates to compile for all target shader platforms. */
-	int32 ShaderPlatform;
-	TArray<FString>* ModifiedFiles;
-	TArray<uint8>* MeshMaterialMaps;
-	TArray<FString> MaterialsToLoad;
-	bool bCompileChangedShaders;
-
-	TArray<FODSCRequestPayload> ShadersToRecompile;
-
-	FShaderRecompileData() :
-		ShaderPlatform(-1),
-		bCompileChangedShaders(true)
-	{}
-
-	FShaderRecompileData& operator=(const FShaderRecompileData& Other)
-	{
-		PlatformName = Other.PlatformName;
-		ShaderPlatform = Other.ShaderPlatform;
-		ModifiedFiles = Other.ModifiedFiles;
-		MeshMaterialMaps = Other.MeshMaterialMaps;
-		MaterialsToLoad = Other.MaterialsToLoad;
-		bCompileChangedShaders = Other.bCompileChangedShaders;
-
-		ShadersToRecompile = Other.ShadersToRecompile;
-
-		return *this;
-	}
-};
-
 
 /**
  * Delegate type for handling shader recompilation requests from a network client.
@@ -75,31 +46,18 @@ DECLARE_MULTICAST_DELEGATE_OneParam( FOnFileModifiedDelegate, const FString& );
 DECLARE_DELEGATE_RetVal_TwoParams( bool, FNewConnectionDelegate, const FString&, const FString& );
 
 
-/**
- * Delegate which returns a list of all the files which should already be deployed to the devkit
- *
- * @param 1 IN, Platform to get precooked file list
- * @param 2 OUT, list of precooked files 
- */
-typedef TMap<FString,FDateTime> FFileTimeMap;
-DECLARE_DELEGATE_TwoParams( FInitialPrecookedListDelegate, const FString&, FFileTimeMap& );
-
-
-
 // container struct for delegates which the network file system uses
 struct FNetworkFileDelegateContainer
 {
 public:
 	FNetworkFileDelegateContainer() : 
 		NewConnectionDelegate(nullptr), 
-		InitialPrecookedListDelegate(nullptr),
 		SandboxPathOverrideDelegate(nullptr),
 		FileRequestDelegate(nullptr),
 		RecompileShadersDelegate(nullptr),
 		OnFileModifiedCallback(nullptr)
 	{}
 	FNewConnectionDelegate NewConnectionDelegate; 
-	FInitialPrecookedListDelegate InitialPrecookedListDelegate;
 	FSandboxPathDelegate SandboxPathOverrideDelegate;
 	FFileRequestDelegate FileRequestDelegate;
 	FRecompileShadersDelegate RecompileShadersDelegate;
@@ -107,11 +65,37 @@ public:
 	FOnFileModifiedDelegate* OnFileModifiedCallback; // this is called from other systems to notify the network file system that a file has been modified hence the terminology callback
 };
 
-
 enum ENetworkFileServerProtocol
 {
 	NFSP_Tcp,
 	NFSP_Http,
+
+	/**
+	 * Platform-specific type of connection between a target device and a host pc.
+	 * 
+	 * It potentially offers performance benefits compared to generic networking protocols but is
+	 * supported by only some of the platforms.
+	 */
+	NFSP_Platform,
+};
+
+// Network file server options
+struct FNetworkFileServerOptions
+{
+	/* File server protocol*/
+	ENetworkFileServerProtocol Protocol = NFSP_Tcp;
+
+	/* The port number to bind to (-1 = default port, 0 = any available port) */
+	int32 Port = INDEX_NONE;
+
+	/* Optional delegates to be invoked when a file is requested by a client */
+	FNetworkFileDelegateContainer Delegates;
+
+	/* Active target platform(s) */
+	TArray<ITargetPlatform*> TargetPlatforms;
+
+	/* When running cook on the fly this options restricts package assets being sent from the project content folder */
+	bool bRestrictPackageAssetsToSandbox = false;
 };
 
 /**
@@ -133,6 +117,29 @@ public:
 	 * @return The new file server, or nullptr if creation failed.
 	 */
 	virtual INetworkFileServer* CreateNetworkFileServer( bool bLoadTargetPlatforms, int32 Port = -1, FNetworkFileDelegateContainer InNetworkFileDelegateContainer = FNetworkFileDelegateContainer(), const ENetworkFileServerProtocol Protocol = NFSP_Tcp ) const = 0;
+
+    /**
+	 * Creates a new network file server.
+	 *
+	 * @param FileServerOptions File server options
+	 * @param bLoadTargetPlatforms If true, gets the target platform from the command line or all available target platforms
+	 *
+	 * @return The new file server, or nullptr if creation failed.
+	 */
+	virtual INetworkFileServer* CreateNetworkFileServer(FNetworkFileServerOptions FileServerOptions, bool bLoadTargetPlatforms) const = 0;
+
+	/**
+	 * Creates a new network file server for COTF.
+	 *
+	 * @param CookOnTheFlyNetworkServer CookOnTheFly network server
+	 * @param Delegates Delegates to be invoked when a file is requested by a client.
+	 *
+	 * @return The new file server, or nullptr if creation failed.
+	*/
+	virtual INetworkFileServer* CreateNetworkFileServer(TSharedRef<UE::Cook::ICookOnTheFlyNetworkServer> CookOnTheFlyNetworkServer, FNetworkFileDelegateContainer Delegates) const
+	{
+		return nullptr;
+	}
 
 public:
 

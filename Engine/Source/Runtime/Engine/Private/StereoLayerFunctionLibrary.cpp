@@ -1,14 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 //
 #include "Kismet/StereoLayerFunctionLibrary.h"
-#include "EngineGlobals.h"
 #include "TextureResource.h"
 #include "Engine/Texture.h"
 #include "Engine/Engine.h"
-#include "IStereoLayers.h"
 #include "StereoRendering.h"
 #include "IXRTrackingSystem.h"
 #include "IXRLoadingScreen.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(StereoLayerFunctionLibrary)
 
 static IXRLoadingScreen* GetLoadingScreen()
 {
@@ -81,11 +81,11 @@ UStereoLayerFunctionLibrary::UStereoLayerFunctionLibrary(const FObjectInitialize
 void UStereoLayerFunctionLibrary::SetSplashScreen(class UTexture* Texture, FVector2D Scale, FVector Offset, bool bShowLoadingMovie, bool bShowOnSet)
 {
 	IXRLoadingScreen* LoadingScreen = GetLoadingScreen();
-	if (LoadingScreen && Texture && Texture->Resource)
+	if (LoadingScreen && Texture && Texture->GetResource())
 	{
 		LoadingScreen->ClearSplashes();
 		IXRLoadingScreen::FSplashDesc Splash;
-		Splash.Texture = Texture->Resource->TextureRHI;
+		Splash.Texture = Texture->GetResource()->TextureRHI;
 		Splash.QuadSize = Scale;
 		Splash.Transform = FTransform(Offset);
 		LoadingScreen->AddSplash(Splash);
@@ -134,3 +134,4 @@ void UStereoLayerFunctionLibrary::EnableAutoLoadingSplashScreen(bool InAutoShowE
 		}
 	}
 }
+

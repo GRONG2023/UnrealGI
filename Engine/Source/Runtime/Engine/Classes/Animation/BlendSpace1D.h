@@ -9,11 +9,14 @@
 
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
-#include "Animation/BlendSpaceBase.h"
+#include "Animation/BlendSpace.h"
 #include "BlendSpace1D.generated.h"
 
+ /**
+  * Allows multiple animations to be blended between based on input parameters
+  */
 UCLASS(config=Engine, hidecategories=Object, MinimalAPI, BlueprintType)
-class UBlendSpace1D : public UBlendSpaceBase
+class UBlendSpace1D : public UBlendSpace
 {
 	GENERATED_UCLASS_BODY()
 
@@ -24,20 +27,19 @@ public:
 	bool bDisplayEditorVertically_DEPRECATED;
 #endif
 
-	/** Drive animation speed by blend input position **/
+	/**
+	 * If you have input smoothing, whether to scale the animation speed. E.g. for locomotion animation, 
+	 * the speed axis will scale the animation speed in order to make up the difference between the target 
+	 * and the result of blending the samples.
+	 */
 	UPROPERTY(EditAnywhere, Category = InputInterpolation)
 	bool bScaleAnimation;
 
-	virtual bool IsValidAdditive() const override;
-	virtual bool IsValidAdditiveType(EAdditiveAnimationType AdditiveType) const override;
 protected:
-	//~ Begin UBlendSpaceBase Interface
-	virtual bool IsSameSamplePoint(const FVector& SamplePointA, const FVector& SamplePointB) const;	
+	//~ Begin UBlendSpace Interface
 	virtual EBlendSpaceAxis GetAxisToScale() const override;
-	virtual void GetRawSamplesFromBlendInput(const FVector &BlendInput, TArray<FGridBlendSample, TInlineAllocator<4> > & OutBlendSamples) const override;
 #if WITH_EDITOR
 	virtual void SnapSamplesToClosestGridPoint() override;
-	virtual void RemapSamplesToNewAxisRange() override;
-#endif // WITH_EDITOR
-	//~ End UBlendSpaceBase Interface
+#endif
+	//~ End UBlendSpace Interface
 };

@@ -2,19 +2,17 @@
 
 #include "TraceServices/Model/Threads.h"
 #include "Model/ThreadsPrivate.h"
-#include "Misc/ScopeLock.h"
+
 #include "AnalysisServicePrivate.h"
 #include "Common/StringStore.h"
+#include "Misc/ScopeLock.h"
 
-namespace Trace
+namespace TraceServices
 {
-
-const FName FThreadProvider::ProviderName = "ThreadProvider";
 
 FThreadProvider::FThreadProvider(IAnalysisSession& InSession)
 	: Session(InSession)
 {
-
 }
 
 FThreadProvider::~FThreadProvider()
@@ -27,17 +25,8 @@ FThreadProvider::~FThreadProvider()
 
 void FThreadProvider::AddGameThread(uint32 Id)
 {
-	Session.WriteAccessCheck();
-
-	check(!ThreadMap.Contains(Id));
-	FThreadInfoInternal* ThreadInfo = new FThreadInfoInternal();
-	ThreadInfo->Id = Id;
-	ThreadInfo->PrioritySortOrder = -2;
-	ThreadInfo->Name = Session.StoreString(*FName(NAME_GameThread).GetPlainNameString());
-	ThreadInfo->FallbackSortOrder = SortedThreads.Num();
-	SortedThreads.Add(ThreadInfo);
-	ThreadMap.Add(Id, ThreadInfo);
-	++ModCount;
+	const FString Name = FName(NAME_GameThread).GetPlainNameString();
+	AddThread(Id, *Name, EThreadPriority(-2));
 }
 
 void FThreadProvider::AddThread(uint32 Id, const TCHAR* Name, EThreadPriority Priority)
@@ -59,8 +48,12 @@ void FThreadProvider::AddThread(uint32 Id, const TCHAR* Name, EThreadPriority Pr
 	}
 	if (Name != nullptr)
 	{
-		ThreadInfo->Name = Session.StoreString(Name);
-		if (!FCString::Strcmp(Name, TEXT("RHIThread")))
+		if (Name[0] != 0)
+		{
+			ThreadInfo->Name = Session.StoreString(Name);
+		}
+
+		if (!FCString::Strcmp(Name, TEXT("RHIThread"))) //-V1051
 		{
 			const TCHAR* GroupName = Session.StoreString(TEXT("Render"));
 			SetThreadGroup(Id, GroupName);
@@ -174,7 +167,7 @@ uint32 FThreadProvider::GetGroupSortOrder(const TCHAR* GroupName)
 	}
 	else
 	{
-		return GetTypeHash(GroupName);
+		return FCrc::Strihash_DEPRECATED(GroupName);
 	}
 }
 
@@ -219,9 +212,20 @@ bool FThreadProvider::FThreadInfoInternal::operator<(const FThreadInfoInternal& 
 	return GroupSortOrder < Other.GroupSortOrder;
 }
 
-const IThreadProvider& ReadThreadProvider(const IAnalysisSession& Session)
+FName GetThreadProviderName()
 {
-	return *Session.ReadProvider<IThreadProvider>(FThreadProvider::ProviderName);
+	static const FName Name("ThreadProvider");
+	return Name;
 }
 
+const IThreadProvider& ReadThreadProvider(const IAnalysisSession& Session)
+{
+	return *Session.ReadProvider<IThreadProvider>(GetThreadProviderName());
 }
+
+IEditableThreadProvider& EditThreadProvider(IAnalysisSession& Session)
+{
+	return *Session.EditProvider<IEditableThreadProvider>(GetThreadProviderName());
+}
+
+} // namespace TraceServices

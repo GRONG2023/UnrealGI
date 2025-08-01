@@ -50,12 +50,7 @@ FWinHttpWebSocket::~FWinHttpWebSocket()
 	{
 		if (WebSocket->IsValid())
 		{
-			// We can gracefully close if we're still connected
-			if (!WebSocket->CloseConnection(UE_WEBSOCKET_CLOSE_NORMAL_CLOSURE, FString()))
-			{
-				// If we can't gracefully close, just tear down the connection
-				WebSocket->CancelRequest();
-			}
+			Close(UE_WEBSOCKET_CLOSE_NORMAL_CLOSURE, FString());
 		}
 
 		WebSocket.Reset();
@@ -74,22 +69,22 @@ void FWinHttpWebSocket::Connect()
 
 	State = EWebSocketConnectionState::Connecting;
 
-	// Check Domain whitelist if enabled
-	bool bDisableDomainWhitelist = false;
-	GConfig->GetBool(TEXT("WinHttpWebSocket"), TEXT("bDisableDomainWhitelist"), bDisableDomainWhitelist, GEngineIni);
-	if (!bDisableDomainWhitelist)
+	// Check Domain allowedlist if enabled
+	bool bDisableDomainAllowlist = false;
+	GConfig->GetBool(TEXT("WinHttpWebSocket"), TEXT("bDisableDomainAllowlist"), bDisableDomainAllowlist, GEngineIni);
+	if (!bDisableDomainAllowlist)
 	{
 		FHttpManager& HttpManager = FHttpModule::Get().GetHttpManager();
 		if (!HttpManager.IsDomainAllowed(Url))
 		{
-			UE_LOG(LogWebSockets, Warning, TEXT("WinHttp WebSocket[%p]: %s is not whitelisted, refusing to connect."), this, *Url);
+			UE_LOG(LogWebSockets, Warning, TEXT("WinHttp WebSocket[%p]: %s is not in the allowed list, refusing to connect."), this, *Url);
 			HandleCloseComplete(EWebSocketConnectionState::FailedToConnect, UE_WEBSOCKET_CLOSE_APP_FAILURE, FString(TEXT("Invalid Domain")));
 			return;
 		}
 	}
 	else
 	{
-		UE_LOG(LogWebSockets, Log, TEXT("WinHttp WebSocket[%p]: Domain whitelisting has been disabled by config."), this);
+		UE_LOG(LogWebSockets, Log, TEXT("WinHttp WebSocket[%p]: Domain allowed list has been disabled by config."), this);
 	}
 
 	FWinHttpHttpManager* Manager = FWinHttpHttpManager::GetManager();
@@ -115,7 +110,7 @@ void FWinHttpWebSocket::Close(const int32 Code, const FString& Reason)
 		case EWebSocketConnectionState::Closed:
 		{
 			// Not connected, ignore close request
-			UE_LOG(LogWebSockets, Verbose, TEXT("WinHttp WebSocket[%p]: Closed socket while in %s state, ignoring"), this, LexToString(State));
+			UE_LOG(LogWebSockets, Verbose, TEXT("WinHttp WebSocket[%p]: Close socket while in %s state, ignoring"), this, LexToString(State));
 			return;
 		}
 		case EWebSocketConnectionState::Connecting:
@@ -132,7 +127,12 @@ void FWinHttpWebSocket::Close(const int32 Code, const FString& Reason)
 
 			if (WebSocket.IsValid())
 			{
-				WebSocket->CloseConnection(Code, Reason);
+				// We can gracefully close if we're still connected
+				if (!WebSocket->CloseConnection(Code, Reason))
+				{
+					// If we can't gracefully close, just tear down the connection
+					WebSocket->CancelRequest();
+				}
 			}
 			else
 			{
@@ -187,6 +187,11 @@ void FWinHttpWebSocket::Send(const void* Data, SIZE_T Size, bool bIsBinary)
 	WebSocket->SendMessage(MessageType, MoveTemp(Message));
 }
 
+void FWinHttpWebSocket::SetTextMessageMemoryLimit(uint64 TextMessageMemoryLimit)
+{
+	UE_LOG(LogWebSockets, Verbose, TEXT("SetTextMessageMemoryLimit not implemented for WinHttpWebSocket."));
+}
+
 FWinHttpWebSocket::FWebSocketConnectedEvent& FWinHttpWebSocket::OnConnected()
 {
 	return OnConnectedHandler;
@@ -205,6 +210,11 @@ FWinHttpWebSocket::FWebSocketClosedEvent& FWinHttpWebSocket::OnClosed()
 FWinHttpWebSocket::FWebSocketMessageEvent& FWinHttpWebSocket::OnMessage()
 {
 	return OnMessageHandler;
+}
+
+FWinHttpWebSocket::FWebSocketBinaryMessageEvent& FWinHttpWebSocket::OnBinaryMessage()
+{ 
+	return BinaryMessageHandler; 
 }
 
 FWinHttpWebSocket::FWebSocketRawMessageEvent& FWinHttpWebSocket::OnRawMessage()

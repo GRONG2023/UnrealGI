@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/StabilizeLocalizationKeys.h"
+#include "UObject/PropertyOptional.h"
 #include "UObject/TextProperty.h"
 
 #if WITH_EDITOR
@@ -108,23 +109,15 @@ void StabilizeLocalizationKeys::StabilizeLocalizationKeysForProperty(FProperty* 
 		{
 			FScriptSetHelper ScriptSetHelper(SetProp, InPropData);
 
-			const int32 ElementCount = ScriptSetHelper.Num();
-			for (int32 RawIndex = 0, ElementIndex = 0; ElementIndex < ElementCount; ++RawIndex)
+			for (FScriptSetHelper::FIterator It(ScriptSetHelper); It; ++It)
 			{
-				if (!ScriptSetHelper.IsValidIndex(RawIndex))
-				{
-					continue;
-				}
-
 				StabilizeLocalizationKeysForProperty(
 					SetProp->ElementProp,
-					ScriptSetHelper.GetElementPtr(RawIndex),
+					ScriptSetHelper.GetElementPtr(It),
 					InNamespace,
-					FString::Printf(TEXT("%s_Index%d"), *PropKeyRoot, ElementIndex),
+					FString::Printf(TEXT("%s_Index%d"), *PropKeyRoot, It.GetLogicalIndex()),
 					/*bAppendPropertyNameToKey*/false
 					);
-
-				++ElementIndex;
 			}
 
 			ScriptSetHelper.Rehash();
@@ -138,21 +131,15 @@ void StabilizeLocalizationKeys::StabilizeLocalizationKeysForProperty(FProperty* 
 		{
 			FScriptMapHelper ScriptMapHelper(MapProp, InPropData);
 
-			const int32 ElementCount = ScriptMapHelper.Num();
-			for (int32 RawIndex = 0, ElementIndex = 0; ElementIndex < ElementCount; ++RawIndex)
+			for (FScriptMapHelper::FIterator It(ScriptMapHelper); It; ++It)
 			{
-				if (!ScriptMapHelper.IsValidIndex(RawIndex))
-				{
-					continue;
-				}
-
 				if (ShouldStabilizeInnerProperty(MapProp->KeyProp))
 				{
 					StabilizeLocalizationKeysForProperty(
 						MapProp->KeyProp,
-						ScriptMapHelper.GetKeyPtr(RawIndex),
+						ScriptMapHelper.GetKeyPtr(It),
 						InNamespace,
-						FString::Printf(TEXT("%s_KeyIndex%d"), *PropKeyRoot, ElementIndex),
+						FString::Printf(TEXT("%s_KeyIndex%d"), *PropKeyRoot, It.GetLogicalIndex()),
 						/*bAppendPropertyNameToKey*/false
 						);
 				}
@@ -161,14 +148,12 @@ void StabilizeLocalizationKeys::StabilizeLocalizationKeysForProperty(FProperty* 
 				{
 					StabilizeLocalizationKeysForProperty(
 						MapProp->ValueProp,
-						ScriptMapHelper.GetValuePtr(RawIndex),
+						ScriptMapHelper.GetValuePtr(It),
 						InNamespace,
-						FString::Printf(TEXT("%s_ValueIndex%d"), *PropKeyRoot, ElementIndex),
+						FString::Printf(TEXT("%s_ValueIndex%d"), *PropKeyRoot, It.GetLogicalIndex()),
 						/*bAppendPropertyNameToKey*/false
 						);
 				}
-
-				++ElementIndex;
 			}
 
 			if (ShouldStabilizeInnerProperty(MapProp->KeyProp))
@@ -177,6 +162,24 @@ void StabilizeLocalizationKeys::StabilizeLocalizationKeysForProperty(FProperty* 
 			}
 		}
 		return;
+	}
+
+	if (FOptionalProperty* OptionalProp = CastField<FOptionalProperty>(InProp))
+	{
+		FProperty* OptionalValueProp = OptionalProp->GetValueProperty();
+		if (ShouldStabilizeInnerProperty(OptionalValueProp))
+		{
+			if (void* ValueData = OptionalProp->GetValuePointerForReplaceIfSet(InPropData))
+			{
+				StabilizeLocalizationKeysForProperty(
+					OptionalValueProp,
+					ValueData,
+					InNamespace,
+					PropKeyRoot,
+					/*bAppendPropertyNameToKey*/false
+					);
+			}
+		}
 	}
 }
 

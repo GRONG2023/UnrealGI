@@ -3,10 +3,18 @@
 #pragma once
 
 #include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "Misc/EnumClassFlags.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
 
 #include "MediaBlueprintFunctionLibrary.generated.h"
+
+class UObject;
+struct FFrame;
 
 
 /**
@@ -85,7 +93,7 @@ ENUM_CLASS_FLAGS(EMediaWebcamCaptureDeviceFilter)
  * Information about a capture device.
  */
 USTRUCT(BlueprintType)
-struct MEDIAASSETS_API FMediaCaptureDevice
+struct FMediaCaptureDevice
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -111,7 +119,7 @@ struct MEDIAASSETS_API FMediaCaptureDevice
 /**
  * Blueprint library for Media related functions.
  */
-UCLASS(meta=(ScriptName="MediaLibrary"))
+UCLASS(meta=(ScriptName="MediaLibrary"), MinimalAPI)
 class UMediaBlueprintFunctionLibrary
 	: public UBlueprintFunctionLibrary
 {
@@ -129,7 +137,7 @@ public:
 	 * @param Filter The types of capture devices to return (-1 = all).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Media|Capture")
-	static void EnumerateAudioCaptureDevices(TArray<FMediaCaptureDevice>& OutDevices, int32 Filter = -1);
+	static MEDIAASSETS_API void EnumerateAudioCaptureDevices(TArray<FMediaCaptureDevice>& OutDevices, int32 Filter = -1);
 
 	/**
 	 * Enumerate available audio capture devices.
@@ -141,7 +149,7 @@ public:
 	 * @param Filter The types of capture devices to return (-1 = all).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Media|Capture")
-	static void EnumerateVideoCaptureDevices(TArray<FMediaCaptureDevice>& OutDevices, int32 Filter = -1);
+	static MEDIAASSETS_API void EnumerateVideoCaptureDevices(TArray<FMediaCaptureDevice>& OutDevices, int32 Filter = -1);
 
 	/**
 	 * Enumerate available audio capture devices.
@@ -153,5 +161,5 @@ public:
 	 * @param Filter The types of capture devices to return (-1 = all).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Media|Capture")
-	static void EnumerateWebcamCaptureDevices(TArray<FMediaCaptureDevice>& OutDevices, int32 Filter = -1);
+	static MEDIAASSETS_API void EnumerateWebcamCaptureDevices(TArray<FMediaCaptureDevice>& OutDevices, int32 Filter = -1);
 };

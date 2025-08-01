@@ -34,14 +34,12 @@
 #include "HAL/UnrealMemory.h"
 #include "Templates/IsArithmetic.h"
 #include "Templates/AndOrNot.h"
-#include "Templates/AreTypesEqual.h"
-#include "Templates/RemoveCV.h"
 #include "Templates/IsPODType.h"
+#include "Templates/IsUECoreType.h"
 #include "Templates/IsTriviallyCopyConstructible.h"
 #include "Templates/UnrealTypeTraits.h"
 #include "Templates/EnableIf.h"
 #include "Templates/RemoveReference.h"
-#include "Templates/ChooseClass.h"
 #include "Templates/IntegralConstant.h"
 #include "Templates/IsClass.h"
 #include "Templates/TypeCompatibleBytes.h"
@@ -55,7 +53,9 @@
 #include "Containers/ContainerAllocationPolicies.h"
 #include "Templates/IsEnumClass.h"
 #include "HAL/PlatformProperties.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Misc/Compression.h"
+#endif
 #include "Misc/EngineVersionBase.h"
 #include "Internationalization/TextNamespaceFwd.h"
 #include "Serialization/Archive.h"
@@ -72,12 +72,16 @@
 #include "Containers/Array.h"
 #include "Misc/FrameNumber.h"
 #include "Misc/Timespan.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "HAL/CriticalSection.h"
+#endif
 #include "Containers/StringConv.h"
 #include "UObject/UnrealNames.h"
 #include "UObject/NameTypes.h"
 #include "Misc/Parse.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Math/Color.h"
+#endif
 #include "Templates/AlignmentTemplates.h"
 #include "Misc/StructBuilder.h"
 #include "Templates/Decay.h"
@@ -91,7 +95,9 @@
 #include "Containers/Set.h"
 #include "Algo/Reverse.h"
 #include "Containers/Map.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Math/ColorList.h"
+#endif
 #include "Math/IntPoint.h"
 #include "Math/IntVector.h"
 #include "Logging/LogCategory.h"
@@ -127,8 +133,10 @@
 #include "Math/TwoVectors.h"
 #include "Math/Edge.h"
 #include "UObject/ObjectVersion.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Math/Plane.h"
 #include "Math/Sphere.h"
+#endif
 #include "Math/CapsuleShape.h"
 #include "Math/Rotator.h"
 #include "Misc/DateTime.h"
@@ -156,13 +164,17 @@
 #include "Math/ScaleMatrix.h"
 #include "Math/MirrorMatrix.h"
 #include "Math/ClipProjectionMatrix.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Math/InterpCurvePoint.h"
 #include "Math/InterpCurve.h"
 #include "Math/CurveEdInterface.h"
+#endif
 #include "Math/Float32.h"
 #include "Math/Float16.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "Math/Float16Color.h"
 #include "Math/Vector2DHalf.h"
+#endif
 #include "Math/Transform.h"
 #include "Math/ConvexHull2d.h"
 #include "Math/UnrealMath.h"

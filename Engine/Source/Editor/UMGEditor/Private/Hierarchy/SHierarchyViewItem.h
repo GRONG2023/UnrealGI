@@ -13,8 +13,6 @@
 #include "WidgetReference.h"
 #include "WidgetBlueprintEditor.h"
 
-class FWidgetBlueprintEditor;
-
 class FHierarchyModel : public TSharedFromThis < FHierarchyModel >
 {
 public:
@@ -68,7 +66,7 @@ public:
 	virtual void SetIsVisible(bool IsVisible) { }
 
 	virtual bool CanControlLockedInDesigner() const { return false; }
-	virtual bool IsLockedInDesigner() { return false; }
+	virtual bool IsLockedInDesigner() const { return false; }
 	virtual void SetIsLockedInDesigner(bool NewIsLocked, bool bRecursive)
 	{
 		if (bRecursive)
@@ -106,6 +104,7 @@ protected:
 	virtual void GetChildren(TArray< TSharedPtr<FHierarchyModel> >& Children) = 0;
 	virtual void UpdateSelection() = 0;
 	virtual FWidgetReference AsDraggedWidgetReference() const { return FWidgetReference(); }
+	virtual bool HasCircularReferences(class UWidgetBlueprint* Blueprint, class UWidget* Widget, TSharedPtr<class FDragDropOperation>& DragDropOp);
 	void DetermineDragDropPreviewWidgets(TArray<class UWidget*>& OutWidgets, const FDragDropEvent& DragDropEvent);
 	void RemovePreviewWidget(class UWidgetBlueprint* Blueprint, class UWidget* Widget);
 
@@ -139,7 +138,7 @@ public:
 	virtual void OnSelection() override;
 
 	virtual bool DoesWidgetOverrideFlowDirection() const override;
-	virtual bool DoesWidgetOverrideNavigation() const { return false; }
+	virtual bool DoesWidgetOverrideNavigation() const override { return false; }
 
 	virtual TOptional<EItemDropZone> HandleCanAcceptDrop(const FDragDropEvent& DragDropEvent, EItemDropZone DropZone) override;
 	virtual FReply HandleAcceptDrop(FDragDropEvent const& DragDropEvent, EItemDropZone DropZone) override;
@@ -154,20 +153,17 @@ private:
 	FText RootText;
 };
 
-class FNamedSlotModel : public FHierarchyModel
+class FNamedSlotModelBase : public FHierarchyModel
 {
 public:
-	FNamedSlotModel(FWidgetReference InItem, FName InSlotName, TSharedPtr<FWidgetBlueprintEditor> InBlueprintEditor);
+	FNamedSlotModelBase(FName InSlotName, TSharedPtr<FWidgetBlueprintEditor> InBlueprintEditor);
 
-	virtual ~FNamedSlotModel() {}
+	virtual ~FNamedSlotModelBase() {}
 
-	virtual FName GetUniqueName() const override;
-
-	/* @returns the widget name to use for the tree item */
+	virtual FName GetUniqueName() const = 0;
 	virtual FText GetText() const override;
 
 	virtual const FSlateBrush* GetImage() const override;
-
 	virtual FSlateFontInfo GetFont() const override;
 
 	virtual void OnSelection() override;
@@ -176,16 +172,55 @@ public:
 	virtual FReply HandleAcceptDrop(FDragDropEvent const& DragDropEvent, EItemDropZone DropZone) override;
 
 protected:
+	virtual INamedSlotInterface* GetNamedSlotHost() const = 0;
+	virtual UWidget* GetNamedSlotHostWidget() const = 0;
+	
 	virtual void GetChildren(TArray< TSharedPtr<FHierarchyModel> >& Children) override;
 	virtual void UpdateSelection() override;
-	virtual FWidgetReference AsDraggedWidgetReference() const;
+	virtual FWidgetReference AsDraggedWidgetReference() const override;
 
-	void DoDrop(UWidget* NamedSlotHostWidget, UWidget* DroppingWidget);
+	virtual void DoDrop(INamedSlotInterface* NamedSlotHost, UWidget* DroppingWidget);
 
-private:
+protected:
+
+	FName SlotName;
+};
+
+class FNamedSlotModel : public FNamedSlotModelBase
+{
+public:
+	FNamedSlotModel(FWidgetReference InItem, FName InSlotName, TSharedPtr<FWidgetBlueprintEditor> InBlueprintEditor);
+
+	virtual ~FNamedSlotModel() {}
+
+	virtual FName GetUniqueName() const override;
+	virtual INamedSlotInterface* GetNamedSlotHost() const override;
+	virtual UWidget* GetNamedSlotHostWidget() const override;
+
+protected:
+	virtual void OnSelection() override;
+
+protected:
 
 	FWidgetReference Item;
-	FName SlotName;
+};
+
+class FNamedSlotModelSubclass : public FNamedSlotModelBase
+{
+public:
+	FNamedSlotModelSubclass(UWidgetBlueprint* Blueprint, FName InSlotName, TSharedPtr<FWidgetBlueprintEditor> InBlueprintEditor);
+
+	virtual ~FNamedSlotModelSubclass() {}
+
+	virtual FName GetUniqueName() const override;
+	virtual INamedSlotInterface* GetNamedSlotHost() const override;
+	virtual UWidget* GetNamedSlotHostWidget() const override;
+
+protected:
+	virtual void OnSelection() override;
+
+protected:
+	TWeakObjectPtr<UWidgetBlueprint> Blueprint;
 };
 
 class FHierarchyWidget : public FHierarchyModel
@@ -254,7 +289,7 @@ public:
 		return true;
 	}
 
-	virtual bool IsLockedInDesigner() override
+	virtual bool IsLockedInDesigner() const override
 	{
 		UWidget* TemplateWidget = Item.GetTemplate();
 		if (TemplateWidget)
@@ -281,7 +316,7 @@ public:
 		UWidget* TemplateWidget = Item.GetTemplate();
 		if (TemplateWidget)
 		{
-			return TemplateWidget->FlowDirectionPreference != EFlowDirectionPreference::Inherit;
+			return TemplateWidget->GetFlowDirectionPreference() != EFlowDirectionPreference::Inherit;
 		}
 
 		return false;
@@ -325,11 +360,12 @@ public:
 protected:
 	virtual void GetChildren(TArray< TSharedPtr<FHierarchyModel> >& Children) override;
 	virtual void UpdateSelection() override;
-	virtual FWidgetReference AsDraggedWidgetReference() const { return Item; }
+	virtual FWidgetReference AsDraggedWidgetReference() const override { return Item; }
 
 private:
 	FWidgetReference Item;
 	bool bEditing;
+	bool bNameTextValid;
 };
 
 /**
@@ -349,7 +385,6 @@ public:
 	virtual ~SHierarchyViewItem();
 
 	// Begin SWidget
-	virtual bool IsHovered() const override;
 	virtual void OnMouseEnter(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual void OnMouseLeave(const FPointerEvent& MouseEvent) override;
 	// End SWidget
@@ -375,6 +410,7 @@ private:
 
 	bool IsReadOnly() const;
 	void OnRequestBeginRename();
+	bool ShouldAppearHovered() const;
 
 	/** Gets the font to use for the text item, bold for customized named items */
 	FSlateFontInfo GetItemFont() const;
@@ -404,4 +440,7 @@ private:
 
 	/** Text when we start editing. */
 	FText InitialText;
+
+	/** Keep an internal IsHovered flag*/
+	bool bHovered;
 };

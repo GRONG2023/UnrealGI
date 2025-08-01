@@ -11,6 +11,7 @@
 #include "Misc/LazySingleton.h"
 #include "Misc/OutputDeviceError.h"
 #include "Misc/ScopeLock.h"
+#include "Misc/ScopeRWLock.h"
 #include "CoreGlobals.h"
 #include "Templates/RefCounting.h"
 
@@ -18,8 +19,9 @@
 #include "Misc/ConfigCacheIni.h"
 
 #include "Modules/ModuleManager.h"
-#include "DerivedDataCacheInterface.h"
+#include "DerivedDataCacheModule.h"
 #include "Interfaces/ITargetPlatformManagerModule.h"
+#include "Interfaces/ITargetPlatform.h"
 
 DEFINE_LOG_CATEGORY(LogSHA);
 DEFINE_LOG_CATEGORY(LogStats);
@@ -41,6 +43,15 @@ DEFINE_LOG_CATEGORY(LogCore);
 
 using FSelfRegisteredExecArray = TArray<FSelfRegisteringExec*, TInlineAllocator<8>>;
 
+// Lazy because pthread implementation doesn't like static initialization.
+FCriticalSection* GetExecRegistryLock()
+{
+	// Note: Using FCriticalSection still allows calls to addition or removal
+	// to/from Execs and FSelfRegisteringExec::StaticExec on the same thread
+	static FCriticalSection ExecRegistryLock;
+	return &ExecRegistryLock;
+}
+
 FSelfRegisteredExecArray& GetExecRegistry()
 {
 	static FSelfRegisteredExecArray Execs;
@@ -50,17 +61,20 @@ FSelfRegisteredExecArray& GetExecRegistry()
 /** Constructor, registering this instance. */
 FSelfRegisteringExec::FSelfRegisteringExec()
 {
+	FScopeLock ScopeLock(GetExecRegistryLock());
 	GetExecRegistry().Add( this );
 }
 
 /** Destructor, unregistering this instance. */
 FSelfRegisteringExec::~FSelfRegisteringExec()
 {
+	FScopeLock ScopeLock(GetExecRegistryLock());
 	verify(GetExecRegistry().Remove( this ) == 1 );
 }
 
 bool FSelfRegisteringExec::StaticExec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 {
+	FScopeLock ScopeLock(GetExecRegistryLock());
 	for (FSelfRegisteringExec* Exe : GetExecRegistry())
 	{
 		if (Exe->Exec( InWorld, Cmd,Ar ))
@@ -76,13 +90,32 @@ FStaticSelfRegisteringExec::FStaticSelfRegisteringExec(bool (*InStaticExecFunc)(
 :	StaticExecFunc(InStaticExecFunc)
 {}
 
+#if UE_ALLOW_EXEC_COMMANDS
 bool FStaticSelfRegisteringExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar )
 {
 	return (*StaticExecFunc)( InWorld, Cmd,Ar);
 }
+#endif // UE_ALLOW_EXEC_COMMANDS
 
+FStaticSelfRegisteringExec_Dev::FStaticSelfRegisteringExec_Dev(bool (*InStaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd,FOutputDevice& Ar))
+	: StaticExecFunc(InStaticExecFunc)
+{}
 
-			// Remove old UE4 crash contexts
+bool FStaticSelfRegisteringExec_Dev::Exec_Dev(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+{
+	return (*StaticExecFunc)(InWorld, Cmd, Ar);
+}
+
+FStaticSelfRegisteringExec_Editor::FStaticSelfRegisteringExec_Editor(bool (*InStaticExecFunc)(UWorld* Inworld, const TCHAR* Cmd, FOutputDevice& Ar))
+	: StaticExecFunc(InStaticExecFunc)
+{}
+
+bool FStaticSelfRegisteringExec_Editor::Exec_Editor(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+{
+	return (*StaticExecFunc)(InWorld, Cmd, Ar);
+}
+
+// Remove old crash contexts
 
 
 /*-----------------------------------------------------------------------------
@@ -91,7 +124,7 @@ bool FStaticSelfRegisteringExec::Exec( UWorld* InWorld, const TCHAR* Cmd, FOutpu
 
 FDerivedDataCacheInterface* GetDerivedDataCache()
 {
-	static FDerivedDataCacheInterface* const* DDC;
+	static FDerivedDataCacheInterface* const* Cache;
 	static bool bInitialized = false;
 	if (!bInitialized)
 	{
@@ -101,22 +134,34 @@ FDerivedDataCacheInterface* GetDerivedDataCache()
 			bInitialized = true;
 			if (IDerivedDataCacheModule* Module = FModuleManager::LoadModulePtr<IDerivedDataCacheModule>("DerivedDataCache"))
 			{
-				DDC = Module->CreateOrGetCache();
+				Cache = Module->CreateOrGetCache();
 			}
 		}
 	}
-	return DDC ? *DDC : nullptr;
+	return Cache ? *Cache : nullptr;
 }
 
 FDerivedDataCacheInterface& GetDerivedDataCacheRef()
 {
-	FDerivedDataCacheInterface* DDC = GetDerivedDataCache();
-	if (!DDC)
+	FDerivedDataCacheInterface* Cache = GetDerivedDataCache();
+	if (!Cache)
 	{
 		UE_LOG(LogInit, Fatal, TEXT("Derived Data Cache was requested, but not available."));
-		CA_ASSUME(DDC); // Suppress static analysis warning in unreachable code (fatal error)
+		CA_ASSUME(Cache); // Suppress static analysis warning in unreachable code (fatal error)
 	}
-	return *DDC;
+	return *Cache;
+}
+
+FDerivedDataCacheInterface* TryGetDerivedDataCache()
+{
+	if (IDerivedDataCacheModule* Module = FModuleManager::GetModulePtr<IDerivedDataCacheModule>("DerivedDataCache"))
+	{
+		if (FDerivedDataCacheInterface* const* Cache = Module->GetCache())
+		{
+			return *Cache;
+		}
+	}
+	return nullptr;
 }
 
 class ITargetPlatformManagerModule* GetTargetPlatformManager(bool bFailOnInitErrors)
@@ -152,18 +197,28 @@ class ITargetPlatformManagerModule& GetTargetPlatformManagerRef()
 	return *SingletonInterface;
 }
 
-//-----------------------------------------------------------------------------
-
-class FCoreTicker : public FTicker {};
-
-FTicker& FTicker::GetCoreTicker()
+bool WillNeedAudioVisualData()
 {
-	return TLazySingleton<FCoreTicker>::Get();
-}
+	class ITargetPlatformManagerModule* SingletonInterface = GetTargetPlatformManager();
+#if WITH_ENGINE
+	// quick check to see if we are targeting non-running platforms
+	if (SingletonInterface && SingletonInterface->RestrictFormatsToRuntimeOnly() == false)
+	{
+		for (ITargetPlatform* Platform : SingletonInterface->GetActiveTargetPlatforms())
+		{
+			if (Platform->AllowAudioVisualData())
+			{
+				return true;
+			}
+		}
 
-void FTicker::TearDownCoreTicker()
-{
-	TLazySingleton<FCoreTicker>::TearDown();
+		// if nothing in the loop above returned true, then we don't need AV data
+		return false;
+	}
+#endif
+
+	// default to needing AV data because some commandlets may need the data for processing - otherwise we could use "FApp::CanEverRender() || FApp::CanEverRenderAudio()"
+	return true;
 }
 
 /*----------------------------------------------------------------------------
@@ -320,7 +375,7 @@ void FScriptExceptionHandler::PushExceptionHandler(const FScriptExceptionHandler
 void FScriptExceptionHandler::PopExceptionHandler()
 {
 	check(ExceptionHandlerStack.Num() > 0);
-	ExceptionHandlerStack.Pop(/*bAllowShrinking*/false);
+	ExceptionHandlerStack.Pop(EAllowShrinking::No);
 }
 
 void FScriptExceptionHandler::HandleException(ELogVerbosity::Type Verbosity, const TCHAR* ExceptionMessage, const TCHAR* StackMessage)
@@ -453,14 +508,87 @@ static FAutoConsoleVariableRef CVarGEnsureOnNANDiagnostic(
 #endif
 
 #if DO_CHECK
-namespace UE4Asserts_Private
+namespace UEAsserts_Private
 {
 	void VARARGS InternalLogNANDiagnosticMessage(const TCHAR* FormattedMsg, ...)
 	{		
 		const int32 TempStrSize = 4096;
 		TCHAR TempStr[TempStrSize];
-		GET_VARARGS(TempStr, TempStrSize, TempStrSize - 1, FormattedMsg, FormattedMsg);
-		UE_LOG(LogCore, Error, TempStr);
+		GET_TYPED_VARARGS(TCHAR, TempStr, TempStrSize, TempStrSize - 1, FormattedMsg, FormattedMsg);
+		UE_LOG(LogCore, Error, TEXT("%s"), TempStr);
 	}
 }
 #endif
+
+static bool GAutoEnableNamedEventsWhenProfiling = false;
+static FAutoConsoleVariableRef GCVarAutoEnableNamedEventsWhenProfiling(
+	TEXT("stats.AutoEnableNamedEventsWhenProfiling"),
+	GAutoEnableNamedEventsWhenProfiling,
+	TEXT("If 1, toggles named events on when a profiler is detected and capturing. Toggles named events off if 0 or when profiling stops."),
+	ECVF_Default
+);
+
+void FAutoNamedEventsToggler::Update(bool bIsProfiling)
+{
+	if (bIsProfiling && !bSetNamedEventsEnabled && GAutoEnableNamedEventsWhenProfiling)
+	{
+		++GCycleStatsShouldEmitNamedEvents;
+		bSetNamedEventsEnabled = true;
+	}
+	else if (!bIsProfiling && bSetNamedEventsEnabled)
+	{
+		GCycleStatsShouldEmitNamedEvents = FMath::Max(0, GCycleStatsShouldEmitNamedEvents - 1);
+		bSetNamedEventsEnabled = false;
+	}
+}
+
+static FAutoConsoleCommand GSetStatsNamedEventsCmd(
+	TEXT("stats.NamedEvents"),
+	TEXT("<on/off> Enables or disables the Named Events."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*, FOutputDevice& Ar)
+	{
+		if (Args.Num() > 0)
+		{
+			bool bShouldEnableNamedEvents = FCString::ToBool(*Args[0]);
+			if (bShouldEnableNamedEvents)
+			{
+				if (GCycleStatsShouldEmitNamedEvents == 0)
+				{
+					GCycleStatsShouldEmitNamedEvents = 1;
+				}
+			}
+			else
+			{
+				if (GCycleStatsShouldEmitNamedEvents > 0)
+				{
+					GCycleStatsShouldEmitNamedEvents = 0;
+				}
+			}
+		}
+		else
+		{
+			Ar.Logf(TEXT("Expected 0/1 argument"));
+		}
+	})
+);
+
+static FAutoConsoleCommand GSetStatsVerboseNamedEventsCmd(
+	TEXT("stats.VerboseNamedEvents"),
+	TEXT("<on/off> Enables or disables the Verbose Named Events."),
+	FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateLambda([](const TArray<FString>& Args, UWorld*, FOutputDevice& Ar)
+	{
+		if (Args.Num() > 0)
+		{
+			GShouldEmitVerboseNamedEvents = FCString::ToBool(*Args[0]);
+
+			if (GShouldEmitVerboseNamedEvents && GCycleStatsShouldEmitNamedEvents == 0)
+			{
+				GCycleStatsShouldEmitNamedEvents = 1;
+			}
+		}
+		else
+		{
+			Ar.Logf(TEXT("Expected on/off argument"));
+		}
+	})
+);

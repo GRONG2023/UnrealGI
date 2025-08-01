@@ -8,17 +8,15 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Styling/CoreStyle.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/SBoxPanel.h"
-#include "EditorStyleSet.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/SToolTip.h"
 #include "Widgets/Shared/SProjectLauncherValidation.h"
-
-
+#include "SSimpleButton.h"
 #define LOCTEXT_NAMESPACE "SProjectLauncherProfileLaunchButton"
 
 
@@ -50,43 +48,10 @@ public:
 		TSharedPtr<SVerticalBox> VerticalBoxWidget;
 		ChildSlot
 		[	
-			SNew(SOverlay)
-					
-			+ SOverlay::Slot()
-			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			[
-				SNew(SButton)
-				.ButtonStyle(FCoreStyle::Get(), "Toolbar.Button")
-				.ForegroundColor(FEditorStyle::GetSlateColor("DefaultForeground"))
-				.OnClicked(InArgs._OnClicked)
-				.HAlign(HAlign_Center)
-				.VAlign(VAlign_Center)
-				.ContentPadding(0)
-				.IsEnabled(this, &SProjectLauncherProfileLaunchButton::ButtonEnabled)
-				[
-					SAssignNew(VerticalBoxWidget, SVerticalBox)
-
-					// Icon
-					+ SVerticalBox::Slot()
-					.AutoHeight()
-					.HAlign(HAlign_Center)
-					.VAlign(VAlign_Center)
-					[
-						SNew(SImage)
-						.Image(this, &SProjectLauncherProfileLaunchButton::GetLaunchIcon)
-					]
-				]
-			]
-
-			+ SOverlay::Slot()
-			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			[
-				SNew(SImage)
-				.Image(this, &SProjectLauncherProfileLaunchButton::GetErrorIcon)
-				.Visibility(this, &SProjectLauncherProfileLaunchButton::GetErrorVisibility)
-			]
+			SNew(SSimpleButton)
+			.OnClicked(InArgs._OnClicked)
+			.IsEnabled(this, &SProjectLauncherProfileLaunchButton::ButtonEnabled)
+			.Icon(this, &SProjectLauncherProfileLaunchButton::GetLaunchIcon)
 		];
 
 		// Add launch text is this was requested
@@ -96,8 +61,6 @@ public:
 			.AutoHeight()
 			[
 				SNew(STextBlock)
-				.TextStyle(FCoreStyle::Get(), "Toolbar.Label")
-				.ShadowOffset(FVector2D::UnitVector)
 				.Text(LOCTEXT("ProjectLauncherLaunch", "Launch"))
 			];
 		}
@@ -149,19 +112,7 @@ private:
 	// Get the SlateIcon for Launch Button
 	const FSlateBrush* GetLaunchIcon() const
 	{
-		return FEditorStyle::GetBrush("Launcher.Run");
-	}
-
-	// Get the SlateIcon for Error Image
-	const FSlateBrush* GetErrorIcon() const
-	{
-		return FEditorStyle::GetBrush(TEXT("Icons.Error"));
-	}
-
-	// Callback to see if the error icon should be displayed, based on validity of the launch profile
-	EVisibility GetErrorVisibility() const
-	{
-		return HasError() ? EVisibility::Visible : EVisibility::Hidden;
+		return HasError() ? FAppStyle::Get().GetBrush(TEXT("Icons.Error")) : FAppStyle::Get().GetBrush("Icons.Launch");
 	}
 
 private:

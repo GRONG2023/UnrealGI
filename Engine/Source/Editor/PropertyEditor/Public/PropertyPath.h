@@ -56,12 +56,22 @@ public:
 		return NewPath;
 	}
 
+	bool IsValid() const 
+	{ 
+		return !Properties.IsEmpty(); 
+	}
+
 	int32 GetNumProperties() const 
 	{ 
 		return Properties.Num(); 
 	}
 
 	const FPropertyInfo& GetPropertyInfo( int32 index ) const
+	{
+		return Properties[ index ];
+	}
+
+	FPropertyInfo& GetPropertyInfoRef( int32 index )
 	{
 		return Properties[ index ];
 	}
@@ -76,7 +86,7 @@ public:
 		return Properties[ 0 ];
 	}
 
-	TSharedRef< FPropertyPath > ExtendPath( const FPropertyInfo& NewLeaf )
+	TSharedRef< FPropertyPath > ExtendPath( const FPropertyInfo& NewLeaf ) const
 	{
 		TSharedRef< FPropertyPath > NewPath = MakeShareable( new FPropertyPath() );
 
@@ -86,7 +96,7 @@ public:
 		return NewPath;
 	}
 
-	TSharedRef< FPropertyPath > ExtendPath( const TSharedRef< FPropertyPath >& Extension )
+	TSharedRef< FPropertyPath > ExtendPath( const TSharedRef< FPropertyPath >& Extension ) const
 	{
 		TSharedRef< FPropertyPath > NewPath = MakeShareable( new FPropertyPath() );
 
@@ -100,7 +110,7 @@ public:
 		return NewPath;
 	}
 
-	TSharedRef< FPropertyPath > TrimPath( const int32 AmountToTrim )
+	TSharedRef< FPropertyPath > TrimPath( const int32 AmountToTrim ) const
 	{
 		TSharedRef< FPropertyPath > NewPath = MakeShareable( new FPropertyPath() );
 

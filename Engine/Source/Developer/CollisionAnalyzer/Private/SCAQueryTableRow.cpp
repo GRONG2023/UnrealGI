@@ -2,6 +2,7 @@
 
 #include "SCAQueryTableRow.h"
 #include "CollisionAnalyzerStyle.h"
+#include "Engine/HitResult.h"
 
 #define LOCTEXT_NAMESPACE "CollisionAnalyzer"
 
@@ -13,7 +14,7 @@ void SCAQueryTableRow::Construct(const FArguments& InArgs, const TSharedRef<STab
 
 	if(Item->bIsGroup)
 	{
-		BorderImage = FInvalidatableBrushAttribute(FCollisionAnalyzerStyle::Get()->GetBrush("CollisionAnalyzer.GroupBackground"));
+		SetBorderImage(FCollisionAnalyzerStyle::Get()->GetBrush("CollisionAnalyzer.GroupBackground"));
 	}
 }
 

@@ -5,7 +5,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using Tools.DotNETCommon;
+using System.Threading.Tasks;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 namespace UnrealBuildTool
 {
@@ -18,7 +20,7 @@ namespace UnrealBuildTool
 	{
 		const string TimingDataRegex = @"^\t\t(?<Indent>\t*)(?<Name>[^\t]+):\s*(?<Duration>[0-9\.]+)s$";
 
-		public override int Execute(CommandLineArguments Arguments)
+		public override Task<int> ExecuteAsync(CommandLineArguments Arguments, ILogger Logger)
 		{
 			FileReference InputFile = Arguments.GetFileReference("-TimingFile=");
 
@@ -27,7 +29,7 @@ namespace UnrealBuildTool
 			if (Arguments.HasOption("-Tracing"))
 			{
 				ParseTimingDataToTracingFiles(InputFile);
-				return 0;
+				return Task.FromResult(0);
 			}
 
 			// Break the input file into the various sections for processing.
@@ -38,7 +40,7 @@ namespace UnrealBuildTool
 			TimingDataType CurrentType = TimingDataType.None;
 			foreach (string Line in AllLines)
 			{
-				if (string.IsNullOrWhiteSpace(Line))
+				if (String.IsNullOrWhiteSpace(Line))
 				{
 					continue;
 				}
@@ -99,28 +101,28 @@ namespace UnrealBuildTool
 			}
 
 			// Build the summary.
-			TimingData Summary = new TimingData() { Name = InputFile.FullName.Replace(".timing.txt", string.Empty), Type = TimingDataType.Summary };
+			TimingData Summary = new TimingData(InputFile.FullName.Replace(".timing.txt", String.Empty), TimingDataType.Summary);
 			Summary.AddChild(SummarizeParsedTimingData("IncludeTimings", TimingDataType.Include, Includes));
 			Summary.AddChild(SummarizeParsedTimingData("ClassTimings", TimingDataType.Class, Classes));
 			Summary.AddChild(SummarizeParsedTimingData("FunctionTimings", TimingDataType.Function, Functions));
 
 			// Write out the timing binary file.
-			using (BinaryWriter Writer = new BinaryWriter(File.Open(InputFile.ChangeExtension(".timing.bin").FullName, FileMode.Create)))
+			using (BinaryWriter Writer = new BinaryWriter(File.Open(InputFile.ChangeExtension(".cta").FullName, FileMode.Create)))
 			{
 				Writer.Write(Summary);
 			}
 
-			return 0;
+			return Task.FromResult(0);
 		}
 
-		TimingData SummarizeParsedTimingData(string SummaryName, TimingDataType TimingType,  IEnumerable<string> Lines)
+		TimingData SummarizeParsedTimingData(string SummaryName, TimingDataType TimingType, IEnumerable<string> Lines)
 		{
-			TimingData Summary = new TimingData() { Name = SummaryName, Type = TimingDataType.Summary };
+			TimingData Summary = new TimingData(SummaryName, TimingDataType.Summary);
 			List<TimingData> ParsedTimingData = ParseTimingDataFromLines(TimingType, Lines);
 			foreach (TimingData Data in ParsedTimingData)
 			{
 				// See if we've already added a child that matches this data's name. If so, just add to the duration.
-				TimingData MatchedData;
+				TimingData? MatchedData;
 				if (Summary.Children.TryGetValue(Data.Name, out MatchedData))
 				{
 					MatchedData.Count += 1;
@@ -139,11 +141,11 @@ namespace UnrealBuildTool
 		{
 			List<TimingData> ParsedTimingData = new List<TimingData>();
 			int LastDepth = 0;
-			TimingData LastTimingData = null;
+			TimingData? LastTimingData = null;
 			foreach (string Line in Lines)
 			{
 				int LineDepth;
-				TimingData CurrentTimingData = ParseTimingDataFromLine(TimingType, Line, out LineDepth);
+				TimingData CurrentTimingData = ParseTimingDataFromLine(TimingType, Line, out LineDepth)!;
 				if (LineDepth == 0)
 				{
 					ParsedTimingData.Add(CurrentTimingData);
@@ -152,18 +154,18 @@ namespace UnrealBuildTool
 				{
 					while (LineDepth < LastDepth)
 					{
-						LastTimingData = LastTimingData.Parent;
+						LastTimingData = LastTimingData!.Parent;
 						--LastDepth;
 					}
 
 					// If this timing data would have a parent, add the data to that parent and reduce its exclusive
 					// duration by this data's inclusive duration.
-					TimingData ParentData = null;
+					TimingData? ParentData = null;
 					if (LineDepth == LastDepth)
 					{
-						CurrentTimingData.Parent = LastTimingData.Parent;
+						CurrentTimingData.Parent = LastTimingData!.Parent;
 						ParentData = LastTimingData.Parent;
-						
+
 					}
 					else if (LineDepth > LastDepth)
 					{
@@ -185,7 +187,7 @@ namespace UnrealBuildTool
 			return ParsedTimingData;
 		}
 
-		TimingData ParseTimingDataFromLine(TimingDataType TimingType, string Line, out int LineDepth)
+		TimingData? ParseTimingDataFromLine(TimingDataType TimingType, string Line, out int LineDepth)
 		{
 			Match TimingDataMatch = Regex.Match(Line, TimingDataRegex);
 			if (!TimingDataMatch.Success)
@@ -196,12 +198,8 @@ namespace UnrealBuildTool
 
 			LineDepth = TimingDataMatch.Groups["Indent"].Success ? TimingDataMatch.Groups["Indent"].Value.Count() : 0;
 
-			TimingData ParsedTimingData = new TimingData()
-			{
-				Name = TimingDataMatch.Groups["Name"].Value,
-				Type = TimingType,
-				ExclusiveDuration = float.Parse(TimingDataMatch.Groups["Duration"].Value),
-			};
+			TimingData ParsedTimingData = new TimingData(TimingDataMatch.Groups["Name"].Value, TimingType);
+			ParsedTimingData.ExclusiveDuration = Single.Parse(TimingDataMatch.Groups["Duration"].Value);
 
 			return ParsedTimingData;
 		}
@@ -259,7 +257,7 @@ namespace UnrealBuildTool
 
 					int Indent = Match.Groups[1].Length;
 					string FileName = Match.Groups[2].Value;
-					float Duration = float.Parse(Match.Groups[3].Value);
+					float Duration = Single.Parse(Match.Groups[3].Value);
 
 					while (Indent <= FinishTimesForIndent.Count - 1)
 					{
@@ -317,7 +315,7 @@ namespace UnrealBuildTool
 				float Time;
 				ClassNameToTime.TryGetValue(ClassName, out Time);
 
-				Time += float.Parse(Match.Groups[2].Value);
+				Time += Single.Parse(Match.Groups[2].Value);
 				ClassNameToTime[ClassName] = Time;
 			}
 

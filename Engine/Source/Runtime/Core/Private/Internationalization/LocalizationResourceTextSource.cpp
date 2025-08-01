@@ -1,12 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/LocalizationResourceTextSource.h"
-#include "Internationalization/TextLocalizationResource.h"
-#include "HAL/PlatformProperties.h"
+
+#include "CoreTypes.h"
 #include "HAL/FileManager.h"
-#include "Misc/Paths.h"
-#include "Misc/CoreDelegates.h"
+#include "Internationalization/TextLocalizationResource.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/CoreDelegates.h"
+#include "Misc/EnumClassFlags.h"
+#include "Misc/Paths.h"
 
 bool FLocalizationResourceTextSource::GetNativeCultureName(const ELocalizedTextSourceCategory InCategory, FString& OutNativeCultureName)
 {
@@ -45,24 +47,41 @@ void FLocalizationResourceTextSource::GetLocalizedCultureNames(const ELocalizati
 
 void FLocalizationResourceTextSource::LoadLocalizedResources(const ELocalizationLoadFlags InLoadFlags, TArrayView<const FString> InPrioritizedCultures, FTextLocalizationResource& InOutNativeResource, FTextLocalizationResource& InOutLocalizedResource)
 {
-	auto GetGameLocalizationPaths = [this]()
+	auto AppendChunkedLocalizationPaths = [this](TArray<FString>& OutLocalizationPaths)
 	{
-		TArray<FString> LocalizationPaths = FPaths::GetGameLocalizationPaths();
-
 		if (ChunkIds.Num() > 0)
 		{
-			const TArray<FString> ChunkedLocalizationTargets = GetChunkedLocalizationTargets();
+			// Filter the list of chunked targets against the list of targets we're actually loading data for
+			TArray<FString> ChunkedLocalizationTargets = GetChunkedLocalizationTargets();
+			ChunkedLocalizationTargets.RemoveAll([&OutLocalizationPaths](const FString& LocalizationTarget)
+			{
+				// Note: We only allow game localization targets to be chunked, and the layout is assumed to follow our standard pattern (as used by the localization dashboard and FLocTextHelper)
+				return !OutLocalizationPaths.Contains(FPaths::ProjectContentDir() / TEXT("Localization") / LocalizationTarget);
+			});
+
 			for (const FString& LocalizationTarget : ChunkedLocalizationTargets)
 			{
 				for (const int32 ChunkId : ChunkIds)
 				{
 					// Note: We only allow game localization targets to be chunked, and the layout is assumed to follow our standard pattern (as used by the localization dashboard and FLocTextHelper)
 					const FString LocalizationTargetForChunk = TextLocalizationResourceUtil::GetLocalizationTargetNameForChunkId(LocalizationTarget, ChunkId);
-					LocalizationPaths.Add(FPaths::ProjectContentDir() / TEXT("Localization") / LocalizationTargetForChunk);
+					OutLocalizationPaths.Add(FPaths::ProjectContentDir() / TEXT("Localization") / LocalizationTargetForChunk);
 				}
 			}
 		}
+	};
 
+	auto GetGameLocalizationPaths = [&AppendChunkedLocalizationPaths]()
+	{
+		TArray<FString> LocalizationPaths = FPaths::GetGameLocalizationPaths();
+		AppendChunkedLocalizationPaths(LocalizationPaths);
+		return LocalizationPaths;
+	};
+
+	auto GetCookedEditorLocalizationPaths = [&AppendChunkedLocalizationPaths]()
+	{
+		TArray<FString> LocalizationPaths = FPaths::GetCookedEditorLocalizationPaths();
+		AppendChunkedLocalizationPaths(LocalizationPaths);
 		return LocalizationPaths;
 	};
 
@@ -83,6 +102,9 @@ void FLocalizationResourceTextSource::LoadLocalizedResources(const ELocalization
 	if (ShouldLoadEditor(InLoadFlags))
 	{
 		EditorLocalizationPaths += FPaths::GetEditorLocalizationPaths();
+#if UE_IS_COOKED_EDITOR
+		EditorLocalizationPaths += GetCookedEditorLocalizationPaths();
+#endif
 		EditorLocalizationPaths += FPaths::GetToolTipLocalizationPaths();
 
 		bool bShouldUseLocalizedPropertyNames = false;
@@ -142,6 +164,7 @@ void FLocalizationResourceTextSource::LoadLocalizedResourcesFromPaths(TArrayView
 	SCOPED_BOOT_TIMING("LoadLocalizedResourcesFromPaths");
 
 	const int32 BaseResourcePriority = GetPriority() * -1; // Flip the priority as larger text source priorities are more important, but smaller text resource priorities are more important
+	const int32 NativeResourcePriority = BaseResourcePriority + InPrioritizedCultures.Num(); // Native resources always prioritize below any localized ones
 
 	static const FString PlatformLocalizationFolderName = FPaths::GetPlatformLocalizationFolderName();
 	static const FString PlatformName = ANSI_TO_TCHAR(FPlatformProperties::IniPlatformName());
@@ -185,7 +208,7 @@ void FLocalizationResourceTextSource::LoadLocalizedResourcesFromPaths(TArrayView
 				// We skip loading the native text if we're transitioning to the native culture as there's no extra work that needs to be done
 				if (!LocMetaResource.NativeCulture.IsEmpty() && !InPrioritizedCultures.Contains(LocMetaResource.NativeCulture))
 				{
-					LoadLocalizationResourcesForCulture(InOutNativeResource, LocalizationPath, LocMetaResource.NativeCulture, FPaths::GetCleanFilename(LocMetaResource.NativeLocRes), BaseResourcePriority);
+					LoadLocalizationResourcesForCulture(InOutNativeResource, LocalizationPath, LocMetaResource.NativeCulture, FPaths::GetCleanFilename(LocMetaResource.NativeLocRes), NativeResourcePriority);
 				}
 			}
 		}
@@ -205,7 +228,7 @@ void FLocalizationResourceTextSource::LoadLocalizedResourcesFromPaths(TArrayView
 				}
 
 				const FString LocResFilename = FPaths::GetBaseFilename(LocalizationPath) + TEXT(".locres");
-				LoadLocalizationResourcesForCulture(InOutLocalizedResource, LocalizationPath, NativeGameCulture, LocResFilename, BaseResourcePriority);
+				LoadLocalizationResourcesForCulture(InOutLocalizedResource, LocalizationPath, NativeGameCulture, LocResFilename, NativeResourcePriority);
 			}
 		}
 	}

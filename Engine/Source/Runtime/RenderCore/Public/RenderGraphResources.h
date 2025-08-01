@@ -2,11 +2,56 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/EnumClassFlags.h"
+#include "PixelFormat.h"
+#include "RHI.h"
+#include "RHIDefinitions.h"
+#include "RHIResources.h"
+#include "RHITransientResourceAllocator.h"
+#include "RenderGraphAllocator.h"
+#include "RenderGraphDefinitions.h"
 #include "RenderGraphParameter.h"
 #include "RenderGraphTextureSubresource.h"
+#include "RendererInterface.h"
+#include "ShaderParameterMacros.h"
+#include "Templates/Function.h"
+#include "Templates/RefCounting.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
 
-struct FPooledRenderTarget;
+class FRDGBarrierBatchBegin;
+class FRDGBarrierValidation;
+class FRDGBuffer;
+class FRDGBufferPool;
+class FRDGBuilder;
+class FRDGResourceDumpContext;
+class FRDGTextureUAV;
+class FRDGTrace;
+class FRDGUserValidation;
+class FRHITransientBuffer;
+class FRHITransientTexture;
 class FRenderTargetPool;
+class FShaderParametersMetadata;
+struct FPooledRenderTarget;
+struct FRDGBufferDebugData;
+struct FRDGResourceDebugData;
+struct FRDGTextureDebugData;
+struct FRDGViewableResourceDebugData;
+
+/** Used for tracking pass producer / consumer edges in the graph for culling and pipe fencing. */
+struct FRDGProducerState
+{
+	FRDGPass* Pass = nullptr;
+	FRDGPass* PassIfSkipUAVBarrier = nullptr;
+	ERHIAccess Access = ERHIAccess::Unknown;
+	FRDGViewHandle NoUAVBarrierHandle;
+};
+
+using FRDGProducerStatesByPipeline = TRHIPipelineArray<FRDGProducerState>;
 
 /** Used for tracking the state of an individual subresource during execution. */
 struct FRDGSubresourceState
@@ -15,43 +60,64 @@ struct FRDGSubresourceState
 	static bool IsTransitionRequired(const FRDGSubresourceState& Previous, const FRDGSubresourceState& Next);
 
 	/** Given a before and after state, returns whether they can be merged into a single state. */
-	static bool IsMergeAllowed(ERDGParentResourceType ResourceType, const FRDGSubresourceState& Previous, const FRDGSubresourceState& Next);
+	static bool IsMergeAllowed(ERDGViewableResourceType ResourceType, const FRDGSubresourceState& Previous, const FRDGSubresourceState& Next);
 
-	FRDGSubresourceState() = default;
+	FRDGSubresourceState()
+		: bReservedCommit(0)
+	{}
 
-	inline void SetPass(FRDGPassHandle PassHandle)
+	explicit FRDGSubresourceState(ERHIAccess InAccess)
+		: Access(InAccess)
+		, bReservedCommit(0)
+	{}
+
+	explicit FRDGSubresourceState(ERHIPipeline Pipeline, FRDGPassHandle PassHandle)
+		: bReservedCommit(0)
 	{
-		FirstPass = LastPass = PassHandle;
+		SetPass(Pipeline, PassHandle);
 	}
 
-	/** Finalizes the state at the end of the transition chain; keeps access intact. */
-	void Finalize();
+	/** Initializes the first and last pass and the pipeline. Clears any other pass state. */
+	void SetPass(ERHIPipeline Pipeline, FRDGPassHandle PassHandle);
+
+	/** Validates that the state is in a correct configuration for use. */
+	void Validate();
+
+	/** Returns whether the state is used by the pipeline. */
+	bool IsUsedBy(ERHIPipeline Pipeline) const;
+
+	/** Returns the last pass across either pipe. */
+	FRDGPassHandle GetLastPass() const;
+
+	/** Returns the first pass across either pipe. */
+	FRDGPassHandle GetFirstPass() const;
+
+	/** Returns the pipeline mask this state is used on. */
+	ERHIPipeline GetPipelines() const;
 
 	/** The last used access on the pass. */
 	ERHIAccess Access = ERHIAccess::Unknown;
 
-	/** The last used transition flags on the pass. */
-	EResourceTransitionFlags Flags = EResourceTransitionFlags::None;
-
-	/** The last used pass hardware pipeline. */
-	ERHIPipeline Pipeline = ERHIPipeline::Graphics;
-
 	/** The first pass in this state. */
-	FRDGPassHandle FirstPass;
+	FRDGPassHandlesByPipeline FirstPass;
 
 	/** The last pass in this state. */
-	FRDGPassHandle LastPass;
+	FRDGPassHandlesByPipeline LastPass;
 
 	/** The last no-UAV barrier to be used by this subresource. */
 	FRDGViewUniqueFilter NoUAVBarrierFilter;
+
+	/** The last used transition flags on the pass. */
+	EResourceTransitionFlags Flags = EResourceTransitionFlags::None;
+
+	/** Whether this subresource state represents a commit operation for a reserved resource. */
+	uint8 bReservedCommit : 1;
 };
 
-using FRDGTextureSubresourceState = TRDGTextureSubresourceArray<FRDGSubresourceState, FDefaultAllocator>;
-using FRDGTextureTransientSubresourceState = TRDGTextureSubresourceArray<FRDGSubresourceState, SceneRenderingAllocator>;
-using FRDGTextureTransientSubresourceStateIndirect = TRDGTextureSubresourceArray<FRDGSubresourceState*, SceneRenderingAllocator>;
+using FRDGTextureSubresourceState = TRDGTextureSubresourceArray<FRDGSubresourceState*, FRDGArrayAllocator>;
 
 /** Generic graph resource. */
-class RENDERCORE_API FRDGResource
+class FRDGResource
 {
 public:
 	FRDGResource(const FRDGResource&) = delete;
@@ -65,15 +131,22 @@ public:
 
 	/** Marks this resource as actually used by a resource. This is to track what dependencies on pass was actually unnecessary. */
 #if RDG_ENABLE_DEBUG
-	virtual void MarkResourceAsUsed();
+	RENDERCORE_API virtual void MarkResourceAsUsed();
 #else
 	inline  void MarkResourceAsUsed() {}
 #endif
 
 	FRHIResource* GetRHI() const
 	{
-		ValidateRHIAccess();
+		IF_RDG_ENABLE_DEBUG(ValidateRHIAccess());
 		return ResourceRHI;
+	}
+
+	void SetOwnerName(const FName& InOwnerName)
+	{
+#if RHI_ENABLE_RESOURCE_INFO
+		OwnerName = InOwnerName;
+#endif
 	}
 
 	//////////////////////////////////////////////////////////////////////////
@@ -83,82 +156,58 @@ protected:
 		: Name(InName)
 	{}
 
-	/** Assigns this resource as a simple passthrough container for an RHI resource. */
-	void SetPassthroughRHI(FRHIResource* InResourceRHI)
-	{
-		ResourceRHI = InResourceRHI;
-#if RDG_ENABLE_DEBUG
-		DebugData.bAllowRHIAccess = true;
-		DebugData.bPassthrough = true;
-#endif
-	}
-
-	bool IsPassthrough() const
-	{
-#if RDG_ENABLE_DEBUG
-		return DebugData.bPassthrough;
-#else
-		return false;
-#endif
-	}
-
-	/** Verify that the RHI resource can be accessed at a pass execution. */
-	void ValidateRHIAccess() const
-	{
-#if RDG_ENABLE_DEBUG
-		checkf(DebugData.bAllowRHIAccess,
-			TEXT("Accessing the RHI resource of %s at this time is not allowed. If you hit this check in pass, ")
-			TEXT("that is due to this resource not being referenced in the parameters of your pass."),
-			Name);
-#endif
-	}
-
 	FRHIResource* GetRHIUnchecked() const
 	{
 		return ResourceRHI;
 	}
 
+	bool HasRHI() const
+	{
+		return ResourceRHI != nullptr;
+	}
+
 	FRHIResource* ResourceRHI = nullptr;
+
+#if RDG_ENABLE_DEBUG
+	RENDERCORE_API void ValidateRHIAccess() const;
+#endif
 
 private:
 #if RDG_ENABLE_DEBUG
-	class FDebugData
-	{
-	private:
-		/** Boolean to track at runtime whether a resource is actually used by the lambda of a pass or not, to detect unnecessary resource dependencies on passes. */
-		bool bIsActuallyUsedByPass = false;
+	struct FRDGResourceDebugData* DebugData = nullptr;
+	RENDERCORE_API FRDGResourceDebugData& GetDebugData() const;
+#endif
 
-		/** Boolean to track at pass execution whether the underlying RHI resource is allowed to be accessed. */
-		bool bAllowRHIAccess = false;
-
-		/** If true, the resource is not attached to any builder and exists as a dummy container for staging code to RDG. */
-		bool bPassthrough = false;
-
-		friend FRDGResource;
-		friend FRDGUserValidation;
-	} DebugData;
+#if RHI_ENABLE_RESOURCE_INFO
+	FName OwnerName;	// For RHI resource tracking
 #endif
 
 	friend FRDGBuilder;
 	friend FRDGUserValidation;
+	friend FRDGBarrierValidation;
 };
 
 class FRDGUniformBuffer
 	: public FRDGResource
 {
 public:
-	FORCEINLINE bool IsGlobal() const
-	{
-		return bGlobal;
-	}
+
+	virtual ~FRDGUniformBuffer() {};
 
 	FORCEINLINE const FRDGParameterStruct& GetParameters() const
 	{
 		return ParameterStruct;
 	}
 
+	FORCEINLINE const TCHAR* GetLayoutName() const
+	{
+		return *ParameterStruct.GetLayout().GetDebugName();
+	}
+
 #if RDG_ENABLE_DEBUG
 	RENDERCORE_API void MarkResourceAsUsed() override;
+#else
+	inline void MarkResourceAsUsed() {}
 #endif
 
 	//////////////////////////////////////////////////////////////////////////
@@ -173,20 +222,23 @@ public:
 
 protected:
 	template <typename TParameterStruct>
-	explicit FRDGUniformBuffer(TParameterStruct* InParameters, const TCHAR* InName)
+	explicit FRDGUniformBuffer(const TParameterStruct* InParameters, const TCHAR* InName)
 		: FRDGResource(InName)
-		, ParameterStruct(InParameters)
-		, bGlobal(ParameterStruct.HasStaticSlot())
+		, ParameterStruct(InParameters, TParameterStruct::FTypeInfo::GetStructMetadata())
 	{}
 
 private:
+	FRHIUniformBuffer* GetRHIUnchecked() const
+	{
+		return static_cast<FRHIUniformBuffer*>(FRDGResource::GetRHIUnchecked());
+	}
+
+	RENDERCORE_API void InitRHI();
 
 	const FRDGParameterStruct ParameterStruct;
 	TRefCountPtr<FRHIUniformBuffer> UniformBufferRHI;
 	FRDGUniformBufferHandle Handle;
-
-	/** Whether this uniform buffer is bound globally or locally to a shader. */
-	uint8 bGlobal : 1;
+	bool bExternal = false;
 
 	friend FRDGBuilder;
 	friend FRDGUniformBufferRegistry;
@@ -197,9 +249,16 @@ template <typename ParameterStructType>
 class TRDGUniformBuffer : public FRDGUniformBuffer
 {
 public:
+	virtual ~TRDGUniformBuffer() {};
+
 	FORCEINLINE const TRDGParameterStruct<ParameterStructType>& GetParameters() const
 	{
 		return static_cast<const TRDGParameterStruct<ParameterStructType>&>(FRDGUniformBuffer::GetParameters());
+	}
+
+	FORCEINLINE const ParameterStructType* GetContents() const
+	{
+		return Parameters;
 	}
 
 	FORCEINLINE TUniformBufferRef<ParameterStructType> GetRHIRef() const
@@ -209,13 +268,16 @@ public:
 
 	FORCEINLINE const ParameterStructType* operator->() const
 	{
-		return GetParameters().GetContents();
+		return Parameters;
 	}
 
 private:
-	explicit TRDGUniformBuffer(ParameterStructType* InParameters, const TCHAR* InName)
+	explicit TRDGUniformBuffer(const ParameterStructType* InParameters, const TCHAR* InName)
 		: FRDGUniformBuffer(InParameters, InName)
+		, Parameters(InParameters)
 	{}
+
+	const ParameterStructType* Parameters;
 
 	friend FRDGBuilder;
 	friend FRDGUniformBufferRegistry;
@@ -223,20 +285,82 @@ private:
 };
 
 /** A render graph resource with an allocation lifetime tracked by the graph. May have child resources which reference it (e.g. views). */
-class RENDERCORE_API FRDGParentResource
+class FRDGViewableResource
 	: public FRDGResource
 {
 public:
 	/** The type of this resource; useful for casting between types. */
-	const ERDGParentResourceType Type;
+	const ERDGViewableResourceType Type;
 
+	/** Whether this resource is externally registered with the graph (i.e. the user holds a reference to the underlying resource outside the graph). */
 	bool IsExternal() const
 	{
 		return bExternal;
 	}
 
+	/** Whether this resource is has been queued for extraction at the end of graph execution. */
+	bool IsExtracted() const
+	{
+		return bExtracted;
+	}
+
+	bool IsCulled() const
+	{
+		return ReferenceCount == 0;
+	}
+
+	/** Whether a prior pass added to the graph produced contents for this resource. External resources are not considered produced
+	 *  until used for a write operation. This is a union of all subresources, so any subresource write will set this to true.
+	 */
+	bool HasBeenProduced() const
+	{
+		return bProduced;
+	}
+
 protected:
-	FRDGParentResource(const TCHAR* InName, ERDGParentResourceType InType);
+	RENDERCORE_API FRDGViewableResource(const TCHAR* InName, ERDGViewableResourceType InType, bool bSkipTracking, bool bImmediateFirstBarrier);
+
+	bool IsCullRoot() const
+	{
+		return bExternal || bExtracted;
+	}
+
+	static const ERHIAccess DefaultEpilogueAccess = ERHIAccess::SRVMask;
+
+	enum class ETransientExtractionHint : uint8
+	{
+		None,
+		Disable,
+		Enable
+	};
+
+	enum class EAccessMode : uint8
+	{
+		Internal,
+		External
+	};
+
+	struct FAccessModeState
+	{
+		bool IsExternalAccess() const { return ActiveMode == EAccessMode::External; }
+
+		FAccessModeState()
+			: Pipelines(ERHIPipeline::None)
+			, Mode(EAccessMode::Internal)
+			, bLocked(0)
+			, bQueued(0)
+		{}
+
+		ERHIAccess			Access = ERHIAccess::None;
+		ERHIPipeline		Pipelines : 2;
+		EAccessMode			Mode : 1;
+		uint8				bLocked : 1;
+		uint8				bQueued : 1;
+
+		/** The actual access mode replayed on the setup pass timeline. */
+		EAccessMode ActiveMode = EAccessMode::Internal;
+
+	} AccessModeState;
 
 	/** Whether this is an externally registered resource. */
 	uint8 bExternal : 1;
@@ -244,55 +368,83 @@ protected:
 	/** Whether this is an extracted resource. */
 	uint8 bExtracted : 1;
 
-	/** Whether this resource needs acquire / discard. */
+	/** Whether any sub-resource has been used for write by a pass. */
+	uint8 bProduced : 1;
+
+	/** Whether this resource is allocated through the transient resource allocator. */
 	uint8 bTransient : 1;
 
-	/** Whether this resource is the last owner of its allocation (i.e. nothing aliases the allocation later in the execution timeline). */
-	uint8 bLastOwner : 1;
+	/** Whether this resource cannot be made transient. */
+	uint8 bForceNonTransient : 1;
 
-	/** If true, the resource was not used by any pass not culled by the graph. */
-	uint8 bCulled : 1;
+	/** If true, the graph will skip the last graph transition. Used for aliased pooled resources. */
+	uint8 bSkipLastTransition : 1;
 
-	/** If true, the resource has been used on an async compute pass and may have async compute states. */
-	uint8 bUsedByAsyncComputePass : 1;
+	/** If true, this resource should skip the first split barrier and perform transition right away. */
+	uint8 bSplitFirstTransition : 1;
 
-private:
-	/** Number of references in passes and deferred queries. */
-	uint16 ReferenceCount = 0;
+	/** If true, the resource has been queued for an upload operation. */
+	uint8 bQueuedForUpload : 1;
 
-	/** The initial and final states of the resource assigned by the user, if known. */
-	ERHIAccess AccessInitial = ERHIAccess::Unknown;
-	ERHIAccess AccessFinal = ERHIAccess::Unknown;
+	/** If false, the resource needs to be collected. */
+	uint8 bCollectForAllocate : 1;
+
+	/** If true, the reserved resource is having tiles committed. */
+	uint8 bQueuedForReservedCommit : 1;
+
+	/** Whether this resource is allowed to be both transient and extracted. */
+	ETransientExtractionHint TransientExtractionHint;
 
 	FRDGPassHandle FirstPass;
 	FRDGPassHandle LastPass;
+	FRDGPassHandle MinAcquirePass;
+	FRDGPassHandle MinDiscardPass;
+
+	/** Number of references in passes and deferred queries. */
+	uint16 ReferenceCount;
+
+	/** Scratch index allocated for the resource in the pass being setup. */
+	uint16 PassStateIndex = 0;
+
+	/** Set of aliasing overlaps to apply to the acquire transition if transient. */
+	TArrayView<const FRHITransientAliasingOverlap> AliasingOverlaps;
+
+	/** The state of the resource at the graph epilogue. */
+	ERHIAccess EpilogueAccess = DefaultEpilogueAccess;
+
+private:
+	static const uint16 DeallocatedReferenceCount = ~0;
+
+	void SetExternalAccessMode(ERHIAccess InReadOnlyAccess, ERHIPipeline InPipelines)
+	{
+		check(!AccessModeState.bLocked);
+
+		AccessModeState.Mode = EAccessMode::External;
+		AccessModeState.Access = InReadOnlyAccess;
+		AccessModeState.Pipelines = InPipelines;
+
+		EpilogueAccess = InReadOnlyAccess;
+	}
+
+#if RDG_ENABLE_TRACE
+	uint16 TraceOrder = 0;
+	TArray<FRDGPassHandle, FRDGArrayAllocator> TracePasses;
+#endif
 
 #if RDG_ENABLE_DEBUG
-	class FParentDebugData
-	{
-	private:
-		/** Pointer towards the pass that is the first to produce it, for even more convenient error message. */
-		const FRDGPass* FirstProducer = nullptr;
-
-		/** Count the number of times it has been used by a pass (without culling). */
-		uint32 PassAccessCount = 0;
-
-		/** Tracks at wiring time if a resource has ever been produced by a pass, to error out early if accessing a resource that has not been produced. */
-		bool bHasBeenProduced = false;
-
-		/** Tracks whether this resource was clobbered by the builder prior to use. */
-		bool bHasBeenClobbered = false;
-
-		friend FRDGUserValidation;
-	} ParentDebugData;
+	struct FRDGViewableResourceDebugData* ViewableDebugData = nullptr;
+	RENDERCORE_API FRDGViewableResourceDebugData& GetViewableDebugData() const;
 #endif
 
 	friend FRDGBuilder;
 	friend FRDGUserValidation;
 	friend FRDGBarrierBatchBegin;
+	friend FRDGResourceDumpContext;
+	friend FRDGTrace;
+	friend FRDGPass;
 };
 
-/** A render graph resource (e.g. a view) which references a single parent resource (e.g. a texture / buffer). Provides an abstract way to access the parent resource. */
+/** A render graph resource (e.g. a view) which references a single viewable resource (e.g. a texture / buffer). Provides an abstract way to access the viewable resource. */
 class FRDGView
 	: public FRDGResource
 {
@@ -301,7 +453,12 @@ public:
 	const ERDGViewType Type;
 
 	/** Returns the referenced parent render graph resource. */
-	virtual FRDGParentResourceRef GetParent() const = 0;
+	virtual FRDGViewableResource* GetParent() const = 0;
+
+	ERDGViewableResourceType GetParentType() const
+	{
+		return ::GetParentType(Type);
+	}
 
 	FRDGViewHandle GetHandle() const
 	{
@@ -316,317 +473,54 @@ protected:
 
 private:
 	FRDGViewHandle Handle;
+	FRDGPassHandle LastPass;
 
 	friend FRDGBuilder;
 	friend FRDGViewRegistry;
 	friend FRDGAllocator;
 };
 
-/** Descriptor used to create a render graph texture. */
-struct RENDERCORE_API FRDGTextureDesc
-{
-	UE_DEPRECATED(4.26, "FRDGTextureDesc has been refactored. Use Create2D instead.")
-	static FRDGTextureDesc Create2DDesc(
-		FIntPoint InExtent,
-		EPixelFormat InFormat,
-		const FClearValueBinding& InClearValue,
-		ETextureCreateFlags InFlags,
-		ETextureCreateFlags InTargetableFlags,
-		bool bInForceSeparateTargetAndShaderResource,
-		uint16 InNumMips = 1);
-
-	UE_DEPRECATED(4.26, "FRDGTextureDesc has been refactored. Use Create3D instead.")
-	static FRDGTextureDesc CreateVolumeDesc(
-		uint32 InSizeX,
-		uint32 InSizeY,
-		uint32 InSizeZ,
-		EPixelFormat InFormat,
-		const FClearValueBinding& InClearValue,
-		ETextureCreateFlags InFlags,
-		ETextureCreateFlags InTargetableFlags,
-		bool bInForceSeparateTargetAndShaderResource,
-		uint16 InNumMips = 1);
-
-	UE_DEPRECATED(4.26, "FRDGTextureDesc has been refactored. Use CreateCube instead.")
-	static FRDGTextureDesc CreateCubemapDesc(
-		uint32 InExtent,
-		EPixelFormat InFormat,
-		const FClearValueBinding& InClearValue,
-		ETextureCreateFlags InFlags,
-		ETextureCreateFlags InTargetableFlags,
-		bool bInForceSeparateTargetAndShaderResource,
-		uint32 InArraySize = 1,
-		uint16 InNumMips = 1);
-
-	UE_DEPRECATED(4.26, "FRDGTextureDesc has been refactored. Use CreateCubeArray instead.")
-	static FRDGTextureDesc CreateCubemapArrayDesc(
-		uint32 InExtent,
-		EPixelFormat InFormat,
-		const FClearValueBinding& InClearValue,
-		ETextureCreateFlags InFlags,
-		ETextureCreateFlags InTargetableFlags,
-		bool bInForceSeparateTargetAndShaderResource,
-		uint32 InArraySize,
-		uint16 InNumMips = 1);
-
-	static FRDGTextureDesc Create2D(
-		FIntPoint InExtent,
-		EPixelFormat InFormat,
-		FClearValueBinding InClearValue,
-		ETextureCreateFlags InFlags,
-		uint8 InNumMips = 1,
-		uint8 InNumSamples = 1)
-	{
-		return FRDGTextureDesc(InClearValue, ETextureDimension::Texture2D, InFlags, InFormat, InExtent, 1, 1, InNumMips, InNumSamples);
-	}
-
-	static FRDGTextureDesc Create2DArray(
-		FIntPoint InExtent,
-		EPixelFormat InFormat,
-		FClearValueBinding InClearValue,
-		ETextureCreateFlags InFlags,
-		uint32 InArraySize,
-		uint8 InNumMips = 1,
-		uint8 InNumSamples = 1)
-	{
-		return FRDGTextureDesc(InClearValue, ETextureDimension::Texture2DArray, InFlags, InFormat, InExtent, 1, InArraySize, InNumMips, InNumSamples);
-	}
-
-	static FRDGTextureDesc Create3D(
-		FIntVector InSize,
-		EPixelFormat InFormat,
-		FClearValueBinding InClearValue,
-		ETextureCreateFlags InFlags,
-		uint8 InNumMips = 1,
-		uint8 InNumSamples = 1)
-	{
-		return FRDGTextureDesc(InClearValue, ETextureDimension::Texture3D, InFlags, InFormat, FIntPoint(InSize.X, InSize.Y), InSize.Z, 1, InNumMips, InNumSamples);
-	}
-
-	static FRDGTextureDesc CreateCube(
-		uint32 InSizeInPixels,
-		EPixelFormat InFormat,
-		FClearValueBinding InClearValue,
-		ETextureCreateFlags InFlags,
-		uint8 InNumMips = 1,
-		uint8 InNumSamples = 1)
-	{
-		return FRDGTextureDesc(InClearValue, ETextureDimension::TextureCube, InFlags, InFormat, FIntPoint(InSizeInPixels, InSizeInPixels), 1, 1, InNumMips, InNumSamples);
-	}
-
-	static FRDGTextureDesc CreateCubeArray(
-		uint32 InSizeInPixels,
-		EPixelFormat InFormat,
-		FClearValueBinding InClearValue,
-		ETextureCreateFlags InFlags,
-		uint32 InArraySize,
-		uint8 InNumMips = 1,
-		uint8 InNumSamples = 1)
-	{
-		return FRDGTextureDesc(InClearValue, ETextureDimension::TextureCubeArray, InFlags, InFormat, FIntPoint(InSizeInPixels, InSizeInPixels), 1, InArraySize, InNumMips, InNumSamples);
-	}
-
-	FRDGTextureDesc() = default;
-	FRDGTextureDesc(
-		FClearValueBinding InClearValue,
-		ETextureDimension InDimension,
-		ETextureCreateFlags InFlags,
-		EPixelFormat InFormat,
-		FIntPoint InExtent,
-		uint16 InDepth = 1,
-		uint16 InArraySize = 1,
-		uint8 InNumMips = 1,
-		uint8 InNumSamples = 1)
-		: ClearValue(InClearValue)
-		, Dimension(InDimension)
-		, Flags(InFlags)
-		, Format(InFormat)
-		, Extent(InExtent)
-		, Depth(InDepth)
-		, ArraySize(InArraySize)
-		, NumMips(InNumMips)
-		, NumSamples(InNumSamples)
-	{}
-
-	void Reset()
-	{
-		// Usually we don't want to propagate MSAA samples.
-		NumSamples = 1;
-
-		// Remove UAV flag for textures that don't need it (some formats are incompatible).
-		Flags |= TexCreate_RenderTargetable;
-		Flags &= ~(TexCreate_UAV | TexCreate_ResolveTargetable | TexCreate_DepthStencilResolveTarget);
-	}
-
-	bool IsTexture2D() const
-	{
-		return Dimension == ETextureDimension::Texture2D || Dimension == ETextureDimension::Texture2DArray;
-	}
-
-	bool IsTexture3D() const
-	{
-		return Dimension == ETextureDimension::Texture3D;
-	}
-
-	bool IsTextureCube() const
-	{
-		return Dimension == ETextureDimension::TextureCube || Dimension == ETextureDimension::TextureCubeArray;
-	}
-
-	bool IsTextureArray() const
-	{
-		return Dimension == ETextureDimension::Texture2DArray || Dimension == ETextureDimension::TextureCubeArray;
-	}
-
-	bool IsMipChain() const
-	{
-		return NumMips > 1;
-	}
-
-	bool IsMultisample() const
-	{
-		return NumSamples > 1;
-	}
-
-	FIntVector GetSize() const
-	{
-		return FIntVector(Extent.X, Extent.Y, Depth);
-	}
-
-	FRDGTextureSubresourceLayout GetSubresourceLayout() const
-	{
-		return FRDGTextureSubresourceLayout(NumMips, ArraySize * (IsTextureCube() ? 6 : 1), IsStencilFormat(Format) ? 2 : 1);
-	}
-
-	/** Returns whether this descriptor conforms to requirements. */
-	bool IsValid() const;
-
-	/** Clear value to use when fast-clearing the texture. */
-	FClearValueBinding ClearValue;
-
-	/** Texture dimension to use when creating the RHI texture. */
-	ETextureDimension Dimension = ETextureDimension::Texture2D;
-
-	/** Texture flags passed on to RHI texture. */
-	ETextureCreateFlags Flags = TexCreate_None;
-
-	/** Pixel format used to create RHI texture. */
-	EPixelFormat Format = PF_Unknown;
-
-	/** Extent of the texture in x and y. */
-	FIntPoint Extent = FIntPoint(1, 1);
-
-	/** Depth of the texture if the dimension is 3D. */
-	uint16 Depth = 1;
-
-	/** The number of array elements in the texture. (Keep at 1 if dimension is 3D). */
-	uint16 ArraySize = 1;
-
-	/** Number of mips in the texture mip-map chain. */
-	uint8 NumMips = 1;
-
-	/** Number of samples in the texture. >1 for MSAA. */
-	uint8 NumSamples = 1;
-};
-
 /** Translates from a pooled render target descriptor to an RDG texture descriptor. */
-inline FRDGTextureDesc Translate(const FPooledRenderTargetDesc& InDesc, ERenderTargetTexture InTexture = ERenderTargetTexture::Targetable);
+inline FRDGTextureDesc Translate(const FPooledRenderTargetDesc& InDesc);
 
-/** Translates from an RDG texture descriptor to a pooled render target descriptor. */
-inline FPooledRenderTargetDesc Translate(const FRDGTextureDesc& InDesc);
+/** Translates from an RHI/RDG texture descriptor to a pooled render target descriptor. */
+inline FPooledRenderTargetDesc Translate(const FRHITextureDesc& InDesc);
 
-class RENDERCORE_API FRDGPooledTexture
+class FRDGPooledTexture final
+	: public FRefCountBase
 {
 public:
-	const FRDGTextureDesc Desc;
+	FRDGPooledTexture(FRHITexture* InTexture)
+		: Texture(InTexture)
+	{}
 
-	FRHITexture* GetRHI() const
-	{
-		return Texture;
-	}
+	/** Finds a UAV matching the descriptor in the cache or creates a new one and updates the cache. */
+	FORCEINLINE FRHIUnorderedAccessView* GetOrCreateUAV(FRHICommandListBase& RHICmdList, const FRHITextureUAVCreateInfo& UAVDesc) { return ViewCache.GetOrCreateUAV(RHICmdList, Texture, UAVDesc); }
 
-	FRDGTexture* GetOwner() const
-	{
-		return Owner;
-	}
+	/** Finds a SRV matching the descriptor in the cache or creates a new one and updates the cache. */
+	FORCEINLINE FRHIShaderResourceView* GetOrCreateSRV(FRHICommandListBase& RHICmdList, const FRHITextureSRVCreateInfo& SRVDesc) { return ViewCache.GetOrCreateSRV(RHICmdList, Texture, SRVDesc); }
 
-	uint32 GetRefCount() const
-	{
-		return RefCount;
-	}
+	UE_DEPRECATED(5.3, "GetOrCreateUAV now requires a command list.")
+	FORCEINLINE FRHIUnorderedAccessView* GetOrCreateUAV(const FRHITextureUAVCreateInfo& UAVDesc) { return ViewCache.GetOrCreateUAV(FRHICommandListImmediate::Get(), Texture, UAVDesc); }
 
-	uint32 AddRef() const
-	{
-		return ++RefCount;
-	}
+	UE_DEPRECATED(5.3, "GetOrCreateSRV now requires a command list.")
+	FORCEINLINE FRHIShaderResourceView* GetOrCreateSRV(const FRHITextureSRVCreateInfo& SRVDesc) { return ViewCache.GetOrCreateSRV(FRHICommandListImmediate::Get(), Texture, SRVDesc); }
 
-	uint32 Release() const
-	{
-		if (--RefCount == 0)
-		{
-			delete this;
-			return 0;
-		}
-		return RefCount;
-	}
+	FORCEINLINE FRHITexture* GetRHI() const { return Texture; }
 
 private:
-	FRDGPooledTexture(FRHITexture* InTexture, const FRDGTextureDesc& InDesc, const FUnorderedAccessViewRHIRef& FirstMipUAV)
-		: Desc(InDesc)
-		, Texture(InTexture)
-		, Layout(InDesc.GetSubresourceLayout())
-	{
-		InitViews(FirstMipUAV);
-		Reset();
-	}
+	TRefCountPtr<FRHITexture> Texture;
+	FRHITextureViewCache ViewCache;
 
-	/** Initializes cached views. Safe to call multiple times; each call will recreate. */
-	void InitViews(const FUnorderedAccessViewRHIRef& FirstMipUAV);
-
-	void Finalize()
-	{
-		for (FRDGSubresourceState& SubresourceState : State)
-		{
-			SubresourceState.Finalize();
-		}
-		Owner = nullptr;
-	}
-
-	void Reset()
-	{
-		InitAsWholeResource(State);
-		Owner = nullptr;
-	}
-
-	FRHITexture* Texture = nullptr;
-	FRDGTexture* Owner = nullptr;
-	FRDGTextureSubresourceLayout Layout;
-	FRDGTextureSubresourceState State;
-
-	/** Cached views created for the RHI texture. */
-	TArray<FUnorderedAccessViewRHIRef, TInlineAllocator<1>> MipUAVs;
-	TArray<TPair<FRHITextureSRVCreateInfo, FShaderResourceViewRHIRef>, TInlineAllocator<1>> SRVs;
-	FUnorderedAccessViewRHIRef HTileUAV;
-	FShaderResourceViewRHIRef  HTileSRV;
-	FUnorderedAccessViewRHIRef StencilUAV;
-	FShaderResourceViewRHIRef  FMaskSRV;
-	FShaderResourceViewRHIRef  CMaskSRV;
-
-	mutable uint32 RefCount = 0;
-
-	friend FRDGTexture;
 	friend FRDGBuilder;
-	friend FPooledRenderTarget;
-	friend FRenderTargetPool;
 };
 
 /** Render graph tracked Texture. */
-class RENDERCORE_API FRDGTexture final
-	: public FRDGParentResource
+class FRDGTexture final
+	: public FRDGViewableResource
 {
 public:
-	/** Creates a passthrough texture suitable for filling RHI uniform buffers with RDG parameters for passes not yet ported to RDG. */
-	static FRDGTextureRef GetPassthrough(const TRefCountPtr<IPooledRenderTarget>& PooledRenderTarget);
+	static const ERDGViewableResourceType StaticType = ERDGViewableResourceType::Texture;
 
 	const FRDGTextureDesc Desc;
 	const ERDGTextureFlags Flags;
@@ -634,51 +528,43 @@ public:
 	//////////////////////////////////////////////////////////////////////////
 	//! The following methods may only be called during pass execution.
 
-	/** Returns the allocated pooled render target. */
-	IPooledRenderTarget* GetPooledRenderTarget() const
-	{
-		ValidateRHIAccess();
-		check(PooledRenderTarget);
-		return PooledRenderTarget;
-	}
-
 	/** Returns the allocated RHI texture. */
-	FRHITexture* GetRHI() const
+	FORCEINLINE FRHITexture* GetRHI() const
 	{
 		return static_cast<FRHITexture*>(FRDGResource::GetRHI());
 	}
 
 	//////////////////////////////////////////////////////////////////////////
 
-	FRDGTextureSubresourceLayout GetSubresourceLayout() const
+	FORCEINLINE FRDGTextureHandle GetHandle() const
+	{
+		return Handle;
+	}
+
+	FORCEINLINE FRDGTextureSubresourceLayout GetSubresourceLayout() const
 	{
 		return Layout;
 	}
 
-	FRDGTextureSubresourceRange GetSubresourceRange() const
+	FORCEINLINE FRDGTextureSubresourceRange GetSubresourceRange() const
 	{
-		return FRDGTextureSubresourceRange(Layout);
+		return WholeRange;
 	}
 
-	FRDGTextureSubresourceRange GetSubresourceRangeSRV() const;
+	FORCEINLINE uint32 GetSubresourceCount() const
+	{
+		return SubresourceCount;
+	}
+
+	FORCEINLINE FRDGTextureSubresource GetSubresource(uint32 SubresourceIndex) const
+	{
+		return Layout.GetSubresource(SubresourceIndex);
+	}
+
+	RENDERCORE_API FRDGTextureSubresourceRange GetSubresourceRangeSRV() const;
 
 private:
-	FRDGTexture(const TCHAR* InName, const FRDGTextureDesc& InDesc, ERDGTextureFlags InFlags, ERenderTargetTexture InRenderTargetTexture)
-		: FRDGParentResource(InName, ERDGParentResourceType::Texture)
-		, Desc(InDesc)
-		, Flags(InFlags)
-		, RenderTargetTexture(InRenderTargetTexture)
-		, Layout(InDesc.GetSubresourceLayout())
-	{
-		InitAsWholeResource(MergeState);
-		InitAsWholeResource(LastProducers);
-	}
-
-	/** Assigns the pooled texture to this texture; returns the previous texture to own the allocation. */
-	void SetRHI(FPooledRenderTarget* PooledRenderTarget, FRDGTextureRef& OutPreviousOwner);
-
-	/** Finalizes the texture for execution; no other transitions are allowed after calling this. */
-	void Finalize();
+	RENDERCORE_API FRDGTexture(const TCHAR* InName, const FRDGTextureDesc& InDesc, ERDGTextureFlags InFlags);
 
 	/** Returns RHI texture without access checks. */
 	FRHITexture* GetRHIUnchecked() const
@@ -686,62 +572,48 @@ private:
 		return static_cast<FRHITexture*>(FRDGResource::GetRHIUnchecked());
 	}
 
-	/** Whether this texture is the last owner of the allocation in the graph. */
-	bool IsLastOwner() const
-	{
-		return NextOwner.IsNull();
-	}
-
-	/** Returns the current texture state. Only valid to call after SetRHI. */
-	FRDGTextureSubresourceState& GetState()
-	{
-		check(State);
-		return *State;
-	}
-
-	/** Describes which RHI texture this RDG texture represents on a pooled texture. Must be default unless the texture is externally registered. */
-	const ERenderTargetTexture RenderTargetTexture;
-
-	/** The layout used to facilitate subresource transitions. */
-	FRDGTextureSubresourceLayout Layout;
-
-	/** The next texture to own the PooledTexture allocation during execution. */
-	FRDGTextureHandle NextOwner;
-
 	/** The handle registered with the builder. */
 	FRDGTextureHandle Handle;
 
-	/** The assigned pooled render target to use during execution. Never reset. */
-	IPooledRenderTarget* PooledRenderTarget = nullptr;
+	/** The previous / next texture to own the PooledTexture allocation during execution. */
+	FRDGTextureHandle PreviousOwner;
+	FRDGTextureHandle NextOwner;
+
+	/** The layout used to facilitate subresource transitions. */
+	FRDGTextureSubresourceLayout Layout;
+	FRDGTextureSubresourceRange  WholeRange;
+	const uint16 SubresourceCount;
+
+	/** Tracks subresource states as the graph is built. */
+	FRDGTextureSubresourceState State;
+
+	/** Tracks the first state in the graph for each subresource. */
+	FRDGTextureSubresourceState FirstState;
+
+	/** Tracks merged subresource states as the graph is built. */
+	FRDGTextureSubresourceState MergeState;
+
+	/** Tracks pass producers for each subresource as the graph is built. */
+	TRDGTextureSubresourceArray<FRDGProducerStatesByPipeline, FRDGArrayAllocator> LastProducers;
+
+	/** The assigned render target to use during execution. Never reset. */
+	IPooledRenderTarget* RenderTarget = nullptr;
 
 	/** The assigned pooled texture to use during execution. Never reset. */
 	FRDGPooledTexture* PooledTexture = nullptr;
 
-	/** Cached state pointer from the pooled texture. */
-	FRDGTextureSubresourceState* State = nullptr;
+	/** The assigned transient texture to use during execution. Never reset. */
+	FRHITransientTexture* TransientTexture = nullptr;
+
+	/** The assigned view cache for this texture (sourced from transient / pooled texture). Never reset. */
+	FRHITextureViewCache* ViewCache = nullptr;
 
 	/** Valid strictly when holding a strong reference; use PooledRenderTarget instead. */
 	TRefCountPtr<IPooledRenderTarget> Allocation;
 
-	/** Tracks merged subresource states as the graph is built. */
-	FRDGTextureTransientSubresourceStateIndirect MergeState;
-
-	/** Tracks pass producers for each subresource as the graph is built. */
-	TRDGTextureSubresourceArray<FRDGPassHandle> LastProducers;
-
 #if RDG_ENABLE_DEBUG
-	class FTextureDebugData
-	{
-	private:
-		/** Tracks whether a UAV has ever been allocated to catch when TexCreate_UAV was unneeded. */
-		bool bHasNeededUAV = false;
-
-		/** Tracks whether has ever been bound as a render target to catch when TexCreate_RenderTargetable was unneeded. */
-		bool bHasBeenBoundAsRenderTarget = false;
-
-		friend FRDGUserValidation;
-		friend FRDGBarrierValidation;
-	} TextureDebugData;
+	struct FRDGTextureDebugData* TextureDebugData = nullptr;
+	RENDERCORE_API FRDGTextureDebugData& GetTextureDebugData() const;
 #endif
 
 	friend FRDGBuilder;
@@ -750,6 +622,8 @@ private:
 	friend FRDGTextureRegistry;
 	friend FRDGAllocator;
 	friend FPooledRenderTarget;
+	friend FRDGTrace;
+	friend FRDGTextureUAV;
 };
 
 /** Render graph tracked SRV. */
@@ -807,30 +681,49 @@ class FRDGTextureSRVDesc final
 {
 public:
 	FRDGTextureSRVDesc() = default;
-	
-	FRDGTextureRef Texture = nullptr;
-	ERDGTextureMetaDataAccess MetaData = ERDGTextureMetaDataAccess::None;
+
+	FRDGTextureSRVDesc(FRDGTexture* InTexture)
+	{
+		Texture = InTexture;
+		NumMipLevels = InTexture->Desc.NumMips;
+		if (InTexture->Desc.IsTextureArray())
+		{
+			NumArraySlices = InTexture->Desc.ArraySize;
+		}
+	}
 
 	/** Create SRV that access all sub resources of texture. */
 	static FRDGTextureSRVDesc Create(FRDGTextureRef Texture)
 	{
-		FRDGTextureSRVDesc Desc;
-		Desc.Texture = Texture;
-		Desc.NumMipLevels = Texture->Desc.NumMips;
-		return Desc;
+		return FRDGTextureSRVDesc(Texture);
 	}
 
 	/** Create SRV that access one specific mip level. */
 	static FRDGTextureSRVDesc CreateForMipLevel(FRDGTextureRef Texture, int32 MipLevel)
 	{
-		FRDGTextureSRVDesc Desc;
-		Desc.Texture = Texture;
-		Desc.MipLevel = MipLevel;
+		check(MipLevel >= -1 && MipLevel <= TNumericLimits<int8>::Max());
+		FRDGTextureSRVDesc Desc = FRDGTextureSRVDesc::Create(Texture);
+		Desc.MipLevel = (int8)MipLevel;
 		Desc.NumMipLevels = 1;
 		return Desc;
 	}
 
-	/** Create SRV that access one specific mip level. */
+	/** Create SRV that access one specific slice. */
+	static FRDGTextureSRVDesc CreateForSlice(FRDGTextureRef Texture, int32 SliceIndex)
+	{
+		check(Texture);
+        check(Texture->Desc.Dimension == ETextureDimension::Texture2DArray);
+		check(SliceIndex >= 0 && SliceIndex < Texture->Desc.ArraySize);
+        
+		FRDGTextureSRVDesc Desc = FRDGTextureSRVDesc::Create(Texture);
+		Desc.FirstArraySlice = (uint16)SliceIndex;
+		Desc.NumArraySlices = 1;
+        Desc.DimensionOverride = ETextureDimension::Texture2D;
+        
+		return Desc;
+	}
+
+	/** Create SRV that access all sub resources of texture with a specific pixel format. */
 	static FRDGTextureSRVDesc CreateWithPixelFormat(FRDGTextureRef Texture, EPixelFormat PixelFormat)
 	{
 		FRDGTextureSRVDesc Desc = FRDGTextureSRVDesc::Create(Texture);
@@ -845,6 +738,33 @@ public:
 		Desc.MetaData = MetaData;
 		return Desc;
 	}
+
+	bool operator == (const FRDGTextureSRVDesc& Other) const
+	{
+		return Texture == Other.Texture && FRHITextureSRVCreateInfo::operator==(Other);
+	}
+
+	bool operator != (const FRDGTextureSRVDesc& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	friend uint32 GetTypeHash(const FRDGTextureSRVDesc& Desc)
+	{
+		return HashCombine(GetTypeHash(static_cast<const FRHITextureSRVCreateInfo&>(Desc)), GetTypeHash(Desc.Texture));
+	}
+
+	/** Returns whether this descriptor conforms to requirements. */
+	bool IsValid() const
+	{
+		if (!Texture)
+		{
+			return false;
+		}
+		return FRHITextureSRVCreateInfo::Validate(Texture->Desc, *this, Texture->Name, /* bFatal = */ false);
+	}
+
+	FRDGTextureRef Texture = nullptr;
 };
 
 /** Render graph tracked SRV. */
@@ -852,6 +772,8 @@ class FRDGTextureSRV final
 	: public FRDGShaderResourceView
 {
 public:
+	static const ERDGViewType StaticType = ERDGViewType::TextureSRV;
+
 	/** Descriptor of the graph tracked SRV. */
 	const FRDGTextureSRVDesc Desc;
 
@@ -874,14 +796,15 @@ private:
 };
 
 /** Descriptor for render graph tracked UAV. */
-class FRDGTextureUAVDesc
+class FRDGTextureUAVDesc final
+	: public FRHITextureUAVCreateInfo
 {
 public:
 	FRDGTextureUAVDesc() = default;
 
-	FRDGTextureUAVDesc(FRDGTextureRef InTexture, uint8 InMipLevel = 0)
-		: Texture(InTexture)
-		, MipLevel(InMipLevel)
+	FRDGTextureUAVDesc(FRDGTextureRef InTexture, uint8 InMipLevel = 0, EPixelFormat InFormat = PF_Unknown, uint16 InFirstArraySlice = 0, uint16 InNumArraySlices = 0)
+		: FRHITextureUAVCreateInfo(InMipLevel, InFormat != PF_Unknown ? InFormat : InTexture->Desc.UAVFormat, InFirstArraySlice, InNumArraySlices)
+		, Texture(InTexture)
 	{}
 
 	/** Create UAV with access to a specific meta data plane */
@@ -892,9 +815,22 @@ public:
 		return Desc;
 	}
 
+	bool operator == (const FRDGTextureUAVDesc& Other) const
+	{
+		return Texture == Other.Texture && FRHITextureUAVCreateInfo::operator==(Other);
+	}
+
+	bool operator != (const FRDGTextureUAVDesc& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	friend uint32 GetTypeHash(const FRDGTextureUAVDesc& Desc)
+	{
+		return HashCombine(GetTypeHash(static_cast<const FRHITextureUAVCreateInfo&>(Desc)), GetTypeHash(Desc.Texture));
+	}
+
 	FRDGTextureRef Texture = nullptr;
-	uint8 MipLevel = 0;
-	ERDGTextureMetaDataAccess MetaData = ERDGTextureMetaDataAccess::None;
 };
 
 /** Render graph tracked texture UAV. */
@@ -902,12 +838,22 @@ class FRDGTextureUAV final
 	: public FRDGUnorderedAccessView
 {
 public:
+	static const ERDGViewType StaticType = ERDGViewType::TextureUAV;
+
 	/** Descriptor of the graph tracked UAV. */
 	const FRDGTextureUAVDesc Desc;
 
 	FRDGTextureRef GetParent() const override
 	{
 		return Desc.Texture;
+	}
+
+	// Can be used instead of GetParent()->GetRHI() to access the underlying texture for a UAV resource in a Pass, without triggering
+	// validation errors.  The RDG validation logic only flags the UAV as accessible, not the parent texture.
+	FRHITexture* GetParentRHI() const
+	{
+		IF_RDG_ENABLE_DEBUG(ValidateRHIAccess());
+		return Desc.Texture->GetRHIUnchecked();
 	}
 
 	FRDGTextureSubresourceRange GetSubresourceRange() const;
@@ -926,23 +872,38 @@ private:
 /** Descriptor for render graph tracked Buffer. */
 struct FRDGBufferDesc
 {
-	// Type of buffers to the RHI
-	enum class EUnderlyingType
+	static FRDGBufferDesc CreateByteAddressDesc(uint32 NumBytes)
 	{
-		VertexBuffer,
-		IndexBuffer, // not implemented yet.
-		StructuredBuffer,
-	};
+		check(NumBytes % 4 == 0);
+		FRDGBufferDesc Desc;
+		Desc.Usage = EBufferUsageFlags::Static | EBufferUsageFlags::UnorderedAccess | EBufferUsageFlags::ShaderResource | EBufferUsageFlags::StructuredBuffer | EBufferUsageFlags::ByteAddressBuffer;
+		Desc.BytesPerElement = 4;
+		Desc.NumElements = NumBytes / 4;
+		return Desc;
+	}
 
-	static inline FRHITransitionInfo::EType GetTransitionResourceType(EUnderlyingType Type)
+	template<typename ParameterStruct>
+	static FRDGBufferDesc CreateByteAddressDesc(uint32 NumElements)
 	{
-		switch (Type)
-		{
-		default: checkNoEntry();
-		case EUnderlyingType::VertexBuffer: return FRHITransitionInfo::EType::VertexBuffer;
-		case EUnderlyingType::IndexBuffer: return FRHITransitionInfo::EType::IndexBuffer;
-		case EUnderlyingType::StructuredBuffer: return FRHITransitionInfo::EType::StructuredBuffer;
-		}
+		FRDGBufferDesc Desc = CreateByteAddressDesc(sizeof(ParameterStruct) * NumElements);
+		Desc.Metadata = ParameterStruct::FTypeInfo::GetStructMetadata();
+		return Desc;
+	}
+
+	static FRDGBufferDesc CreateIndirectDesc(uint32 BytesPerElement, uint32 NumElements)
+	{
+		FRDGBufferDesc Desc;
+		Desc.Usage = EBufferUsageFlags::Static | EBufferUsageFlags::DrawIndirect | EBufferUsageFlags::UnorderedAccess | EBufferUsageFlags::ShaderResource | EBufferUsageFlags::VertexBuffer;
+		Desc.BytesPerElement = BytesPerElement;
+		Desc.NumElements = NumElements;
+		return Desc;
+	}
+
+	static FRDGBufferDesc CreateRawIndirectDesc(uint32 NumBytes)
+	{
+		FRDGBufferDesc Desc = CreateByteAddressDesc(NumBytes);
+		Desc.Usage |=  EBufferUsageFlags::DrawIndirect;
+		return Desc;
 	}
 
 	/** Create the descriptor for an indirect RHI call.
@@ -955,78 +916,121 @@ struct FRDGBufferDesc
 	template<typename IndirectParameterStruct>
 	static FRDGBufferDesc CreateIndirectDesc(uint32 NumElements = 1)
 	{
-		FRDGBufferDesc Desc;
-		Desc.UnderlyingType = EUnderlyingType::VertexBuffer;
-		Desc.Usage = (EBufferUsageFlags)(BUF_Static | BUF_DrawIndirect | BUF_UnorderedAccess | BUF_ShaderResource);
-		Desc.BytesPerElement = sizeof(IndirectParameterStruct);
-		Desc.NumElements = NumElements;
-		return Desc;
+		return CreateIndirectDesc(sizeof(IndirectParameterStruct), NumElements);
 	}
 
 	static FRDGBufferDesc CreateIndirectDesc(uint32 NumElements = 1)
 	{
-		FRDGBufferDesc Desc;
-		Desc.UnderlyingType = EUnderlyingType::VertexBuffer;
-		Desc.Usage = (EBufferUsageFlags)(BUF_Static | BUF_DrawIndirect | BUF_UnorderedAccess | BUF_ShaderResource);
-		Desc.BytesPerElement = 4;
-		Desc.NumElements = NumElements;
-		return Desc;
+		return CreateIndirectDesc(4u, NumElements);
 	}
 
 	static FRDGBufferDesc CreateStructuredDesc(uint32 BytesPerElement, uint32 NumElements)
 	{
 		FRDGBufferDesc Desc;
-		Desc.UnderlyingType = EUnderlyingType::StructuredBuffer;
-		Desc.Usage = (EBufferUsageFlags)(BUF_Static | BUF_UnorderedAccess | BUF_ShaderResource);
+		Desc.Usage = EBufferUsageFlags::Static | EBufferUsageFlags::UnorderedAccess | EBufferUsageFlags::ShaderResource | EBufferUsageFlags::StructuredBuffer;
 		Desc.BytesPerElement = BytesPerElement;
 		Desc.NumElements = NumElements;
+		return Desc;
+	}
+
+	template<typename ParameterStruct>
+	static FRDGBufferDesc CreateStructuredDesc(uint32 NumElements)
+	{
+		FRDGBufferDesc Desc = CreateStructuredDesc(sizeof(ParameterStruct), NumElements);
+		Desc.Metadata = ParameterStruct::FTypeInfo::GetStructMetadata();
 		return Desc;
 	}
 
 	static FRDGBufferDesc CreateBufferDesc(uint32 BytesPerElement, uint32 NumElements)
 	{
 		FRDGBufferDesc Desc;
-		Desc.UnderlyingType = EUnderlyingType::VertexBuffer;
-		Desc.Usage = (EBufferUsageFlags)(BUF_Static | BUF_UnorderedAccess | BUF_ShaderResource);
+		Desc.Usage = EBufferUsageFlags::Static | EBufferUsageFlags::UnorderedAccess | EBufferUsageFlags::ShaderResource | EBufferUsageFlags::VertexBuffer;
 		Desc.BytesPerElement = BytesPerElement;
 		Desc.NumElements = NumElements;
 		return Desc;
 	}
 
-	static FRDGBufferDesc CreateByteAddressDesc(uint32 NumBytes)
+	template<typename ParameterStruct>
+	static FRDGBufferDesc CreateBufferDesc(uint32 NumElements)
 	{
-		check(NumBytes % 4 == 0);
-		FRDGBufferDesc Desc;
-		Desc.UnderlyingType = EUnderlyingType::StructuredBuffer;
-		Desc.Usage = (EBufferUsageFlags)(BUF_UnorderedAccess | BUF_ShaderResource | BUF_ByteAddressBuffer);
-		Desc.BytesPerElement = 4;
-		Desc.NumElements = NumBytes / 4;
+		FRDGBufferDesc Desc = CreateBufferDesc(sizeof(ParameterStruct), NumElements);
+		Desc.Metadata = ParameterStruct::FTypeInfo::GetStructMetadata();
 		return Desc;
 	}
 
 	static FRDGBufferDesc CreateUploadDesc(uint32 BytesPerElement, uint32 NumElements)
 	{
 		FRDGBufferDesc Desc;
-		Desc.UnderlyingType = EUnderlyingType::VertexBuffer;
-		Desc.Usage = (EBufferUsageFlags)(BUF_Static | BUF_ShaderResource);
+		Desc.Usage = EBufferUsageFlags::ShaderResource | EBufferUsageFlags::VertexBuffer;
 		Desc.BytesPerElement = BytesPerElement;
 		Desc.NumElements = NumElements;
 		return Desc;
 	}
 
+	template<typename ParameterStruct>
+	static FRDGBufferDesc CreateUploadDesc(uint32 NumElements)
+	{
+		FRDGBufferDesc Desc = CreateUploadDesc(sizeof(ParameterStruct), NumElements);
+		Desc.Metadata = ParameterStruct::FTypeInfo::GetStructMetadata();
+		return Desc;
+	}
+
+	static FRDGBufferDesc CreateStructuredUploadDesc(uint32 BytesPerElement, uint32 NumElements)
+	{
+		FRDGBufferDesc Desc;
+		Desc.Usage = EBufferUsageFlags::ShaderResource | EBufferUsageFlags::StructuredBuffer;
+		Desc.BytesPerElement = BytesPerElement;
+		Desc.NumElements = NumElements;
+		return Desc;
+	}
+
+	template<typename ParameterStruct>
+	static FRDGBufferDesc CreateStructuredUploadDesc(uint32 NumElements)
+	{
+		FRDGBufferDesc Desc = CreateStructuredUploadDesc(sizeof(ParameterStruct), NumElements);
+		Desc.Metadata = ParameterStruct::FTypeInfo::GetStructMetadata();
+		return Desc;
+	}
+
+	static FRDGBufferDesc CreateByteAddressUploadDesc(uint32 NumBytes)
+	{
+		check(NumBytes % 4 == 0);
+		FRDGBufferDesc Desc;
+		Desc.Usage = EBufferUsageFlags::ShaderResource | EBufferUsageFlags::ByteAddressBuffer | EBufferUsageFlags::StructuredBuffer;
+		Desc.BytesPerElement = 4;
+		Desc.NumElements = NumBytes / 4;
+		return Desc;
+	}
+
+	template<typename ParameterStruct>
+	static FRDGBufferDesc CreateByteAddressUploadDesc(uint32 NumElements)
+	{
+		FRDGBufferDesc Desc = CreateByteAddressUploadDesc(sizeof(ParameterStruct) * NumElements);
+		Desc.Metadata = ParameterStruct::FTypeInfo::GetStructMetadata();
+		return Desc;
+	}
+
 	/** Returns the total number of bytes allocated for a such buffer. */
-	uint32 GetTotalNumBytes() const
+	uint32 GetSize() const
 	{
 		return BytesPerElement * NumElements;
 	}
 
+	friend uint32 GetTypeHash(const FRDGBufferDesc& Desc)
+	{
+		uint32 Hash = GetTypeHash(Desc.BytesPerElement);
+		Hash = HashCombine(Hash, GetTypeHash(Desc.NumElements));
+		Hash = HashCombine(Hash, GetTypeHash(Desc.Usage));
+		Hash = HashCombine(Hash, GetTypeHash(Desc.Metadata));
+		return Hash;
+	}
+
 	bool operator == (const FRDGBufferDesc& Other) const
 	{
-		return (
+		return
 			BytesPerElement == Other.BytesPerElement &&
 			NumElements == Other.NumElements &&
-			Usage == Other.Usage &&
-			UnderlyingType == Other.UnderlyingType);
+			Usage == Other.Usage;
 	}
 
 	bool operator != (const FRDGBufferDesc& Other) const
@@ -1041,271 +1045,302 @@ struct FRDGBufferDesc
 	uint32 NumElements = 1;
 
 	/** Bitfields describing the uses of that buffer. */
-	EBufferUsageFlags Usage = BUF_None;
+	EBufferUsageFlags Usage = EBufferUsageFlags::None;
 
-	/** The underlying RHI type to use. A bit of a work around because RHI still have 3 different objects. */
-	EUnderlyingType UnderlyingType = EUnderlyingType::VertexBuffer;
+	/** Meta data of the layout of the buffer for debugging purposes. */
+	const FShaderParametersMetadata* Metadata = nullptr;
 };
 
-struct FRDGBufferSRVDesc
+struct FRDGBufferSRVDesc final
+	: public FRHIBufferSRVCreateInfo
 {
 	FRDGBufferSRVDesc() = default;
 
 	FRDGBufferSRVDesc(FRDGBufferRef InBuffer);
 
 	FRDGBufferSRVDesc(FRDGBufferRef InBuffer, EPixelFormat InFormat)
-		: Buffer(InBuffer)
-		, Format(InFormat)
+		: FRHIBufferSRVCreateInfo(InFormat)
+		, Buffer(InBuffer)
 	{
-		BytesPerElement = GPixelFormats[Format].BlockBytes;
+	}
+
+	FRDGBufferSRVDesc(FRDGBufferRef InBuffer, uint32 InStartOffsetBytes, uint32 InNumElements)
+		: FRHIBufferSRVCreateInfo(InStartOffsetBytes, InNumElements)
+		, Buffer(InBuffer)
+	{}
+
+	bool operator == (const FRDGBufferSRVDesc& Other) const
+	{
+		return Buffer == Other.Buffer && FRHIBufferSRVCreateInfo::operator==(Other);
+	}
+
+	bool operator != (const FRDGBufferSRVDesc& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	friend uint32 GetTypeHash(const FRDGBufferSRVDesc& Desc)
+	{
+		return HashCombine(GetTypeHash(static_cast<const FRHIBufferSRVCreateInfo&>(Desc)), GetTypeHash(Desc.Buffer));
 	}
 
 	FRDGBufferRef Buffer = nullptr;
-
-	/** Number of bytes per element (used for vertex buffer). */
-	uint32 BytesPerElement = 1;
-
-	/** Encoding format for the element (used for vertex buffer). */
-	EPixelFormat Format = PF_Unknown;
 };
 
-struct FRDGBufferUAVDesc
+struct FRDGBufferUAVDesc final
+	: public FRHIBufferUAVCreateInfo
 {
 	FRDGBufferUAVDesc() = default;
 
 	FRDGBufferUAVDesc(FRDGBufferRef InBuffer);
 
 	FRDGBufferUAVDesc(FRDGBufferRef InBuffer, EPixelFormat InFormat)
-		: Buffer(InBuffer)
-		, Format(InFormat)
+		: FRHIBufferUAVCreateInfo(InFormat)
+		, Buffer(InBuffer)
 	{}
 
+	bool operator == (const FRDGBufferUAVDesc& Other) const
+	{
+		return Buffer == Other.Buffer && FRHIBufferUAVCreateInfo::operator==(Other);
+	}
+
+	bool operator != (const FRDGBufferUAVDesc& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	friend uint32 GetTypeHash(const FRDGBufferUAVDesc& Desc)
+	{
+		return HashCombine(GetTypeHash(static_cast<const FRHIBufferUAVCreateInfo&>(Desc)), GetTypeHash(Desc.Buffer));
+	}
+
 	FRDGBufferRef Buffer = nullptr;
-
-	/** Number of bytes per element (used for vertex buffer). */
-	EPixelFormat Format = PF_Unknown;
-
-	/** Whether the uav supports atomic counter or append buffer operations (used for structured buffers) */
-	bool bSupportsAtomicCounter = false;
-	bool bSupportsAppendBuffer = false;
 };
 
-class RENDERCORE_API FRDGPooledBuffer
+/** Translates from a RDG buffer descriptor to a RHI buffer creation info */
+inline FRHIBufferCreateInfo Translate(const FRDGBufferDesc& InDesc);
+
+class FRDGPooledBuffer final
+	: public FRefCountBase
 {
 public:
+	FRDGPooledBuffer(FRHICommandListBase& RHICmdList, TRefCountPtr<FRHIBuffer> InBuffer, const FRDGBufferDesc& InDesc, uint32 InNumAllocatedElements, const TCHAR* InName)
+		: Desc(InDesc)
+		, Buffer(MoveTemp(InBuffer))
+		, Name(InName)
+		, NumAllocatedElements(InNumAllocatedElements)
+	{
+		if (EnumHasAnyFlags(InDesc.Usage, EBufferUsageFlags::StructuredBuffer | EBufferUsageFlags::ByteAddressBuffer))
+		{
+			CachedSRV = GetOrCreateSRV(RHICmdList, FRHIBufferSRVCreateInfo());
+		}
+	}
+
+	RENDERCORE_API FRDGPooledBuffer(TRefCountPtr<FRHIBuffer> InBuffer, const FRDGBufferDesc& InDesc, uint32 InNumAllocatedElements, const TCHAR* InName);
+
 	const FRDGBufferDesc Desc;
 
 	/** Finds a UAV matching the descriptor in the cache or creates a new one and updates the cache. */
-	FRHIUnorderedAccessView* GetOrCreateUAV(FRDGBufferUAVDesc UAVDesc);
+	FORCEINLINE FRHIUnorderedAccessView* GetOrCreateUAV(FRHICommandListBase& RHICmdList, const FRHIBufferUAVCreateInfo& UAVDesc) { return ViewCache.GetOrCreateUAV(RHICmdList, Buffer, UAVDesc); }
 
 	/** Finds a SRV matching the descriptor in the cache or creates a new one and updates the cache. */
-	FRHIShaderResourceView* GetOrCreateSRV(FRDGBufferSRVDesc SRVDesc);
+	FORCEINLINE FRHIShaderResourceView* GetOrCreateSRV(FRHICommandListBase& RHICmdList, const FRHIBufferSRVCreateInfo& SRVDesc) { return ViewCache.GetOrCreateSRV(RHICmdList, Buffer, SRVDesc); }
 
-	FRHIVertexBuffer* GetVertexBufferRHI() const
+	UE_DEPRECATED(5.3, "GetOrCreateUAV now requires a command list.")
+	FORCEINLINE FRHIUnorderedAccessView* GetOrCreateUAV(const FRHIBufferUAVCreateInfo& UAVDesc) { return ViewCache.GetOrCreateUAV(FRHICommandListImmediate::Get(), Buffer, UAVDesc); }
+
+	UE_DEPRECATED(5.3, "GetOrCreateSRV now requires a command list.")
+	FORCEINLINE FRHIShaderResourceView* GetOrCreateSRV(const FRHIBufferSRVCreateInfo& SRVDesc) { return ViewCache.GetOrCreateSRV(FRHICommandListImmediate::Get(), Buffer, SRVDesc); }
+
+	/** Returns the RHI buffer. */
+	FORCEINLINE FRHIBuffer* GetRHI() const { return Buffer; }
+
+	/** Returns the default SRV. */
+	FORCEINLINE FRHIShaderResourceView* GetSRV()
 	{
-		return VertexBuffer;
+		checkf(CachedSRV, TEXT("Only byte address and structured buffers can use the default GetSRV call"));
+		return CachedSRV;
 	}
 
-	FRHIIndexBuffer* GetIndexBufferRHI() const
+	UE_DEPRECATED(5.3, "GetSRV now requires a command list.")
+	FORCEINLINE FRHIShaderResourceView* GetSRV(const FRHIBufferSRVCreateInfo& SRVDesc)
 	{
-		return IndexBuffer;
+		return GetOrCreateSRV(FRHICommandListImmediate::Get(), SRVDesc);
 	}
 
-	FRHIStructuredBuffer* GetStructuredBufferRHI() const
+	FORCEINLINE FRHIShaderResourceView* GetSRV(FRHICommandListBase& RHICmdList, const FRHIBufferSRVCreateInfo& SRVDesc)
 	{
-		return StructuredBuffer;
+		return GetOrCreateSRV(RHICmdList, SRVDesc);
 	}
 
-	uint32 GetRefCount() const
+	FORCEINLINE uint32 GetSize() const
 	{
-		return RefCount;
+		return Desc.GetSize();
 	}
 
-	uint32 AddRef() const
+	FORCEINLINE uint32 GetAlignedSize() const
 	{
-		return ++RefCount;
+		return Desc.BytesPerElement * NumAllocatedElements;
 	}
 
-	uint32 Release() const
+	FORCEINLINE uint64 GetCommittedSize() const
 	{
-		const uint32 LocalRefCount = --RefCount;
-		if (LocalRefCount == 0)
-		{
-			delete this;
-		}
-		return LocalRefCount;
+		return FMath::Min<uint64>(CommittedSizeInBytes, GetSize());
 	}
 
-	template<typename KeyType, typename ValueType>
-	struct TSRVFuncs : BaseKeyFuncs<TPair<KeyType, ValueType>, KeyType, /* bInAllowDuplicateKeys = */ false>
+	const TCHAR* GetName() const
 	{
-		typedef typename TTypeTraits<KeyType>::ConstPointerType KeyInitType;
-		typedef const TPairInitializer<typename TTypeTraits<KeyType>::ConstInitType, typename TTypeTraits<ValueType>::ConstInitType>& ElementInitType;
-
-		static FORCEINLINE KeyInitType GetSetKey(ElementInitType Element)
-		{
-			return Element.Key;
-		}
-		static FORCEINLINE bool Matches(KeyInitType A, KeyInitType B)
-		{
-			return A.BytesPerElement == B.BytesPerElement && A.Format == B.Format;
-		}
-		static FORCEINLINE uint32 GetKeyHash(KeyInitType Key)
-		{
-			return HashCombine(uint32(Key.BytesPerElement), uint32(Key.Format));
-		}
-	};
-
-	template<typename KeyType, typename ValueType>
-	struct TUAVFuncs : BaseKeyFuncs<TPair<KeyType, ValueType>, KeyType, /* bInAllowDuplicateKeys = */ false>
-	{
-		typedef typename TTypeTraits<KeyType>::ConstPointerType KeyInitType;
-		typedef const TPairInitializer<typename TTypeTraits<KeyType>::ConstInitType, typename TTypeTraits<ValueType>::ConstInitType>& ElementInitType;
-
-		static FORCEINLINE KeyInitType GetSetKey(ElementInitType Element)
-		{
-			return Element.Key;
-		}
-		static FORCEINLINE bool Matches(KeyInitType A, KeyInitType B)
-		{
-			return A.Format == B.Format && A.bSupportsAtomicCounter == B.bSupportsAtomicCounter && A.bSupportsAppendBuffer == B.bSupportsAppendBuffer;
-		}
-		static FORCEINLINE uint32 GetKeyHash(KeyInitType Key)
-		{
-			return (uint32(Key.bSupportsAtomicCounter) << 8) | (uint32(Key.bSupportsAppendBuffer) << 9) | uint32(Key.Format);
-		}
-	};
+		return Name;
+	}
 
 private:
-	FRDGPooledBuffer(const FRDGBufferDesc& InDesc)
-		: Desc(InDesc)
-	{}
+	TRefCountPtr<FRHIBuffer> Buffer;
+	FRHIShaderResourceView* CachedSRV = nullptr;
+	FRHIBufferViewCache ViewCache;
 
-	FVertexBufferRHIRef VertexBuffer;
-	FIndexBufferRHIRef IndexBuffer;
-	FStructuredBufferRHIRef StructuredBuffer;
-	TMap<FRDGBufferUAVDesc, FUnorderedAccessViewRHIRef, FDefaultSetAllocator, TUAVFuncs<FRDGBufferUAVDesc, FUnorderedAccessViewRHIRef>> UAVs;
-	TMap<FRDGBufferSRVDesc, FShaderResourceViewRHIRef, FDefaultSetAllocator, TSRVFuncs<FRDGBufferSRVDesc, FShaderResourceViewRHIRef>> SRVs;
-
-	void Reset()
+	FRDGBufferDesc GetAlignedDesc() const
 	{
-		Owner = nullptr;
-		State = {};
+		FRDGBufferDesc AlignedDesc = Desc;
+		AlignedDesc.NumElements = NumAllocatedElements;
+		return AlignedDesc;
 	}
 
-	void Finalize()
+	// Used internally by FRDGBuilder::QueueCommitReservedBuffer(),
+	// which is expected to be the only way to resize physical memory for FRDGPooledBuffer
+	void SetCommittedSize(uint64 InCommittedSizeInBytes)
 	{
-		Owner = nullptr;
-		State.Finalize();
+		if (InCommittedSizeInBytes == UINT64_MAX)
+		{
+			InCommittedSizeInBytes = GetSize();
+		}
+
+		checkf(EnumHasAllFlags(Desc.Usage, EBufferUsageFlags::ReservedResource), TEXT("CommitReservedResource() may only be used on reserved buffers"));
+		checkf(InCommittedSizeInBytes <= GetSize(), TEXT("Attempting to commit more memory than was reserved for this buffer during creation"));
+
+		CommittedSizeInBytes = InCommittedSizeInBytes;
 	}
 
 	const TCHAR* Name = nullptr;
 
-	FRDGBufferRef Owner = nullptr;
-	FRDGSubresourceState State;
+	// Size of the GPU physical memory committed to a reserved buffer.
+	// May be UINT64_MAX for regular (non-reserved) buffers or when the entire resource is committed.
+	uint64 CommittedSizeInBytes = UINT64_MAX;
 
-	mutable uint32 RefCount = 0;
+	const uint32 NumAllocatedElements;
 	uint32 LastUsedFrame = 0;
 
-	friend FRenderGraphResourcePool;
 	friend FRDGBuilder;
-	friend FRDGBuffer;
+	friend FRDGBufferPool;
 };
 
-UE_DEPRECATED(4.26, "FRDGPooledBuffer has been renamed to FRDGPooledBuffer.")
-typedef FRDGPooledBuffer FPooledRDGBuffer;
-
 /** A render graph tracked buffer. */
-class RENDERCORE_API FRDGBuffer final
-	: public FRDGParentResource
+class FRDGBuffer final
+	: public FRDGViewableResource
 {
 public:
-	const FRDGBufferDesc Desc;
+	static const ERDGViewableResourceType StaticType = ERDGViewableResourceType::Buffer;
+
+	FRDGBufferDesc Desc;
 	const ERDGBufferFlags Flags;
 
 	//////////////////////////////////////////////////////////////////////////
 	//! The following methods may only be called during pass execution.
 
+	/** Returns the underlying RHI buffer resource */
+	FRHIBuffer* GetRHI() const
+	{
+		return static_cast<FRHIBuffer*>(FRDGViewableResource::GetRHI());
+	}
+
 	/** Returns the buffer to use for indirect RHI calls. */
-	FRHIVertexBuffer* GetIndirectRHICallBuffer() const
+	FORCEINLINE FRHIBuffer* GetIndirectRHICallBuffer() const
 	{
-		checkf(Desc.UnderlyingType == FRDGBufferDesc::EUnderlyingType::VertexBuffer, TEXT("Buffer %s is not an underlying vertex buffer."), Name);
 		checkf(Desc.Usage & BUF_DrawIndirect, TEXT("Buffer %s was not flagged for indirect draw usage."), Name);
-		return static_cast<FRHIVertexBuffer*>(GetRHI());
-	}
-
-	/** Returns the buffer to use for RHI calls, eg RHILockVertexBuffer. */
-	FRHIVertexBuffer* GetRHIVertexBuffer() const
-	{
-		checkf(Desc.UnderlyingType == FRDGBufferDesc::EUnderlyingType::VertexBuffer, TEXT("Buffer %s is not an underlying vertex buffer."), Name);
-		return static_cast<FRHIVertexBuffer*>(GetRHI());
-	}
-
-	/** Returns the buffer to use for structured buffer calls. */
-	FRHIStructuredBuffer* GetRHIStructuredBuffer() const
-	{
-		checkf(Desc.UnderlyingType == FRDGBufferDesc::EUnderlyingType::StructuredBuffer, TEXT("Buffer %s is not an underlying structured buffer."), Name);
-		return static_cast<FRHIStructuredBuffer*>(GetRHI());
+		return GetRHI();
 	}
 
 	//////////////////////////////////////////////////////////////////////////
 
-private:
-	FRDGBuffer(const TCHAR* InName, const FRDGBufferDesc& InDesc, ERDGBufferFlags InFlags)
-		: FRDGParentResource(InName, ERDGParentResourceType::Buffer)
-		, Desc(InDesc)
-		, Flags(InFlags)
-	{}
-
-	/** Assigns the pooled buffer to this buffer; returns the previous buffer to own the allocation. */
-	void SetRHI(FRDGPooledBuffer* InPooledBuffer, FRDGBufferRef& OutPreviousOwner);
-
-	/** Finalizes the buffer for execution; no other transitions are allowed after calling this. */
-	void Finalize();
-
-	/** Returns the current buffer state. Only valid to call after SetRHI. */
-	FRDGSubresourceState& GetState() const
+	FRDGBufferHandle GetHandle() const
 	{
-		check(State);
-		return *State;
+		return Handle;
+	}
+
+	FORCEINLINE uint32 GetSize() const
+	{
+		return Desc.GetSize();
+	}
+
+	FORCEINLINE uint32 GetStride() const
+	{
+		return Desc.BytesPerElement;
+	}
+
+private:
+	RENDERCORE_API FRDGBuffer(const TCHAR* InName, const FRDGBufferDesc& InDesc, ERDGBufferFlags InFlags);
+
+	FRDGBuffer(const TCHAR* InName, const FRDGBufferDesc& InDesc, ERDGBufferFlags InFlags, FRDGBufferNumElementsCallback&& InNumElementsCallback)
+		: FRDGBuffer(InName, InDesc, InFlags)
+	{
+		NumElementsCallback = MoveTemp(InNumElementsCallback);
+	}
+
+	/** Finalizes any pending field of the buffer descriptor. */
+	void FinalizeDesc();
+
+	FRHIBuffer* GetRHIUnchecked() const
+	{
+		return static_cast<FRHIBuffer*>(FRDGResource::GetRHIUnchecked());
 	}
 
 	/** Registered handle set by the builder. */
 	FRDGBufferHandle Handle;
 
-	/** Tracks the last pass that produced this resource as the graph is built. */
-	FRDGPassHandle LastProducer;
-
-	/** The next buffer to own the PooledBuffer allocation during execution. */
+	/** The previous / next buffer to own the PooledBuffer allocation during execution. */
+	FRDGBufferHandle PreviousOwner;
 	FRDGBufferHandle NextOwner;
 
 	/** Assigned pooled buffer pointer. Never reset once assigned. */
 	FRDGPooledBuffer* PooledBuffer = nullptr;
 
-	/** Cached state pointer from the pooled buffer. */
-	FRDGSubresourceState* State = nullptr;
+	/** Assigned transient buffer pointer. Never reset once assigned. */
+	FRHITransientBuffer* TransientBuffer = nullptr;
+
+	/** The assigned buffer view cache (sourced from the pooled / transient buffer. Never reset. */
+	FRHIBufferViewCache* ViewCache = nullptr;
 
 	/** Valid strictly when holding a strong reference; use PooledBuffer instead. */
 	TRefCountPtr<FRDGPooledBuffer> Allocation;
+
+	/** Tracks the last pass that produced this resource as the graph is built. */
+	FRDGProducerStatesByPipeline LastProducer;
+
+	/** Optional callback to supply NumElements after the creation of this FRDGBuffer. */
+	FRDGBufferNumElementsCallback NumElementsCallback;
+
+	/** Optional reserved resource commit size to apply on the first resource transition. */
+	uint64 PendingCommitSize = 0;
+
+	/** Cached state pointer from the pooled / transient buffer. */
+	FRDGSubresourceState* State = nullptr;
+
+	/** Tracks the first state in the graph for this buffer. */
+	FRDGSubresourceState* FirstState = nullptr;
 
 	/** Tracks the merged subresource state as the graph is built. */
 	FRDGSubresourceState* MergeState = nullptr;
 
 #if RDG_ENABLE_DEBUG
-	class FBufferDebugData
-	{
-	private:
-		/** Tracks state changes in order of execution. */
-		TArray<TPair<FRDGPassHandle, FRDGSubresourceState>, SceneRenderingAllocator> States;
-
-		friend FRDGBarrierValidation;
-	} BufferDebugData;
+	struct FRDGBufferDebugData* BufferDebugData = nullptr;
+	RENDERCORE_API FRDGBufferDebugData& GetBufferDebugData() const;
 #endif
 
 	friend FRDGBuilder;
 	friend FRDGBarrierValidation;
+	friend FRDGUserValidation;
 	friend FRDGBufferRegistry;
 	friend FRDGAllocator;
+	friend FRDGTrace;
 };
 
 /** Render graph tracked buffer SRV. */
@@ -1313,6 +1348,8 @@ class FRDGBufferSRV final
 	: public FRDGShaderResourceView
 {
 public:
+	static const ERDGViewType StaticType = ERDGViewType::BufferSRV;
+
 	/** Descriptor of the graph tracked SRV. */
 	const FRDGBufferSRVDesc Desc;
 
@@ -1337,6 +1374,8 @@ class FRDGBufferUAV final
 	: public FRDGUnorderedAccessView
 {
 public:
+	static const ERDGViewType StaticType = ERDGViewType::BufferUAV;
+
 	/** Descriptor of the graph tracked UAV. */
 	const FRDGBufferUAVDesc Desc;
 
@@ -1356,4 +1395,51 @@ private:
 	friend FRDGAllocator;
 };
 
-#include "RenderGraphResources.inl"
+template <typename ViewableResourceType>
+inline ViewableResourceType* GetAs(FRDGViewableResource* Resource)
+{
+	check(ViewableResourceType::StaticType == Resource->Type);
+	return static_cast<ViewableResourceType*>(Resource);
+}
+
+template <typename ViewType>
+inline ViewType* GetAs(FRDGView* View)
+{
+	check(ViewType::StaticType == View->Type);
+	return static_cast<ViewType*>(View);
+}
+
+inline FRDGBuffer* GetAsBuffer(FRDGViewableResource* Resource)
+{
+	return GetAs<FRDGBuffer>(Resource);
+}
+
+inline FRDGTexture* GetAsTexture(FRDGViewableResource* Resource)
+{
+	return GetAs<FRDGTexture>(Resource);
+}
+
+inline FRDGBufferUAV* GetAsBufferUAV(FRDGView* View)
+{
+	return GetAs<FRDGBufferUAV>(View);
+}
+
+inline FRDGBufferSRV* GetAsBufferSRV(FRDGView* View)
+{
+	return GetAs<FRDGBufferSRV>(View);
+}
+
+inline FRDGTextureUAV* GetAsTextureUAV(FRDGView* View)
+{
+	return GetAs<FRDGTextureUAV>(View);
+}
+
+inline FRDGTextureSRV* GetAsTextureSRV(FRDGView* View)
+{
+	return GetAs<FRDGTextureSRV>(View);
+}
+
+inline FGraphicsPipelineRenderTargetsInfo ExtractRenderTargetsInfo(const FRDGParameterStruct& ParameterStruct);
+inline FGraphicsPipelineRenderTargetsInfo ExtractRenderTargetsInfo(const FRenderTargetBindingSlots& RenderTargets);
+
+#include "RenderGraphResources.inl" // IWYU pragma: export

@@ -266,9 +266,10 @@
 			TSharedPtr<IAccessibleWidget> Widget = [FMacAccessibilityManager AccessibilityManager].MacApplication->GetAccessibleMessageHandler()->GetAccessibleWidgetFromId(TempId);
 			if (Widget.IsValid() && Widget->IsEnabled() && !Widget->IsHidden())
 			{
-				Widget->SetFocus();
+				// Voiceover only recognizes 1 user, the primary accessible user.
+				Widget->SetUserFocus(FGenericAccessibleUserRegistry::GetPrimaryUserIndex());
 			}
-		}, @[ NSDefaultRunLoopMode, UE4IMEEventMode, UE4ShowEventMode, UE4ResizeEventMode, UE4FullscreenEventMode], false); // GameThreadCall
+		}, @[ NSDefaultRunLoopMode, UnrealIMEEventMode, UnrealShowEventMode, UnrealResizeEventMode, UnrealFullscreenEventMode], false); // GameThreadCall
 	}
 	[super setAccessibilityFocused:InIsFocused];
 }
@@ -435,7 +436,7 @@
 				}
 			}
 		} // if widget valid and enabled
-	}, @[ NSDefaultRunLoopMode, UE4IMEEventMode, UE4ShowEventMode, UE4ResizeEventMode, UE4FullscreenEventMode], false); // GameThreadCall
+	}, @[ NSDefaultRunLoopMode, UnrealIMEEventMode, UnrealShowEventMode, UnrealResizeEventMode, UnrealFullscreenEventMode], false); // GameThreadCall
 	return YES;
 }
 

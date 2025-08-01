@@ -1,13 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Kismet/BlueprintMapLibrary.h"
+#include "Kismet/KismetArrayLibrary.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlueprintMapLibrary)
 
 void UBlueprintMapLibrary::GenericMap_Add(const void* TargetMap, const FMapProperty* MapProperty, const void* KeyPtr, const void* ValuePtr)
 {
 	if (TargetMap)
 	{
 		FScriptMapHelper MapHelper(MapProperty, TargetMap);
-		MapHelper.AddPair(KeyPtr, ValuePtr);
+		if (MapHelper.Num() < MaxSupportedMapSize)
+		{
+			MapHelper.AddPair(KeyPtr, ValuePtr);
+		}
+		else if (!MapHelper.FindValueFromHash(KeyPtr))
+		{
+			FFrame::KismetExecutionMessage(*FString::Printf(TEXT("Attempted add to map '%s' beyond the maximum supported capacity!"), *MapProperty->GetName()), ELogVerbosity::Warning, UKismetArrayLibrary::ReachedMaximumContainerSizeWarning);
+		}
 	}
 }
 
@@ -51,17 +61,11 @@ void UBlueprintMapLibrary::GenericMap_Keys(const void* TargetMap, const FMapProp
 		FScriptArrayHelper ArrayHelper(ArrayProperty, TargetArray);
 		ArrayHelper.EmptyValues();
 
-		FProperty* InnerProp = ArrayProperty->Inner;
-
-		int32 Size = MapHelper.Num();
-		for( int32 I = 0; Size; ++I )
+		const FProperty* InnerProp = ArrayProperty->Inner;
+		for (FScriptMapHelper::FIterator It(MapHelper); It; ++It)
 		{
-			if(MapHelper.IsValidIndex(I))
-			{
-				int32 LastIndex = ArrayHelper.AddValue();
-				InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(LastIndex), MapHelper.GetKeyPtr(I));
-				--Size;
-			}
+			const int32 LastIndex = ArrayHelper.AddValue();
+			InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(LastIndex), MapHelper.GetKeyPtr(It));
 		}
 	}
 }
@@ -74,17 +78,11 @@ void UBlueprintMapLibrary::GenericMap_Values(const void* TargetMap, const FMapPr
 		FScriptArrayHelper ArrayHelper(ArrayProperty, TargetArray);
 		ArrayHelper.EmptyValues();
 
-		FProperty* InnerProp = ArrayProperty->Inner;
-		
-		int32 Size = MapHelper.Num();
-		for( int32 I = 0; Size; ++I )
+		const FProperty* InnerProp = ArrayProperty->Inner;
+		for (FScriptMapHelper::FIterator It(MapHelper); It; ++It)
 		{
-			if(MapHelper.IsValidIndex(I))
-			{
-				int32 LastIndex = ArrayHelper.AddValue();
-				InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(LastIndex), MapHelper.GetValuePtr(I));
-				--Size;
-			}
+			const int32 LastIndex = ArrayHelper.AddValue();
+			InnerProp->CopySingleValueToScriptVM(ArrayHelper.GetRawPtr(LastIndex), MapHelper.GetValuePtr(It));
 		}
 	}
 }
@@ -97,6 +95,26 @@ int32 UBlueprintMapLibrary::GenericMap_Length(const void* TargetMap, const FMapP
 		return MapHelper.Num();
 	}
 	return 0;
+}
+
+bool UBlueprintMapLibrary::GenericMap_IsEmpty(const void* TargetMap, const FMapProperty* MapProperty)
+{
+	if (TargetMap)
+	{
+		FScriptMapHelper MapHelper(MapProperty, TargetMap);
+		return MapHelper.Num() == 0;
+	}
+	return true;
+}
+
+bool UBlueprintMapLibrary::GenericMap_IsNotEmpty(const void* TargetMap, const FMapProperty* MapProperty)
+{
+	if (TargetMap)
+	{
+		FScriptMapHelper MapHelper(MapProperty, TargetMap);
+		return MapHelper.Num() > 0;
+	}
+	return false;
 }
 
 void UBlueprintMapLibrary::GenericMap_Clear(const void* TargetMap, const FMapProperty* MapProperty)

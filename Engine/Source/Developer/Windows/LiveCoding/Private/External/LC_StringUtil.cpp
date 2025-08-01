@@ -1,8 +1,18 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
+
+// BEGIN EPIC MOD
+//#include PCH_INCLUDE
+// END EPIC MOD
 
 #include "LC_StringUtil.h"
-#include "Windows/WindowsHWrapper.h"
+// BEGIN EPIC MOD
+#if defined(__clang__) && defined(_MSC_VER) && _MSVC_LANG > 201402L && __clang_major__ < 13
+// For reference: https://bugs.llvm.org/show_bug.cgi?id=41226#c16
+#include <wchar.h>
+#endif
 
+#include "Windows/WindowsHWrapper.h"
+// END EPIC MOD
 
 namespace detail
 {
@@ -71,6 +81,106 @@ namespace detail
 
 		return true;
 	}
+
+	// BEGIN EPIC MOD
+	template <typename T>
+	static const T* StartsWithEx(const T* str, const T* subString)
+	{
+		for (;;)
+		{
+			// Reached the end of the substring, return the remaining part of original string
+			T c2 = *subString++;
+			if (c2 == 0)
+			{
+				return str;
+			}
+
+			// If the characters don't match, we are done.  We don't have to do a check specifically
+			// for 0 since we know that c2 must not be zero at this point.
+			T c1 = *str++;
+			if (c1 != c2)
+			{
+				return nullptr;
+			}
+		}
+	}
+
+	template <typename T>
+	bool MatchesWildcardRecursive(const T* target, const T* wildcard)
+	{
+		for (;;)
+		{
+			T w = *wildcard++;
+
+			// We have reached the end of the wildcard string, this is successful if have no more target string
+			if (w == 0)
+			{
+				return *target == 0;
+			}
+
+			// If we have a wildcard character, then 
+			else if (w == '*')
+			{
+
+				// Skip any multiple wildcards 
+				for (; *wildcard == '*'; ++wildcard)
+				{
+				}
+
+				w = *wildcard++;
+
+				// If wildcard is at the end of the wildcards, then we have a match
+				if (w == 0)
+				{
+					return true;
+				}
+
+				// Look through the target string for the given character.  
+				// If we reach the end of the target string without finding a match
+				// then this is a failed match.  If we find the character, recurse 
+				// to match the remaining part of the string
+				for (;;)
+				{
+					T t = *target++;
+					if (t == 0)
+					{
+						return false;
+					}
+					else if (t == w && MatchesWildcardRecursive(target, wildcard))
+					{
+						return true;
+					}
+				}
+			}
+			
+			// If we don't match the character, then we don't have a match
+			else if (w != *target++)
+			{
+				return false;
+			}
+		}
+	}
+
+	// Temporary replacement for std::wstring::find
+	static size_t WideFindOffset(const std::wstring& haystack, const std::wstring& needle)
+	{
+#if defined(__clang__) && defined(_MSC_VER) && _MSVC_LANG > 201402L && __clang_major__ < 13
+		// For reference: https://bugs.llvm.org/show_bug.cgi?id=41226#c16
+		const wchar_t* found = ::wcsstr(haystack.c_str(), needle.c_str());
+		if (found)
+		{
+			return static_cast<size_t>(found - haystack.c_str());
+		}
+		else
+		{
+			return std::wstring::npos;
+		}
+#else
+		return haystack.find(needle);
+#endif
+	}
+
+	// END EPIC MOD
 }
 
 
@@ -85,7 +195,9 @@ namespace string
 	std::wstring ToWideString(const char* utf8Str, size_t count)
 	{
 		size_t length = 0u;
-		while ((utf8Str[length] != '\0') && (length < count))
+		// BEGIN EPIC MOD - PVS FIX
+		while ((length < count) && (utf8Str[length] != '\0'))
+		// END EPIC MOD
 		{
 			// find null-terminator
 			++length;
@@ -105,7 +217,9 @@ namespace string
 	{
 		std::wstring result = str;
 
-		size_t startPos = str.find(from);
+// BEGIN EPIC MOD
+		size_t startPos = detail::WideFindOffset(str, from);
+// END EPIC MOD
 		if (startPos == std::wstring::npos)
 			return result;
 
@@ -127,13 +241,32 @@ namespace string
 	}
 
 
+	std::string ReplaceAll(const std::string& str, const std::string& from, const std::string& to)
+	{
+		std::string result(str);
+
+		for (;;)
+		{
+			const size_t pos = result.find(from);
+			if (pos == std::string::npos)
+			{
+				return result;
+			}
+
+			result.replace(pos, from.length(), to);
+		}
+	}
+
+
 	std::wstring ReplaceAll(const std::wstring& str, const std::wstring& from, const std::wstring& to)
 	{
 		std::wstring result(str);
 
 		for (;;)
 		{
-			const size_t pos = result.find(from);
+// BEGIN EPIC MOD
+			const size_t pos = detail::WideFindOffset(result, from);
+// END EPIC MOD
 			if (pos == std::wstring::npos)
 			{
 				return result;
@@ -169,7 +302,9 @@ namespace string
 
 		for (;;)
 		{
-			const size_t pos = result.find(subString);
+// BEGIN EPIC MOD
+			const size_t pos = detail::WideFindOffset(result, subString);
+// END EPIC MOD
 			if (pos == std::wstring::npos)
 			{
 				return result;
@@ -260,6 +395,30 @@ namespace string
 	{
 		return detail::StartsWith(str, subString);
 	}
+
+
+	// BEGIN EPIC MOD
+	const char* StartsWithEx(const char* str, const char* subString)
+	{
+		return detail::StartsWithEx(str, subString);
+	}
+
+	const wchar_t* StartsWithEx(const wchar_t* str, const wchar_t* subString)
+	{
+		return detail::StartsWithEx(str, subString);
+	}
+
+
+	bool MatchWildcard(const char* target, const char* wildcard)
+	{
+		return detail::MatchesWildcardRecursive(target, wildcard);
+	}
+
+	bool MatchWildcard(const wchar_t* target, const wchar_t* wildcard)
+	{
+		return detail::MatchesWildcardRecursive(target, wildcard);
+	}
+	// END EPIC MOD
 
 
 	std::string ToUpper(const char* str)

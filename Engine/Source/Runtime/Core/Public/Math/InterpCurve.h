@@ -4,6 +4,7 @@
 
 #include "CoreTypes.h"
 #include "Misc/AssertionMacros.h"
+#include "Algo/MinElement.h"
 #include "Containers/Array.h"
 #include "Math/UnrealMathUtility.h"
 #include "Math/Color.h"
@@ -96,7 +97,12 @@ public:
 	 * @param OutDistanceSq - output - the squared distance between the given point and the closest found point.
 	 * @return The key (the 't' parameter) of the nearest point. 
 	 */
-	float InaccurateFindNearest( const T &PointInSpace, float& OutDistanceSq ) const;
+	float FindNearest( const T &PointInSpace, float& OutDistanceSq ) const;
+
+	/**
+	 * @deprecated Use FindNearest instead.
+	 */
+	float InaccurateFindNearest(const T& PointInSpace, float& OutDistanceSq) const;
 
 	/**
 	* Find the nearest point on spline to the given point.
@@ -106,7 +112,12 @@ public:
 	* @param OutSegment - output - the nearest segment to the given point.
 	* @return The key (the 't' parameter) of the nearest point.
 	*/
-	float InaccurateFindNearest( const T &PointInSpace, float& OutDistanceSq, float& OutSegment ) const;
+	float FindNearest( const T &PointInSpace, float& OutDistanceSq, float& OutSegment ) const;
+
+	/**
+	 * @deprecated Use FindNearest instead.
+	 */
+	float InaccurateFindNearest(const T& PointInSpace, float& OutDistanceSq, float& OutSegment) const;
 
 	/** 
 	 * Find the nearest point (to the given point) on segment between Points[PtIdx] and Points[PtIdx+1]
@@ -114,7 +125,12 @@ public:
 	 * @param PointInSpace - the given point
 	 * @return The key (the 't' parameter) of the found point. 
 	 */
-	float InaccurateFindNearestOnSegment( const T &PointInSpace, int32 PtIdx, float& OutSquaredDistance ) const;
+	float FindNearestOnSegment( const T &PointInSpace, int32 PtIdx, float& OutSquaredDistance ) const;
+
+	/**
+	 * @deprecated Use FindNearestOnSegment instead.
+	 */
+	float InaccurateFindNearestOnSegment(const T& PointInSpace, int32 PtIdx, float& OutSquaredDistance) const;
 
 	/** Automatically set the tangents on the curve based on surrounding points */
 	void AutoSetTangents(float Tension = 0.0f, bool bStationaryEndpoints = true);
@@ -138,7 +154,7 @@ public:
 		//   as inline struct properties in UnClass.cpp!
 
 		Ar << Curve.Points;
-		if (Ar.UE4Ver() >= VER_UE4_INTERPCURVE_SUPPORTS_LOOPING)
+		if (Ar.UEVer() >= VER_UE4_INTERPCURVE_SUPPORTS_LOOPING)
 		{
 			Ar << Curve.bIsLooped;
 			Ar << Curve.LoopKeyOffset;
@@ -297,6 +313,15 @@ T FInterpCurve<T>::Eval(const float InVal, const T& Default) const
 		return Default;
 	}
 
+	// If we let NaNs in through here, they fail the check() on the Alpha between the two points.
+	if (FPlatformMath::IsNaN(InVal))
+	{
+#if ENABLE_NAN_DIAGNOSTIC
+		logOrEnsureNanError(TEXT("FInterpCurve<T>::Eval has InVal == NaN"));
+#endif
+		return Default;
+	}
+
 	// Binary search to find index of lower bound of input value
 	const int32 Index = GetPointIndexForInputValue(InVal);
 
@@ -333,7 +358,7 @@ T FInterpCurve<T>::Eval(const float InVal, const T& Default) const
 	if (Diff > 0.0f && PrevPoint.InterpMode != CIM_Constant)
 	{
 		const float Alpha = (InVal - PrevPoint.InVal) / Diff;
-		check(Alpha >= 0.0f && Alpha <= 1.0f);
+		checkf(Alpha >= 0.0f && Alpha <= 1.0f, TEXT("Bad value in Eval(): in %f prev %f  diff %f alpha %f"), InVal, PrevPoint.InVal, Diff, Alpha);
 
 		if (PrevPoint.InterpMode == CIM_Linear)
 		{
@@ -363,6 +388,15 @@ T FInterpCurve<T>::EvalDerivative(const float InVal, const T& Default) const
 		return Default;
 	}
 
+	// If we let NaNs in through here, they fail the check() on the Alpha between the two points.
+	if (FPlatformMath::IsNaN(InVal))
+	{
+#if ENABLE_NAN_DIAGNOSTIC
+		logOrEnsureNanError(TEXT("FInterpCurve<T>::EvalDerivative has InVal == NaN"));
+#endif
+		return Default;
+	}
+	
 	// Binary search to find index of lower bound of input value
 	const int32 Index = GetPointIndexForInputValue(InVal);
 
@@ -405,7 +439,7 @@ T FInterpCurve<T>::EvalDerivative(const float InVal, const T& Default) const
 		else
 		{
 			const float Alpha = (InVal - PrevPoint.InVal) / Diff;
-			check(Alpha >= 0.0f && Alpha <= 1.0f);
+			checkf(Alpha >= 0.0f && Alpha <= 1.0f, TEXT("Bad value in EvalDerivative(): in %f prev %f  diff %f alpha %f"), InVal, PrevPoint.InVal, Diff, Alpha);
 
 			return FMath::CubicInterpDerivative(PrevPoint.OutVal, PrevPoint.LeaveTangent * Diff, NextPoint.OutVal, NextPoint.ArriveTangent * Diff, Alpha) / Diff;
 		}
@@ -416,7 +450,6 @@ T FInterpCurve<T>::EvalDerivative(const float InVal, const T& Default) const
 		return T(ForceInit);
 	}
 }
-
 
 template< class T >
 T FInterpCurve<T>::EvalSecondDerivative(const float InVal, const T& Default) const
@@ -430,6 +463,15 @@ T FInterpCurve<T>::EvalSecondDerivative(const float InVal, const T& Default) con
 		return Default;
 	}
 
+	// If we let NaNs in through here, they fail the check() on the Alpha between the two points.
+	if (FPlatformMath::IsNaN(InVal))
+	{
+#if ENABLE_NAN_DIAGNOSTIC
+		logOrEnsureNanError(TEXT("FInterpCurve<T>::EvalSecondDerivative has InVal == NaN"));
+#endif
+		return Default;
+	}
+	
 	// Binary search to find index of lower bound of input value
 	const int32 Index = GetPointIndexForInputValue(InVal);
 
@@ -468,7 +510,7 @@ T FInterpCurve<T>::EvalSecondDerivative(const float InVal, const T& Default) con
 		else
 		{
 			const float Alpha = (InVal - PrevPoint.InVal) / Diff;
-			check(Alpha >= 0.0f && Alpha <= 1.0f);
+			checkf(Alpha >= 0.0f && Alpha <= 1.0f, TEXT("Bad value in EvalSecondDerivative(): in %f prev %f  diff %f alpha %f"), InVal, PrevPoint.InVal, Diff, Alpha);
 
 			return FMath::CubicInterpSecondDerivative(PrevPoint.OutVal, PrevPoint.LeaveTangent * Diff, NextPoint.OutVal, NextPoint.ArriveTangent * Diff, Alpha) / (Diff * Diff);
 		}
@@ -480,16 +522,22 @@ T FInterpCurve<T>::EvalSecondDerivative(const float InVal, const T& Default) con
 	}
 }
 
+template< class T >
+float FInterpCurve<T>::FindNearest(const T& PointInSpace, float& OutDistanceSq) const
+{
+	float OutSegment;
+	return FindNearest(PointInSpace, OutDistanceSq, OutSegment);
+}
 
 template< class T >
 float FInterpCurve<T>::InaccurateFindNearest(const T &PointInSpace, float& OutDistanceSq) const
 {
 	float OutSegment;
-	return InaccurateFindNearest(PointInSpace, OutDistanceSq, OutSegment);
+	return FindNearest(PointInSpace, OutDistanceSq, OutSegment);
 }
 
 template< class T >
-float FInterpCurve<T>::InaccurateFindNearest(const T &PointInSpace, float& OutDistanceSq, float& OutSegment) const
+float FInterpCurve<T>::FindNearest(const T &PointInSpace, float& OutDistanceSq, float& OutSegment) const		// LWC_TODO: Precision loss
 {
 	const int32 NumPoints = Points.Num();
 	const int32 NumSegments = bIsLooped ? NumPoints : NumPoints - 1;
@@ -497,12 +545,12 @@ float FInterpCurve<T>::InaccurateFindNearest(const T &PointInSpace, float& OutDi
 	if (NumPoints > 1)
 	{
 		float BestDistanceSq;
-		float BestResult = InaccurateFindNearestOnSegment(PointInSpace, 0, BestDistanceSq);
+		float BestResult = FindNearestOnSegment(PointInSpace, 0, BestDistanceSq);
 		float BestSegment = 0;
 		for (int32 Segment = 1; Segment < NumSegments; ++Segment)
 		{
 			float LocalDistanceSq;
-			float LocalResult = InaccurateFindNearestOnSegment(PointInSpace, Segment, LocalDistanceSq);
+			float LocalResult = FindNearestOnSegment(PointInSpace, Segment, LocalDistanceSq);
 			if (LocalDistanceSq < BestDistanceSq)
 			{
 				BestDistanceSq = LocalDistanceSq;
@@ -517,7 +565,7 @@ float FInterpCurve<T>::InaccurateFindNearest(const T &PointInSpace, float& OutDi
 
 	if (NumPoints == 1)
 	{
-		OutDistanceSq = (PointInSpace - Points[0].OutVal).SizeSquared();
+		OutDistanceSq = static_cast<float>((PointInSpace - Points[0].OutVal).SizeSquared());
 		OutSegment = 0;
 		return Points[0].InVal;
 	}
@@ -525,9 +573,14 @@ float FInterpCurve<T>::InaccurateFindNearest(const T &PointInSpace, float& OutDi
 	return 0.0f;
 }
 
+template< class T >
+float FInterpCurve<T>::InaccurateFindNearest(const T& PointInSpace, float& OutDistanceSq, float& OutSegment) const
+{
+	return FindNearest(PointInSpace, OutDistanceSq, OutSegment);
+}
 
 template< class T >
-float FInterpCurve<T>::InaccurateFindNearestOnSegment(const T& PointInSpace, int32 PtIdx, float& OutSquaredDistance) const
+float FInterpCurve<T>::FindNearestOnSegment(const T& PointInSpace, int32 PtIdx, float& OutSquaredDistance) const
 {
 	const int32 NumPoints = Points.Num();
 	const int32 LastPoint = NumPoints - 1;
@@ -538,8 +591,8 @@ float FInterpCurve<T>::InaccurateFindNearestOnSegment(const T& PointInSpace, int
 
 	if (CIM_Constant == Points[PtIdx].InterpMode)
 	{
-		const float Distance1 = (Points[PtIdx].OutVal - PointInSpace).SizeSquared();
-		const float Distance2 = (Points[NextPtIdx].OutVal - PointInSpace).SizeSquared();
+		const float Distance1 = static_cast<float>((Points[PtIdx].OutVal - PointInSpace).SizeSquared());
+		const float Distance2 = static_cast<float>((Points[NextPtIdx].OutVal - PointInSpace).SizeSquared());
 		if (Distance1 < Distance2)
 		{
 			OutSquaredDistance = Distance1;
@@ -553,66 +606,148 @@ float FInterpCurve<T>::InaccurateFindNearestOnSegment(const T& PointInSpace, int
 	if (CIM_Linear == Points[PtIdx].InterpMode)
 	{
 		// like in function: FMath::ClosestPointOnLine
-		const float A = (Points[PtIdx].OutVal - PointInSpace) | (Points[NextPtIdx].OutVal - Points[PtIdx].OutVal);
-		const float B = (Points[NextPtIdx].OutVal - Points[PtIdx].OutVal).SizeSquared();
+		const float A = static_cast<float>((Points[PtIdx].OutVal - PointInSpace) | (Points[NextPtIdx].OutVal - Points[PtIdx].OutVal));
+		const float B = static_cast<float>((Points[NextPtIdx].OutVal - Points[PtIdx].OutVal).SizeSquared());
 		const float V = FMath::Clamp(-A / B, 0.f, 1.f);
-		OutSquaredDistance = (FMath::Lerp(Points[PtIdx].OutVal, Points[NextPtIdx].OutVal, V) - PointInSpace).SizeSquared();
+		OutSquaredDistance = static_cast<float>((FMath::Lerp(Points[PtIdx].OutVal, Points[NextPtIdx].OutVal, V) - PointInSpace).SizeSquared());
 		return V * Diff + Points[PtIdx].InVal;
 	}
 
 	{
-		const int32 PointsChecked = 3;
-		const int32 IterationNum = 3;
-		const float Scale = 0.75;
+		// To be accurate and fast, the algorithm is divided into 2 steps:
+		// A first step starting from the 4 start coordinates with a large tolerance to find a good approximation in few iterations
+		// if needed, a last step starting from the best approximation with a small tolerance to be accurate is performed
+		// Few small differences in the Newton algorithms:
+		// - in the first step, the break is done before the last evaluation (not needed) (BreakBeforeEvaluateStep1)
+		// - in the second step, the last evaluation is done before the break as the result point is the final point needed to evaluate the error (BreakAfterEvaluateStep2)
+		// - in the first step, to avoid duplicated test, if the new coordinate is:
+		//    - before the range ("start value" - 1/3), the process is break
+		//    - after the range ("start value" + 1/3), the next "start value" is not test
 
-		// Newton's methods is repeated 3 times, starting with t = 0, 0.5, 1.
-		float ValuesT[PointsChecked];
-		ValuesT[0] = 0.0f;
-		ValuesT[1] = 0.5f;
-		ValuesT[2] = 1.0f;
+		constexpr float ToleranceStep1 = 1.e-2f;
+		constexpr float ToleranceStep2 = 1.e-5f;
+		constexpr float ToleranceToLaunchStep2 = 1.e-6f; // Step1 break before the evaluation. So if the last move of step1 is not so small, a last evaluation has to be done
 
-		T InitialPoints[PointsChecked];
-		InitialPoints[0] = Points[PtIdx].OutVal;
-		InitialPoints[1] = FMath::CubicInterp(Points[PtIdx].OutVal, Points[PtIdx].LeaveTangent * Diff, Points[NextPtIdx].OutVal, Points[NextPtIdx].ArriveTangent * Diff, ValuesT[1]);
-		InitialPoints[2] = Points[NextPtIdx].OutVal;
+		constexpr int32 MaxIteration = 20;
+		constexpr float InvThree = 1.f / 3.f;
+		constexpr float TwoInvThree = 2.f / 3.f;
 
-		float DistancesSq[PointsChecked];
+		// The parametric space is divided into 3 areas. The search starts from the four limits of the areas
+		// So Newton's methods is repeated 4 times
+		constexpr int32 NewtonIterationCount = 4;
 
-		for (int32 point = 0; point < PointsChecked; ++point)
+		constexpr float StartValuesT[] = { 0.f, InvThree, TwoInvThree, 1.f };
+		float ValuesT[] = {0.f, InvThree, TwoInvThree, 1.f};
+		float NextMovesT[] = { 0.f, 0.f, 0.f, 0.f };
+		float DistancesSq[NewtonIterationCount];
+
+		float LastValue = UE_BIG_NUMBER;
+		float MinValue = 0.f;
+		float MaxValue = UE_BIG_NUMBER;
+		int32 NextValue = 1;
+
+		const TArray<FInterpCurvePoint<T>>& PointsT = Points;
+
+		const auto BreakIfConverged = [&LastValue, &MinValue, &MaxValue, &NextValue, &StartValuesT, NewtonIterationCount](float& Value, const float Tolerance) -> bool
 		{
-			//Algorithm explanation: http://permalink.gmane.org/gmane.games.devel.sweng/8285
-			T FoundPoint = InitialPoints[point];
-			float LastMove = 1.0f;
-			for (int32 iter = 0; iter < IterationNum; ++iter)
+			if (FMath::IsNearlyEqual(LastValue, Value, Tolerance))
 			{
-				const T LastBestTangent = FMath::CubicInterpDerivative(Points[PtIdx].OutVal, Points[PtIdx].LeaveTangent * Diff, Points[NextPtIdx].OutVal, Points[NextPtIdx].ArriveTangent * Diff, ValuesT[point]);
-				const T Delta = (PointInSpace - FoundPoint);
-				float Move = (LastBestTangent | Delta) / LastBestTangent.SizeSquared();
-				Move = FMath::Clamp(Move, -LastMove*Scale, LastMove*Scale);
-				ValuesT[point] += Move;
-				ValuesT[point] = FMath::Clamp(ValuesT[point], 0.0f, 1.0f);
-				LastMove = FMath::Abs(Move);
-				FoundPoint = FMath::CubicInterp(Points[PtIdx].OutVal, Points[PtIdx].LeaveTangent * Diff, Points[NextPtIdx].OutVal, Points[NextPtIdx].ArriveTangent * Diff, ValuesT[point]);
+				// Has converged
+				Value = LastValue;
+				return true;
 			}
-			DistancesSq[point] = (FoundPoint - PointInSpace).SizeSquared();
-			ValuesT[point] = ValuesT[point] * Diff + Points[PtIdx].InVal;
+
+			if (Value > MaxValue)
+			{
+				// The new coordinate is after the range ("start value" + 1/3), the next "start value" is not test
+				// Value is clamp into [0.,1.], so value cannot be > to 1.
+				++NextValue;
+				MaxValue = StartValuesT[NextValue >= NewtonIterationCount ? NewtonIterationCount - 1 : NextValue];
+			}
+
+			if (Value < MinValue)
+			{
+				// The new coordinate is before the range, the process is break as the area has been proceed 
+				return true;
+			}
+
+			LastValue = Value;
+
+			return false;
+		};
+
+		const auto NeverBreak = [](float& Value, const float Tolerance) -> bool
+		{
+			return false;
+		};
+
+		const auto Newton =
+			[&PointsT, &PtIdx, &NextPtIdx, &PointInSpace, &Diff, MaxIteration, InvThree]
+			(float& Value, float& Move, TFunctionRef<bool(float&, const float)> BreakBeforeEvaluate, TFunctionRef<bool(float&, const float)> BreakAfterEvaluate, const float Tolerance) -> float
+		{
+			T FoundPoint = {};
+
+			for (int32 Iter = 0; Iter < MaxIteration; ++Iter)
+			{
+				Value += Move;
+				Value = FMath::Clamp(Value, 0.0f, 1.0f);
+
+				if (BreakBeforeEvaluate(Value, Tolerance))
+				{
+					break;
+				}
+
+				FoundPoint = FMath::CubicInterp(PointsT[PtIdx].OutVal, PointsT[PtIdx].LeaveTangent * Diff, PointsT[NextPtIdx].OutVal, PointsT[NextPtIdx].ArriveTangent * Diff, Value);
+
+				if (BreakAfterEvaluate(Value, Tolerance))
+				{
+					break;
+				}
+
+				const T Tangent = FMath::CubicInterpDerivative(PointsT[PtIdx].OutVal, PointsT[PtIdx].LeaveTangent * Diff, PointsT[NextPtIdx].OutVal, PointsT[NextPtIdx].ArriveTangent * Diff, Value);
+				const T Delta = (PointInSpace - FoundPoint);
+				Move = static_cast<float>(Tangent.Dot(Delta) / Tangent.SizeSquared());
+			}
+			return static_cast<float>((FoundPoint - PointInSpace).SizeSquared());
+		};
+
+		// A first step starting from the 4 start coordinates with a large tolerance to find a good approximation in few iterations
+		for (int32 Index = 0; Index < NewtonIterationCount; ++Index)
+		{
+			MinValue = StartValuesT[Index == 0 ? 0 : Index - 1];
+			MaxValue = StartValuesT[NextValue >= NewtonIterationCount ? Index : NextValue];
+
+			float& Value = ValuesT[Index];
+			float& Move = NextMovesT[Index];
+
+			DistancesSq[Index] = Newton(Value, Move, BreakIfConverged, NeverBreak, ToleranceStep1);
 		}
 
-		if (DistancesSq[0] <= DistancesSq[1] && DistancesSq[0] <= DistancesSq[2])
+		// Find the index of the best approximation
+		const float* MinValuePtr = Algo::MinElement(DistancesSq);
+		const int32 IndexOfTheSmallest = MinValuePtr - DistancesSq;
+
+		float& Move = NextMovesT[IndexOfTheSmallest];
+
+		// if needed, a last step starting from the best approximation with a small tolerance to be accurate is performed
+		if (!FMath::IsNearlyZero(Move, ToleranceToLaunchStep2))
 		{
-			OutSquaredDistance = DistancesSq[0];
-			return ValuesT[0];
+			MinValue = 0.f;
+			MaxValue = 1.f;
+			float& Value = ValuesT[IndexOfTheSmallest];
+			DistancesSq[IndexOfTheSmallest] = Newton(Value, Move, NeverBreak, BreakIfConverged, ToleranceStep2);
 		}
-		if (DistancesSq[1] <= DistancesSq[2])
-		{
-			OutSquaredDistance = DistancesSq[1];
-			return ValuesT[1];
-		}
-		OutSquaredDistance = DistancesSq[2];
-		return ValuesT[2];
+
+		OutSquaredDistance = DistancesSq[IndexOfTheSmallest];
+		return ValuesT[IndexOfTheSmallest] * Diff + Points[PtIdx].InVal;
 	}
 }
 
+template< class T >
+float FInterpCurve<T>::InaccurateFindNearestOnSegment(const T& PointInSpace, int32 PtIdx, float& OutSquaredDistance) const
+{
+	return FindNearestOnSegment(PointInSpace, PtIdx, OutSquaredDistance);
+}
 
 template< class T >
 void FInterpCurve<T>::AutoSetTangents(float Tension, bool bStationaryEndpoints)
@@ -669,9 +804,10 @@ void FInterpCurve<T>::AutoSetTangents(float Tension, bool bStationaryEndpoints)
 		}
 		else if (ThisPoint.InterpMode == CIM_Linear)
 		{
-			T Tangent = NextPoint.OutVal - ThisPoint.OutVal;
-			ThisPoint.ArriveTangent = Tangent;
-			ThisPoint.LeaveTangent = Tangent;
+			ThisPoint.LeaveTangent = NextPoint.OutVal - ThisPoint.OutVal;
+
+			// Following from a curve, we should set the tangents equal so that there are no discontinuities
+			ThisPoint.ArriveTangent = PrevPoint.IsCurveKey() ? ThisPoint.LeaveTangent : ThisPoint.OutVal - PrevPoint.OutVal;
 		}
 		else if (ThisPoint.InterpMode == CIM_Constant)
 		{

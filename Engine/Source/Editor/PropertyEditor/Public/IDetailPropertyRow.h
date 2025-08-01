@@ -3,14 +3,14 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Misc/Attribute.h"
-#include "Layout/Visibility.h"
 #include "Framework/SlateDelegates.h"
+#include "Layout/Visibility.h"
+#include "Misc/Attribute.h"
 #include "PropertyHandle.h"
 
 class FDetailWidgetRow;
 class FDetailWidgetDecl;
-
+class IDetailDragDropHandler;
 
 DECLARE_DELEGATE_RetVal_OneParam(bool, FIsResetToDefaultVisible, TSharedPtr<IPropertyHandle> /* PropertyHandle */);
 DECLARE_DELEGATE_OneParam(FResetToDefaultHandler, TSharedPtr<IPropertyHandle> /* PropertyHandle*/);
@@ -26,7 +26,7 @@ public:
 	{
 		FResetToDefaultOverride ResetToDefault;
 		ResetToDefault.bForceShow = true;
-		ResetToDefault.OnResetToDefaultClickedDelegate = InResetToDefaultClicked;
+		ResetToDefault.OnClickedPropertyDelegate = InResetToDefaultClicked;
 		ResetToDefault.bPropagateToChildren = InPropagateToChildren;
 		ResetToDefault.bForceHide = false;
 		return ResetToDefault;
@@ -37,8 +37,42 @@ public:
 	{
 		FResetToDefaultOverride ResetToDefault;
 		ResetToDefault.bForceShow = false;
-		ResetToDefault.IsResetToDefaultVisibleDelegate = InIsResetToDefaultVisible;
-		ResetToDefault.OnResetToDefaultClickedDelegate = InResetToDefaultClicked;
+		ResetToDefault.IsVisiblePropertyDelegate = InIsResetToDefaultVisible;
+		ResetToDefault.OnClickedPropertyDelegate = InResetToDefaultClicked;
+		ResetToDefault.bPropagateToChildren = InPropagateToChildren;
+		ResetToDefault.bForceHide = false;
+		return ResetToDefault;
+	} 
+
+	/** Create a FResetToDefaultOverride from a visibility attribute. */
+	static FResetToDefaultOverride Create(TAttribute<bool> InIsResetToDefaultVisible, const bool InPropagateToChildren = false)
+	{
+		FResetToDefaultOverride ResetToDefault;
+		ResetToDefault.bForceShow = false;
+		ResetToDefault.IsVisibleAttribute = InIsResetToDefaultVisible;
+		ResetToDefault.bPropagateToChildren = InPropagateToChildren;
+		ResetToDefault.bForceHide = false;
+		return ResetToDefault;
+	}
+
+	/** Create a FResetToDefaultOverride from a visibility attribute and a simple delegate. */
+	static FResetToDefaultOverride Create(TAttribute<bool> InIsResetToDefaultVisible, FSimpleDelegate InResetToDefaultClicked, const bool InPropagateToChildren = false)
+	{
+		FResetToDefaultOverride ResetToDefault;
+		ResetToDefault.bForceShow = false;
+		ResetToDefault.IsVisibleAttribute = InIsResetToDefaultVisible;
+		ResetToDefault.OnClickedDelegate = InResetToDefaultClicked;
+		ResetToDefault.bPropagateToChildren = InPropagateToChildren;
+		ResetToDefault.bForceHide = false;
+		return ResetToDefault;
+	}
+
+	/** Create a FResetToDefaultOverride from a simple delegate. */
+	static FResetToDefaultOverride Create(FSimpleDelegate InResetToDefaultClicked, const bool InPropagateToChildren = false)
+	{
+		FResetToDefaultOverride ResetToDefault;
+		ResetToDefault.bForceShow = true;
+		ResetToDefault.OnClickedDelegate = InResetToDefaultClicked;
 		ResetToDefault.bPropagateToChildren = InPropagateToChildren;
 		ResetToDefault.bForceHide = false;
 		return ResetToDefault;
@@ -61,18 +95,46 @@ public:
 		{
 			return true;
 		}
-		if (!bForceHide && IsResetToDefaultVisibleDelegate.IsBound())
+
+		if (bForceHide)
 		{
-			return IsResetToDefaultVisibleDelegate.Execute(Property);
+			return false;
 		}
+
+		if (IsVisiblePropertyDelegate.IsBound())
+		{
+			return IsVisiblePropertyDelegate.Execute(Property);
+		}
+
+		if (IsVisibleAttribute.IsSet())
+		{
+			return IsVisibleAttribute.Get();
+		}
+		
 		return false;
 	}
 
-	/** Called by the property editor to actually reset the property to default */
-	FResetToDefaultHandler OnResetToDefaultClicked() const
+	/** Does this have a custom reset to default handler? */
+	bool HasResetToDefaultHandler() const
 	{
-		return OnResetToDefaultClickedDelegate;
+		return OnClickedPropertyDelegate.IsBound() || OnClickedDelegate.IsBound();
 	}
+
+	/** Called by the property editor to actually reset the property to default */
+	void OnResetToDefaultClicked(TSharedPtr<IPropertyHandle> PropertyHandle) const
+	{
+		if (PropertyHandle.IsValid() && OnClickedPropertyDelegate.IsBound())
+		{
+			PropertyHandle->ExecuteCustomResetToDefault(*this);
+		} 
+		else
+		{
+			OnClickedDelegate.ExecuteIfBound();
+		}
+	}
+
+	/** Get the actual delegate bound to this reset to default handler. */
+	FResetToDefaultHandler GetPropertyResetToDefaultDelegate() const { return OnClickedPropertyDelegate; }
 
 	/** Called by properties to determine whether this override should set on their children */
 	bool PropagatesToChildren() const
@@ -82,10 +144,16 @@ public:
 
 private:
 	/** Callback to indicate whether or not reset to default is visible */
-	FIsResetToDefaultVisible IsResetToDefaultVisibleDelegate;
+	FIsResetToDefaultVisible IsVisiblePropertyDelegate;
 
 	/** Delegate called when reset to default is clicked */
-	FResetToDefaultHandler OnResetToDefaultClickedDelegate;
+	FResetToDefaultHandler OnClickedPropertyDelegate;
+
+	/** Attribute to determine whether or not reset to default is visible */
+	TAttribute<bool> IsVisibleAttribute; 
+
+	/** Delegate called when reset to default is clicked */
+	FSimpleDelegate OnClickedDelegate;
 
 	/** Should properties pass this on to their children? */
 	bool bPropagateToChildren;
@@ -106,7 +174,7 @@ public:
 	virtual ~IDetailPropertyRow(){}
 
 	/** @return the property handle for the property on this row */
-	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() = 0;
+	virtual TSharedPtr<IPropertyHandle> GetPropertyHandle() const = 0;
 
 	/**
 	 * Sets the localized display name of the property
@@ -140,6 +208,13 @@ public:
 	virtual IDetailPropertyRow& EditCondition( TAttribute<bool> EditConditionValue, FOnBooleanValueChanged OnEditConditionValueChanged ) = 0;
 
 	/**
+	 * Sets whether or not the edit condition for this property should affect its visibility.  If the edit condition fails, the property will be hidden outright.
+	 * 
+	 * @param bEditConditionHidesValue		if true the property be shown/hidden based on the edit condition
+	 */
+	virtual IDetailPropertyRow& EditConditionHides( bool bEditConditionHidesValue ) = 0;
+
+	/**
 	 * Sets whether or not this property is enabled
 	 *
 	 * @param InIsEnabled	Attribute for the enabled state of the property (true to enable the property)
@@ -167,6 +242,20 @@ public:
 	 * @param ResetToDefault	Contains the delegates needed to override the behavior of reset to default
 	 */
 	virtual IDetailPropertyRow& OverrideResetToDefault(const FResetToDefaultOverride& ResetToDefault) = 0;
+
+	/**
+	 * Sets a handler for this property row to be a source or target of drag-and-drop operations
+	 * 
+	 * @param InDragDropHandler	Handler used when starting a drag or accepting a drop operation
+	 */
+	virtual IDetailPropertyRow& DragDropHandler(TSharedPtr<IDetailDragDropHandler> InDragDropHandler) = 0;
+
+	/**
+	 * Returns the property row expansion state
+	 *
+	 * @return Will return true if the row is expanded, false if not
+	 */
+	virtual bool IsExpanded() const = 0;
 
 	/**
 	 * Returns the name and value widget of this property row.  You can use this widget to apply further customization to existing widgets (by using this  with CustomWidget)

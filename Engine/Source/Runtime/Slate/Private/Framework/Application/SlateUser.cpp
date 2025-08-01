@@ -3,12 +3,14 @@
 #include "Framework/Application/SlateUser.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Application/NavigationConfig.h"
+#include "Misc/App.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/SWeakWidget.h"
+#include "GenericPlatform/GenericPlatformInputDeviceMapper.h"
 
-#if PLATFORM_WINDOWS || PLATFORM_HOLOLENS
+#if PLATFORM_MICROSOFT
 // Needed to be able to use RECT
-#include "Windows/WindowsHWrapper.h"
+#include "Microsoft/WindowsHWrapper.h"
 #endif
 
 DECLARE_CYCLE_STAT(TEXT("QueryCursor"), STAT_SlateQueryCursor, STATGROUP_Slate);
@@ -17,10 +19,10 @@ DECLARE_CYCLE_STAT(TEXT("Update Tooltip Time"), STAT_SlateUpdateTooltip, STATGRO
 namespace SlateDefs
 {
 	// How far tooltips should be offset from the mouse cursor position, in pixels
-	static const FVector2D TooltipOffsetFromMouse(12.0f, 8.0f);
+	static const FVector2f TooltipOffsetFromMouse(12.0f, 8.0f);
 
 	// How far tooltips should be pushed out from a force field border, in pixels
-	static const FVector2D TooltipOffsetFromForceField(4.0f, 3.0f);
+	static const FVector2f TooltipOffsetFromForceField(4.0f, 3.0f);
 }
 
 static bool bEnableSyntheticCursorMoves = true;
@@ -36,6 +38,12 @@ FAutoConsoleVariableRef CVarEnableCursorQueries(
 	bEnableCursorQueries,
 	TEXT(""));
 
+static float SoftwareCursorScale = 1.0f;
+FAutoConsoleVariableRef CVarSoftwareCursorScale(
+	TEXT("Slate.SoftwareCursorScale"),
+	SoftwareCursorScale,
+	TEXT("Scale factor applied to the software cursor. Requires the cursor widget to be scale-aware."));
+
 static float TooltipSummonDelay = 0.15f;
 FAutoConsoleVariableRef CVarTooltipSummonDelay(
 	TEXT("Slate.TooltipSummonDelay"),
@@ -47,6 +55,12 @@ FAutoConsoleVariableRef CVarTooltipIntroDuration(
 	TEXT("Slate.TooltipIntroDuration"),
 	TooltipIntroDuration,
 	TEXT("How long it takes for a tooltip to animate into view, in seconds."));
+
+static float CursorSignificantMoveDetectionThreshold = 0.0;
+FAutoConsoleVariableRef CVarCursorSignificantMoveDetectionThreshold(
+	TEXT("Slate.CursorSignificantMoveDetectionThreshold"),
+	CursorSignificantMoveDetectionThreshold,
+	TEXT("The distance from previous cursor position above which the move will be considered significant (used to trigger the display of the tooltips)."));
 
 //////////////////////////////////////////////////////////////////////////
 // FSlateVirtualUserHandle
@@ -97,14 +111,33 @@ TSharedRef<FSlateUser> FSlateUser::Create(int32 InUserIndex, TSharedPtr<ICursor>
 	return MakeShareable(new FSlateUser(InUserIndex, InCursor));
 }
 
+TSharedRef<FSlateUser> FSlateUser::Create(FPlatformUserId InPlatformUserId, TSharedPtr<ICursor> InCursor)
+{
+	return MakeShareable(new FSlateUser(InPlatformUserId, InCursor));
+}
+
 FSlateUser::FSlateUser(int32 InUserIndex, TSharedPtr<ICursor> InCursor)
 	: UserIndex(InUserIndex)
 	, Cursor(InCursor)
 {
-	UE_LOG(LogSlate, Log, TEXT("New Slate User Created.  User Index %d, Is Virtual User: %d"), UserIndex, IsVirtualUser());
+	PlatformUser = FPlatformMisc::GetPlatformUserForUserIndex(InUserIndex);
+	UE_LOG(LogSlate, Log, TEXT("New Slate User Created. Platform User Id %d, User Index %d, Is Virtual User: %d"), PlatformUser.GetInternalId(), UserIndex, IsVirtualUser());
 
-	PointerPositionsByIndex.Add(FSlateApplication::CursorPointerIndex, FVector2D::ZeroVector);
-	PreviousPointerPositionsByIndex.Add(FSlateApplication::CursorPointerIndex, FVector2D::ZeroVector);
+	PointerPositionsByIndex.Add(FSlateApplication::CursorPointerIndex, FVector2f::ZeroVector);
+	PreviousPointerPositionsByIndex.Add(FSlateApplication::CursorPointerIndex, FVector2f::ZeroVector);
+}
+
+FSlateUser::FSlateUser(FPlatformUserId InPlatformUser, TSharedPtr<ICursor> InCursor)
+	: PlatformUser(InPlatformUser)
+	, Cursor(InCursor)
+{
+	// TODO: Remove this part, its backwards compatible for now
+	UserIndex = InPlatformUser.GetInternalId();
+	
+	UE_LOG(LogSlate, Log, TEXT("New Slate User Created.  Platform User Id %d,  Old User Index: %d  , Is Virtual User: %d"), PlatformUser.GetInternalId(), UserIndex, IsVirtualUser());
+	
+	PointerPositionsByIndex.Add(FSlateApplication::CursorPointerIndex, FVector2f::ZeroVector);
+	PreviousPointerPositionsByIndex.Add(FSlateApplication::CursorPointerIndex, FVector2f::ZeroVector);
 }
 
 FSlateUser::~FSlateUser()
@@ -129,12 +162,12 @@ bool FSlateUser::ShouldShowFocus(TSharedPtr<const SWidget> Widget) const
 
 bool FSlateUser::HasFocusedDescendants(TSharedRef<const SWidget> Widget) const
 {
-	return WeakFocusPath.IsValid() && WeakFocusPath.GetLastWidget().Pin() != Widget && WeakFocusPath.ContainsWidget(Widget);
+	return WeakFocusPath.IsValid() && WeakFocusPath.GetLastWidget().Pin() != Widget && WeakFocusPath.ContainsWidget(&Widget.Get());
 }
 
 bool FSlateUser::IsWidgetInFocusPath(TSharedPtr<const SWidget> Widget) const
 {
-	return Widget && WeakFocusPath.IsValid() && WeakFocusPath.ContainsWidget(Widget.ToSharedRef());
+	return Widget && WeakFocusPath.IsValid() && WeakFocusPath.ContainsWidget(Widget.Get());
 }
 
 bool FSlateUser::SetFocus(const TSharedRef<SWidget>& WidgetToFocus, EFocusCause ReasonFocusIsChanging)
@@ -352,7 +385,7 @@ void FSlateUser::SetCursorPosition(int32 PosX, int32 PosY)
 	SetPointerPosition(FSlateApplication::CursorPointerIndex, PosX, PosY);
 }
 
-void FSlateUser::SetCursorPosition(const FVector2D& NewCursorPos)
+void FSlateUser::SetCursorPosition(const UE::Slate::FDeprecateVector2DParameter& NewCursorPos)
 {
 	SetCursorPosition((int32)NewCursorPos.X, (int32)NewCursorPos.Y);
 }
@@ -361,40 +394,42 @@ void FSlateUser::SetPointerPosition(uint32 PointerIndex, int32 PosX, int32 PosY)
 {
 	if (Cursor && PointerIndex == FSlateApplication::CursorPointerIndex)
 	{
+		UE_LOG(LogSlate, Verbose, TEXT("SlateUser [%d] moving cursor @ (%d, %d)"), UserIndex, PosX, PosY );
+
 		Cursor->SetPosition(PosX, PosY);
 	}
 
-	UpdatePointerPosition(PointerIndex, FVector2D(PosX, PosY));
+	UpdatePointerPosition(PointerIndex, FVector2f(PosX, PosY));
 }
 
-void FSlateUser::SetPointerPosition(uint32 PointerIndex, const FVector2D& NewPointerPos)
+void FSlateUser::SetPointerPosition(uint32 PointerIndex, const UE::Slate::FDeprecateVector2DParameter& NewPointerPos)
 {
 	SetPointerPosition(PointerIndex, (int32)NewPointerPos.X, (int32)NewPointerPos.Y);
 }
 
-FVector2D FSlateUser::GetCursorPosition() const
+UE::Slate::FDeprecateVector2DResult FSlateUser::GetCursorPosition() const
 {
 	return GetPointerPosition(FSlateApplication::CursorPointerIndex);
 }
 
-FVector2D FSlateUser::GetPreviousCursorPosition() const
+UE::Slate::FDeprecateVector2DResult FSlateUser::GetPreviousCursorPosition() const
 {
 	return GetPreviousPointerPosition(FSlateApplication::CursorPointerIndex);
 }
 
-FVector2D FSlateUser::GetPointerPosition(uint32 PointerIndex) const
+UE::Slate::FDeprecateVector2DResult FSlateUser::GetPointerPosition(uint32 PointerIndex) const
 {
 	if (Cursor && PointerIndex == FSlateApplication::CursorPointerIndex)
 	{
-		return Cursor->GetPosition();
+		return UE::Slate::CastToVector2f(Cursor->GetPosition());
 	}
-	const FVector2D* FoundPosition = PointerPositionsByIndex.Find(PointerIndex);
-	return FoundPosition ? *FoundPosition : FVector2D::ZeroVector;
+	const FVector2f* FoundPosition = PointerPositionsByIndex.Find(PointerIndex);
+	return FoundPosition ? *FoundPosition : FVector2f::ZeroVector;
 }
 
-FVector2D FSlateUser::GetPreviousPointerPosition(uint32 PointerIndex) const
+UE::Slate::FDeprecateVector2DResult FSlateUser::GetPreviousPointerPosition(uint32 PointerIndex) const
 {
-	const FVector2D* FoundPosition = PreviousPointerPositionsByIndex.Find(PointerIndex);
+	const FVector2f* FoundPosition = PreviousPointerPositionsByIndex.Find(PointerIndex);
 	return FoundPosition ? *FoundPosition : GetPointerPosition(PointerIndex);
 }
 
@@ -406,7 +441,7 @@ bool FSlateUser::IsWidgetUnderCursor(TSharedPtr<const SWidget> Widget) const
 bool FSlateUser::IsWidgetUnderPointer(TSharedPtr<const SWidget> Widget, uint32 PointerIndex) const
 {
 	const FWeakWidgetPath* WidgetsUnderPointer = WidgetsUnderPointerLastEventByIndex.Find(PointerIndex);
-	return Widget && WidgetsUnderPointer && WidgetsUnderPointer->ContainsWidget(Widget.ToSharedRef());
+	return Widget && WidgetsUnderPointer && WidgetsUnderPointer->ContainsWidget(Widget.Get());
 }
 
 bool FSlateUser::IsWidgetUnderAnyPointer(TSharedPtr<const SWidget> Widget) const
@@ -415,7 +450,7 @@ bool FSlateUser::IsWidgetUnderAnyPointer(TSharedPtr<const SWidget> Widget) const
 	{
 		for (const auto& IndexPathPair : WidgetsUnderPointerLastEventByIndex)
 		{
-			if (IndexPathPair.Value.ContainsWidget(Widget.ToSharedRef()))
+			if (IndexPathPair.Value.ContainsWidget(Widget.Get()))
 			{
 				return true;
 			}
@@ -496,7 +531,7 @@ void FSlateUser::CancelDragDrop()
 	}
 }
 
-void FSlateUser::ShowTooltip(const TSharedRef<IToolTip>& InTooltip, const FVector2D& InLocation)
+void FSlateUser::ShowTooltip(const TSharedRef<IToolTip>& InTooltip, const UE::Slate::FDeprecateVector2DParameter& InLocation)
 {
 	CloseTooltip();
 
@@ -547,6 +582,10 @@ void FSlateUser::SetUserNavigationConfig(TSharedPtr<FNavigationConfig> InNavigat
 	{
 		InNavigationConfig->OnRegister();
 	}
+
+#if WITH_SLATE_DEBUGGING
+	FSlateApplication::Get().TryDumpNavigationConfig(UserNavigationConfig);
+#endif // WITH_SLATE_DEBUGGING
 }
 
 bool FSlateUser::IsTouchPointerActive(int32 TouchPointerIndex) const
@@ -570,7 +609,7 @@ void FSlateUser::DrawWindowlessDragDropContent(const TSharedRef<SWindow>& Window
 				DecoratorWidget->SetVisibility(EVisibility::HitTestInvisible);
 				DecoratorWidget->SlatePrepass(WindowRootScale);
 
-				FVector2D DragDropContentInWindowSpace = WindowToDraw->GetWindowGeometryInScreen().AbsoluteToLocal(DragDropContent->GetDecoratorPosition()) * WindowRootScale;
+				FVector2f DragDropContentInWindowSpace = WindowToDraw->GetWindowGeometryInScreen().AbsoluteToLocal(DragDropContent->GetDecoratorPosition()) * WindowRootScale;
 				const FGeometry DragDropContentGeometry = FGeometry::MakeRoot(DecoratorWidget->GetDesiredSize(), FSlateLayoutTransform(DragDropContentInWindowSpace));
 
 				DecoratorWidget->Paint(
@@ -598,10 +637,10 @@ void FSlateUser::DrawCursor(const TSharedRef<SWindow>& WindowToDraw, FSlateWindo
 			CursorWidget->SetVisibility(EVisibility::HitTestInvisible);
 			CursorWidget->SlatePrepass(WindowRootScale);
 
-			FVector2D CursorInScreen = GetCursorPosition();
-			FVector2D CursorPosInWindowSpace = WindowToDraw->GetWindowGeometryInScreen().AbsoluteToLocal(CursorInScreen) * WindowRootScale;
-			CursorPosInWindowSpace += (CursorWidget->GetDesiredSize() * -0.5);
-			const FGeometry CursorGeometry = FGeometry::MakeRoot(CursorWidget->GetDesiredSize(), FSlateLayoutTransform(CursorPosInWindowSpace));
+			FVector2f CursorInScreen = GetCursorPosition();
+			FVector2f CursorPosInWindowSpace = WindowToDraw->GetWindowGeometryInScreen().AbsoluteToLocal(CursorInScreen) * WindowRootScale;
+			CursorPosInWindowSpace += (CursorWidget->GetDesiredSize() * SoftwareCursorScale * -0.5);
+			const FGeometry CursorGeometry = FGeometry::MakeRoot(CursorWidget->GetDesiredSize() * SoftwareCursorScale, FSlateLayoutTransform(CursorPosInWindowSpace));
 
 			CursorWidget->Paint(
 				FPaintArgs(&WindowToDraw.Get(), WindowToDraw->GetHittestGrid(), WindowToDraw->GetPositionInScreen(), SlateApp.GetCurrentTime(), SlateApp.GetDeltaTime()),
@@ -646,20 +685,28 @@ bool FSlateUser::SynthesizeCursorMoveIfNeeded()
 
 		FSlateApplication& SlateApp = FSlateApplication::Get();
 		
-		const bool bHasHardwareCursor = SlateApp.GetPlatformCursor() == Cursor;
-		const TSet<FKey> EmptySet;
-		FPointerEvent SyntheticCursorMoveEvent(
-			GetUserIndex(),
-			FSlateApplication::CursorPointerIndex,
-			GetCursorPosition(),
-			GetPreviousCursorPosition(),
-			bHasHardwareCursor ? SlateApp.GetPressedMouseButtons() : EmptySet,
-			EKeys::Invalid,
-			0,
-			bHasHardwareCursor ? SlateApp.GetPlatformApplication()->GetModifierKeys() : FModifierKeysState());
+		FInputDeviceId InputDeviceId = IPlatformInputDeviceMapper::Get().GetPrimaryInputDeviceForUser(GetPlatformUserId());
+		
+		// The input device might be invalid if a split screen player has logged off but still has their controller plugged in
+		if (InputDeviceId.IsValid())
+		{			
+			const bool bHasHardwareCursor = SlateApp.GetPlatformCursor() == Cursor;
+			const TSet<FKey> EmptySet;
+			FPointerEvent SyntheticCursorMoveEvent(
+				InputDeviceId,
+				FSlateApplication::CursorPointerIndex,
+				GetCursorPosition(),
+				GetPreviousCursorPosition(),
+				bHasHardwareCursor ? SlateApp.GetPressedMouseButtons() : EmptySet,
+				EKeys::Invalid,
+				0,
+				bHasHardwareCursor ? SlateApp.GetPlatformApplication()->GetModifierKeys() : FModifierKeysState(),
+				UserIndex);
 
-		SlateApp.ProcessMouseMoveEvent(SyntheticCursorMoveEvent, true);
-		return true;
+			SlateApp.ProcessMouseMoveEvent(SyntheticCursorMoveEvent, true);
+			return true;
+
+		}		
 	}
 	return false;
 }
@@ -690,7 +737,7 @@ void FSlateUser::QueryCursor()
 	bQueryCursorRequested = false;
 
 	// The slate loading widget thread is not allowed to execute this code (it's unsafe to read the hittest grid in another thread)
-	if (bCanDrawCursor && Cursor && IsInGameThread())
+	if (bCanDrawCursor && Cursor && IsInGameThread() && FApp::CanEverRender())
 	{
 		SCOPE_CYCLE_COUNTER(STAT_SlateQueryCursor);
 
@@ -706,8 +753,8 @@ void FSlateUser::QueryCursor()
 		if (!CursorReply.IsEventHandled())
 		{
 			const bool bHasHardwareCursor = SlateApp.GetPlatformCursor() == Cursor;
-			const FVector2D CurrentCursorPosition = GetCursorPosition();
-			const FVector2D LastCursorPosition = GetPreviousCursorPosition();			
+			const FVector2f CurrentCursorPosition = GetCursorPosition();
+			const FVector2f LastCursorPosition = GetPreviousCursorPosition();			
 			
 			const TSet<FKey> EmptySet;
 			const FPointerEvent CursorEvent(
@@ -851,6 +898,12 @@ void FSlateUser::UpdateCursor()
 	{
 		QueryCursor();
 	}
+
+	const double MoveEpsilonSquared = CursorSignificantMoveDetectionThreshold * CursorSignificantMoveDetectionThreshold;
+	if (FVector2D::DistSquared(GetPreviousCursorPosition(), GetCursorPosition()) > MoveEpsilonSquared)
+	{
+		LastCursorSignificantMoveTime = FPlatformTime::Seconds();
+	}
 }
 
 void FSlateUser::ProcessCursorReply(const FCursorReply& CursorReply)
@@ -897,17 +950,31 @@ void FSlateUser::LockCursorInternal(const FWidgetPath& WidgetPath)
 	if (NativeWindow && NativeWindow->IsForegroundWindow())
 	{
 		// The last widget in the path should be the widget we are locking the cursor to
-		const FSlateRect SlateClipRect = WidgetPath.Widgets.Last().Geometry.GetLayoutBoundingRect();
+		FSlateRect SlateClipRect = WidgetPath.Widgets.Last().Geometry.GetLayoutBoundingRect();
 		LastComputedLockBounds = SlateClipRect;
 		LockingWidgetPath = WidgetPath;
 
 		// Generate a screen space clip rect based on the widget's geometry
 #if PLATFORM_DESKTOP
 		const bool bIsBorderlessGameWindow = NativeWindow->IsDefinitionValid() && NativeWindow->GetDefinition().Type == EWindowType::GameWindow && !NativeWindow->GetDefinition().HasOSWindowBorder;
-		const int32 ClipRectAdjustment = bIsBorderlessGameWindow ? 1 : 0;
+		const int32 ClipRectAdjustment = bIsBorderlessGameWindow ? 0 : 1;
 #else
 		const int32 ClipRectAdjustment = 0;
 #endif
+		// Screen space mapping scales everything. When viewport resolution doesn't match platform resolution, 
+		// this causes offset cursor hit-tests in fullscreen. Correct when capturing mouse as viewport widget may be smaller than screen in pixels.
+		if (FSlateApplication::Get().GetTransformFullscreenMouseInput() && !GIsEditor && NativeWindow->GetWindowMode() == EWindowMode::Fullscreen)
+		{
+			FDisplayMetrics CachedDisplayMetrics;
+			FSlateApplication::Get().GetCachedDisplayMetrics(CachedDisplayMetrics);
+			FVector2f DisplaySize = { (float)CachedDisplayMetrics.PrimaryDisplayWidth, (float)CachedDisplayMetrics.PrimaryDisplayHeight };
+			FVector2f DisplayDistortion = SlateClipRect.GetSize() / DisplaySize;
+
+			SlateClipRect.Left /= DisplayDistortion.X;
+			SlateClipRect.Top /= DisplayDistortion.Y;
+			SlateClipRect.Right /= DisplayDistortion.X;
+			SlateClipRect.Bottom /= DisplayDistortion.Y;
+		}
 
 		// Note: We round the upper left coordinate of the clip rect so we guarantee the rect is inside the geometry of the widget.  If we truncated when there is a half pixel we would cause the clip
 		// rect to be half a pixel larger than the geometry and cause the mouse to go outside of the geometry.
@@ -1010,13 +1077,13 @@ void FSlateUser::UpdatePointerPosition(const FPointerEvent& PointerEvent)
 	UpdatePointerPosition(PointerEvent.GetPointerIndex(), PointerEvent.GetScreenSpacePosition());
 }
 
-void FSlateUser::UpdatePointerPosition(uint32 PointerIndex, const FVector2D& Position)
+void FSlateUser::UpdatePointerPosition(uint32 PointerIndex, const FVector2f& Position)
 {
 	PointerPositionsByIndex.FindOrAdd(PointerIndex) = Position;
 	PreviousPointerPositionsByIndex.FindOrAdd(PointerIndex) = Position;
 }
 
-void FSlateUser::StartDragDetection(const FWidgetPath& PathToWidget, int32 PointerIndex, FKey DragButton, FVector2D StartLocation)
+void FSlateUser::StartDragDetection(const FWidgetPath& PathToWidget, int32 PointerIndex, FKey DragButton, UE::Slate::FDeprecateVector2DParameter StartLocation)
 {
 	DragStatesByPointerIndex.Add(PointerIndex, FDragDetectionState(PathToWidget, PointerIndex, DragButton, StartLocation));
 }
@@ -1025,7 +1092,7 @@ FWidgetPath FSlateUser::DetectDrag(const FPointerEvent& PointerEvent, float Drag
 {
 	if (FDragDetectionState* DragState = DragStatesByPointerIndex.Find(PointerEvent.GetPointerIndex()))
 	{
-		const FVector2D DragDelta = DragState->DragStartLocation - PointerEvent.GetScreenSpacePosition();
+		const FVector2f DragDelta = DragState->DragStartLocation - PointerEvent.GetScreenSpacePosition();
 		if (DragDelta.SizeSquared() > FMath::Square(DragTriggerDistance))
 		{
 			FWidgetPath DragDetectionPath = DragState->DetectDragForWidget.ToWidgetPath(FWeakWidgetPath::EInterruptedPathHandling::ReturnInvalid);
@@ -1127,7 +1194,10 @@ void FSlateUser::UpdateTooltip(const FMenuStack& MenuStack, bool bCanSpawnNewToo
 
 	SCOPE_CYCLE_COUNTER(STAT_SlateUpdateTooltip);
 
-	float DPIScaleFactor = 1.0f;
+	const double MotionLessDurationBeforeAllowingNewToolTip = 0.05;
+	bCanSpawnNewTooltip = bCanSpawnNewTooltip && bCanDrawCursor && (FPlatformTime::Seconds() - LastCursorSignificantMoveTime > MotionLessDurationBeforeAllowingNewToolTip);
+
+	float DPIScaleFactor = 1.0f; //todo: this value is never changed, we should investigate if it is necessary or not to handle it for the force field.
 	FWidgetPath WidgetsToQueryForTooltip;
 
 	const bool bCheckForTooltipChanges =
@@ -1238,11 +1308,19 @@ void FSlateUser::UpdateTooltip(const FMenuStack& MenuStack, bool bCanSpawnNewToo
 		}
 	}
 
-	FVector2D DesiredLocation = ActiveTooltipInfo.DesiredLocation;
+	FVector2f DesiredLocation = ActiveTooltipInfo.DesiredLocation;
 	if ((ActiveTooltip && !ActiveTooltip->IsInteractive()) || (NewTooltip && NewTooltip != ActiveTooltip))
 	{
-		// Keep track of where we want tooltips to be positioned
+		// New tooltips and non-interactive tooltips appear offset from the cursor position, and they follow the cursor as it moves.	
 		DesiredLocation = GetPreviousCursorPosition() + SlateDefs::TooltipOffsetFromMouse;
+
+		// Allow interactive tooltips to adjust the window location
+		if (NewTooltip && NewTooltip->IsInteractive() && !NewTooltipVisualizer.IsValid())
+		{
+			FVector2D DesiredLocation2d(DesiredLocation);
+			NewTooltip->OnSetInteractiveWindowLocation(DesiredLocation2d);
+			DesiredLocation = UE::Slate::CastToVector2f(DesiredLocation2d);
+		}
 	}
 
 	if (TooltipWindowPtr.IsValid())
@@ -1254,7 +1332,7 @@ void FSlateUser::UpdateTooltip(const FMenuStack& MenuStack, bool bCanSpawnNewToo
 	// Repel tooltip from a force field, if necessary
 	if (ForceFieldRect.IsSet())
 	{
-		FVector2D TooltipShift;
+		FVector2f TooltipShift;
 		TooltipShift.X = (ForceFieldRect->Right + SlateDefs::TooltipOffsetFromForceField.X) - DesiredLocation.X;
 		TooltipShift.Y = (ForceFieldRect->Bottom + SlateDefs::TooltipOffsetFromForceField.Y) - DesiredLocation.Y;
 
@@ -1277,6 +1355,9 @@ void FSlateUser::UpdateTooltip(const FMenuStack& MenuStack, bool bCanSpawnNewToo
 			}
 		}
 	}
+
+	// Update the desired location so that interactive tooltips can continue to target it in future frames even after the mouse moves away
+	ActiveTooltipInfo.DesiredLocation = DesiredLocation;
 
 	// The tool tip changed...
 	if (bTooltipChanged)
@@ -1309,7 +1390,7 @@ void FSlateUser::UpdateTooltip(const FMenuStack& MenuStack, bool bCanSpawnNewToo
 
 		// How long since the tooltip was summoned?
 		const double PlatformSeconds = FPlatformTime::Seconds();
-		const float TimeSinceSummon = PlatformSeconds - TooltipSummonDelay - ActiveTooltipInfo.SummonTime;
+		const float TimeSinceSummon = (float)(PlatformSeconds - TooltipSummonDelay - ActiveTooltipInfo.SummonTime);
 		const float TooltipOpacity = FMath::Clamp<float>(TimeSinceSummon / TooltipIntroDuration, 0.0f, 1.0f);
 
 		// Update window opacity
@@ -1317,12 +1398,12 @@ void FSlateUser::UpdateTooltip(const FMenuStack& MenuStack, bool bCanSpawnNewToo
 		TooltipWindow->SetOpacity(TooltipOpacity);
 
 		// How far tool tips should slide
-		const FVector2D SlideDistance(30.0f, 5.0f);
+		const FVector2f SlideDistance(30.0f, 5.0f);
 
 		// Apply steep inbound curve to the movement, so it looks like it quickly decelerating
 		const float SlideProgress = bAllowAnimations ? FMath::Pow(1.0f - TooltipOpacity, 3.0f) : 0.0f;
 
-		FVector2D WindowLocation = DesiredLocation + SlideProgress * SlideDistance;
+		FVector2f WindowLocation = DesiredLocation + SlideProgress * SlideDistance;
 		if (WindowLocation != TooltipWindow->GetPositionInScreen())
 		{
 			// already handled

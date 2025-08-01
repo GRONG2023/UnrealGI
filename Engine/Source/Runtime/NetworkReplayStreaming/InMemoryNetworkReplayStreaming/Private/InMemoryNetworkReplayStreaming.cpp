@@ -55,7 +55,7 @@ void FInMemoryNetworkReplayStreamer::StartStreaming(const FStartStreamingParamet
 		FileAr->SetIsSaving(Params.bRecord);
 		FileAr->SetIsLoading(!Params.bRecord);
 		HeaderAr.Reset(new FMemoryReader(FoundReplay->Header));
-		StreamerState = EStreamerState::Playback;
+		StreamerState = EReplayStreamerState::Playback;
 	}
 	else
 	{
@@ -77,7 +77,7 @@ void FInMemoryNetworkReplayStreamer::StartStreaming(const FStartStreamingParamet
 
 		OwningFactory->Replays.Add(CurrentStreamName, MoveTemp(NewReplay));
 		
-		StreamerState = EStreamerState::Recording;
+		StreamerState = EReplayStreamerState::Recording;
 	}
 
 	// Notify immediately
@@ -91,7 +91,7 @@ void FInMemoryNetworkReplayStreamer::StartStreaming(const FStartStreamingParamet
 
 void FInMemoryNetworkReplayStreamer::StopStreaming()
 {
-	if (StreamerState == EStreamerState::Recording)
+	if (StreamerState == EReplayStreamerState::Recording)
 	{
 		FInMemoryReplay* FoundReplay = GetCurrentReplayChecked();
 
@@ -108,7 +108,7 @@ void FInMemoryNetworkReplayStreamer::StopStreaming()
 	FileAr.Reset();
 
 	CurrentStreamName.Empty();
-	StreamerState = EStreamerState::Idle;
+	StreamerState = EReplayStreamerState::Idle;
 }
 
 FArchive* FInMemoryNetworkReplayStreamer::GetHeaderArchive()
@@ -123,7 +123,7 @@ FArchive* FInMemoryNetworkReplayStreamer::GetStreamingArchive()
 
 void FInMemoryNetworkReplayStreamer::UpdateTotalDemoTime(uint32 TimeInMS)
 {
-	check(StreamerState == EStreamerState::Recording);
+	check(StreamerState == EReplayStreamerState::Recording);
 
 	FInMemoryReplay* FoundReplay = GetCurrentReplayChecked();
 
@@ -132,7 +132,7 @@ void FInMemoryNetworkReplayStreamer::UpdateTotalDemoTime(uint32 TimeInMS)
 
 uint32 FInMemoryNetworkReplayStreamer::GetTotalDemoTime() const
 {
-	check(StreamerState != EStreamerState::Idle);
+	check(StreamerState != EReplayStreamerState::Idle);
 
 	const FInMemoryReplay* FoundReplay = GetCurrentReplayChecked();
 
@@ -144,7 +144,7 @@ bool FInMemoryNetworkReplayStreamer::IsDataAvailable() const
 	// Assumptions:
 	// 1. All streamer instances run on the same thread, not simultaneously
 	// 2. A recording DemoNetDriver will write either no frames or entire frames each time it ticks
-	return StreamerState == EStreamerState::Playback && FileAr.IsValid() && FileAr->Tell() < FileAr->TotalSize();
+	return StreamerState == EReplayStreamerState::Playback && FileAr.IsValid() && FileAr->Tell() < FileAr->TotalSize();
 }
 
 bool FInMemoryNetworkReplayStreamer::IsLive() const
@@ -337,7 +337,7 @@ FArchive* FInMemoryNetworkReplayStreamer::GetCheckpointArchive()
 	// If the archive is null, and the API is being used properly, the caller is writing a checkpoint...
 	if ( CheckpointAr.Get() == nullptr )
 	{
-		check(StreamerState != EStreamerState::Playback);
+		check(StreamerState != EReplayStreamerState::Playback);
 
 		UE_LOG(LogMemoryReplay, Log, TEXT("FInMemoryNetworkReplayStreamer::GetCheckpointArchive. Creating new checkpoint."));
 
@@ -347,7 +347,7 @@ FArchive* FInMemoryNetworkReplayStreamer::GetCheckpointArchive()
 		if (TimeBufferHintSeconds > 0.0f)
 		{
 			// Absolute time at which the buffer should start
-			const float BufferStartTimeMS = FoundReplay->StreamInfo.LengthInMS - (TimeBufferHintSeconds * 1000.0);
+			const uint32 BufferStartTimeMS = UE::LWC::FloatToIntCastChecked<uint32>(FoundReplay->StreamInfo.LengthInMS - (TimeBufferHintSeconds * 1000.0));
 
 			// Store the found checkpoint's time so that we can line up chunks with it
 			uint32 FoundCheckpointTime = 0;
@@ -369,7 +369,7 @@ FArchive* FInMemoryNetworkReplayStreamer::GetCheckpointArchive()
 
 			// Remove the checkpoints.
 			const int32 NumCheckpointsToRemove = FirstCheckpointIndexToKeep;
-			FoundReplay->Checkpoints.RemoveAt(0, NumCheckpointsToRemove, false);
+			FoundReplay->Checkpoints.RemoveAt(0, NumCheckpointsToRemove, EAllowShrinking::No);
 
 			// Always keep at least one chunk
 			int32 FirstChunkIndexToKeep = 0;
@@ -387,7 +387,7 @@ FArchive* FInMemoryNetworkReplayStreamer::GetCheckpointArchive()
 
 			// Remove the chunks.
 			const int32 NumChunksToRemove = FirstChunkIndexToKeep;
-			FoundReplay->StreamChunks.RemoveAt(0, NumChunksToRemove, false);
+			FoundReplay->StreamChunks.RemoveAt(0, NumChunksToRemove, EAllowShrinking::No);
 		}
 
 		// Save to a temporary checkpoint that will moved onto the replay's checkpoint list in FlushCheckpoint().
@@ -409,7 +409,7 @@ void FInMemoryNetworkReplayStreamer::FlushCheckpoint(const uint32 TimeInMS)
 	CheckpointAr.Reset();
 	
 	CheckpointCurrentlyBeingSaved.TimeInMS = TimeInMS;
-	CheckpointCurrentlyBeingSaved.StreamByteOffset = FileAr->Tell();
+	CheckpointCurrentlyBeingSaved.StreamByteOffset = IntCastChecked<uint32>(FileAr->Tell());
 
 	FInMemoryReplay* const FoundReplay = GetCurrentReplayChecked();
 
@@ -578,7 +578,7 @@ void FInMemoryReplayStreamArchive::Serialize(void* V, int64 Length)
 			return;
 		}
 
-		const int32 OffsetIntoChunk = Pos - CurrentChunk->StartIndex;
+		const int64 OffsetIntoChunk = Pos - CurrentChunk->StartIndex;
 		FMemory::Memcpy(V, CurrentChunk->Data.GetData() + OffsetIntoChunk, Length);
 
 		Pos += Length;
@@ -595,9 +595,8 @@ void FInMemoryReplayStreamArchive::Serialize(void* V, int64 Length)
 			return;
 		}
 
-		const int32 OffsetIntoChunk = Pos - CurrentChunk->StartIndex;
-		const int32 SpaceNeeded = Length - (CurrentChunk->Data.Num() - OffsetIntoChunk);
-
+		const int64 OffsetIntoChunk = Pos - CurrentChunk->StartIndex;
+		const int32 SpaceNeeded = IntCastChecked<int32>(Length - (CurrentChunk->Data.Num() - OffsetIntoChunk));
 		if (SpaceNeeded > 0)
 		{
 			CurrentChunk->Data.AddZeroed(SpaceNeeded);

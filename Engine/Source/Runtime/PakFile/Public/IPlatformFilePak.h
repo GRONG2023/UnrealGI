@@ -2,23 +2,61 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Containers/StringConv.h"
+#include "Containers/Ticker.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "GenericPlatform/GenericPlatformChunkInstall.h"
 #include "GenericPlatform/GenericPlatformFile.h"
-#include "Stats/Stats.h"
+#include "HAL/CriticalSection.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/UnrealMemory.h"
+#include "IO/IoContainerId.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Math/BigInt.h"
+#include "Math/NumericLimits.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AES.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/CompressionFlags.h"
+#include "Misc/DateTime.h"
+#include "Misc/Guid.h"
+#include "Misc/IEngineCrypto.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeLock.h"
 #include "Misc/ScopeRWLock.h"
-#include "Templates/UniquePtr.h"
-#include "Math/BigInt.h"
-#include "Misc/AES.h"
-#include "RSA.h"
 #include "Misc/SecureHash.h"
-#include "GenericPlatform/GenericPlatformChunkInstall.h"
+#include "RSA.h"
+#include "Serialization/Archive.h"
 #include "Serialization/MemoryImage.h"
+#include "Stats/Stats.h"
+#include "Stats/Stats2.h"
+#include "Templates/Function.h"
 #include "Templates/RefCounting.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "Templates/UnrealTemplate.h"
+#include "Trace/Detail/Channel.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 
 class FChunkCacheWorker;
+class FFileIoStore;
+class FFilePackageStoreBackend;
+class FOutputDevice;
 class IAsyncReadFileHandle;
+class IMappedFileHandle;
+namespace UE::PakFile::Private { class FPakFileDirectoryVisitorBase; }
+struct FIoContainerHeader;
 
 PAKFILE_API DECLARE_LOG_CATEGORY_EXTERN(LogPakFile, Log, All);
 DECLARE_FLOAT_ACCUMULATOR_STAT_EXTERN(TEXT("Total pak file read time"), STAT_PakFile_Read, STATGROUP_PakFile, PAKFILE_API);
@@ -72,10 +110,12 @@ struct FPakChunkSignatureCheckFailedData
 DECLARE_DELEGATE_RetVal_OneParam(bool, FFilenameSecurityDelegate, const TCHAR* /*InFilename*/);
 DECLARE_DELEGATE_ThreeParams(FPakCustomEncryptionDelegate, uint8* /*InData*/, uint32 /*InDataSize*/, FGuid /*InEncryptionKeyGuid*/);
 DECLARE_MULTICAST_DELEGATE_OneParam(FPakChunkSignatureCheckFailedHandler, const FPakChunkSignatureCheckFailedData&);
-DECLARE_MULTICAST_DELEGATE_OneParam(FPakMasterSignatureTableCheckFailureHandler, const FString&);
+DECLARE_MULTICAST_DELEGATE_OneParam(FPakPrincipalSignatureTableCheckFailureHandler, const FString&);
 /** Delegate which allows a project to configure Index Pruning.  This is a delegate instead of a config file because config files are loaded after the first PakFiles */
 DECLARE_DELEGATE_ThreeParams(FPakSetIndexSettings, bool& /* bKeepFullDirectory*/, bool& /* bValidatePruning */, bool& /* bDelayPruning */);
 
+UE_DEPRECATED("5.1", "Use FPakPrincipalSignatureTableCheckFailureHandler instead")
+typedef FPakPrincipalSignatureTableCheckFailureHandler FPakMasterSignatureTableCheckFailureHandler;
 /**
  * Struct which holds pak file info (version, index offset, hash value).
  */
@@ -241,6 +281,8 @@ struct FPakInfo
 					ANSICHAR* MethodString = &Methods[Index * CompressionMethodNameLen];
 					if (MethodString[0] != 0)
 					{
+						// Make sure if the file has garbage we don't read off in to lala land.
+						MethodString[CompressionMethodNameLen-1] = 0;
 						CompressionMethods.Add(FName(MethodString));
 					}
 				}
@@ -260,7 +302,7 @@ struct FPakInfo
 		}
 	}
 
-	uint8 GetCompressionMethodIndex(FName CompressionMethod)
+	int32 GetCompressionMethodIndex(FName CompressionMethod)
 	{
 		// look for existing method
 		for (uint8 Index = 0; Index < CompressionMethods.Num(); Index++)
@@ -279,9 +321,18 @@ struct FPakInfo
 		return CompressionMethods.Add(CompressionMethod);
 	}
 
-	FName GetCompressionMethod(uint8 Index) const
+	FName GetCompressionMethod(uint32 Index) const
 	{
 		return CompressionMethods[Index];
+	}
+	
+	TOptional<FName> TryGetCompressionMethod(uint32 Index) const
+	{
+		if (IntFitsIn<int32>(Index) == false)
+		{
+			return TOptional<FName>();
+		}
+		return (int32)Index >= CompressionMethods.Num() ? TOptional<FName>() : TOptional<FName>(CompressionMethods[(int32)Index]);
 	}
 };
 
@@ -624,6 +675,38 @@ FORCEINLINE FArchive& operator<<(FArchive& Ar, FPakEntryLocation& PakEntryLocati
 	return Ar;
 }
 
+
+class FPakFile;
+
+// Wrapper for a pointer to a shared pak reader archive that has been temporarily acquired. 
+class FSharedPakReader final 
+{
+	friend class FPakFile;
+
+	FArchive* Archive = nullptr;
+	FPakFile* PakFile = nullptr; // Pak file to return ownership to on destruction
+
+	PAKFILE_API FSharedPakReader(FArchive* InArchive, FPakFile* InPakFile);
+
+public:
+	PAKFILE_API ~FSharedPakReader();
+
+	FSharedPakReader(const FSharedPakReader& Other) = delete;
+	FSharedPakReader& operator=(const FSharedPakReader& Other) = delete;
+	PAKFILE_API FSharedPakReader(FSharedPakReader&& Other);
+	PAKFILE_API FSharedPakReader& operator=(FSharedPakReader&& Other);
+
+	explicit operator bool() const { return Archive != nullptr; }
+	bool operator==(nullptr_t) { return Archive == nullptr; }
+	bool operator!=(nullptr_t) { return Archive != nullptr; }
+	FArchive* operator->() { return Archive; }
+
+	
+	// USE WITH CARE, the FSharedPakReader must live longer than this reference to prevent the archive being used by another thread. Do not call on a temporary return value!
+	FArchive& GetArchive() { return *Archive; } 
+
+};
+
 /** Pak directory type mapping a filename to an FPakEntryLocation. */
 typedef TMap<FString, FPakEntryLocation> FPakDirectory;
 
@@ -637,7 +720,7 @@ struct FPakEntryPair
 /**
  * Pak file.
  */
-class PAKFILE_API FPakFile : FNoncopyable, public FRefCountBase, public IPakFile
+class FPakFile : FNoncopyable, public FRefCountBase, public IPakFile
 {
 public:
 	/** Index data that provides a map from the hash of a Filename to an FPakEntryLocation */
@@ -682,7 +765,13 @@ public:
 	};
 
 	/** Recreates the pak reader for each thread */
-	bool RecreatePakReaders(IPlatformFile* LowerLevel);
+	PAKFILE_API bool RecreatePakReaders(IPlatformFile* LowerLevel);
+
+	struct FArchiveAndLastAccessTime 
+	{
+		TUniquePtr<FArchive> Archive;
+		double LastAccessTime;
+	};
 
 private:
 	friend class FPakPlatformFile;
@@ -692,17 +781,19 @@ private:
 	FName PakFilenameName;
 	/** Archive to serialize the pak file from. */
 	TUniquePtr<class FChunkCacheWorker> Decryptor;
-	/** Map of readers assigned to threads. */
-	TMap<uint32, TUniquePtr<FArchive>> ReaderMap;
-	/** Critical section for accessing ReaderMap. */
-	FCriticalSection CriticalSection;
+	/** List of readers and when they were last used. */
+	TArray<FArchiveAndLastAccessTime> Readers;
+	/** How many readers have been loaned out and not yet returned. If this is >0 we should not destroy the decryptor. */
+	std::atomic<int32> CurrentlyUsedReaders = 0;
+	/** Critical section for accessing Readers. */
+	FCriticalSection ReadersCriticalSection;
 	/** Pak file info (trailer). */
 	FPakInfo Info;
 	/** Mount point. */
 	FString MountPoint;
 	/** Info on all files stored in pak. */
 	TArray<FPakEntry> Files;
-	/** Pak Index organized as a map of directories to support searches by path.  This Index is pruned at runtime of all FileNames and Paths that are not whitelisted in DirectoryIndexKeepFiles */
+	/** Pak Index organized as a map of directories to support searches by path.  This Index is pruned at runtime of all FileNames and Paths that are not allowed by DirectoryIndexKeepFiles */
 	FDirectoryIndex DirectoryIndex;
 #if ENABLE_PAKFILE_RUNTIME_PRUNING
 	/** Temporary-lifetime copy of the Pruned DirectoryIndex; all Pruned files have been removed form this copy.  This copy is used for validation that no queries are missing during runtime, and will be swapped into the DirectoryIndex when Pak Mounting is complete */
@@ -753,6 +844,11 @@ private:
 	/** Record of whether the pak file is still mounted, so PakPrecacher can reject requests to register it. */
 	bool bIsMounted;
 
+	TUniquePtr<FIoContainerHeader> IoContainerHeader;
+#if WITH_EDITOR
+	TUniquePtr<FIoContainerHeader> OptionalSegmentIoContainerHeader;
+#endif
+
 	static inline int32 CDECL CompareFilenameHashes(const void* Left, const void* Right)
 	{
 		const uint64* LeftHash = (const uint64*)Left;
@@ -768,9 +864,8 @@ private:
 		return 0;
 	}
 
-	FArchive* CreatePakReader(const TCHAR* Filename);
-	FArchive* CreatePakReader(IFileHandle& InHandle, const TCHAR* Filename);
-	FArchive* SetupSignedPakReader(FArchive* Reader, const TCHAR* Filename);
+	PAKFILE_API FArchive* CreatePakReader(IPlatformFile* LowerLevel, const TCHAR* Filename);
+	PAKFILE_API FArchive* SetupSignedPakReader(FArchive* Reader, const TCHAR* Filename);
 
 
 public:
@@ -794,7 +889,7 @@ public:
 	{
 		for (FFilenameIterator It(*this); It; ++It)
 		{
-			Visitor.Visit(*It.Filename(), false);
+			Visitor.CallShouldVisitAndVisit(*It.Filename(), false);
 		}
 	}
 
@@ -820,7 +915,7 @@ public:
 	* @param Filename Pak filename.
 	* @param bIsSigned true if the pak is signed
 	*/
-	FPakFile(const TCHAR* Filename, bool bIsSigned);
+	PAKFILE_API FPakFile(const TCHAR* Filename, bool bIsSigned);
 #endif
 
 	/**
@@ -830,7 +925,7 @@ public:
 	 * @param Filename Filename.
 	 * @param bIsSigned = true if the pak is signed.
 	 */
-	FPakFile(IPlatformFile* LowerLevel, const TCHAR* Filename, bool bIsSigned, bool bLoadIndex = true);
+	PAKFILE_API FPakFile(IPlatformFile* LowerLevel, const TCHAR* Filename, bool bIsSigned, bool bLoadIndex = true);
 
 	/**
 	 * Creates a pak file using the supplied archive.
@@ -838,12 +933,12 @@ public:
 	 * @param Archive	Pointer to the archive which contains the pak file data.
 	 */
 #if WITH_EDITOR
-	FPakFile(FArchive* Archive);
+	PAKFILE_API FPakFile(FArchive* Archive);
 #endif
 
 private:
 	/** Private destructor, use AddRef/Release instead */
-	virtual ~FPakFile();
+	PAKFILE_API virtual ~FPakFile();
 	friend class FRefCountBase;
 
 public:
@@ -863,7 +958,7 @@ public:
 	 *
 	 * @return true if this pak file has passed the initial signature checking phase
 	 */
-	bool PassedSignatureChecks() const;
+	PAKFILE_API bool PassedSignatureChecks() const;
 
 	/**
 	 * Gets pak filename.
@@ -885,17 +980,6 @@ public:
 	}
 
 	/**
-	 * Gets pak file index.
-	 *
-	 * @return Pak index.
-	 */
-	UE_DEPRECATED(4.26, "Use FPrunedFilenameIterator or FPakEntryIterator instead; the Index is now no longer necessarily a DirectoryIndex and in some cases requires a lock around Index use")
-	const TMap<FString, FPakDirectory>& GetIndex() const
-	{
-		return DirectoryIndex;
-	}
-
-	/**
 	 * Gets the number of files in this pak.
 	 */
 	virtual int32 GetNumFiles() const override
@@ -903,30 +987,24 @@ public:
 		return NumEntries;
 	}
 
-	UE_DEPRECATED(4.26, "Use GetPrunedFilenames instead")
-	void GetFilenames(TArray<FString>& OutFileList) const
-	{
-		return GetPrunedFilenames(OutFileList);
-	}
-
 	/** Returns the FullPath (includes Mount) Filename found in Pruned DirectoryIndex */
-	void GetPrunedFilenames(TArray<FString>& OutFileList) const;
-
-	UE_DEPRECATED(4.26, "Use GetPrunedFilenamesInChunk instead")
-	void GetFilenamesInChunk(const TArray<int32>& InChunkIDs, TArray<FString>& OutFileList) const
-	{
-		GetPrunedFilenamesInChunk(InChunkIDs, OutFileList);
-	}
+	PAKFILE_API void GetPrunedFilenames(TArray<FString>& OutFileList) const;
 
 	/** Returns the RelativePathFromMount Filename for every Filename found in the Pruned DirectoryIndex that points to a PakEntry in the given Chunk */
-	void GetPrunedFilenamesInChunk(const TArray<int32>& InChunkIDs, TArray<FString>& OutFileList) const;
+	PAKFILE_API void GetPrunedFilenamesInChunk(const TArray<int32>& InChunkIDs, TArray<FString>& OutFileList) const;
 
 	/**
 	 * Gets shared pak file archive for given thread.
 	 *
 	 * @return Pointer to pak file archive used to read data from pak.
 	 */
-	FArchive* GetSharedReader(IPlatformFile* LowerLevel);
+	PAKFILE_API FSharedPakReader GetSharedReader(IPlatformFile* LowerLevel);
+
+	// Return a shared pak reader. Should only be called from the FSharedPakReader's destructor.
+	PAKFILE_API void ReturnSharedReader(FArchive* SharedReader);
+
+	// Delete all readers that haven't been used in MaxAgeSeconds.
+	PAKFILE_API void ReleaseOldReaders(double MaxAgeSeconds);
 
 	/**
 	 * Finds an entry in the pak file matching the given filename.
@@ -941,7 +1019,7 @@ public:
 		Found,
 		FoundDeleted,
 	};
-	EFindResult Find(const FString& FullPath, FPakEntry* OutEntry) const;
+	PAKFILE_API EFindResult Find(const FString& FullPath, FPakEntry* OutEntry) const;
 
 	/**
 	 * Sets the pak file mount point.
@@ -965,10 +1043,16 @@ public:
 	}
 
 	template <class ContainerType>
-	UE_DEPRECATED(4.26, "Use FindPrunedFilesAtPath instead")
-	void FindFilesAtPath(ContainerType& OutFiles, const TCHAR* InPath, bool bIncludeFiles = true, bool bIncludeDirectories = false, bool bRecursive = false) const
+	UE_DEPRECATED(5.4, "Use version that takes a TArray<FString>& instead.")
+	void FindPrunedFilesAtPath(ContainerType& OutFiles, const TCHAR* InPath,
+		bool bIncludeFiles = true, bool bIncludeDirectories = false, bool bRecursive = false) const
 	{
-		FindPrunedFilesAtPath(OutFiles, InPath, bIncludeFiles, bIncludeDirectories, bRecursive);
+		TArray<FString> LocalFiles;
+		FindPrunedFilesAtPath(InPath, LocalFiles, bIncludeFiles, bIncludeDirectories, bRecursive);
+		for (FString& File : LocalFiles)
+		{
+			OutFiles.Add(File);
+		}
 	}
 
 	/**
@@ -977,47 +1061,14 @@ public:
 	 * A project can specify which FileNames and DirectoryNames can be marked to keep in the DirectoryIndex; see FPakFile::FIndexSettings and FPakFile::PruneDirectoryIndex
 	 * Returned paths are full paths (include the mount point)
 	 *
-	 * @param OutFiles List of files or folder matching search criteria.
 	 * @param InPath Path to look for files or folder at.
+	 * @param OutFiles List of files or folder matching search criteria.
 	 * @param bIncludeFiles If true OutFiles will include matching files.
 	 * @param bIncludeDirectories If true OutFiles will include matching folders.
 	 * @param bRecursive If true, sub-folders will also be checked.
 	 */
-	template <class ContainerType>
-	void FindPrunedFilesAtPath(ContainerType& OutFiles, const TCHAR* InPath, bool bIncludeFiles = true, bool bIncludeDirectories = false, bool bRecursive = false) const
-	{
-		// Make sure all directory names end with '/'.
-		FString Directory(InPath);
-		MakeDirectoryFromPath(Directory);
-
-		// Check the specified path is under the mount point of this pak file.
-		// The reverse case (MountPoint StartsWith Directory) is needed to properly handle
-		// pak files that are a subdirectory of the actual directory.
-		if (!Directory.StartsWith(MountPoint) && !MountPoint.StartsWith(Directory))
-		{
-			return;
-		}
-
-		FScopedPakDirectoryIndexAccess ScopeAccess(*this);
-#if ENABLE_PAKFILE_RUNTIME_PRUNING_VALIDATE
-		if (ShouldValidatePrunedDirectory())
-		{
-			TSet<FString> FullFoundFiles, PrunedFoundFiles;
-			FindFilesAtPathInIndex(DirectoryIndex, FullFoundFiles, Directory, bIncludeFiles, bIncludeDirectories, bRecursive);
-			FindFilesAtPathInIndex(PrunedDirectoryIndex, PrunedFoundFiles, Directory, bIncludeFiles, bIncludeDirectories, bRecursive);
-			ValidateDirectorySearch(FullFoundFiles, PrunedFoundFiles, InPath);
-
-			for (const FString& FoundFile : FullFoundFiles)
-			{
-				OutFiles.Add(FoundFile);
-			}
-		}
-		else
-#endif
-		{
-			FindFilesAtPathInIndex(DirectoryIndex, OutFiles, Directory, bIncludeFiles, bIncludeDirectories, bRecursive);
-		}
-	}
+	PAKFILE_API void FindPrunedFilesAtPath(const TCHAR* InPath, TArray<FString>& OutFiles,
+		bool bIncludeFiles = true, bool bIncludeDirectories = false, bool bRecursive = false) const;
 
 	/**
 	 * Finds a directory in pak file.
@@ -1025,12 +1076,6 @@ public:
 	 * @param InPath Directory path.
 	 * @return Pointer to a map with directory contents if the directory was found, NULL otherwise.
 	 */
-	UE_DEPRECATED(4.26, "Use FindPrunedDirectory instead and wrap the access with FScopedPakDirectoryIndexAccess; const FPakDirectory is no longer threadsafe.")
-	const FPakDirectory* FindDirectory(const TCHAR* InPath) const
-	{
-		return nullptr;
-	}
-
 	const FPakDirectory* FindPrunedDirectory(const TCHAR* InPath) const
 	{
 		// Caller holds FScopedPakDirectoryIndexAccess
@@ -1041,12 +1086,6 @@ public:
 		}
 
 		return FindPrunedDirectoryInternal(RelativePathFromMount);
-	}
-
-	UE_DEPRECATED(4.26, "Use DirectoryExistsInPruned instead.")
-	bool DirectoryExists(const TCHAR* InPath) const
-	{
-		return DirectoryExistsInPruned(InPath);
 	}
 
 	/**
@@ -1072,7 +1111,7 @@ public:
 	 *
 	 * @return true if the pak file is valid
 	 */
-	bool Check();
+	PAKFILE_API bool Check();
 
 	/** Base functionality for iterating over the DirectoryIndex. */
 	class FBaseIterator
@@ -1298,18 +1337,6 @@ public:
 		using FBaseIterator::Filename;
 	};
 
-	class FFileIterator : public FFilenameIterator
-	{
-	public:
-		UE_DEPRECATED(4.26, "FFileIterator is deprecated, use FFilenameIterator instead.  Note that FFilenameIterator will only iterate over the DirectoryIndexKeepFiles entries.")
-		FFileIterator(const FPakFile& InPakFile, bool bInIncludeDeleted = false)
-			: FFilenameIterator(InPakFile, bInIncludeDeleted)
-		{
-		}
-
-		using FFilenameIterator::Filename;
-	};
-
 	/**
 	 * Gets this pak file info.
 	 *
@@ -1356,7 +1383,7 @@ public:
 		}
 		else
 		{
-			FArchive* Reader = GetSharedReader(nullptr);
+			TUniquePtr<FArchive> Reader {CreatePakReader(nullptr, *GetFilename())};
 			Reader->Seek(PakEntry.Offset);
 			FPakEntry SerializedEntry;
 			SerializedEntry.Serialize(*Reader, GetInfo().Version);
@@ -1365,7 +1392,7 @@ public:
 	}
 
 	/** Hash the given full-path filename using the hash function used by FPakFiles, with the given FPakFile-specific seed, with version provided for legacy pak files that used different hash function */
-	static uint64 HashPath(const TCHAR* RelativePathFromMount, uint64 Seed, int32 PakFileVersion);
+	static PAKFILE_API uint64 HashPath(const TCHAR* RelativePathFromMount, uint64 Seed, int32 PakFileVersion);
 
 	/** Read a list of (Filename, FPakEntry) pairs from a provided enumeration, attempt to encode each one,
 	  * store each one in the appropriate given encoded and/or unencoded array, and populate the given
@@ -1387,16 +1414,16 @@ public:
 	  * @param PakFileVersion Version of the pakfile containing the index, to support legacy formats
 	  */
 	typedef TFunction<FPakEntryPair & ()> ReadNextEntryFunction;
-	static void EncodePakEntriesIntoIndex(int32 InNumEntries, const ReadNextEntryFunction& InReadNextEntry, const TCHAR* InPakFilename, const FPakInfo& InPakInfo, const FString& MountPoint,
+	static PAKFILE_API void EncodePakEntriesIntoIndex(int32 InNumEntries, const ReadNextEntryFunction& InReadNextEntry, const TCHAR* InPakFilename, const FPakInfo& InPakInfo, const FString& MountPoint,
 		int32& OutNumEncodedEntries, int32& OutNumDeletedEntries, uint64* OutPathHashSeed,
 		FDirectoryIndex* OutDirectoryIndex, FPathHashIndex* OutPathHashIndex, TArray<uint8>& OutEncodedPakEntries, TArray<FPakEntry>& OutNonEncodableEntries, TMap<uint64, FString>* InOutCollisionDetection,
 		int32 PakFileVersion);
 
 	/** Lookup the FPakEntryLocation stored in the given PathHashIndex, return nullptr if not found */
-	static const FPakEntryLocation* FindLocationFromIndex(const FString& FullPath, const FString& MountPoint, const FPathHashIndex& PathHashIndex, uint64 PathHashSeed, int32 PakFileVersion);
+	static PAKFILE_API const FPakEntryLocation* FindLocationFromIndex(const FString& FullPath, const FString& MountPoint, const FPathHashIndex& PathHashIndex, uint64 PathHashSeed, int32 PakFileVersion);
 
 	/** Lookup the FPakEntryLocation stored in the given DirectoryIndex, return nullptr if not found */
-	static const FPakEntryLocation* FindLocationFromIndex(const FString& FullPath, const FString& MountPoint, const FDirectoryIndex& DirectoryIndex);
+	static PAKFILE_API const FPakEntryLocation* FindLocationFromIndex(const FString& FullPath, const FString& MountPoint, const FDirectoryIndex& DirectoryIndex);
 
 	/**
 	  * Returns the FPakEntry pointed to by the given FPakEntryLocation inside the given EncodedPakEntries or Files
@@ -1404,7 +1431,7 @@ public:
 	  * If OutEntry is non-null, populates it with a copy of the FPakEntry found, or sets it to
 	  * an FPakEntry with SetDeleteRecord(true) if not found
 	  */
-	static EFindResult GetPakEntry(const FPakEntryLocation& FPakEntryLocation, FPakEntry* OutEntry, const TArray<uint8>& EncodedPakEntries, const TArray<FPakEntry>& Files, const FPakInfo& Info);
+	static PAKFILE_API EFindResult GetPakEntry(const FPakEntryLocation& FPakEntryLocation, FPakEntry* OutEntry, const TArray<uint8>& EncodedPakEntries, const TArray<FPakEntry>& Files, const FPakInfo& Info);
 
 	/**
 	 * Given a directory index, remove entries from it that are directed by ini to not have filenames kept at runtime.
@@ -1413,7 +1440,7 @@ public:
 	 * OutDirectoryIndex - If null, InOutDirectoryIndex will have pruned entries removed.  If non-null, InOutDirectoryIndex will not be modified, and PrunedDirectoryIndex will have kept values added.
 	 * MountPoint The mount point for the pak containing the index, used to provide the fullpath for filenames in the DirectoryIndex for comparison against paths in ini
 	 */
-	static void PruneDirectoryIndex(FDirectoryIndex& InOutDirectoryIndex, FDirectoryIndex* PrunedDirectoryIndex, const FString& MountPoint);
+	static PAKFILE_API void PruneDirectoryIndex(FDirectoryIndex& InOutDirectoryIndex, FDirectoryIndex* PrunedDirectoryIndex, const FString& MountPoint);
 
 	/* Helper function to modify the given string to append '/' at the end of path to normalize directory names for hash and string compares */
 	static void MakeDirectoryFromPath(FString& Path)
@@ -1480,7 +1507,7 @@ public:
 			if (InOutPath[InOutPath.Len() - 1] == TEXT('/'))
 			{
 				// The input was a Directory; remove the trailing / since we don't keep those on the CleanFilename
-				InOutPath.LeftChopInline(1, false /* bAllowShrinking */);
+				InOutPath.LeftChopInline(1, EAllowShrinking::No);
 			}
 
 			int32 Offset = 0;
@@ -1488,7 +1515,7 @@ public:
 			{
 				int32 FilenameStart = Offset + 1;
 				OutFilename = InOutPath.Mid(FilenameStart);
-				InOutPath.LeftInline(FilenameStart, false /* bAllowShrinking */); // The Parent Directory keeps the / at the end
+				InOutPath.LeftInline(FilenameStart, EAllowShrinking::No); // The Parent Directory keeps the / at the end
 			}
 			else
 			{
@@ -1541,63 +1568,64 @@ public:
 	}
 
 	/* Returns the global,const flag for whether the current process is allowing PakFiles to keep their entire DirectoryIndex (if it exists in the PakFile on disk) rather than pruning it */
-	static bool IsPakKeepFullDirectory();
+	static PAKFILE_API bool IsPakKeepFullDirectory();
 
 	/* Returns the global,const flag for whether UnrealPak should write a copy of the full PathHashIndex and Pruned DirectoryIndex to the PakFile */
-	static bool IsPakWritePathHashIndex();
+	static PAKFILE_API bool IsPakWritePathHashIndex();
 
 	/* Returns the global,const flag for whether UnrealPak should write a copy of the full DirectoryIndex to the PakFile */
-	static bool IsPakWriteFullDirectoryIndex();
+	static PAKFILE_API bool IsPakWriteFullDirectoryIndex();
 
 private:
 
 	/**
 	 * Initializes the pak file.
 	 */
-	void Initialize(FArchive* Reader, bool bLoadIndex = true);
+	PAKFILE_API void Initialize(FArchive& Reader, bool bLoadIndex = true);
 
 	/**
 	 * Loads and initializes pak file index.
 	 */
-	void LoadIndex(FArchive* Reader);
+	PAKFILE_API void LoadIndex(FArchive& Reader);
 
 	/**
 	  * Returns the FPakEntry pointed to by the given FPakEntryLocation, forwards to the static GetPakEntry with data from *this
 	  */
-	EFindResult GetPakEntry(const FPakEntryLocation& FPakEntryLocation, FPakEntry* OutEntry) const;
+	PAKFILE_API EFindResult GetPakEntry(const FPakEntryLocation& FPakEntryLocation, FPakEntry* OutEntry) const;
 
 	/** Helper class to read IndexSettings from project delegate and commandline */
 	struct FIndexSettings;
-	static FIndexSettings& GetIndexSettings();
+
+	static PAKFILE_API FIndexSettings& GetIndexSettings();
 
 	/**
 	  * Returns the global,const flag for whether the current process should run directory queries on both the DirectoryIndex and the Pruned DirectoryIndex and log an error if they don't match.
 	  * Validation only occurs until the first call to OptimizeMemoryUsageForMountedPaks, after which the Full DirectoryIndex is dropped and there is nothing left to Validate
 	  * Has the same effect as IsPakDelayPruning, plus the addition of the error for any mismatches.
 	  */
-	static bool IsPakValidatePruning();
+	static PAKFILE_API bool IsPakValidatePruning();
 	/**
 	 * Returns the global,const flag for whether the current process should keep a copy of the Full DirectoryIndex around until OptimizeMemoryUsageForMountedPaks is called, so that systems can run
 	 * directory queries against the full index until then.
 	 * Note that validation will still occur if IsPakValidatePruning is true.
 	 */
-	static bool IsPakDelayPruning();
+	static PAKFILE_API bool IsPakDelayPruning();
 
 #if ENABLE_PAKFILE_RUNTIME_PRUNING
 	/** Global flag for whether a Pak has indicated it needs Pruning */
-	static bool bSomePakNeedsPruning;
+	static PAKFILE_API bool bSomePakNeedsPruning;
 #endif
 
 	/**
 	  * Returns whether read accesses against the DirectoryIndex need to be guarded using this->DirectoryIndexLock.
 	  * Locking is not required if the pak is not going to be pruned or already has been; the DirectoryIndex is immutable after that point, and we can get a performance benefit by skipping the lock.
 	  */
-	bool RequiresDirectoryIndexLock() const;
+	PAKFILE_API bool RequiresDirectoryIndexLock() const;
 
 	/**
 	 * Returns whether the current Process IsPakValidatePruning and this PakFile has a Full DirectoryIndex and Pruned DirectoryIndex to validate.
 	 */
-	bool ShouldValidatePrunedDirectory() const;
+	PAKFILE_API bool ShouldValidatePrunedDirectory() const;
 
 	/**
 	  * Add the given (Filename,FPakEntryLocation) value into the provided indexes
@@ -1611,101 +1639,60 @@ private:
 	  * @param InOutCollisionDetection Optional parameter to detect hash collisions.  If present, the hashed filename will be check()'d for a collision against a different filename in InOutCollisionDetection, and will be added into InOutCollisionDetection
 	  * @param PakFileVersion Version of the pakfile containing the index, to support legacy formats
 	  */
-	static void AddEntryToIndex(const FString& Filename, const FPakEntryLocation& EntryLocation, const FString& MountPoint, uint64 PathHashSeed,
+	static PAKFILE_API void AddEntryToIndex(const FString& Filename, const FPakEntryLocation& EntryLocation, const FString& MountPoint, uint64 PathHashSeed,
 		FDirectoryIndex* DirectoryIndex, FPathHashIndex* PathHashIndex, TMap<uint64, FString>* CollisionDetection, int32 PakFileVersion);
 
 	/* Encodes a pak entry as an array of bytes into the given archive.  Returns true if encoding succeeded.  If encoding did not succeed, caller will need to store the InPakEntry in an unencoded list */
-	static bool EncodePakEntry(FArchive& Ar, const FPakEntry& InPakEntry, const FPakInfo& InInfo);
+	static PAKFILE_API bool EncodePakEntry(FArchive& Ar, const FPakEntry& InPakEntry, const FPakInfo& InInfo);
 
 	/* Decodes a bit-encoded pak entry from a pointer to the start of its encoded bytes into the given OutEntry */
-	static void DecodePakEntry(const uint8* SourcePtr, FPakEntry& OutEntry, const FPakInfo& InInfo);
+	static PAKFILE_API void DecodePakEntry(const uint8* SourcePtr, FPakEntry& OutEntry, const FPakInfo& InInfo);
 
 	/* Internal index loading function that returns false if index loading fails due to an intermittent IO error. Allows LoadIndex to retry or throw a fatal as required */
-	bool LoadIndexInternal(FArchive* Reader);
+	PAKFILE_API bool LoadIndexInternal(FArchive& Reader);
 
 	/* Legacy index loading function for PakFiles saved before FPakInfo::PakFile_Version_PathHashIndex */
-	bool LoadLegacyIndex(FArchive* Reader);
+	PAKFILE_API bool LoadLegacyIndex(FArchive& Reader);
 
 	/* Helper function for LoadIndexInternal; each array of Index bytes read from the file needs to be independently decrypted and checked for corruption */
-	bool DecryptAndValidateIndex(FArchive* Reader, TArray<uint8>& IndexData, FSHAHash& InExpectedHash, FSHAHash& OutActualHash);
+	PAKFILE_API bool DecryptAndValidateIndex(FArchive& Reader, TArray<uint8>& IndexData, FSHAHash& InExpectedHash, FSHAHash& OutActualHash);
 
 	/* Manually add a file to a pak file */
-	void AddSpecialFile(const FPakEntry& Entry, const FString& Filename);
+	PAKFILE_API void AddSpecialFile(const FPakEntry& Entry, const FString& Filename);
+
+	template <typename ShouldVisitFunc, class ContainerType>
+	void FindPrunedFilesAtPathInternal(const TCHAR* InPath, const ShouldVisitFunc& ShouldVisit, ContainerType& OutFiles,
+		bool bIncludeFiles = true, bool bIncludeDirectories = false, bool bRecursive = false) const;
 
 	/**
 	 * Search the given FDirectoryIndex for all files under the given Directory.  Helper for FindFilesAtPath, called separately on the DirectoryIndex or Pruned DirectoryIndex. Does not use
 	 * FScopedPakDirectoryIndexAccess internally; caller is responsible for calling from within a lock.
 	 * Returned paths are full paths (include the mount point)
 	 */
-	template <class ContainerType>
-	void FindFilesAtPathInIndex(const FDirectoryIndex& TargetIndex, ContainerType& OutFiles, const FString& Directory, bool bIncludeFiles = true, bool bIncludeDirectories = false, bool bRecursive = false) const
-	{
-		TArray<FString> DirectoriesInPak; // List of all unique directories at path
-		for (TMap<FString, FPakDirectory>::TConstIterator It(TargetIndex); It; ++It)
-		{
-			const FString PakPath(PakPathCombine(MountPoint, It.Key()));
-			// Check if the file is under the specified path.
-			if (PakPath.StartsWith(Directory))
-			{
-				if (bRecursive == true)
-				{
-					// Add everything
-					if (bIncludeFiles)
-					{
-						for (FPakDirectory::TConstIterator DirectoryIt(It.Value()); DirectoryIt; ++DirectoryIt)
-						{
-							OutFiles.Add(PakPathCombine(PakPath, DirectoryIt.Key()));
-						}
-					}
-					if (bIncludeDirectories)
-					{
-						if (Directory != PakPath)
-						{
-							DirectoriesInPak.Add(PakPath);
-						}
-					}
-				}
-				else
-				{
-					int32 SubDirIndex = PakPath.Len() > Directory.Len() ? PakPath.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromStart, Directory.Len() + 1) : INDEX_NONE;
-					// Add files in the specified folder only.
-					if (bIncludeFiles && SubDirIndex == INDEX_NONE)
-					{
-						for (FPakDirectory::TConstIterator DirectoryIt(It.Value()); DirectoryIt; ++DirectoryIt)
-						{
-							OutFiles.Add(PakPathCombine(PakPath, DirectoryIt.Key()));
-						}
-					}
-					// Add sub-folders in the specified folder only
-					if (bIncludeDirectories && SubDirIndex >= 0)
-					{
-						DirectoriesInPak.AddUnique(PakPath.Left(SubDirIndex + 1));
-					}
-				}
-			}
-		}
-		OutFiles.Append(DirectoriesInPak);
-	}
+	template <typename ShouldVisitFunc, class ContainerType>
+	void FindFilesAtPathInIndex(const FDirectoryIndex& TargetIndex, ContainerType& OutFiles, const FString& Directory,
+		const ShouldVisitFunc& ShouldVisit, bool bIncludeFiles = true, bool bIncludeDirectories = false,
+		bool bRecursive = false) const;
 
 	/** Converts the path to a RelativePathFromMount and normalizes it to the expected format for Pak Directories.  Returns false if Path is not under the MountDir and hence can not be in this PakFile. */
-	bool NormalizeDirectoryQuery(const TCHAR* InPath, FString& OutRelativePathFromMount) const;
+	PAKFILE_API bool NormalizeDirectoryQuery(const TCHAR* InPath, FString& OutRelativePathFromMount) const;
 
 	/**
 	 * Looks up the given Normalized RelativePath in the Pruned DirectoryIndex and returns the directory if found.
 	 * Validates the result if IsPakValidatePruning. Does not use a critical section; caller is responsible for calling from within an FScopedPakDirectoryIndexAccess
 	 */
-	const FPakDirectory* FindPrunedDirectoryInternal(const FString& RelativePathFromMount) const;
+	PAKFILE_API const FPakDirectory* FindPrunedDirectoryInternal(const FString& RelativePathFromMount) const;
 
 #if ENABLE_PAKFILE_RUNTIME_PRUNING_VALIDATE
 	/* Logs an error if the two sets are not identical after removing all config-specified ignore paths */
-	void ValidateDirectorySearch(const TSet<FString>& FoundFullFiles, const TSet<FString>& PrunedFoundFiles, const TCHAR* InPath) const;
+	PAKFILE_API void ValidateDirectorySearch(const TSet<FString>& FoundFullFiles, const TSet<FString>& PrunedFoundFiles, const TCHAR* InPath) const;
 #endif
 };
 
 /**
  * Placeholder Class
  */
-class PAKFILE_API FPakNoEncryption
+class FPakNoEncryption
 {
 public:
 	enum 
@@ -1727,10 +1714,10 @@ public:
 /**
  * Typedef for a function that returns an archive to use for accessing an underlying pak file
  */
-typedef TFunction<FArchive*()> TAcquirePakReaderFunction;
+typedef TFunction<FSharedPakReader()> TAcquirePakReaderFunction;
 
 template< typename EncryptionPolicy = FPakNoEncryption >
-class PAKFILE_API FPakReaderPolicy
+class FPakReaderPolicy
 {
 public:
 	/** Pak file that own this file data */
@@ -1761,7 +1748,7 @@ public:
 		const constexpr int64 Alignment = (int64)EncryptionPolicy::Alignment;
 		const constexpr int64 AlignmentMask = ~(Alignment - 1);
 		uint8 TempBuffer[Alignment];
-		FArchive* PakReader = AcquirePakReader();
+		FSharedPakReader PakReader = AcquirePakReader();
 		if (EncryptionPolicy::AlignReadRequest(DesiredPosition) != DesiredPosition)
 		{
 			int64 Start = DesiredPosition & AlignmentMask;
@@ -1800,10 +1787,8 @@ public:
  * File handle to read from pak file.
  */
 template< typename ReaderPolicy = FPakReaderPolicy<> >
-class PAKFILE_API FPakFileHandle : public IFileHandle
-{	
-	/** True if PakReader is shared and should not be deleted by this handle. */
-	const bool bSharedReader;
+class FPakFileHandle : public IFileHandle
+{
 	/** Current read position. */
 	int64 ReadPos;
 	/** Class that controls reading from pak file */
@@ -1813,12 +1798,6 @@ class PAKFILE_API FPakFileHandle : public IFileHandle
 
 public:
 
-	UE_DEPRECATED(4.27, "Use constructor that takes a TRefCountPtr<FPakFile> instead")
-	FPakFileHandle(const FPakFile& InPakFile, const FPakEntry& InPakEntry, TAcquirePakReaderFunction& InAcquirePakReaderFunction, bool bIsSharedReader)
-		: FPakFileHandle(TRefCountPtr<const FPakFile>(&InPakFile), InPakEntry, InAcquirePakReaderFunction, bIsSharedReader)
-	{
-	}
-
 	/**
 	 * Constructs pak file handle to read from pak.
 	 *
@@ -1826,19 +1805,12 @@ public:
 	 * @param InPakEntry Entry in the pak file.
 	 * @param InAcquirePakReaderFunction Function that returns the archive to use for serialization. The result of this should not be cached, but reacquired on each serialization operation
 	 */
-	FPakFileHandle(const TRefCountPtr<const FPakFile>& InPakFile, const FPakEntry& InPakEntry, TAcquirePakReaderFunction& InAcquirePakReaderFunction, bool bIsSharedReader)
-		: bSharedReader(bIsSharedReader)
-		, ReadPos(0)
+	FPakFileHandle(const TRefCountPtr<const FPakFile>& InPakFile, const FPakEntry& InPakEntry, TAcquirePakReaderFunction& InAcquirePakReaderFunction)
+		: ReadPos(0)
 		, Reader(*InPakFile, InPakEntry, InAcquirePakReaderFunction)
 		, PakFile(InPakFile)
 	{
 		INC_DWORD_STAT(STAT_PakFile_NumOpenHandles);
-	}
-
-	UE_DEPRECATED(4.27, "Use constructor that takes a TRefCountPtr<FPakFile> instead")
-	FPakFileHandle(const FPakFile& InPakFile, const FPakEntry& InPakEntry, FArchive* InPakReader, bool bIsSharedReader)
-		: FPakFileHandle(TRefCountPtr<const FPakFile>(&InPakFile), InPakEntry, InPakReader, bIsSharedReader)
-	{
 	}
 
 	/**
@@ -1848,10 +1820,9 @@ public:
 	 * @param InPakEntry Entry in the pak file.
 	 * @param InPakFile Pak file.
 	 */
-	FPakFileHandle(const TRefCountPtr<const FPakFile>& InPakFile, const FPakEntry& InPakEntry, FArchive* InPakReader, bool bIsSharedReader)
-		: bSharedReader(bIsSharedReader)
-		, ReadPos(0)
-		, Reader(*InPakFile, InPakEntry, [InPakReader]() { return InPakReader; })
+	FPakFileHandle(const TRefCountPtr<const FPakFile>& InPakFile, const FPakEntry& InPakEntry, FArchive* InPakReader)
+		: ReadPos(0)
+		, Reader(*InPakFile, InPakEntry, InPakReader)
 		, PakFile(InPakFile)
 	{
 		INC_DWORD_STAT(STAT_PakFile_NumOpenHandles);
@@ -1862,11 +1833,6 @@ public:
 	 */
 	virtual ~FPakFileHandle()
 	{
-		if (!bSharedReader)
-		{
-			delete Reader.AcquirePakReader();
-		}
-
 		DEC_DWORD_STAT(STAT_PakFile_NumOpenHandles);
 	}
 
@@ -1896,9 +1862,9 @@ public:
 		if (!Reader.PakEntry.Verified)
 		{
 			FPakEntry FileHeader;
-			FArchive* PakReader = Reader.AcquirePakReader();
+			FSharedPakReader PakReader = Reader.AcquirePakReader();
 			PakReader->Seek(Reader.PakEntry.Offset);
-			FileHeader.Serialize(*PakReader, Reader.PakFile.GetInfo().Version);
+			FileHeader.Serialize(PakReader.GetArchive(), Reader.PakFile.GetInfo().Version);
 			if (FPakEntry::VerifyPakEntriesMatch(Reader.PakEntry, FileHeader))
 			{
 				Reader.PakEntry.Verified = true;
@@ -1947,7 +1913,7 @@ public:
 /**
  * Platform file wrapper to be able to use pak files.
  **/
-class PAKFILE_API FPakPlatformFile : public IPlatformFile
+class FPakPlatformFile : public IPlatformFile
 {
 	struct FPakListEntry
 	{
@@ -1990,6 +1956,16 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 	FString IniFileExtension;
 	/** The filename for the gameusersettings ini file, used for excluding ini files, but not gameusersettings */
 	FString GameUserSettingsIniFilename;
+	TSharedPtr<FFileIoStore> IoDispatcherFileBackend;
+	TSharedPtr<FFilePackageStoreBackend> PackageStoreBackend;
+
+	FTSTicker::FDelegateHandle RetireReadersHandle;
+
+#if !UE_BUILD_SHIPPING
+	// if true (via -looklocalfirst) then loose/non-ufs files will be looked for before looking in the .pak file
+	// this respects IsNonPakFilenameAllowed()
+	bool bLookLooseFirst = false;
+#endif
 
 	/**
 	 * Gets mounted pak files
@@ -2000,36 +1976,13 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 		Paks.Append(PakFiles);
 	}
 
-	UE_DEPRECATED(4.26, "Use DirectoryExistsInPrunedPakFiles instead")
-	bool DirectoryExistsInPakFiles(const TCHAR* Directory)
-	{
-		return DirectoryExistsInPrunedPakFiles(Directory);
-	}
-
 	/**
 	 * Checks if a directory exists in one of the available pak files.
 	 *
 	 * @param Directory Directory to look for.
 	 * @return true if the directory exists, false otherwise.
 	 */
-	bool DirectoryExistsInPrunedPakFiles(const TCHAR* Directory)
-	{
-		FString StandardPath = Directory;
-		FPaths::MakeStandardFilename(StandardPath);
-
-		TArray<FPakListEntry> Paks;
-		GetMountedPaks(Paks);
-
-		// Check all pak files.
-		for (int32 PakIndex = 0; PakIndex < Paks.Num(); PakIndex++)
-		{
-			if (Paks[PakIndex].PakFile->DirectoryExistsInPruned(*StandardPath))
-			{
-				return true;
-			}
-		}
-		return false;
-	}
+	PAKFILE_API bool DirectoryExistsInPrunedPakFiles(const TCHAR* Directory);
 
 	/**
 	 * Helper function to copy a file from one handle to another usuing the supplied buffer.
@@ -2041,7 +1994,7 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 	 * @param BufferSize Sizeof of the buffer.
 	 * @return true if the operation was successfull, false otherwise.
 	 */
-	bool BufferedCopyFile(IFileHandle& Dest, IFileHandle& Source, const int64 FileSize, uint8* Buffer, const int64 BufferSize) const;
+	PAKFILE_API bool BufferedCopyFile(IFileHandle& Dest, IFileHandle& Source, const int64 FileSize, uint8* Buffer, const int64 BufferSize) const;
 
 	/**
 	 * Creates file handle to read from Pak file.
@@ -2051,29 +2004,23 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 	 * @param FileEntry File entry to create the handle for.
 	 * @return Pointer to the new handle.
 	 */
-	IFileHandle* CreatePakFileHandle(const TCHAR* Filename, const TRefCountPtr<FPakFile>& PakFile, const FPakEntry* FileEntry);
+	PAKFILE_API IFileHandle* CreatePakFileHandle(const TCHAR* Filename, const TRefCountPtr<FPakFile>& PakFile, const FPakEntry* FileEntry);
 
 	/**
 	* Hardcode default load ordering of game main pak -> game content -> engine content -> saved dir
 	* would be better to make this config but not even the config system is initialized here so we can't do that
 	*/
-	static int32 GetPakOrderFromPakFilePath(const FString& PakFilePath);
+	PAKFILE_API static int32 GetPakOrderFromPakFilePath(const FString& PakFilePath);
 
 	/**
 	 * Handler for device delegate to prompt us to load a new pak.	 
 	 */
-	IPakFile* HandleMountPakDelegate(const FString& PakFilePath, int32 PakOrder);
-
-	/**
-	 * Handler for device delegate to prompt us to load a new pak.
-	 */
-	UE_DEPRECATED(4.26, "Use HandleMountPakDelegate instead")
-	bool HandleOnMountPakDelegate(const FString& PakFilePath, int32 PakOrder, IPlatformFile::FDirectoryVisitor* Visitor);
+	PAKFILE_API IPakFile* HandleMountPakDelegate(const FString& PakFilePath, int32 PakOrder);
 
 	/**
 	 * Handler for device delegate to prompt us to unload a pak.
 	 */
-	bool HandleUnmountPakDelegate(const FString& PakFilePath);
+	PAKFILE_API bool HandleUnmountPakDelegate(const FString& PakFilePath);
 
 	/**
 	 * Finds all pak files in the given directory.
@@ -2081,14 +2028,14 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 	 * @param Directory Directory to (recursively) look for pak files in
 	 * @param OutPakFiles List of pak files
 	 */
-	static void FindPakFilesInDirectory(IPlatformFile* LowLevelFile, const TCHAR* Directory, const FString& WildCard, TArray<FString>& OutPakFiles);
+	PAKFILE_API static void FindPakFilesInDirectory(IPlatformFile* LowLevelFile, const TCHAR* Directory, const FString& WildCard, TArray<FString>& OutPakFiles);
 
 	/**
 	 * Finds all pak files in the known pak folders
 	 *
 	 * @param OutPakFiles List of all found pak files
 	 */
-	static void FindAllPakFiles(IPlatformFile* LowLevelFile, const TArray<FString>& PakFolders, const FString& WildCard, TArray<FString>& OutPakFiles);
+	PAKFILE_API static void FindAllPakFiles(IPlatformFile* LowLevelFile, const TArray<FString>& PakFolders, const FString& WildCard, TArray<FString>& OutPakFiles);
 
 	/**
 	 * When security is enabled, determine if this filename can be looked for in the lower level file system
@@ -2096,7 +2043,7 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 	 * @param InFilename			Filename to check
 	 * @param bAllowDirectories		Consider directories as valid filepaths?
 	 */
-	bool IsNonPakFilenameAllowed(const FString& InFilename);
+	PAKFILE_API bool IsNonPakFilenameAllowed(const FString& InFilename);
 
 	/**
 	 * Registers a new AES key with the given guid. Triggers the mounting of any pak files that we encountered that use that key
@@ -2104,7 +2051,15 @@ class PAKFILE_API FPakPlatformFile : public IPlatformFile
 	 * @param InEncryptionKeyGuid	Guid for this encryption key
 	 * @param InKey					Encryption key
 	 */
-	void RegisterEncryptionKey(const FGuid& InEncryptionKeyGuid, const FAES::FAESKey& InKey);
+	PAKFILE_API void RegisterEncryptionKey(const FGuid& InEncryptionKeyGuid, const FAES::FAESKey& InKey);
+
+	/**
+	 * Checks with any current chunk installation system if the given pak file is installed
+	 * 
+	 * @param InFilename  the pak filename to check
+	 * @return whether the pak file is installed
+	 */
+	PAKFILE_API static bool IsPakFileInstalled(const FString& InFilename);
 
 public:
 
@@ -2125,22 +2080,22 @@ public:
 	/**
 	 * Get the wild card pattern used to identify paks to load on startup
 	 */
-	static const TCHAR* GetMountStartupPaksWildCard();
+	PAKFILE_API static const TCHAR* GetMountStartupPaksWildCard();
 
 	/**
 	 * Overrides the wildcard used for searching paks. Call before initialization
 	 */
-	static void SetMountStartupPaksWildCard(const FString& WildCard);
+	PAKFILE_API static void SetMountStartupPaksWildCard(const FString& WildCard);
 
 	/**
 	* Determine location information for a given pakchunk index. Will be DoesNotExist if the pak file wasn't detected, NotAvailable if it exists but hasn't been mounted due to a missing encryption key, or LocalFast if it exists and has been mounted
 	*/
-	EChunkLocation::Type GetPakChunkLocation(int32 InPakchunkIndex) const;
+	PAKFILE_API EChunkLocation::Type GetPakChunkLocation(int32 InPakchunkIndex) const;
 
 	/**
 	* Returns true if any of the mounted or pending pak files are chunks (filenames starting pakchunkN)
 	*/
-	bool AnyChunksAvailable() const;
+	PAKFILE_API bool AnyChunksAvailable() const;
 
 	/**
 	* Get a list of all pak files which have been successfully mounted
@@ -2156,49 +2111,62 @@ public:
 	}
 
 	/**
+	* Get a list of all pak files which have been successfully mounted
+	*/
+	FORCEINLINE void GetMountedPakFilenames(TSet<FString>& PakFilenames)
+	{
+		FScopeLock ScopedLock(&PakListCritical);
+		PakFilenames.Empty(PakFiles.Num());
+		for (FPakListEntry& Entry : PakFiles)
+		{
+			PakFilenames.Add(Entry.PakFile->GetFilename());
+		}
+	}
+
+	/**
 	 * Checks if pak files exist in any of the known pak file locations.
 	 */
-	static bool CheckIfPakFilesExist(IPlatformFile* LowLevelFile, const TArray<FString>& PakFolders);
+	PAKFILE_API static bool CheckIfPakFilesExist(IPlatformFile* LowLevelFile, const TArray<FString>& PakFolders);
 
 	/**
 	 * Gets all pak file locations.
 	 */
-	static void GetPakFolders(const TCHAR* CmdLine, TArray<FString>& OutPakFolders);
+	PAKFILE_API static void GetPakFolders(const TCHAR* CmdLine, TArray<FString>& OutPakFolders);
 
 	/**
 	* Helper function for accessing pak encryption key
 	*/
-	static void GetPakEncryptionKey(FAES::FAESKey& OutKey, const FGuid& InEncryptionKeyGuid);
+	PAKFILE_API static void GetPakEncryptionKey(FAES::FAESKey& OutKey, const FGuid& InEncryptionKeyGuid);
 
 	/**
 	* Load a pak signature file. Validates the contents by comparing a SHA hash of the chunk table against and encrypted version that
 	* is stored within the file. Returns nullptr if the data is missing or fails the signature check. This function also calls
 	* the generic pak signature failure delegates if anything is wrong.
 	*/
-	static TSharedPtr<const struct FPakSignatureFile, ESPMode::ThreadSafe> GetPakSignatureFile(const TCHAR* InFilename);
+	PAKFILE_API static TSharedPtr<const struct FPakSignatureFile, ESPMode::ThreadSafe> GetPakSignatureFile(const TCHAR* InFilename);
 
 	/**
 	 * Remove the intenrally cached pointer to the signature file for the specified pak
 	 */
-	static void RemoveCachedPakSignaturesFile(const TCHAR* InFilename);
+	PAKFILE_API static void RemoveCachedPakSignaturesFile(const TCHAR* InFilename);
 
 	/**
 	 * Constructor.
 	 * 
 	 * @param InLowerLevel Wrapper platform file.
 	 */
-	FPakPlatformFile();
+	PAKFILE_API FPakPlatformFile();
 
 	/**
 	 * Destructor.
 	 */
-	virtual ~FPakPlatformFile();
+	PAKFILE_API virtual ~FPakPlatformFile();
 
-	virtual bool ShouldBeUsed(IPlatformFile* Inner, const TCHAR* CmdLine) const override;
-	virtual bool Initialize(IPlatformFile* Inner, const TCHAR* CommandLineParam) override;
-	virtual void InitializeNewAsyncIO() override;
+	PAKFILE_API virtual bool ShouldBeUsed(IPlatformFile* Inner, const TCHAR* CmdLine) const override;
+	PAKFILE_API virtual bool Initialize(IPlatformFile* Inner, const TCHAR* CommandLineParam) override;
+	PAKFILE_API virtual void InitializeNewAsyncIO() override;
 
-	void OptimizeMemoryUsageForMountedPaks();
+	PAKFILE_API void OptimizeMemoryUsageForMountedPaks();
 
 	virtual IPlatformFile* GetLowerLevel() override
 	{
@@ -2214,7 +2182,7 @@ public:
 		return FPakPlatformFile::GetTypeName();
 	}
 
-	void Tick() override;
+	PAKFILE_API void Tick() override;
 
 	/**
 	 * Mounts a pak file at the specified path.
@@ -2222,41 +2190,22 @@ public:
 	 * @param InPakFilename Pak filename.
 	 * @param InPath Path to mount the pak at.
 	 */
-	bool Mount(const TCHAR* InPakFilename, uint32 PakOrder, const TCHAR* InPath = NULL, bool bLoadIndex = true);
+	PAKFILE_API bool Mount(const TCHAR* InPakFilename, uint32 PakOrder, const TCHAR* InPath = nullptr, bool bLoadIndex = true, FPakListEntry* OutPakListEntry = nullptr);
 
-	bool Unmount(const TCHAR* InPakFilename);
+	PAKFILE_API bool Unmount(const TCHAR* InPakFilename);
 
-	int32 MountAllPakFiles(const TArray<FString>& PakFolders);
-	int32 MountAllPakFiles(const TArray<FString>& PakFolders, const FString& WildCard);
+	PAKFILE_API int32 MountAllPakFiles(const TArray<FString>& PakFolders);
+	PAKFILE_API int32 MountAllPakFiles(const TArray<FString>& PakFolders, const FString& WildCard);
 
 	/**
 	 * Re-creates all the pak readers
 	 */
-	bool ReloadPakReaders();
+	PAKFILE_API bool ReloadPakReaders();
 
 	/**
 	 * Make unique in memory pak files from a list of named files
 	 */
-	virtual void MakeUniquePakFilesForTheseFiles(const TArray<TArray<FString>>& InFiles);
-
-
-	/** Overload needed for deprecation; remove this when removing the version with a FPakFile** OutPakFile */
-	static bool FindFileInPakFiles(TArray<FPakListEntry>& Paks, const TCHAR* Filename, nullptr_t OutPakFile, FPakEntry* OutEntry = nullptr)
-	{
-		return FindFileInPakFiles(Paks, Filename, (TRefCountPtr<FPakFile>*) nullptr, OutEntry);
-	}
-
-	UE_DEPRECATED(4.27, "Use version with OutPakFile is a TRefCountPtr<FPakFile> instead")
-	static bool FindFileInPakFiles(TArray<FPakListEntry>& Paks, const TCHAR* Filename, FPakFile** OutPakFile, FPakEntry* OutEntry = nullptr)
-	{
-		TRefCountPtr<FPakFile> PakFile;
-		bool bResult = FindFileInPakFiles(Paks, Filename, &PakFile, OutEntry);
-		if (OutPakFile)
-		{
-			*OutPakFile = PakFile.GetReference();
-		}
-		return bResult;
-	}
+	PAKFILE_API virtual void MakeUniquePakFilesForTheseFiles(const TArray<TArray<FString>>& InFiles);
 
 	/**
 	 * Finds a file in the specified pak files.
@@ -2266,61 +2215,8 @@ public:
 	 * @param OutPakFile Optional pointer to a pak file where the filename was found.
 	 * @return Pointer to pak entry if the file was found, NULL otherwise.
 	 */
-	static bool FindFileInPakFiles(TArray<FPakListEntry>& Paks,const TCHAR* Filename,TRefCountPtr<FPakFile>* OutPakFile,FPakEntry* OutEntry = nullptr)
-	{
-		FString StandardFilename(Filename);
-		FPaths::MakeStandardFilename(StandardFilename);
-
-		int32 DeletedReadOrder = -1;
-
-		for (int32 PakIndex = 0; PakIndex < Paks.Num(); PakIndex++)
-		{
-			int32 PakReadOrder = Paks[PakIndex].ReadOrder;
-			if (DeletedReadOrder != -1 && DeletedReadOrder > PakReadOrder)
-			{
-				//found a delete record in a higher priority patch level, but now we're at a lower priority set - don't search further back or we'll find the original, old file.
-				UE_LOG( LogPakFile, Verbose, TEXT("Delete Record: Accepted a delete record for %s"), Filename );
-				return false;
-			}
-
-			FPakFile::EFindResult FindResult = Paks[PakIndex].PakFile->Find(StandardFilename, OutEntry);
-			if (FindResult == FPakFile::EFindResult::Found )
-			{
-				if (OutPakFile != NULL)
-				{
-					*OutPakFile = Paks[PakIndex].PakFile;
-				}
-				UE_CLOG( DeletedReadOrder != -1, LogPakFile, Verbose, TEXT("Delete Record: Ignored delete record for %s - found it in %s instead (asset was moved between chunks)"), Filename, *Paks[PakIndex].PakFile->GetFilename() );
-				return true;
-			}
-			else if (FindResult == FPakFile::EFindResult::FoundDeleted )
-			{
-				DeletedReadOrder = PakReadOrder;
-				UE_LOG( LogPakFile, Verbose, TEXT("Delete Record: Found a delete record for %s in %s"), Filename, *Paks[PakIndex].PakFile->GetFilename() );
-			}
-		}
-
-		UE_CLOG( DeletedReadOrder != -1, LogPakFile, Warning, TEXT("Delete Record: No lower priority pak files looking for %s. (maybe not downloaded?)"), Filename );
-		return false;
-	}
-
-	/** Overload needed for deprecation; remove this when removing the version with a FPakFile** OutPakFile */
-	bool FindFileInPakFiles(const TCHAR* Filename, nullptr_t OutPakFile, FPakEntry* OutEntry = nullptr)
-	{
-		return FindFileInPakFiles(Filename, (TRefCountPtr<FPakFile>*)nullptr, OutEntry);
-	}
-
-	UE_DEPRECATED(4.27, "Use version with OutPakFile is a TRefCountPtr<FPakFile> instead")
-	bool FindFileInPakFiles(const TCHAR* Filename, FPakFile** OutPakFile, FPakEntry* OutEntry = nullptr)
-	{
-		TRefCountPtr<FPakFile> PakFile;
-		bool bResult = FindFileInPakFiles(Filename, &PakFile, OutEntry);
-		if (OutPakFile)
-		{
-			*OutPakFile = PakFile.GetReference();
-		}
-		return bResult;
-	}
+	PAKFILE_API static bool FindFileInPakFiles(TArray<FPakListEntry>& Paks, const TCHAR* Filename,
+		TRefCountPtr<FPakFile>* OutPakFile, FPakEntry* OutEntry = nullptr);
 
 	/**
 	 * Finds a file in all available pak files.
@@ -2329,13 +2225,8 @@ public:
 	 * @param OutPakFile Optional pointer to a pak file where the filename was found.
 	 * @return Pointer to pak entry if the file was found, NULL otherwise.
 	 */
-	bool FindFileInPakFiles(const TCHAR* Filename, TRefCountPtr<FPakFile>* OutPakFile = nullptr, FPakEntry* OutEntry = nullptr)
-	{
-		TArray<FPakListEntry> Paks;
-		GetMountedPaks(Paks);
-
-		return FindFileInPakFiles(Paks, Filename, OutPakFile, OutEntry);
-	}
+	bool FindFileInPakFiles(const TCHAR* Filename, TRefCountPtr<FPakFile>* OutPakFile = nullptr,
+		FPakEntry* OutEntry = nullptr);
 
 	//~ Begin IPlatformFile Interface
 	virtual bool FileExists(const TCHAR* Filename) override
@@ -2561,395 +2452,38 @@ public:
 		}
 	}
 
-	virtual IFileHandle* OpenRead(const TCHAR* Filename, bool bAllowWrite = false) override;
-
-	virtual IFileHandle* OpenWrite(const TCHAR* Filename, bool bAppend = false, bool bAllowRead = false) override
+	virtual ESymlinkResult IsSymlink(const TCHAR* Filename) override
 	{
-		// No modifications allowed on pak files.
-		if (FindFileInPakFiles(Filename))
-		{
-			return nullptr;
-		}
-		// Use lower level to handle writing.
-		return LowerLevel->OpenWrite(Filename, bAppend, bAllowRead);
+		return LowerLevel->IsSymlink(Filename);
 	}
 
-	virtual bool DirectoryExists(const TCHAR* Directory) override
-	{
-		// Check pak files first.
-		if (DirectoryExistsInPrunedPakFiles(Directory))
-		{
-			return true;
-		}
-		// Directory does not exist in any of the pak files, continue searching using inner platform file.
-		bool Result = LowerLevel->DirectoryExists(Directory); 
-		return Result;
-	}
+	PAKFILE_API virtual IFileHandle* OpenRead(const TCHAR* Filename, bool bAllowWrite = false) override;
+	PAKFILE_API virtual IFileHandle* OpenWrite(const TCHAR* Filename, bool bAppend = false,
+		bool bAllowRead = false) override;
 
-	virtual bool CreateDirectory(const TCHAR* Directory) override
-	{
-		// Directories can be created only under the normal path
-		return LowerLevel->CreateDirectory(Directory);
-	}
+	PAKFILE_API virtual bool DirectoryExists(const TCHAR* Directory) override;
+	PAKFILE_API virtual bool CreateDirectory(const TCHAR* Directory) override;
+	PAKFILE_API virtual bool DeleteDirectory(const TCHAR* Directory) override;
+	PAKFILE_API virtual FFileStatData GetStatData(const TCHAR* FilenameOrDirectory) override;
+	PAKFILE_API virtual bool IterateDirectory(const TCHAR* Directory,
+		IPlatformFile::FDirectoryVisitor& Visitor) override;
+	PAKFILE_API virtual bool IterateDirectoryRecursively(const TCHAR* Directory,
+		IPlatformFile::FDirectoryVisitor& Visitor) override;
+	PAKFILE_API virtual bool IterateDirectoryStat(const TCHAR* Directory,
+		IPlatformFile::FDirectoryStatVisitor& Visitor) override;
+	PAKFILE_API virtual bool IterateDirectoryStatRecursively(const TCHAR* Directory,
+		IPlatformFile::FDirectoryStatVisitor& Visitor) override;
+	PAKFILE_API virtual void FindFiles(TArray<FString>& FoundFiles,
+		const TCHAR* Directory, const TCHAR* FileExtension) override;
+	PAKFILE_API virtual void FindFilesRecursively(TArray<FString>& FoundFiles,
+		const TCHAR* Directory, const TCHAR* FileExtension) override;
+	PAKFILE_API virtual bool DeleteDirectoryRecursively(const TCHAR* Directory) override;
+	PAKFILE_API virtual bool CreateDirectoryTree(const TCHAR* Directory) override;
 
-	virtual bool DeleteDirectory(const TCHAR* Directory) override
-	{
-		// Even if the same directory exists outside of pak files it will never
-		// get truly deleted from pak and will still be reported by Iterate functions.
-		// Fail in cases like this.
-		if (DirectoryExistsInPrunedPakFiles(Directory))
-		{
-			return false;
-		}
-		// Directory does not exist in pak files so it's safe to delete.
-		return LowerLevel->DeleteDirectory(Directory);
-	}
+	PAKFILE_API virtual bool CopyFile(const TCHAR* To, const TCHAR* From, EPlatformFileRead ReadFlags = EPlatformFileRead::None, EPlatformFileWrite WriteFlags = EPlatformFileWrite::None) override;
 
-	virtual FFileStatData GetStatData(const TCHAR* FilenameOrDirectory) override
-	{
-		// Check pak files first.
-		FPakEntry FileEntry;
-		TRefCountPtr<FPakFile> PakFile;
-		if (FindFileInPakFiles(FilenameOrDirectory, &PakFile, &FileEntry))
-		{
-			return FFileStatData(
-				PakFile->GetTimestamp(),
-				PakFile->GetTimestamp(),
-				PakFile->GetTimestamp(),
-				(FileEntry.CompressionMethodIndex != 0) ? FileEntry.UncompressedSize : FileEntry.Size,
-				false,	// IsDirectory
-				true	// IsReadOnly
-				);
-		}
-
-		// Then check pak directories
-		if (DirectoryExistsInPrunedPakFiles(FilenameOrDirectory))
-		{
-			FDateTime DirectoryTimeStamp = FDateTime::MinValue();
-			return FFileStatData(
-				DirectoryTimeStamp,
-				DirectoryTimeStamp,
-				DirectoryTimeStamp,
-				-1,		// FileSize
-				true,	// IsDirectory
-				true	// IsReadOnly
-				);
-		}
-
-		// Fall back to lower level.
-		FFileStatData FileStatData;
-		if (IsNonPakFilenameAllowed(FilenameOrDirectory))
-		{
-			FileStatData = LowerLevel->GetStatData(FilenameOrDirectory);
-		}
-
-		return FileStatData;
-	}
-
-	/**
-	 * Helper class to filter out files which have already been visited in one of the pak files.
-	 */
-	class FPreventDuplicatesVisitorBase
-	{
-	public:
-		/** Visited files. */
-		TSet<FString>& VisitedFiles;
-		FString NormalizedFilename;
-
-		FPreventDuplicatesVisitorBase(TSet<FString>& InVisitedFiles)
-			: VisitedFiles(InVisitedFiles)
-		{
-		}
-
-		bool CheckDuplicate(const TCHAR* FilenameOrDirectory)
-		{
-			NormalizedFilename.Reset();
-			NormalizedFilename.AppendChars(FilenameOrDirectory, TCString<TCHAR>::Strlen(FilenameOrDirectory));
-			FPaths::MakeStandardFilename(NormalizedFilename);
-			if (VisitedFiles.Contains(NormalizedFilename))
-			{
-				return true;
-			}
-			VisitedFiles.Add(NormalizedFilename);
-			return false;
-		}
-	};
-
-	class FPreventDuplicatesVisitor : public FPreventDuplicatesVisitorBase, public IPlatformFile::FDirectoryVisitor
-	{
-	public:
-		/** Wrapped visitor. */
-		FDirectoryVisitor& Visitor;
-
-		/** Constructor. */
-		FPreventDuplicatesVisitor(FDirectoryVisitor& InVisitor, TSet<FString>& InVisitedFiles)
-			: FPreventDuplicatesVisitorBase(InVisitedFiles)
-			, Visitor(InVisitor)
-		{}
-		virtual bool Visit(const TCHAR* FilenameOrDirectory, bool bIsDirectory)
-		{
-			if (CheckDuplicate(FilenameOrDirectory))
-			{
-				// Already visited, continue iterating.
-				return true;
-			}
-			return Visitor.Visit(*NormalizedFilename, bIsDirectory);
-		}
-	};
-
-	virtual bool IterateDirectory(const TCHAR* Directory, IPlatformFile::FDirectoryVisitor& Visitor) override
-	{
-		return IterateDirectoryInternal(Directory, Visitor, false /* bRecursive */);
-	}
-
-	bool IterateDirectoryInternal(const TCHAR* Directory, IPlatformFile::FDirectoryVisitor& Visitor, bool bRecursive)
-	{
-		TUniqueFunction<bool(const FString&, const FString&, bool, FPakFile&)> VisitFunction = [&Visitor](const FString& Filename, const FString& NormalizedFilename, bool bIsDir, FPakFile& PakFile)
-		{
-			return Visitor.Visit(*NormalizedFilename, bIsDir);
-		};
-		TSet<FString> FilesVisitedInPak;
-		bool Result = IterateDirectoryInternal(Directory, VisitFunction, bRecursive, FilesVisitedInPak);
-		if (Result && LowerLevel->DirectoryExists(Directory))
-		{
-			// Iterate inner filesystem but don't visit any files that were found in the Paks
-			FPreventDuplicatesVisitor PreventDuplicatesVisitor(Visitor, FilesVisitedInPak);
-			IPlatformFile::FDirectoryVisitor& LowerLevelVisitor(FilesVisitedInPak.Num() ? PreventDuplicatesVisitor : Visitor); // For performance, skip using PreventDuplicatedVisitor if there were no hits in pak
-			if (bRecursive)
-			{
-				Result = LowerLevel->IterateDirectoryRecursively(Directory, LowerLevelVisitor);
-			}
-			else
-			{
-				Result = LowerLevel->IterateDirectory(Directory, LowerLevelVisitor);
-			}
-		}
-		return Result;
-	}
-
-	bool IterateDirectoryInternal(const TCHAR* Directory, TUniqueFunction<bool(const FString&, const FString&, bool, FPakFile&)>& VisitFunction, bool bRecursive, TSet<FString>& FilesVisitedInPak)
-	{
-		bool Result = true;
-
-		TArray<FPakListEntry> Paks;
-		FString StandardDirectory = Directory;
-		FPaths::MakeStandardFilename(StandardDirectory);
-		
-		bool bIsDownloadableDir = (FPaths::HasProjectPersistentDownloadDir() && StandardDirectory.StartsWith(FPaths::ProjectPersistentDownloadDir())) || StandardDirectory.StartsWith(FPaths::CloudDir());
-
-		// don't look for in pak files for target-only locations
-		if (!bIsDownloadableDir)
-		{
-			GetMountedPaks(Paks);
-		}
-
-		// Iterate pak files first
-		FString NormalizationBuffer;
-		TSet<FString> FilesVisitedInThisPak;
-		for (int32 PakIndex = 0; PakIndex < Paks.Num(); PakIndex++)
-		{
-			FPakFile& PakFile = *Paks[PakIndex].PakFile;
-			
-			const bool bIncludeFiles = true;
-			const bool bIncludeFolders = true;
-
-			FilesVisitedInThisPak.Reset();
-			PakFile.FindPrunedFilesAtPath(FilesVisitedInThisPak, *StandardDirectory, bIncludeFiles, bIncludeFolders, bRecursive);
-			for (TSet<FString>::TConstIterator SetIt(FilesVisitedInThisPak); SetIt && Result; ++SetIt)
-			{
-				const FString& Filename = *SetIt;
-				bool bIsDir = Filename.Len() && Filename[Filename.Len() - 1] == '/';
-				const FString* NormalizedFilename;
-				if (bIsDir)
-				{
-					NormalizationBuffer.Reset(Filename.Len());
-					NormalizationBuffer.AppendChars(*Filename, Filename.Len()-1); // Chop off the trailing /
-					NormalizedFilename = &NormalizationBuffer;
-				}
-				else
-				{
-					NormalizedFilename = &Filename;
-				}
-				if (!FilesVisitedInPak.Contains(*NormalizedFilename))
-				{
-					FilesVisitedInPak.Add(*NormalizedFilename);
-					Result = VisitFunction(Filename, *NormalizedFilename, bIsDir, PakFile) && Result;
-				}
-			}
-		}
-		return Result;
-	}
-
-	virtual bool IterateDirectoryRecursively(const TCHAR* Directory, IPlatformFile::FDirectoryVisitor& Visitor) override
-	{
-		return IterateDirectoryInternal(Directory, Visitor, true /* bRecursive */);
-	}
-
-	class FPreventDuplicatesStatVisitor : public FPreventDuplicatesVisitorBase, public IPlatformFile::FDirectoryStatVisitor
-	{
-	public:
-		/** Wrapped visitor. */
-		FDirectoryStatVisitor& Visitor;
-
-		/** Constructor. */
-		FPreventDuplicatesStatVisitor(FDirectoryStatVisitor& InVisitor, TSet<FString>& InVisitedFiles)
-			: FPreventDuplicatesVisitorBase(InVisitedFiles)
-			, Visitor(InVisitor)
-		{}
-		virtual bool Visit(const TCHAR* FilenameOrDirectory, const FFileStatData& StatData)
-		{
-			if (CheckDuplicate(FilenameOrDirectory))
-			{
-				// Already visited, continue iterating.
-				return true;
-			}
-			return Visitor.Visit(*NormalizedFilename, StatData);
-		}
-	};
-
-	virtual bool IterateDirectoryStat(const TCHAR* Directory, IPlatformFile::FDirectoryStatVisitor& Visitor) override
-	{
-		return IterateDirectoryStatInternal(Directory, Visitor, false /* bRecursive */);
-	}
-
-	bool IterateDirectoryStatInternal(const TCHAR* Directory, IPlatformFile::FDirectoryStatVisitor& Visitor, bool bRecursive)
-	{
-		TUniqueFunction<bool(const FString&, const FString&, bool, FPakFile&)> VisitFunction = [&Visitor, this](const FString& Filename, const FString& NormalizedFilename, bool bIsDir, FPakFile& PakFile)
-		{
-			int64 FileSize = -1;
-			if (!bIsDir)
-			{
-				FPakEntry FileEntry;
-				if (FindFileInPakFiles(*Filename, nullptr, &FileEntry))
-				{
-					FileSize = (FileEntry.CompressionMethodIndex != 0) ? FileEntry.UncompressedSize : FileEntry.Size;
-				}
-			}
-
-			const FFileStatData StatData(
-				PakFile.GetTimestamp(),
-				PakFile.GetTimestamp(),
-				PakFile.GetTimestamp(),
-				FileSize,
-				bIsDir,
-				true	// IsReadOnly
-			);
-
-			return Visitor.Visit(*NormalizedFilename, StatData);
-		};
-
-		TSet<FString> FilesVisitedInPak;
-		bool Result = IterateDirectoryInternal(Directory, VisitFunction, bRecursive, FilesVisitedInPak);
-		if (Result && LowerLevel->DirectoryExists(Directory))
-		{
-			// Iterate inner filesystem but don't visit any files that were found in the Paks
-			FPreventDuplicatesStatVisitor PreventDuplicatesVisitor(Visitor, FilesVisitedInPak);
-			IPlatformFile::FDirectoryStatVisitor& LowerLevelVisitor(FilesVisitedInPak.Num() ? PreventDuplicatesVisitor : Visitor); // For performance, skip using PreventDuplicatedVisitor if there were no hits in pak
-			if (bRecursive)
-			{
-				Result = LowerLevel->IterateDirectoryStatRecursively(Directory, LowerLevelVisitor);
-			}
-			else
-			{
-				Result = LowerLevel->IterateDirectoryStat(Directory, LowerLevelVisitor);
-			}
-		}
-		return Result;
-	}
-
-	virtual bool IterateDirectoryStatRecursively(const TCHAR* Directory, IPlatformFile::FDirectoryStatVisitor& Visitor) override
-	{
-		return IterateDirectoryStatInternal(Directory, Visitor, true/* bRecursive */);
-	}
-
-	virtual void FindFiles(TArray<FString>& FoundFiles, const TCHAR* Directory, const TCHAR* FileExtension) override
-	{		
-		if (LowerLevel->DirectoryExists(Directory))
-		{
-			LowerLevel->FindFiles(FoundFiles, Directory, FileExtension);
-		}
-
-		bool bRecursive = false;
-		FindFilesInternal(FoundFiles, Directory, FileExtension, bRecursive);
-	}
-	
-	virtual void FindFilesRecursively(TArray<FString>& FoundFiles, const TCHAR* Directory, const TCHAR* FileExtension) override
-	{
-		if (LowerLevel->DirectoryExists(Directory))
-		{
-			LowerLevel->FindFilesRecursively(FoundFiles, Directory, FileExtension);
-		}
-		
-		bool bRecursive = true;
-		FindFilesInternal(FoundFiles, Directory, FileExtension, bRecursive);
-	}
-
-	void FindFilesInternal(TArray<FString>& FoundFiles, const TCHAR* Directory, const TCHAR* FileExtension, bool bRecursive)
-	{
-		TArray<FPakListEntry> Paks;
-		GetMountedPaks(Paks);
-		if (Paks.Num())
-		{
-			TSet<FString> FilesVisited;
-			FilesVisited.Append(FoundFiles);
-			
-			FString StandardDirectory = Directory;
-			FString FileExtensionStr = FileExtension;
-			FPaths::MakeStandardFilename(StandardDirectory);
-			bool bIncludeFiles = true;
-			bool bIncludeFolders = false;
-
-			TArray<FString> FilesInPak;
-			FilesInPak.Reserve(64);
-			for (int32 PakIndex = 0; PakIndex < Paks.Num(); PakIndex++)
-			{
-				FPakFile& PakFile = *Paks[PakIndex].PakFile;
-				PakFile.FindPrunedFilesAtPath(FilesInPak, *StandardDirectory, bIncludeFiles, bIncludeFolders, bRecursive);
-			}
-			
-			for (const FString& Filename : FilesInPak)
-			{
-				// filter out files by FileExtension
-				if (FileExtensionStr.Len())
-				{
-					if (!Filename.EndsWith(FileExtensionStr))
-					{
-						continue;
-					}
-				}
-								
-				// make sure we don't add duplicates to FoundFiles
-				bool bVisited = false;
-				FilesVisited.Add(Filename, &bVisited);
-				if (!bVisited)
-				{
-					FoundFiles.Add(Filename);
-				}
-			}
-		}
-	}
-
-	virtual bool DeleteDirectoryRecursively(const TCHAR* Directory) override
-	{
-		// Can't delete directories existing in pak files. See DeleteDirectory(..) for more info.
-		if (DirectoryExistsInPrunedPakFiles(Directory))
-		{
-			return false;
-		}
-		// Directory does not exist in pak files so it's safe to delete.
-		return LowerLevel->DeleteDirectoryRecursively(Directory);
-	}
-
-	virtual bool CreateDirectoryTree(const TCHAR* Directory) override
-	{
-		// Directories can only be created only under the normal path
-		return LowerLevel->CreateDirectoryTree(Directory);
-	}
-
-	virtual bool CopyFile(const TCHAR* To, const TCHAR* From, EPlatformFileRead ReadFlags = EPlatformFileRead::None, EPlatformFileWrite WriteFlags = EPlatformFileWrite::None) override;
-
-	virtual IAsyncReadFileHandle* OpenAsyncRead(const TCHAR* Filename) override;
-	virtual void SetAsyncMinimumPriority(EAsyncIOPriorityAndFlags Priority) override;
+	PAKFILE_API virtual IAsyncReadFileHandle* OpenAsyncRead(const TCHAR* Filename) override;
+	PAKFILE_API virtual void SetAsyncMinimumPriority(EAsyncIOPriorityAndFlags Priority) override;
 
 	virtual IMappedFileHandle* OpenMapped(const TCHAR* Filename) override;
 	/**
@@ -2995,80 +2529,90 @@ public:
 	//~ End IPlatformFile Interface
 
 	// Access static delegate for loose file security
-	static FFilenameSecurityDelegate& GetFilenameSecurityDelegate();
+	PAKFILE_API static FFilenameSecurityDelegate& GetFilenameSecurityDelegate();
 
 	// Access static delegate for custom encryption
-	static FPakCustomEncryptionDelegate& GetPakCustomEncryptionDelegate();
+	PAKFILE_API static FPakCustomEncryptionDelegate& GetPakCustomEncryptionDelegate();
 
 	struct FPakSigningFailureHandlerData
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
+		FCriticalSection& GetLock() { return Lock; }
+		FPakChunkSignatureCheckFailedHandler& GetPakChunkSignatureCheckFailedDelegate() { return ChunkSignatureCheckFailedDelegate; }
+		FPakPrincipalSignatureTableCheckFailureHandler& GetPrincipalSignatureTableCheckFailedDelegate() { return MasterSignatureTableCheckFailedDelegate; }
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+		UE_DEPRECATED("5.1", "Use GetLock instead")
 		FCriticalSection Lock;
+
+		UE_DEPRECATED("5.1", "Use GetPakChunkSignatureCheckFailedDelegate instead")
 		FPakChunkSignatureCheckFailedHandler ChunkSignatureCheckFailedDelegate;
-		FPakMasterSignatureTableCheckFailureHandler MasterSignatureTableCheckFailedDelegate;
+
+		UE_DEPRECATED("5.1", "Use GetPrincipalSignatureTableCheckFailureDelegate instead")
+		FPakPrincipalSignatureTableCheckFailureHandler MasterSignatureTableCheckFailedDelegate;
 	};
 
-	// Access static delegate for handling a pak signature check failure
-	static FPakSigningFailureHandlerData& GetPakSigningFailureHandlerData();
+	// Access static delegate for handling a Pak signature check failure
+	PAKFILE_API static FPakSigningFailureHandlerData& GetPakSigningFailureHandlerData();
 	
-	// Access static delegate for handling a pak signature check failure
-	UE_DEPRECATED(4.25, "GetPakChunkSignatureCheckFailedHandler is not thread safe, so please migrate to using GetPakSigningFailureHandlerData and locking the critical section around any use of the delegates")
-	static FPakChunkSignatureCheckFailedHandler& GetPakChunkSignatureCheckFailedHandler();
+	// Broadcast a signature check failure through any registered delegates in a thread safe way
+	PAKFILE_API static void BroadcastPakChunkSignatureCheckFailure(const FPakChunkSignatureCheckFailedData& InData);
 
-	// Access static delegate for handling a pak signature check failure
-	UE_DEPRECATED(4.25, "GetPakMasterSignatureTableCheckFailureHandler is not thread safe, so please migrate to using GetPakSigningFailureHandlerData and locking the critical section around any use of the delegates")
-	static FPakMasterSignatureTableCheckFailureHandler& GetPakMasterSignatureTableCheckFailureHandler();
+	// Broadcast a principal signature table failure through any registered delegates in a thread safe way
+	PAKFILE_API static void BroadcastPakPrincipalSignatureTableCheckFailure(const FString& InFilename);
 
-	// Broadacast a signature check failure through any registered delegates in a thread safe way
-	static void BroadcastPakChunkSignatureCheckFailure(const FPakChunkSignatureCheckFailedData& InData);
-
-	// Broadacast a master signature table failure through any registered delegates in a thread safe way
-	static void BroadcastPakMasterSignatureTableCheckFailure(const FString& InFilename);
+	UE_DEPRECATED("5.1", "Use BroadcastPakPrincipalSignatureTableCheckFailure instead")
+	PAKFILE_API static void BroadcastPakMasterSignatureTableCheckFailure(const FString& InFilename);
 
 	// Access static delegate for setting PakIndex settings.
-	static FPakSetIndexSettings& GetPakSetIndexSettingsDelegate();
-
-	UE_DEPRECATED(4.26, "Use GetPrunedFilenamesInChunk")
-	void GetFilenamesInChunk(const FString& InPakFilename, const TArray<int32>& InChunkIDs, TArray<FString>& OutFileList)
-	{
-		GetPrunedFilenamesInChunk(InPakFilename, InChunkIDs, OutFileList);
-	}
+	PAKFILE_API static FPakSetIndexSettings& GetPakSetIndexSettingsDelegate();
 
 	/* Get a list of RelativePathFromMount for every file in the given Pak that lives in any of the given chunks.  Only searches the Pruned DirectoryIndex */
-	void GetPrunedFilenamesInChunk(const FString& InPakFilename, const TArray<int32>& InChunkIDs, TArray<FString>& OutFileList);
-	UE_DEPRECATED(4.26, "Use GetPrunedFilenamesInPakFile")
-	void GetFilenamesInPakFile(const FString& InPakFilename, TArray<FString>& OutFileList)
-	{
-		GetPrunedFilenamesInPakFile(InPakFilename, OutFileList);
-	}
+	PAKFILE_API void GetPrunedFilenamesInChunk(const FString& InPakFilename, const TArray<int32>& InChunkIDs, TArray<FString>& OutFileList);
 
 	/** Gets a list of FullPaths (includes Mount directory) for every File in the given Pak's Pruned DirectoryIndex */
-	void GetPrunedFilenamesInPakFile(const FString& InPakFilename, TArray<FString>& OutFileList);
+	PAKFILE_API void GetPrunedFilenamesInPakFile(const FString& InPakFilename, TArray<FString>& OutFileList);
 
 	/** Returns the RelativePathFromMount Filename for every file found in the given Iostore Container */
-	static void GetFilenamesFromIostoreContainer(const FString& InContainerName, TArray<FString>& OutFileList);
+	PAKFILE_API static void GetFilenamesFromIostoreContainer(const FString& InContainerName, TArray<FString>& OutFileList);
 
 	/** Returns the RelativePathFromMount Filename for every Filename found in the Iostore Container that relates to the provided block indexes */
-	static void GetFilenamesFromIostoreByBlockIndex(const FString& InContainerName, const TArray<int32>& InBlockIndex, TArray<FString>& OutFileList);
+	PAKFILE_API static void GetFilenamesFromIostoreByBlockIndex(const FString& InContainerName, const TArray<int32>& InBlockIndex, TArray<FString>& OutFileList);
+
+	/** Iterates Iostore Container while Predicate returns true */
+	PAKFILE_API static void ForeachPackageInIostoreWhile(TFunctionRef<bool(FName)> Predicate);
+
+	PAKFILE_API void ReleaseOldReaders();
 
 	// BEGIN Console commands
 #if !UE_BUILD_SHIPPING
-	void HandlePakListCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	void HandleMountCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	void HandleUnmountCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	void HandlePakCorruptCommand(const TCHAR* Cmd, FOutputDevice& Ar);
-	void HandleReloadPakReadersCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	PAKFILE_API void HandlePakListCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	PAKFILE_API void HandleMountCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	PAKFILE_API void HandleUnmountCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	PAKFILE_API void HandlePakCorruptCommand(const TCHAR* Cmd, FOutputDevice& Ar);
+	PAKFILE_API void HandleReloadPakReadersCommand(const TCHAR* Cmd, FOutputDevice& Ar);
 #endif
 	// END Console commands
 	
 #if PAK_TRACKER
-	static TMap<FString, int32> GPakSizeMap;
-	static void TrackPak(const TCHAR* Filename, const FPakEntry* PakEntry);
+	PAKFILE_API static TMap<FString, int32> GPakSizeMap;
+	PAKFILE_API static void TrackPak(const TCHAR* Filename, const FPakEntry* PakEntry);
 	static TMap<FString, int32>& GetPakMap() { return GPakSizeMap; }
 #endif
 
 	// Internal cache of pak signature files
-	static TMap<FName, TSharedPtr<const struct FPakSignatureFile, ESPMode::ThreadSafe>> PakSignatureFileCache;
-	static FCriticalSection PakSignatureFileCacheLock;
+	PAKFILE_API static TMap<FName, TSharedPtr<const struct FPakSignatureFile, ESPMode::ThreadSafe>> PakSignatureFileCache;
+	PAKFILE_API static FCriticalSection PakSignatureFileCacheLock;
+
+private:
+	bool IterateDirectoryInternal(const TCHAR* Directory, IPlatformFile::FDirectoryVisitor& Visitor, bool bRecursive);
+	bool IterateDirectoryInPakFiles(const TCHAR* Directory,
+		UE::PakFile::Private::FPakFileDirectoryVisitorBase& Visitor, bool bRecursive,
+		TSet<FString>& FilesVisitedInPak);
+	bool IterateDirectoryStatInternal(const TCHAR* Directory,
+		IPlatformFile::FDirectoryStatVisitor& Visitor, bool bRecursive);
+	void FindFilesInternal(TArray<FString>& FoundFiles,
+		const TCHAR* Directory, const TCHAR* FileExtension, bool bRecursive);
 };
 
 /**
@@ -3110,7 +2654,7 @@ struct FPakSignatureFile
 	{
 		ChunkHashes = InChunkHashes;
 		SignatureData = InSignatureData;
-		DecryptedHash = ComputeCurrentMasterHash();
+		DecryptedHash = ComputeCurrentPrincipalHash();
 
 		TArray<uint8> NewSignatureData;
 		NewSignatureData.Append(SignatureData);
@@ -3155,7 +2699,7 @@ struct FPakSignatureFile
 			{
 				FMemory::Memcpy(DecryptedHash.Hash, SignatureData.GetData() + SignatureData.Num() - UE_ARRAY_COUNT(FSHAHash::Hash), UE_ARRAY_COUNT(FSHAHash::Hash));
 				SignatureData.SetNum(SignatureData.Num() - UE_ARRAY_COUNT(FSHAHash::Hash));
-				FSHAHash CurrentHash = ComputeCurrentMasterHash();
+				FSHAHash CurrentHash = ComputeCurrentPrincipalHash();
 				if (DecryptedHash == CurrentHash)
 				{
 					return true;
@@ -3171,17 +2715,23 @@ struct FPakSignatureFile
 			}
 		}
 
-		FPakPlatformFile::BroadcastPakMasterSignatureTableCheckFailure(InFilename);
+		FPakPlatformFile::BroadcastPakPrincipalSignatureTableCheckFailure(InFilename);
 		return false;
 	}
 
 	/**
 	 * Helper function for computing the SHA1 hash of the current chunk CRC array
 	 */
-	FSHAHash ComputeCurrentMasterHash() const
+	FSHAHash ComputeCurrentPrincipalHash() const
 	{
 		FSHAHash CurrentHash;
 		FSHA1::HashBuffer(ChunkHashes.GetData(), ChunkHashes.Num() * sizeof(TPakChunkHash), CurrentHash.Hash);
 		return CurrentHash;
+	}
+
+	UE_DEPRECATED("5.1", "Use ComputeCurrentPrincipalHash instead")
+	FSHAHash ComputeCurrentMasterHash() const
+	{
+		return ComputeCurrentPrincipalHash();
 	}
 };

@@ -4,6 +4,8 @@
 #include "GameplayTagsSettings.h"
 #include "Misc/ConfigCacheIni.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameplayTagRedirectors)
+
 FGameplayTagRedirectors& FGameplayTagRedirectors::Get()
 {
 	static FGameplayTagRedirectors Singleton;
@@ -16,11 +18,11 @@ FGameplayTagRedirectors::FGameplayTagRedirectors()
 
 	// Check the deprecated location
 	bool bFoundDeprecated = false;
-	FConfigSection* PackageRedirects = GConfig->GetSectionPrivate(TEXT("/Script/Engine.Engine"), false, true, GEngineIni);
+	const FConfigSection* PackageRedirects = GConfig->GetSection(TEXT("/Script/Engine.Engine"), false, GEngineIni);
 
 	if (PackageRedirects)
 	{
-		for (FConfigSection::TIterator It(*PackageRedirects); It; ++It)
+		for (FConfigSection::TConstIterator It(*PackageRedirects); It; ++It)
 		{
 			if (It.Key() == TEXT("+GameplayTagRedirects"))
 			{
@@ -118,3 +120,4 @@ const FGameplayTag* FGameplayTagRedirectors::RedirectTag(const FName& InTagName)
 
 	return nullptr;
 }
+

@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class LogVisualizer : ModuleRules
@@ -9,17 +10,10 @@ public class LogVisualizer : ModuleRules
         PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"DesktopPlatform",
-				"MainFrame",
-				"LevelEditor"
 			}
 		);
 
-		PublicIncludePaths.AddRange(
-			new string[] {
-				"Runtime/Engine/Classes",
-				"Editor/WorkspaceMenuStructure/Public"
-			}
-		);
+		PublicIncludePathModuleNames.Add("WorkspaceMenuStructure");
 
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
@@ -30,8 +24,9 @@ public class LogVisualizer : ModuleRules
 				"Json",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
+				
 				"Engine",
+				"EditorFramework",
 				"UnrealEd",
 			}
 		);

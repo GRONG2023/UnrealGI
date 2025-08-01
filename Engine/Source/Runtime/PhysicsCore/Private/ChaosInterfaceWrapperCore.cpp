@@ -30,22 +30,24 @@ namespace ChaosInterface
 	ECollisionShapeType GetImplicitType(const Chaos::FImplicitObject& InGeometry)
 	{
 		using namespace Chaos;
-		int32 ImplicitObjectType = GetInnerType(InGeometry.GetType());
+		int32 ResultObjectType = GetInnerType(InGeometry.GetType());
+		const Chaos::FImplicitObject* CurrentGeometry = &InGeometry;
 
-		if (ImplicitObjectType == ImplicitObjectType::Transformed)
+		while (CurrentGeometry && ResultObjectType == ImplicitObjectType::Transformed)
 		{
-			ImplicitObjectType = static_cast<const TImplicitObjectTransformed<FReal, 3>*>(&InGeometry)->Object()->GetType();
+			CurrentGeometry = static_cast<const TImplicitObjectTransformed<FReal, 3>*>(CurrentGeometry)->GetGeometry();
+			ResultObjectType = GetInnerType(CurrentGeometry->GetType());
 		}
 
-		return ImplicitTypeToCollisionType(ImplicitObjectType);
+		return ImplicitTypeToCollisionType(ResultObjectType);
 	}
 
-	float GetRadius(const Chaos::FCapsule& InCapsule)
+	Chaos::FReal GetRadius(const Chaos::FCapsule& InCapsule)
 	{
 		return InCapsule.GetRadius();
 	}
 
-	float GetHalfHeight(const Chaos::FCapsule& InCapsule)
+	Chaos::FReal GetHalfHeight(const Chaos::FCapsule& InCapsule)
 	{
 		return InCapsule.GetHeight() / 2.;
 	}

@@ -11,6 +11,7 @@
 #include "IDetailCustomization.h"
 #include "ShaderFormatsPropertyDetails.h"
 #include "TargetPlatformAudioCustomization.h"
+#include "Containers/Ticker.h"
 
 class FMonitoredProcess;
 class IDetailLayoutBuilder;
@@ -61,16 +62,22 @@ public:
 	// IDetailCustomization interface
 	virtual void CustomizeDetails(IDetailLayoutBuilder& DetailLayout) override;
 	// End of IDetailCustomization interface
-
+    
+    EVisibility ShouldShowGenerateButtonForIcon(bool bCannotBeGenerated, FString ImageToCheck) const;
+    
 private:
 	TArray<struct FPlatformIconInfo> IconNames;
 	TArray<struct FPlatformIconInfo> LaunchImageNames;
+	TArray<struct FPlatformIconInfo> TvOSImageNames;
 
 	const FString EngineInfoPath;
 	const FString GameInfoPath;
 
 	const FString EngineGraphicsPath;
 	const FString GameGraphicsPath;
+
+	const FString TVOSEngineGraphicsPath;
+	const FString TVOSGameGraphicsPath;
 
 	IDetailLayoutBuilder* SavedLayoutBuilder;
 
@@ -84,7 +91,7 @@ private:
 	bool bManuallySelected;
 
 	TSharedPtr<FMonitoredProcess> IPPProcess;
-	FDelegateHandle TickerHandle;
+	FTSTicker::FDelegateHandle TickerHandle;
 	TSharedPtr<TArray<ProvisionPtr>> ProvisionList;
 	TArray<ProvisionPtr> FilteredProvisionList;
 	TSharedPtr<SListView<ProvisionPtr> > ProvisionListView;
@@ -111,7 +118,8 @@ private:
 	void BuildPListSection(IDetailLayoutBuilder& DetailLayout);
 	void BuildIconSection(IDetailLayoutBuilder& DetailLayout);
     void BuildRemoteBuildingSection(IDetailLayoutBuilder& DetailLayout);
-
+    void BuildSecondaryRemoteMacBuildingSection(IDetailLayoutBuilder& DetailLayout);
+    
 	// Navigates to the plist in explorer or finder
 	FReply OpenPlistFolder();
 
@@ -119,7 +127,7 @@ private:
 	void CopySetupFilesIntoProject();
 
 	// Builds an image row
-	void BuildImageRow(class IDetailLayoutBuilder& DetailLayout, class IDetailCategoryBuilder& Category, const struct FPlatformIconInfo& Info, const FVector2D& MaxDisplaySize);
+	void BuildImageRow(class IDetailLayoutBuilder& DetailLayout, class IDetailCategoryBuilder& Category, const struct FPlatformIconInfo& Info, const FVector2D& MaxDisplaySize, bool bIsTVOS = false);
 
 	// Install the provision
  	FReply OnInstallProvisionClicked();
@@ -130,8 +138,10 @@ private:
 	// certificate request
 	FReply OnCertificateRequestClicked();
 
+	FReply OnGenerateImageClicked(const FString SourceImagePath, const FString TargetImagePath, FIntPoint IconRequiredSize);
+
 	// ssh key request
-	FReply OnGenerateSSHKey();
+	FReply OnGenerateSSHKey(bool IsPrimary);
 
 	// Get the image to display for the provision status
 	const FSlateBrush* GetProvisionStatus() const;

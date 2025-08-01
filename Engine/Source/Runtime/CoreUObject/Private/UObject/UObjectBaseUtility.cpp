@@ -7,12 +7,16 @@
 #include "UObject/UObjectBaseUtility.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
+#include "UObject/SoftObjectPath.h"
 #include "UObject/UObjectHash.h"
 #include "Templates/Casts.h"
 #include "UObject/Interface.h"
+#include "Misc/PackageName.h"
 #include "Misc/StringBuilder.h"
 #include "Modules/ModuleManager.h"
-#include "ProfilingDebugging/MallocProfiler.h"
+#include "HAL/IConsoleManager.h"
+#include "Misc/ConfigCacheIni.h"
+#include "Containers/VersePath.h"
 
 /***********************/
 /******** Names ********/
@@ -94,15 +98,22 @@ FString UObjectBaseUtility::GetFullName(const UObject* StopOuter, EObjectFullNam
   */
 void UObjectBaseUtility::GetFullName(const UObject* StopOuter, FString& ResultString, EObjectFullNameFlags Flags) const
 {
+	TStringBuilder<256> StringBuilder;
+	GetFullName(StringBuilder, StopOuter, Flags);
+	ResultString.Append(StringBuilder);
+}
+
+void UObjectBaseUtility::GetFullName(FStringBuilderBase& ResultString, const UObject* StopOuter, EObjectFullNameFlags Flags) const
+{
 	if (this != nullptr)
 	{
 		if (EnumHasAllFlags(Flags, EObjectFullNameFlags::IncludeClassPackage))
 		{
-			ResultString += GetClass()->GetPathName();
+			GetClass()->GetPathName(nullptr, ResultString);
 		}
 		else
 		{
-			GetClass()->AppendName(ResultString);
+			GetClass()->GetFName().AppendString(ResultString);
 		}
 		ResultString += TEXT(' ');
 		GetPathName(StopOuter, ResultString);
@@ -110,7 +121,7 @@ void UObjectBaseUtility::GetFullName(const UObject* StopOuter, FString& ResultSt
 	else
 	{
 		ResultString += TEXT("None");
-	} 
+	}
 }
 
 
@@ -130,6 +141,11 @@ FString UObjectBaseUtility::GetFullGroupName( bool bStartWithOuter ) const
 /***********************/
 /*** Outer & Package ***/
 /***********************/
+
+bool UObjectBaseUtility::IsPackageExternal() const
+{
+	return HasAnyFlags(RF_HasExternalPackage);
+}
 
 void UObjectBaseUtility::DetachExternalPackage()
 {
@@ -187,6 +203,11 @@ UPackage* UObjectBaseUtility::GetPackage() const
 	}
 }
 
+UE::Core::FVersePath UObjectBaseUtility::GetVersePath() const
+{
+	return FPackageName::GetVersePath(FSoftObjectPath(static_cast<const UObject*>(this)));
+}
+
 /**
  * Legacy function, has the same behavior as GetPackage
  * use GetPackage instead.
@@ -211,15 +232,13 @@ bool UObjectBaseUtility::MarkPackageDirty() const
 
 		if( Package != NULL	)
 		{
-			// It is against policy to dirty a map or package during load in the Editor, to enforce this policy
-			// we explicitly disable the ability to dirty a package or map during load.  Commandlets can still
+			// It is against policy to dirty a map or package during load/undo/redo in the Editor, to enforce this policy
+			// we explicitly disable the ability to dirty a package or map during load/undo/redo.  Commandlets can still
 			// set the dirty state on load.
 			if( IsRunningCommandlet() || 
-				(GIsEditor && !GIsEditorLoadingPackage && !GIsCookerLoadingPackage && !GIsPlayInEditorWorld && !IsInAsyncLoadingThread()
-#if WITH_HOT_RELOAD
-				&& !GIsHotReload
-#endif // WITH_HOT_RELOAD
+				(!IsInAsyncLoadingThread() && GIsEditor && !GIsEditorLoadingPackage && !GIsCookerLoadingPackage && !GIsPlayInEditorWorld && !IsReloadActive()
 #if WITH_EDITORONLY_DATA
+				&& !GIsTransacting
 				&& !Package->bIsCookedForEditor // Cooked packages can't be modified nor marked as dirty
 #endif
 				))
@@ -272,6 +291,8 @@ bool UObjectBaseUtility::IsTemplate( EObjectFlags TemplateTypes ) const
  */
 UObject* UObjectBaseUtility::GetTypedOuter(UClass* Target) const
 {
+	ensureMsgf(Target != UPackage::StaticClass(), TEXT("Calling GetTypedOuter to retrieve a package is now invalid, you should use GetPackage() instead."));
+
 	UObject* Result = NULL;
 	for ( UObject* NextOuter = GetOuter(); Result == NULL && NextOuter != NULL; NextOuter = NextOuter->GetOuter() )
 	{
@@ -281,6 +302,20 @@ UObject* UObjectBaseUtility::GetTypedOuter(UClass* Target) const
 		}
 	}
 	return Result;
+}
+
+UObjectBaseUtility* UObjectBaseUtility::GetImplementingOuterObject(const UClass* InInterfaceClass) const
+{
+	for (UObject* NextOuter = GetOuter(); NextOuter != nullptr; NextOuter = NextOuter->GetOuter())
+	{
+		UClass* OuterClass = NextOuter->GetClass();
+		if (OuterClass && OuterClass->ImplementsInterface(InInterfaceClass))
+		{
+			return NextOuter;
+		}
+	}
+
+	return nullptr;
 }
 
 /*-----------------------------------------------------------------------------
@@ -474,12 +509,21 @@ void* UObjectBaseUtility::GetNativeInterfaceAddress(UClass* InterfaceClass)
 	return NULL;
 }
 
-bool UObjectBaseUtility::IsDefaultSubobject() const
+bool UObjectBaseUtility::IsTemplateForSubobjects(EObjectFlags TemplateTypes) const
 {
-	const bool bIsInstanced = GetOuter() && (GetOuter()->HasAnyFlags(RF_ClassDefaultObject) || ((UObject*)this)->GetArchetype() != GetClass()->GetDefaultObject(false));
-	return bIsInstanced;
+	// This includes archetype objects that are inside CDOs or inheritable component templates, but not the CDO itself
+	return HasAnyFlags(RF_ArchetypeObject) && !HasAnyFlags(RF_ClassDefaultObject) && IsTemplate(TemplateTypes);
 }
 
+bool UObjectBaseUtility::IsDefaultSubobject() const
+{
+	// For historical reasons this behavior does not match the RF_DefaultSubObject flag.
+	// It will return true for any object instanced using a non-CDO archetype, 
+	// but it will return false for indirectly nested subobjects of a CDO that can be used as an archetype.
+	
+	return !HasAnyFlags(RF_ClassDefaultObject) && GetOuter() &&
+		(GetOuter()->HasAnyFlags(RF_ClassDefaultObject) || ((UObject*)this)->GetArchetype() != GetClass()->GetDefaultObject(false));
+}
 
 UClass* GetParentNativeClass(UClass* Class)
 {
@@ -490,120 +534,6 @@ UClass* GetParentNativeClass(UClass* Class)
 
 	return Class;
 }
-
-#if STATS && USE_MALLOC_PROFILER
-void FScopeCycleCounterUObject::TrackObjectForMallocProfiling(const UObjectBaseUtility *InObject)
-{
-	// Get the package name from the outermost item (if available - can't use GetOutermost here)
-	FName PackageName;
-	if (InObject->GetOuter())
-	{
-		UObjectBaseUtility* Top = InObject->GetOuter();
-		for (;;)
-		{
-			UObjectBaseUtility* CurrentOuter = Top->GetOuter();
-			if (!CurrentOuter)
-			{
-				PackageName = Top->GetFName();
-				break;
-			}
-			Top = CurrentOuter;
-		}
-	}
-
-	// Get the class name (if available)
-	FName ClassName;
-	if (InObject->GetClass())
-	{
-		ClassName = InObject->GetClass()->GetFName();
-	}
-
-	TrackObjectForMallocProfiling(PackageName, ClassName, InObject->GetFName());
-}
-void FScopeCycleCounterUObject::TrackObjectForMallocProfiling(const FName InPackageName, const FName InClassName, const FName InObjectName)
-{
-	static const TCHAR PackageTagCategory[] = TEXT("Package:");
-	static const TCHAR ObjectTagCategory[] = TEXT("Object:");
-	static const TCHAR ClassTagCategory[] = TEXT("Class:");
-
-	// We use an array rather than an FString to try and minimize heap allocations
-	TArray<TCHAR, TInlineAllocator<256>> ScratchSpaceBuffer;
-
-	auto AppendNameToBuffer = [&](const FName InName)
-	{
-		const FNameEntry* NameEntry = InName.GetDisplayNameEntry();
-		if (NameEntry->IsWide())
-		{
-			WIDECHAR WideName[NAME_SIZE];
-			NameEntry->GetWideName(WideName);
-			const WIDECHAR* NameCharPtr = WideName;
-			while (*NameCharPtr != 0)
-			{
-				ScratchSpaceBuffer.Add((TCHAR)*NameCharPtr++);
-			}
-		}
-		else
-		{
-			ANSICHAR AnsiName[NAME_SIZE];
-			NameEntry->GetAnsiName(AnsiName);
-			const ANSICHAR* NameCharPtr = AnsiName;
-			while (*NameCharPtr != 0)
-			{
-				ScratchSpaceBuffer.Add((TCHAR)*NameCharPtr++);
-			}
-		}
-	};
-
-	if (!InPackageName.IsNone())
-	{
-		// "Package:/Path/To/Package"
-		ScratchSpaceBuffer.Reset();
-		ScratchSpaceBuffer.Append(PackageTagCategory, UE_ARRAY_COUNT(PackageTagCategory) - 1);
-		AppendNameToBuffer(InPackageName);
-		ScratchSpaceBuffer.Add(0);
-		PackageTag = FName(ScratchSpaceBuffer.GetData());
-		GMallocProfiler->AddTag(PackageTag);
-
-		// "Object:/Path/To/Package/ObjectName"
-		ScratchSpaceBuffer.Reset();
-		ScratchSpaceBuffer.Append(ObjectTagCategory, UE_ARRAY_COUNT(ObjectTagCategory) - 1);
-		AppendNameToBuffer(InPackageName);
-		ScratchSpaceBuffer.Add(TEXT('/'));
-		AppendNameToBuffer(InObjectName);
-		ScratchSpaceBuffer.Add(0);
-		ObjectTag = FName(ScratchSpaceBuffer.GetData());
-		GMallocProfiler->AddTag(ObjectTag);
-	}
-
-	if (!InClassName.IsNone())
-	{
-		// "Class:ClassName"
-		ScratchSpaceBuffer.Reset();
-		ScratchSpaceBuffer.Append(ClassTagCategory, UE_ARRAY_COUNT(ClassTagCategory) - 1);
-		AppendNameToBuffer(InClassName);
-		ScratchSpaceBuffer.Add(0);
-		ClassTag = FName(ScratchSpaceBuffer.GetData());
-		GMallocProfiler->AddTag(ClassTag);
-	}
-}
-void FScopeCycleCounterUObject::UntrackObjectForMallocProfiling()
-{
-	if (!PackageTag.IsNone())
-	{
-		GMallocProfiler->RemoveTag(PackageTag);
-	}
-
-	if (!ClassTag.IsNone())
-	{
-		GMallocProfiler->RemoveTag(ClassTag);
-	}
-
-	if (!ObjectTag.IsNone())
-	{
-		GMallocProfiler->RemoveTag(ObjectTag);
-	}
-}
-#endif
 
 #if !STATS && !ENABLE_STATNAMEDEVENTS && USE_LIGHTWEIGHT_STATS_FOR_HITCH_DETECTION && USE_HITCH_DETECTION && USE_LIGHTWEIGHT_UOBJECT_STATS_FOR_HITCH_DETECTION
 #include "HAL/ThreadHeartBeat.h"

@@ -11,7 +11,7 @@
 #include "Widgets/Layout/SSpacer.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SScrollBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "AnalyticsEventAttribute.h"
 #include "EngineAnalytics.h"
 #include "Interfaces/IAnalyticsProvider.h"
@@ -21,7 +21,7 @@
 #include "Widgets/Input/SHyperlink.h"
 #include "Widgets/SSettingsSectionHeader.h"
 #include "SSettingsEditorCheckoutNotice.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/PlatformFile.h"
 
 #define LOCTEXT_NAMESPACE "SSettingsEditor"
@@ -58,16 +58,19 @@ void SSettingsEditor::Construct( const FArguments& InArgs, const ISettingsEditor
 		DetailsViewArgs.NotifyHook = this;
 		DetailsViewArgs.bShowOptions = true;
 		DetailsViewArgs.bShowModifiedPropertiesOption = false;
+		DetailsViewArgs.bShowAnimatedPropertiesOption = false;
+		DetailsViewArgs.bShowDifferingPropertiesOption = false;
+		DetailsViewArgs.bShowKeyablePropertiesOption = false;
+		DetailsViewArgs.bShowHiddenPropertiesWhilePlayingOption = false;
+		DetailsViewArgs.bShowPropertyMatrixButton = false;
 		DetailsViewArgs.bAllowMultipleTopLevelObjects = true;
-		DetailsViewArgs.bShowActorLabel = false;
 		DetailsViewArgs.bCustomNameAreaLocation = true;
 		DetailsViewArgs.bCustomFilterAreaLocation = true;
 		DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
-		DetailsViewArgs.bShowPropertyMatrixButton = false;
 	}
 
 	SettingsView = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor").CreateDetailView(DetailsViewArgs);
-	SettingsView->SetVisibility(TAttribute<EVisibility>::Create(TAttribute<EVisibility>::FGetter::CreateSP(this, &SSettingsEditor::HandleSettingsViewVisibility)));
+	SettingsView->SetVisibility(TAttribute<EVisibility>::CreateSP(this, &SSettingsEditor::HandleSettingsViewVisibility));
 	SettingsView->SetIsPropertyEditingEnabledDelegate(FIsPropertyEditingEnabled::CreateSP(this, &SSettingsEditor::HandleSettingsViewEnabled));
 
 	TSharedPtr<FSettingsDetailRootObjectCustomization> RootObjectCustomization = MakeShareable(new FSettingsDetailRootObjectCustomization(Model, SettingsView.ToSharedRef()));
@@ -213,7 +216,7 @@ void SSettingsEditor::NotifyPostChange( const FPropertyChangedEvent& PropertyCha
 
 				if (ObjectBeingEdited->GetClass()->HasAnyClassFlags(CLASS_DefaultConfig) && !bIsArrayOrArrayElement && !bIsSetOrSetElement && !bIsMapOrMapElement)
 				{
-					if(Section->NotifySectionOnPropertyModified())
+					if (!Section.IsValid() || Section->NotifySectionOnPropertyModified())
 					{
 						ObjectBeingEdited->UpdateSinglePropertyInConfigFile(PropertyThatChanged->GetActiveMemberNode()->GetValue(), ObjectBeingEdited->GetDefaultConfigFilename());
 					}
@@ -221,6 +224,12 @@ void SSettingsEditor::NotifyPostChange( const FPropertyChangedEvent& PropertyCha
 				else if (Section.IsValid())
 				{
 					Section->Save();
+				}
+				// Some files being edited might have an array element, but they may also not have a corresponding section for inlined
+				// external objects, for them if they're DefaultConfig, we update them here.
+				else if (ObjectBeingEdited->GetClass()->HasAnyClassFlags(CLASS_DefaultConfig))
+				{
+					ObjectBeingEdited->TryUpdateDefaultConfigFile();
 				}
 
 				if (bIsNewFile && bIsSourceControlled)
@@ -280,7 +289,7 @@ TSharedRef<SWidget> SSettingsEditor::MakeCategoryWidget( const ISettingsCategory
 					.VAlign(VAlign_Center)
 					[
 						SNew(SImage)
-							.Image(FEditorStyle::Get().GetBrush("TreeArrow_Collapsed_Hovered"))
+							.Image(FAppStyle::Get().GetBrush("TreeArrow_Collapsed_Hovered"))
 							.Visibility(this, &SSettingsEditor::HandleSectionLinkImageVisibility, Section)
 					]
 
@@ -309,7 +318,7 @@ TSharedRef<SWidget> SSettingsEditor::MakeCategoryWidget( const ISettingsCategory
 		[
 			// category title
 			SNew(STextBlock)
-				.Font(FEditorStyle::GetFontStyle("SettingsEditor.CatgoryAndSectionFont"))
+				.Font(FAppStyle::GetFontStyle("SettingsEditor.CatgoryAndSectionFont"))
 				.Text(Category->GetDisplayName())
 		]
 
@@ -329,7 +338,7 @@ void SSettingsEditor::RecordPreferenceChangedAnalytics( ISettingsSectionPtr Sele
 	if(FEngineAnalytics::IsAvailable() && ChangedProperty != nullptr && ChangedProperty->GetOwnerClass() != nullptr)
 	{
 		TArray<FAnalyticsEventAttribute> EventAttributes;
-		EventAttributes.Add(FAnalyticsEventAttribute(TEXT("PropertySection"), SelectedSection->GetDisplayName().ToString()));
+		EventAttributes.Add(FAnalyticsEventAttribute(TEXT("PropertySection"), SelectedSection->GetName().ToString()));
 		EventAttributes.Add(FAnalyticsEventAttribute(TEXT("PropertyClass"), ChangedProperty->GetOwnerClass()->GetName()));
 		EventAttributes.Add(FAnalyticsEventAttribute(TEXT("PropertyName"), ChangedProperty->GetName()));
 
@@ -354,7 +363,7 @@ void SSettingsEditor::ReloadCategories()
 		.VAlign(VAlign_Center)
 		[
 			SNew(SImage)
-			.Image(FEditorStyle::Get().GetBrush("TreeArrow_Collapsed_Hovered"))
+			.Image(FAppStyle::Get().GetBrush("TreeArrow_Collapsed_Hovered"))
 			.Visibility(this, &SSettingsEditor::HandleAllSectionsLinkImageVisibility)
 		]
 		+ SHorizontalBox::Slot()
@@ -401,12 +410,16 @@ void SSettingsEditor::ReloadCategories()
 
 		CategorySettingsSections.Sort(FSectionSortPredicate());
 
-		CategoriesBox->AddSlot()
-			.AutoHeight()
-			.Padding(0.0f, 0.0f, 0.0f, 16.0f)
-			[
-				MakeCategoryWidget(Category.ToSharedRef(), CategorySettingsSections)
-			];
+		TSharedRef<SWidget> CategoryWidget = MakeCategoryWidget(Category.ToSharedRef(), CategorySettingsSections);
+		if (CategoryWidget != SNullWidget::NullWidget)
+		{
+			CategoriesBox->AddSlot()
+				.AutoHeight()
+				.Padding(0.0f, 0.0f, 0.0f, 16.0f)
+				[
+					MoveTemp(CategoryWidget)
+				];
+		}
 
 		for(TSharedPtr<ISettingsSection>& Section : CategorySettingsSections)
 		{
@@ -437,6 +450,12 @@ void SSettingsEditor::HandleCultureChanged()
 
 void SSettingsEditor::HandleModelSelectionChanged()
 {
+	// This callback can trigger on unregister during shutdown, simply return in this case
+	if (!FSlateApplication::IsInitialized())
+	{
+		return;
+	}
+
 	ISettingsSectionPtr SelectedSection = Model->GetSelectedSection();
 
 	if (SelectedSection.IsValid())

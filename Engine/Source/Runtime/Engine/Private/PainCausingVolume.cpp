@@ -2,7 +2,9 @@
 
 #include "GameFramework/PainCausingVolume.h"
 #include "TimerManager.h"
-#include "GameFramework/Pawn.h"
+#include "Engine/DamageEvents.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PainCausingVolume)
 
 APainCausingVolume::APainCausingVolume(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -55,18 +57,13 @@ void APainCausingVolume::PainTimer()
 	if (bPainCausing)
 	{
 		TSet<AActor*> TouchingActors;
-		GetOverlappingActors(TouchingActors, APawn::StaticClass());
+		GetOverlappingActors(TouchingActors);
 
 		for (AActor* const A : TouchingActors)
 		{
-			if (A && A->CanBeDamaged() && !A->IsPendingKill())
+			if (IsValid(A) && A->CanBeDamaged() && A->GetPhysicsVolume() == this)
 			{
-				// @todo physicsVolume This won't work for other actor. Need to fix it properly
-				APawn* PawnA = Cast<APawn>(A);
-				if (PawnA && PawnA->GetPawnPhysicsVolume() == this)
-				{
-					CausePainTo(A);
-				}
+				CausePainTo(A);
 			}
 		}
 
@@ -86,4 +83,5 @@ void APainCausingVolume::CausePainTo(AActor* Other)
 		Other->TakeDamage(DamagePerSec*PainInterval, FDamageEvent(DmgTypeClass), DamageInstigator, this);
 	}
 }
+
 

@@ -6,24 +6,21 @@ namespace UnrealBuildTool.Rules
 	{
 		public Media(ReadOnlyTargetRules Target) : base(Target)
 		{
+			IWYUSupport = IWYUSupport.KeepAsIsForNow;
+
 			PublicDependencyModuleNames.AddRange(
 				new string[]
 				{
 					"Core",
+					"RenderCore",
+					"ColorManagement",
 				});
 
-			// Make sure we always have the info module for the common platforms
-			DynamicallyLoadedModuleNames.Add(GetMediaInfoModuleName());
-
-			PrivateIncludePaths.AddRange(
+			PublicIncludePathModuleNames.AddRange(
 				new string[] {
-					"Runtime/Media/Private",
+					"ColorManagement",
+					"RenderCore",
 				});
-		}
-
-		protected virtual string GetMediaInfoModuleName()
-        {
-			return "MediaInfo";
 		}
 	}
 }

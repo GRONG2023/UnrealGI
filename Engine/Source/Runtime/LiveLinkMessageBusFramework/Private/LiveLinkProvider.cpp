@@ -1,7 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LiveLinkProvider.h"
+#include "LiveLinkProviderImpl.h"
 
+#include "Algo/RemoveIf.h"
+#include "Algo/Transform.h"
 #include "HAL/PlatformProcess.h"
 #include "IMessageContext.h"
 #include "LiveLinkMessages.h"
@@ -16,6 +19,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogLiveLinkMessageBus, Warning, All);
 
 static const int32 LIVELINK_SupportedVersion = 2;
 
+template TSharedPtr<ILiveLinkProvider> ILiveLinkProvider::CreateLiveLinkProvider<FLiveLinkProvider>(const FString&,
+																									FMessageEndpointBuilder&&);
 
 FName FLiveLinkMessageAnnotation::SubjectAnnotation = TEXT("SubjectName");
 FName FLiveLinkMessageAnnotation::RoleAnnotation = TEXT("Role");
@@ -53,28 +58,6 @@ private:
 
 const double FConnectionValidator::CONNECTION_TIMEOUT = 10.f;
 
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-// Subject that the application has told us about
-struct FTrackedSubject
-{
-	// Ref skeleton to go with transform data
-	FLiveLinkRefSkeleton RefSkeleton;
-
-	// Bone transform data
-	TArray<FTransform> Transforms;
-
-	// Curve data
-	TArray<FLiveLinkCurveElement> Curves;
-
-	// MetaData for subject
-	FLiveLinkMetaData MetaData;
-
-	// Incrementing time (application time) for interpolation purposes
-	double Time;
-};
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
-
 // Static Subject data that the application has told us about
 struct FTrackedStaticData
 {
@@ -106,360 +89,370 @@ struct FTrackedFrameData
 };
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
-struct FLiveLinkProvider : public ILiveLinkProvider
+
+// Validate our current connections
+void FLiveLinkProvider::ValidateConnections()
 {
-private:
-	const FString ProviderName;
-	const FString MachineName;
+	FConnectionValidator Validator;
 
-	TSharedPtr<FMessageEndpoint, ESPMode::ThreadSafe> MessageEndpoint;
+	TArray<FMessageAddress> RemovedConnections;
 
-	/** Lock to stop multiple threads accessing the CurrentPreset at the same time */
-	mutable FCriticalSection CriticalSection;
-
-	// Array of our current connections
-	TArray<FTrackedAddress> ConnectedAddresses;
-
-	// Cache of our current subject state
-	TArray<FTrackedStaticData> StaticDatas;
-	TArray<FTrackedFrameData> FrameDatas;
-	TMap<FName, FTrackedSubject> Subjects;
-
-	// Delegate to notify interested parties when the client sources have changed
-	FLiveLinkProviderConnectionStatusChanged OnConnectionStatusChanged;
-	
-	//Message bus message handlers
-	void HandlePingMessage(const FLiveLinkPingMessage& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context);
-	void HandleConnectMessage(const FLiveLinkConnectMessage& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context);
-	void HandleHeartbeat(const FLiveLinkHeartbeatMessage& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context);
-	// End message bus message handlers
-
-	// Validate our current connections
-	void ValidateConnections()
+	// Using SetNumUninitialized because FTrackedAddress does not have a default constructor, resulting in SetNum not
+	// compiling (due to the DefaultConstructItems<> usage). Uninitialized is not unsafe here, because we're shrinking.
+	ConnectedAddresses.SetNumUninitialized(Algo::RemoveIf(ConnectedAddresses, [this, &Validator, &RemovedConnections](const FTrackedAddress& Address) mutable
 	{
-		FConnectionValidator Validator;
+		if (!Validator(Address))
+	    {
+			RemovedConnections.Add(Address.Address);
+			return true;
+	    }
+		return false;
+	}));
 
-		const int32 RemovedConnections = ConnectedAddresses.RemoveAll([=](const FTrackedAddress& Address) { return !Validator(Address); });
-
-		if (RemovedConnections > 0)
-		{
-			OnConnectionStatusChanged.Broadcast();
-		}
-	}
-
-	// Get the cached data for the named subject
-	FTrackedSubject& GetTrackedSubject(const FName& SubjectName)
+	if (RemovedConnections.Num() > 0)
 	{
-		return Subjects.FindOrAdd(SubjectName);
+		OnConnectionsClosed(RemovedConnections);
+		OnConnectionStatusChanged.Broadcast();
 	}
+}
 
-	// Send hierarchy data for named subject
-	void SendSubject(FName SubjectName, const FTrackedSubject& Subject)
-	{
-		FLiveLinkSubjectDataMessage* SubjectData = new FLiveLinkSubjectDataMessage;
-		SubjectData->RefSkeleton = Subject.RefSkeleton;
-		SubjectData->SubjectName = SubjectName;
+void FLiveLinkProvider::CloseConnection(FMessageAddress Address)
+{
+	TArray<FMessageAddress> RemovedConnections;
 
-		ValidateConnections();
-		TArray<FMessageAddress> Addresses;
-		Addresses.Reserve(ConnectedAddresses.Num());
-		for (const FTrackedAddress& Address : ConnectedAddresses)
-		{
-			Addresses.Add(Address.Address);
-		}
-
-		MessageEndpoint->Send(SubjectData, Addresses);
-	}
-
-	// Send frame data for named subject
-	void SendSubjectFrame(FName SubjectName, const FTrackedSubject& Subject)
-	{
-		FLiveLinkSubjectFrameMessage* SubjectFrame = new FLiveLinkSubjectFrameMessage;
-		SubjectFrame->Transforms = Subject.Transforms;
-		SubjectFrame->SubjectName = SubjectName;
-		SubjectFrame->Curves = Subject.Curves;
-		SubjectFrame->MetaData = Subject.MetaData;
-		SubjectFrame->Time = Subject.Time;
-
-		ValidateConnections();
-
-		TArray<FMessageAddress> Addresses;
-		Addresses.Reserve(ConnectedAddresses.Num());
-		for (const FTrackedAddress& Address : ConnectedAddresses)
-		{
-			Addresses.Add(Address.Address);
-		}
-
-		MessageEndpoint->Send(SubjectFrame, Addresses);
-	}
-
-	// Get the cached data for the named subject
-	FTrackedStaticData* GetLastSubjectStaticData(const FName& SubjectName)
-	{
-		return StaticDatas.FindByKey(SubjectName);
-	}
-
-	FTrackedFrameData* GetLastSubjectFrameData(const FName& SubjectName)
-	{
-		return FrameDatas.FindByKey(SubjectName);
-	}
-
-	void SetLastSubjectStaticData(FName SubjectName, TSubclassOf<ULiveLinkRole> Role, FLiveLinkStaticDataStruct&& StaticData)
-	{
-		FTrackedStaticData* Result = StaticDatas.FindByKey(SubjectName);
-		if (Result)
-		{
-			Result->StaticData = MoveTemp(StaticData);
-			Result->RoleClass = Role.Get();
-		}
-		else
-		{
-			StaticDatas.Emplace(SubjectName, Role.Get(), MoveTemp(StaticData));
-		}
-	}
-
-	void SetLastSubjectFrameData(FName SubjectName, FLiveLinkFrameDataStruct&& FrameData)
-	{
-		FTrackedFrameData* Result = FrameDatas.FindByKey(SubjectName);
-		if (Result)
-		{
-			Result->FrameData = MoveTemp(FrameData);
-		}
-		else
-		{
-			FrameDatas.Emplace(SubjectName, MoveTemp(FrameData));
-		}
-	}
-
-	// Clear a existing track subject
-	void ClearTrackedSubject(const FName& SubjectName)
-	{
-		Subjects.Remove(SubjectName);
-		const int32 FrameIndex = FrameDatas.IndexOfByKey(SubjectName);
-		if (FrameIndex != INDEX_NONE)
-		{
-			FrameDatas.RemoveAtSwap(FrameIndex);
-		}
-		const int32 StaticIndex = StaticDatas.IndexOfByKey(SubjectName);
-		if (FrameIndex != INDEX_NONE)
-		{
-			StaticDatas.RemoveAtSwap(StaticIndex);
-		}
-	}
-
-	void SendClearSubjectToConnections(FName SubjectName)
-	{
-		ValidateConnections();
-
-		TArray<FMessageAddress> MessageAddresses;
-		MessageAddresses.Reserve(ConnectedAddresses.Num());
-		for (const FTrackedAddress& Address : ConnectedAddresses)
-		{
-			MessageAddresses.Add(Address.Address);
-		}
-
-		FLiveLinkClearSubject* ClearSubject = new FLiveLinkClearSubject(SubjectName);
-		MessageEndpoint->Send(ClearSubject, EMessageFlags::Reliable, nullptr, MessageAddresses, FTimespan::Zero(), FDateTime::MaxValue());
-	}
-
-public:
-	FLiveLinkProvider(const FString& InProviderName)
-		: ProviderName(InProviderName)
-		, MachineName(FPlatformProcess::ComputerName())
-	{
-		MessageEndpoint = FMessageEndpoint::Builder(*InProviderName)
-			.ReceivingOnAnyThread()
-			.Handling<FLiveLinkPingMessage>(this, &FLiveLinkProvider::HandlePingMessage)
-			.Handling<FLiveLinkConnectMessage>(this, &FLiveLinkProvider::HandleConnectMessage)
-			.Handling<FLiveLinkHeartbeatMessage>(this, &FLiveLinkProvider::HandleHeartbeat);
-
-		if (MessageEndpoint.IsValid())
-		{
-			MessageEndpoint->Subscribe<FLiveLinkPingMessage>();
-		}
-	}
-
-	virtual ~FLiveLinkProvider()
-	{
-		if (MessageEndpoint.IsValid())
-		{
-			// Disable the Endpoint message handling since the message could keep it alive a bit.
-			MessageEndpoint->Disable();
-			MessageEndpoint.Reset();
-		}
-	}
-
-	virtual void UpdateSubject(const FName& SubjectName, const TArray<FName>& BoneNames, const TArray<int32>& BoneParents) override
 	{
 		FScopeLock Lock(&CriticalSection);
-
-		FTrackedSubject& Subject = GetTrackedSubject(SubjectName);
-		Subject.RefSkeleton.SetBoneNames(BoneNames);
-		Subject.RefSkeleton.SetBoneParents(BoneParents);
-		Subject.Transforms.Empty();
-
-		SendSubject(SubjectName, Subject);
-	}
-
-	virtual bool UpdateSubjectStaticData(const FName SubjectName, TSubclassOf<ULiveLinkRole> Role, FLiveLinkStaticDataStruct&& StaticData) override
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		if (SubjectName == NAME_None || Role.Get() == nullptr)
+		ConnectedAddresses.SetNumUninitialized(Algo::RemoveIf(ConnectedAddresses, [this, Address, &RemovedConnections](const FTrackedAddress& TrackedAddress) mutable
 		{
-			return false;
-		}
-
-		if (Role->GetDefaultObject<ULiveLinkRole>()->GetStaticDataStruct() != StaticData.GetStruct())
-		{
-			return false;
-		}
-
-		if (GetLastSubjectStaticData(SubjectName) != nullptr)
-		{
-			ClearSubject(SubjectName);
-		}
-
-		ValidateConnections();
-
-		if (ConnectedAddresses.Num() > 0)
-		{
-			TArray<FMessageAddress> Addresses;
-			Addresses.Reserve(ConnectedAddresses.Num());
-			for (const FTrackedAddress& Address : ConnectedAddresses)
+			if (TrackedAddress.Address == Address)
 			{
-				Addresses.Add(Address.Address);
-			}
-
-			TMap<FName, FString> Annotations;
-			Annotations.Add(FLiveLinkMessageAnnotation::SubjectAnnotation, SubjectName.ToString());
-			Annotations.Add(FLiveLinkMessageAnnotation::RoleAnnotation, Role->GetName());
-
-			MessageEndpoint->Send(StaticData.CloneData(), const_cast<UScriptStruct*>(StaticData.GetStruct()), EMessageFlags::Reliable, Annotations, nullptr, Addresses, FTimespan::Zero(), FDateTime::MaxValue());
-		}
-
-		SetLastSubjectStaticData(SubjectName, Role, MoveTemp(StaticData));
-
-		return true;
-	}
-
-	virtual void ClearSubject(const FName& SubjectName)
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		RemoveSubject(SubjectName);
-	}
-
-	virtual void RemoveSubject(const FName SubjectName) override
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		ClearTrackedSubject(SubjectName);
-		SendClearSubjectToConnections(SubjectName);
-	}
-
-	virtual void UpdateSubjectFrame(const FName& SubjectName, const TArray<FTransform>& BoneTransforms, const TArray<FLiveLinkCurveElement>& CurveData, double Time) override
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		FTrackedSubject& Subject = GetTrackedSubject(SubjectName);
-
-		Subject.Transforms = BoneTransforms;
-		Subject.Curves = CurveData;
-		Subject.Time = Time;
-
-		SendSubjectFrame(SubjectName, Subject);
-	}
-
-	virtual void UpdateSubjectFrame(const FName& SubjectName, const TArray<FTransform>& BoneTransforms, const TArray<FLiveLinkCurveElement>& CurveData,
-		const FLiveLinkMetaData& MetaData, double Time) override
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		FTrackedSubject& Subject = GetTrackedSubject(SubjectName);
-
-		Subject.Transforms = BoneTransforms;
-		Subject.Curves = CurveData;
-		Subject.MetaData = MetaData;
-		Subject.Time = Time;
-
-		SendSubjectFrame(SubjectName, Subject);
-	}
-
-	virtual bool UpdateSubjectFrameData(const FName SubjectName, FLiveLinkFrameDataStruct&& FrameData) override
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		if (SubjectName == NAME_None)
-		{
-			return false;
-		}
-
-		FTrackedStaticData* StaticData = GetLastSubjectStaticData(SubjectName);
-		if (StaticData == nullptr)
-		{
-			return false;
-		}
-
-		UClass* RoleClass = StaticData->RoleClass.Get();
-		if (RoleClass == nullptr)
-		{
-			return false;
-		}
-
-		if (RoleClass->GetDefaultObject<ULiveLinkRole>()->GetFrameDataStruct() != FrameData.GetStruct())
-		{
-			return false;
-		}
-
-		ValidateConnections();
-
-		if (ConnectedAddresses.Num() > 0)
-		{
-			TArray<FMessageAddress> Addresses;
-			Addresses.Reserve(ConnectedAddresses.Num());
-			for (const FTrackedAddress& Address : ConnectedAddresses)
-			{
-				Addresses.Add(Address.Address);
-			}
-
-			TMap<FName, FString> Annotations;
-			Annotations.Add(FLiveLinkMessageAnnotation::SubjectAnnotation, SubjectName.ToString());
-
-			MessageEndpoint->Send(FrameData.CloneData(), const_cast<UScriptStruct*>(FrameData.GetStruct()), EMessageFlags::None, Annotations, nullptr, Addresses, FTimespan::Zero(), FDateTime::MaxValue());
-		}
-
-		SetLastSubjectFrameData(SubjectName, MoveTemp(FrameData));
-
-		return true;
-	}
-
-	virtual bool HasConnection() const
-	{
-		FScopeLock Lock(&CriticalSection);
-
-		FConnectionValidator Validator;
-
-		for (const FTrackedAddress& Connection : ConnectedAddresses)
-		{
-			if (Validator(Connection))
-			{
+				RemovedConnections.Add(TrackedAddress.Address);
 				return true;
 			}
+			return false;
+		}));
+	}
+
+	if (RemovedConnections.Num() > 0)
+	{
+		OnConnectionsClosed(RemovedConnections);
+		OnConnectionStatusChanged.Broadcast();
+	}
+}
+
+// Get the cached data for the named subject
+FTrackedSubject& FLiveLinkProvider::GetTrackedSubject(const FName& SubjectName)
+{
+	return Subjects.FindOrAdd(SubjectName);
+}
+
+// Send hierarchy data for named subject
+void FLiveLinkProvider::SendSubject(FName SubjectName, const FTrackedSubject& Subject)
+{
+	FLiveLinkSubjectDataMessage* SubjectData = FMessageEndpoint::MakeMessage<FLiveLinkSubjectDataMessage>();
+	SubjectData->RefSkeleton = Subject.RefSkeleton;
+	SubjectData->SubjectName = SubjectName;
+
+	TArray<FMessageAddress> Addresses;
+	GetFilteredAddresses(SubjectName, Addresses);
+
+	MessageEndpoint->Send(SubjectData, FLiveLinkSubjectDataMessage::StaticStruct(), EMessageFlags::None, GetAnnotations(), nullptr, Addresses, FTimespan::Zero(), FDateTime::MaxValue());
+}
+
+// Send frame data for named subject
+void FLiveLinkProvider::SendSubjectFrame(FName SubjectName, const FTrackedSubject& Subject)
+{
+	FLiveLinkSubjectFrameMessage* SubjectFrame = FMessageEndpoint::MakeMessage<FLiveLinkSubjectFrameMessage>();
+	SubjectFrame->Transforms = Subject.Transforms;
+	SubjectFrame->SubjectName = SubjectName;
+	SubjectFrame->Curves = Subject.Curves;
+	SubjectFrame->MetaData = Subject.MetaData;
+	SubjectFrame->Time = Subject.Time;
+
+	TArray<FMessageAddress> Addresses;
+	GetFilteredAddresses(SubjectName, Addresses);
+
+	MessageEndpoint->Send(SubjectFrame, FLiveLinkSubjectFrameMessage::StaticStruct(), EMessageFlags::None, GetAnnotations(), nullptr, Addresses, FTimespan::Zero(), FDateTime::MaxValue());
+}
+
+TPair<UClass*, FLiveLinkStaticDataStruct*> FLiveLinkProvider::GetLastSubjectStaticDataStruct(FName SubjectName)
+{
+	FScopeLock Lock(&CriticalSection);
+	TPair<UClass*, FLiveLinkStaticDataStruct*> Pair = { nullptr, nullptr };
+
+	if (FTrackedStaticData* TrackedStaticData = GetLastSubjectStaticData(SubjectName))
+	{
+		if (TrackedStaticData->RoleClass.IsValid() && TrackedStaticData->StaticData.IsValid())
+		{
+			Pair.Key = TrackedStaticData->RoleClass.Get();
+			Pair.Value = &TrackedStaticData->StaticData;
 		}
+	}
+
+	return Pair;
+}
+
+// Get the cached data for the named subject
+FTrackedStaticData* FLiveLinkProvider::GetLastSubjectStaticData(const FName& SubjectName)
+{
+	return StaticDatas.FindByKey(SubjectName);
+}
+
+FTrackedFrameData* FLiveLinkProvider::GetLastSubjectFrameData(const FName& SubjectName)
+{
+	return FrameDatas.FindByKey(SubjectName);
+}
+
+void FLiveLinkProvider::SetLastSubjectStaticData(FName SubjectName, TSubclassOf<ULiveLinkRole> Role, FLiveLinkStaticDataStruct&& StaticData)
+{
+	FTrackedStaticData* Result = StaticDatas.FindByKey(SubjectName);
+	if (Result)
+	{
+		Result->StaticData = MoveTemp(StaticData);
+		Result->RoleClass = Role.Get();
+	}
+	else
+	{
+		StaticDatas.Emplace(SubjectName, Role.Get(), MoveTemp(StaticData));
+	}
+}
+
+void FLiveLinkProvider::SetLastSubjectFrameData(FName SubjectName, FLiveLinkFrameDataStruct&& FrameData)
+{
+	FTrackedFrameData* Result = FrameDatas.FindByKey(SubjectName);
+	if (Result)
+	{
+		Result->FrameData = MoveTemp(FrameData);
+	}
+	else
+	{
+		FrameDatas.Emplace(SubjectName, MoveTemp(FrameData));
+	}
+}
+
+// Clear a existing track subject
+void FLiveLinkProvider::ClearTrackedSubject(const FName& SubjectName)
+{
+	Subjects.Remove(SubjectName);
+	const int32 FrameIndex = FrameDatas.IndexOfByKey(SubjectName);
+	if (FrameIndex != INDEX_NONE)
+	{
+		FrameDatas.RemoveAtSwap(FrameIndex);
+	}
+	const int32 StaticIndex = StaticDatas.IndexOfByKey(SubjectName);
+	if (StaticIndex != INDEX_NONE)
+	{
+		StaticDatas.RemoveAtSwap(StaticIndex);
+	}
+}
+
+FLiveLinkProvider::FLiveLinkProvider(const FString& InProviderName)
+	: ProviderName(InProviderName)
+	, MachineName(FPlatformProcess::ComputerName())
+{
+	FMessageEndpointBuilder EndpointBuilder = FMessageEndpoint::Builder(*InProviderName);
+	CreateMessageEndpoint(EndpointBuilder);
+}
+
+FLiveLinkProvider::FLiveLinkProvider(const FString& InProviderName, FMessageEndpointBuilder&& EndpointBuilder)
+	: ProviderName(InProviderName)
+	, MachineName(FPlatformProcess::ComputerName())
+{
+	CreateMessageEndpoint(EndpointBuilder);
+}
+
+FLiveLinkProvider::FLiveLinkProvider(const FString& InProviderName, bool bInCreateEndpoint)
+	: ProviderName(InProviderName)
+	, MachineName(FPlatformProcess::ComputerName())
+{
+	if (bInCreateEndpoint)
+	{
+		FMessageEndpointBuilder EndpointBuilder = FMessageEndpoint::Builder(*InProviderName);
+    	CreateMessageEndpoint(EndpointBuilder);
+	}
+}
+
+FLiveLinkProvider::~FLiveLinkProvider()
+{
+	if (MessageEndpoint.IsValid())
+	{
+		// Disable the Endpoint message handling since the message could keep it alive a bit.
+		MessageEndpoint->Disable();
+		MessageEndpoint.Reset();
+	}
+}
+
+void FLiveLinkProvider::UpdateSubject(const FName& SubjectName, const TArray<FName>& BoneNames, const TArray<int32>& BoneParents)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	FTrackedSubject& Subject = GetTrackedSubject(SubjectName);
+	Subject.RefSkeleton.SetBoneNames(BoneNames);
+	Subject.RefSkeleton.SetBoneParents(BoneParents);
+	Subject.Transforms.Empty();
+
+	SendSubject(SubjectName, Subject);
+}
+
+void FLiveLinkProvider::SendClearSubjectToConnections(FName SubjectName)
+{
+	TArray<FMessageAddress> MessageAddresses;
+	GetFilteredAddresses(SubjectName, MessageAddresses);
+
+	MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FLiveLinkClearSubject>(SubjectName), EMessageFlags::Reliable, GetAnnotations(), nullptr, MessageAddresses, FTimespan::Zero(), FDateTime::MaxValue());
+}
+
+bool FLiveLinkProvider::UpdateSubjectStaticData(const FName SubjectName, TSubclassOf<ULiveLinkRole> Role, FLiveLinkStaticDataStruct&& StaticData)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	if (SubjectName == NAME_None || Role.Get() == nullptr)
+	{
 		return false;
 	}
 
-	virtual FDelegateHandle RegisterConnStatusChangedHandle(const FLiveLinkProviderConnectionStatusChanged::FDelegate& ConnStatusChanged)
+	if (Role->GetDefaultObject<ULiveLinkRole>()->GetStaticDataStruct() != StaticData.GetStruct())
 	{
-		return OnConnectionStatusChanged.Add(ConnStatusChanged);
+		return false;
 	}
 
-	virtual void UnregisterConnStatusChangedHandle(FDelegateHandle Handle)
+	if (GetLastSubjectStaticData(SubjectName) != nullptr)
 	{
-		OnConnectionStatusChanged.Remove(Handle);
+		ClearSubject(SubjectName);
 	}
-};
+
+	ValidateConnections();
+
+	if (ConnectedAddresses.Num() > 0)
+	{
+		TArray<FMessageAddress> Addresses;
+		GetFilteredAddresses(SubjectName, Addresses);
+
+		TMap<FName, FString> Annotations;
+		Annotations.Add(FLiveLinkMessageAnnotation::SubjectAnnotation, SubjectName.ToString());
+		Annotations.Add(FLiveLinkMessageAnnotation::RoleAnnotation, Role->GetName());
+
+		MessageEndpoint->Send(StaticData.CloneData(), const_cast<UScriptStruct*>(StaticData.GetStruct()), EMessageFlags::Reliable, Annotations, nullptr, Addresses, FTimespan::Zero(), FDateTime::MaxValue());
+	}
+
+	SetLastSubjectStaticData(SubjectName, Role, MoveTemp(StaticData));
+
+	return true;
+}
+
+void FLiveLinkProvider::ClearSubject(const FName& SubjectName)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	RemoveSubject(SubjectName);
+}
+
+void FLiveLinkProvider::RemoveSubject(const FName SubjectName)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	ClearTrackedSubject(SubjectName);
+	SendClearSubjectToConnections(SubjectName);
+}
+
+void FLiveLinkProvider::UpdateSubjectFrame(const FName& SubjectName, const TArray<FTransform>& BoneTransforms, const TArray<FLiveLinkCurveElement>& CurveData, double Time)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	FTrackedSubject& Subject = GetTrackedSubject(SubjectName);
+
+	Subject.Transforms = BoneTransforms;
+	Subject.Curves = CurveData;
+	Subject.Time = Time;
+
+	SendSubjectFrame(SubjectName, Subject);
+}
+
+void FLiveLinkProvider::UpdateSubjectFrame(const FName& SubjectName, const TArray<FTransform>& BoneTransforms, const TArray<FLiveLinkCurveElement>& CurveData,
+	const FLiveLinkMetaData& MetaData, double Time)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	FTrackedSubject& Subject = GetTrackedSubject(SubjectName);
+
+	Subject.Transforms = BoneTransforms;
+	Subject.Curves = CurveData;
+	Subject.MetaData = MetaData;
+	Subject.Time = Time;
+
+	SendSubjectFrame(SubjectName, Subject);
+}
+
+bool FLiveLinkProvider::UpdateSubjectFrameData(const FName SubjectName, FLiveLinkFrameDataStruct&& FrameData)
+{
+	FScopeLock Lock(&CriticalSection);
+
+	if (SubjectName == NAME_None)
+	{
+		return false;
+	}
+
+	FTrackedStaticData* StaticData = GetLastSubjectStaticData(SubjectName);
+	if (StaticData == nullptr)
+	{
+		return false;
+	}
+
+	UClass* RoleClass = StaticData->RoleClass.Get();
+	if (RoleClass == nullptr)
+	{
+		return false;
+	}
+
+	if (RoleClass->GetDefaultObject<ULiveLinkRole>()->GetFrameDataStruct() != FrameData.GetStruct())
+	{
+		return false;
+	}
+
+	ValidateConnections();
+
+	if (ConnectedAddresses.Num() > 0)
+	{
+		TArray<FMessageAddress> Addresses;
+		GetFilteredAddresses(SubjectName, Addresses);
+
+		TMap<FName, FString> Annotations;
+		Annotations.Add(FLiveLinkMessageAnnotation::SubjectAnnotation, SubjectName.ToString());
+
+		MessageEndpoint->Send(FrameData.CloneData(), const_cast<UScriptStruct*>(FrameData.GetStruct()), EMessageFlags::None, Annotations, nullptr, Addresses, FTimespan::Zero(), FDateTime::MaxValue());
+	}
+
+	SetLastSubjectFrameData(SubjectName, MoveTemp(FrameData));
+
+	return true;
+}
+
+bool FLiveLinkProvider::HasConnection() const
+{
+	FScopeLock Lock(&CriticalSection);
+
+	FConnectionValidator Validator;
+
+	for (const FTrackedAddress& Connection : ConnectedAddresses)
+	{
+		if (Validator(Connection))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+FDelegateHandle FLiveLinkProvider::RegisterConnStatusChangedHandle(const FLiveLinkProviderConnectionStatusChanged::FDelegate& ConnStatusChanged)
+{
+	return OnConnectionStatusChanged.Add(ConnStatusChanged);
+}
+
+void FLiveLinkProvider::UnregisterConnStatusChangedHandle(FDelegateHandle Handle)
+{
+	OnConnectionStatusChanged.Remove(Handle);
+}
+
 PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void FLiveLinkProvider::HandlePingMessage(const FLiveLinkPingMessage& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context)
@@ -470,7 +463,7 @@ void FLiveLinkProvider::HandlePingMessage(const FLiveLinkPingMessage& Message, c
 		return;
 	}
 
-	MessageEndpoint->Send(new FLiveLinkPongMessage(ProviderName, MachineName, Message.PollRequest), Context->GetSender());
+	MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FLiveLinkPongMessage>(ProviderName, MachineName, Message.PollRequest, LIVELINK_SupportedVersion), GetAnnotations(), Context->GetSender());
 }
 
 void FLiveLinkProvider::HandleConnectMessage(const FLiveLinkConnectMessage& Message, const TSharedRef<IMessageContext, ESPMode::ThreadSafe>& Context)
@@ -501,7 +494,7 @@ void FLiveLinkProvider::HandleConnectMessage(const FLiveLinkConnectMessage& Mess
 		TArray<FMessageAddress> MessageAddress;
 		MessageAddress.Add(ConnectionAddress);
 
-		TMap<FName, FString> Annotations;
+		TMap<FName, FString> Annotations = GetAnnotations();
 		Annotations.Add(FLiveLinkMessageAnnotation::SubjectAnnotation, TEXT(""));
 		Annotations.Add(FLiveLinkMessageAnnotation::RoleAnnotation, TEXT(""));
 
@@ -535,11 +528,42 @@ void FLiveLinkProvider::HandleHeartbeat(const FLiveLinkHeartbeatMessage& Message
 		TrackedAddress->LastHeartbeatTime = FPlatformTime::Seconds();
 
 		// Respond so editor gets heartbeat too
-		MessageEndpoint->Send(new FLiveLinkHeartbeatMessage(), Context->GetSender());
+		MessageEndpoint->Send(FMessageEndpoint::MakeMessage<FLiveLinkHeartbeatMessage>(), GetAnnotations(), Context->GetSender());
 	}
 }
 
 TSharedPtr<ILiveLinkProvider> ILiveLinkProvider::CreateLiveLinkProvider(const FString& ProviderName)
 {
 	return MakeShareable(new FLiveLinkProvider(ProviderName));
+}
+
+void FLiveLinkProvider::CreateMessageEndpoint(FMessageEndpointBuilder& EndpointBuilder)
+{
+	MessageEndpoint = EndpointBuilder
+		.ReceivingOnAnyThread()
+		.Handling<FLiveLinkPingMessage>(this, &FLiveLinkProvider::HandlePingMessage)
+		.Handling<FLiveLinkConnectMessage>(this, &FLiveLinkProvider::HandleConnectMessage)
+		.Handling<FLiveLinkHeartbeatMessage>(this, &FLiveLinkProvider::HandleHeartbeat);
+
+	Subscribe<FLiveLinkPingMessage>();
+}
+
+void FLiveLinkProvider::GetConnectedAddresses(TArray<FMessageAddress>& Addresses)
+{
+	ValidateConnections();
+	Addresses.Reserve(ConnectedAddresses.Num());
+	for (const FTrackedAddress& Address : ConnectedAddresses)
+	{
+		Addresses.Add(Address.Address);
+	}
+}
+
+void FLiveLinkProvider::GetFilteredAddresses(FName SubjectName, TArray<FMessageAddress>& Addresses)
+{
+	ValidateConnections();
+	Addresses.Reserve(ConnectedAddresses.Num());
+
+	Algo::TransformIf(ConnectedAddresses, Addresses,
+		[this, SubjectName](const FTrackedAddress& Address){ return ShouldTransmitToSubject_AnyThread(SubjectName, Address.Address); },
+		[](const FTrackedAddress& Address){ return Address.Address; });
 }

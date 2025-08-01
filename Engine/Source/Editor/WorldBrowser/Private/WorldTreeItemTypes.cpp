@@ -8,7 +8,7 @@
 #include "Engine/Engine.h"
 #include "SWorldHierarchyImpl.h"
 #include "ToolMenus.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "AssetSelection.h"
 #include "SWorldHierarchyImpl.h"
 
@@ -39,7 +39,7 @@ namespace WorldHierarchy
 		
 		for (const FAssetData& Asset : AssetList)
 		{
-			if (Asset.AssetClass == UWorld::StaticClass()->GetFName())
+			if (Asset.AssetClassPath == UWorld::StaticClass()->GetClassPathName())
 			{
 				OutWorlds.Add(Asset);
 			}
@@ -183,7 +183,11 @@ namespace WorldHierarchy
 	void FLevelModelTreeItem::SetExpansion(bool bExpanded)
 	{
 		IWorldTreeItem::SetExpansion(bExpanded);
-		LevelModel.Pin()->SetLevelExpansionFlag(bExpanded);
+
+		if (LevelModel.IsValid())
+		{
+			LevelModel.Pin()->SetLevelExpansionFlag(bExpanded);
+		}
 	}
 
 	bool FLevelModelTreeItem::HasModel(TSharedPtr<FLevelModel> InLevelModel) const
@@ -460,12 +464,12 @@ namespace WorldHierarchy
 		
 		if (StreamingClass == ULevelStreamingDynamic::StaticClass())
 		{
-			return FEditorStyle::GetBrush("WorldBrowser.LevelStreamingBlueprint");
+			return FAppStyle::GetBrush("WorldBrowser.LevelStreamingBlueprint");
 		}
 
 		if (StreamingClass == ULevelStreamingAlwaysLoaded::StaticClass())
 		{
-			return FEditorStyle::GetBrush("WorldBrowser.LevelStreamingAlwaysLoaded");
+			return FAppStyle::GetBrush("WorldBrowser.LevelStreamingAlwaysLoaded");
 		}
 
 		return nullptr;
@@ -473,7 +477,7 @@ namespace WorldHierarchy
 
 	bool FLevelModelTreeItem::CanChangeParents() const
 	{
-		return Parent.IsValid();
+		return Parent.IsValid() && LevelModel.IsValid() && LevelModel.Pin()->IsUserManaged();
 	}
 
 	void FLevelModelTreeItem::GenerateContextMenu(UToolMenu* Menu, const SWorldHierarchyImpl& Hierarchy)
@@ -481,7 +485,7 @@ namespace WorldHierarchy
 		if (!Parent.IsValid() && WorldModel.Pin()->HasFolderSupport())
 		{
 			// Persistent level items should be able to create new folders beneath them in the hierarchy
-			const FSlateIcon NewFolderIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.NewFolderIcon");
+			const FSlateIcon NewFolderIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.NewFolderIcon");
 
 			FName RootPath = LevelModel.Pin()->GetFolderPath();
 			auto NewFolderAction = FExecuteAction::CreateSP(const_cast<SWorldHierarchyImpl*>(&Hierarchy), &SWorldHierarchyImpl::CreateFolder, LevelModel.Pin(), RootPath, /*bMoveSelection*/ false);
@@ -898,16 +902,16 @@ namespace WorldHierarchy
 	{
 		if (Children.Num() > 0 && Flags.bExpanded)
 		{
-			return FEditorStyle::Get().GetBrush("WorldBrowser.FolderOpen");
+			return FAppStyle::Get().GetBrush("Icons.FolderOpen");
 		}
 
-		return FEditorStyle::Get().GetBrush("WorldBrowser.FolderClosed");
+		return FAppStyle::Get().GetBrush("Icons.FolderClosed");
 	}
 
 	void FFolderTreeItem::GenerateContextMenu(UToolMenu* Menu, const SWorldHierarchyImpl& Hierarchy)
 	{
 		// Folder items should be able to create subfolders, rename themselves, or delete themselves from the tree
-		const FSlateIcon NewFolderIcon(FEditorStyle::GetStyleSetName(), "WorldBrowser.NewFolderIcon");
+		const FSlateIcon NewFolderIcon(FAppStyle::GetAppStyleSetName(), "WorldBrowser.NewFolderIcon");
 
 		TSharedPtr<FLevelModel> RootLevel = GetRootItem();
 		TArray<FWorldTreeItemPtr> Folders;
@@ -919,8 +923,8 @@ namespace WorldHierarchy
 
 		FToolMenuSection& Section = Menu->AddSection("Section");
 		Section.AddMenuEntry("CreateSubFolder", LOCTEXT("CreateSubFolder", "Create Subfolder"), FText(), NewFolderIcon, FUIAction(NewFolderAction));
-		Section.AddMenuEntry("RenameFolder", LOCTEXT("RenameFolder", "Rename"), FText(), FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Rename"), FUIAction(RenameFolderAction));
-		Section.AddMenuEntry("DeleteFolder", LOCTEXT("DeleteFolder", "Delete"), FText(), FSlateIcon(FEditorStyle::GetStyleSetName(), "ContentBrowser.AssetActions.Delete"), FUIAction(DeleteFolderAction));
+		Section.AddMenuEntry("RenameFolder", LOCTEXT("RenameFolder", "Rename"), FText(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.AssetActions.Rename"), FUIAction(RenameFolderAction));
+		Section.AddMenuEntry("DeleteFolder", LOCTEXT("DeleteFolder", "Delete"), FText(), FSlateIcon(FAppStyle::GetAppStyleSetName(), "ContentBrowser.AssetActions.Delete"), FUIAction(DeleteFolderAction));
 	}
 
 	FValidationInfo FFolderTreeItem::ValidateDrop(const FDragDropEvent& DragEvent) const

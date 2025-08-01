@@ -2,11 +2,17 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Interface.h"
+#include "CoreTypes.h"
 #include "Fonts/CompositeFont.h"
+#include "UObject/Interface.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "FontFaceInterface.generated.h"
+
+class UObject;
 
 UINTERFACE(MinimalAPI, meta=(CannotImplementInterfaceInBlueprint))
 class UFontFaceInterface : public UInterface
@@ -35,9 +41,18 @@ class IFontFaceInterface
 	/** Get the method to use when laying out the font? */
 	virtual EFontLayoutMethod GetLayoutMethod() const = 0;
 
+	/** Returns true if the ascend is overridden. */
+	virtual bool IsAscendOverridden() const = 0;
+
+	/** Returns the overridden value of the ascend. This value will be used only if IsAscendOverridden returns true. */
+	virtual int32 GetAscendOverriddenValue() const = 0;
+
+	/** Returns true if the descend is overridden. */
+	virtual bool IsDescendOverridden() const = 0;
+
+	/** Returns the overridden value of the descend. This value will be used only if IsDescendOverridden returns true. */
+	virtual int32 GetDescendOverriddenValue() const = 0;
+
 	/** Get the data buffer containing the data for the current font face. */
 	virtual FFontFaceDataConstRef GetFontFaceData() const = 0;
-
-	/** Get the filename of the font to use when cooked. This file will be generated during cook. */
-	virtual FString GetCookedFilename() const = 0;
 };

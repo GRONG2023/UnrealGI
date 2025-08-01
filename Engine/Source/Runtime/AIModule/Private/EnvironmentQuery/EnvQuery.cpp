@@ -8,6 +8,8 @@
 #include "EnvironmentQuery/EnvQueryTest.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(EnvQuery)
+
 namespace FEQSParamsExporter
 {
 	bool HasNamedValue(const FName& ParamName, const TArray<FAIDynamicParam>& NamedValues)
@@ -46,6 +48,32 @@ namespace FEQSParamsExporter
 	{
 		for (FProperty* TestProperty = QueryNode.GetClass()->PropertyLink; TestProperty; TestProperty = TestProperty->PropertyLinkNext)
 		{
+			FArrayProperty* TestArray = CastField<FArrayProperty>(TestProperty);
+			if (TestArray)
+			{
+				FObjectPropertyBase* ArrayInnerProperty = CastField<FObjectPropertyBase>(TestArray->Inner);
+				if (ArrayInnerProperty == nullptr)
+				{
+					continue;
+				}
+
+				if (ArrayInnerProperty->PropertyClass == nullptr || ArrayInnerProperty->PropertyClass->IsChildOf<UEnvQueryNode>() == false)
+				{
+					continue;
+				}
+
+				FScriptArrayHelper ArrayHelper(TestArray, TestArray->ContainerPtrToValuePtr<void>(&QueryNode));
+
+				for (int32 SubNodeIndex = 0; SubNodeIndex < ArrayHelper.Num(); ++SubNodeIndex)
+				{
+					const UEnvQueryNode** SubNode = reinterpret_cast<const UEnvQueryNode**>(ArrayHelper.GetRawPtr(SubNodeIndex));
+					if (SubNode && *SubNode)
+					{
+						AddNamedValuesFromObject(QueryOwner, **SubNode, NamedValues, RequiredParams);	
+					}
+				}
+			}
+
 			FStructProperty* TestStruct = CastField<FStructProperty>(TestProperty);
 			if (TestStruct == NULL)
 			{
@@ -142,6 +170,13 @@ void UEnvQuery::PostLoad()
 }
 
 #if WITH_EDITOR
+void UEnvQuery::PostRename(UObject* OldOuter, const FName OldName)
+{
+	Super::PostRename(OldOuter, OldName);
+
+	QueryName = GetFName();
+}
+
 void UEnvQuery::PostDuplicate(bool bDuplicateForPIE)
 {
 	if (bDuplicateForPIE == false)
@@ -152,3 +187,4 @@ void UEnvQuery::PostDuplicate(bool bDuplicateForPIE)
 	Super::PostDuplicate(bDuplicateForPIE);
 }
 #endif // WITH_EDITOR
+

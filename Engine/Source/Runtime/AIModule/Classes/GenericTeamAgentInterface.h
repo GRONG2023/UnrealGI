@@ -11,7 +11,7 @@
 UENUM(BlueprintType)
 namespace ETeamAttitude
 {
-	enum Type
+	enum Type : int
 	{
 		Friendly,
 		Neutral,
@@ -20,7 +20,7 @@ namespace ETeamAttitude
 }
 
 USTRUCT(BlueprintType)
-struct AIMODULE_API FGenericTeamId
+struct FGenericTeamId
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -45,8 +45,8 @@ public:
 	FORCEINLINE uint8 GetId() const { return TeamID; }
 	//FORCEINLINE void SetId(uint8 NewId) { TeamID = NewId; }
 	
-	static FGenericTeamId GetTeamIdentifier(const AActor* TeamMember);
-	static ETeamAttitude::Type GetAttitude(const AActor* A, const AActor* B);
+	static AIMODULE_API FGenericTeamId GetTeamIdentifier(const AActor* TeamMember);
+	static AIMODULE_API ETeamAttitude::Type GetAttitude(const AActor* A, const AActor* B);
 	static ETeamAttitude::Type GetAttitude(FGenericTeamId TeamA, FGenericTeamId TeamB)
 	{
 		return AttitudeSolverImpl ? (AttitudeSolverImpl)(TeamA, TeamB) : ETeamAttitude::Neutral;
@@ -54,31 +54,31 @@ public:
 
 	typedef TFunction<ETeamAttitude::Type(FGenericTeamId, FGenericTeamId)> FAttitudeSolverFunction;
 	
-	static void SetAttitudeSolver(const FAttitudeSolverFunction& Solver);
-	static void ResetAttitudeSolver();
+	static AIMODULE_API void SetAttitudeSolver(const FAttitudeSolverFunction& Solver);
+	static AIMODULE_API void ResetAttitudeSolver();
 
 protected:
 	// the default implementation makes all teams hostile
 	// @note that for consistency IGenericTeamAgentInterface should be using the same function 
 	//	(by default it does)
-	static FAttitudeSolverFunction AttitudeSolverImpl;
+	static AIMODULE_API FAttitudeSolverFunction AttitudeSolverImpl;
 
 public:
-	static const FGenericTeamId NoTeam;
+	static AIMODULE_API const FGenericTeamId NoTeam;
+
+	friend FORCEINLINE uint32 GetTypeHash(const FGenericTeamId Value)
+	{
+		return Value.GetId();
+	}
 };
 
-FORCEINLINE uint32 GetTypeHash(const FGenericTeamId TeamID)
-{
-	return TeamID.GetId();
-}
-
-UINTERFACE()
-class AIMODULE_API UGenericTeamAgentInterface : public UInterface
+UINTERFACE(MinimalAPI)
+class UGenericTeamAgentInterface : public UInterface
 {
 	GENERATED_UINTERFACE_BODY()
 };
 
-class AIMODULE_API IGenericTeamAgentInterface
+class IGenericTeamAgentInterface
 {
 	GENERATED_IINTERFACE_BODY()
 

@@ -2,32 +2,67 @@
 
 #include "FbxImportUIDetails.h"
 
+#include "AssetToolsModule.h"
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
 #include "DetailWidgetRow.h"
-#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Engine.h"
 #include "Engine/StaticMesh.h"
-#include "IDetailGroup.h"
-#include "IDetailPropertyRow.h"
 #include "Factories/FbxAnimSequenceImportData.h"
+#include "Factories/FbxMeshImportData.h"
 #include "Factories/FbxSkeletalMeshImportData.h"
 #include "Factories/FbxStaticMeshImportData.h"
 #include "Factories/FbxTextureImportData.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IAssetTools.h"
+#include "IDetailGroup.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Layout/Visibility.h"
+#include "MaterialTypes.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
+#include "Math/UnrealMathSSE.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/Attribute.h"
 #include "Misc/Guid.h"
+#include "Misc/NamePermissionList.h"
+#include "Misc/StringFormatArg.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "PropertyEditorModule.h"
 #include "PropertyHandle.h"
-#include "SEnumCombobox.h"
+#include "SEnumCombo.h"
+#include "SlotBase.h"
+#include "StaticMeshResources.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
 #include "Templates/Tuple.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ReflectedTypeAccessors.h"
+#include "UObject/SoftObjectPath.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Images/SImage.h"
-#include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/STextComboBox.h"
 #include "Widgets/Layout/SBox.h"
-#include "Widgets/Text/STextBlock.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SToolTip.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "FbxImportUIDetails"
 
@@ -182,7 +217,7 @@ bool FFbxImportUIDetails::ShowCompareResult()
 					LOCTEXT("MaterialConflict_ButtonShowTooltip", "Show a detailed view of the materials conflict."),
 					LOCTEXT("MaterialConflict_ButtonShow", "Show Conflict"),
 					EConflictDialogType::Conflict_Material,
-					FEditorStyle::GetBrush("Icons.Error"),
+					FAppStyle::GetBrush("Icons.Error"),
 					LOCTEXT("MaterialConflict_IconTooltip", "There is one or more material(s) that do not match.")
 				);
 			}
@@ -203,9 +238,9 @@ bool FFbxImportUIDetails::ShowCompareResult()
 					IconTooltip = (LOCTEXT("SkeletonConflictAddedBones_IconTooltip", "(Info) Added bones: Some bones in the incoming fbx do not exist in the current skeletalmesh asset."));
 				}
 				 
-				const FSlateBrush* Brush = (SkeletonCompareResult & ImportCompareHelper::ECompareResult::SCR_SkeletonBadRoot) > ImportCompareHelper::ECompareResult::SCR_None ? FEditorStyle::GetBrush("Icons.Error")
-					: (SkeletonCompareResult & ImportCompareHelper::ECompareResult::SCR_SkeletonMissingBone) > ImportCompareHelper::ECompareResult::SCR_None ? FEditorStyle::GetBrush("Icons.Warning")
-					: FEditorStyle::GetBrush("Icons.Info");
+				const FSlateBrush* Brush = (SkeletonCompareResult & ImportCompareHelper::ECompareResult::SCR_SkeletonBadRoot) > ImportCompareHelper::ECompareResult::SCR_None ? FAppStyle::GetBrush("Icons.Error")
+					: (SkeletonCompareResult & ImportCompareHelper::ECompareResult::SCR_SkeletonMissingBone) > ImportCompareHelper::ECompareResult::SCR_None ? FAppStyle::GetBrush("Icons.Warning")
+					: FAppStyle::GetBrush("Icons.Info");
 
 				BuildConflictRow(LOCTEXT("SkeletonConflict_RowFilter", "Skeleton conflict"),
 					LOCTEXT("SkeletonConflict_NameContent", "Unmatched Skeleton joints"),
@@ -229,6 +264,18 @@ void FFbxImportUIDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuilder 
 
 	ImportUI = Cast<UFbxImportUI>(EditingObjects[0].Get());
 	
+	auto GetClassPermission = [](UClass* Class, EAssetClassAction ClassAction)
+		{
+			IAssetTools& AssetTools = FAssetToolsModule::GetModule().Get();
+			TSharedPtr<FPathPermissionList> AssetClassPermissionList = AssetTools.GetAssetClassPathPermissionList(ClassAction);
+			if (Class && AssetClassPermissionList && AssetClassPermissionList->HasFiltering())
+			{
+				return AssetClassPermissionList->PassesFilter(Class->GetPathName());
+			}
+			return true;
+		};
+	bool bShowPhysicsAssetOptions = GetClassPermission(UPhysicsAsset::StaticClass(), EAssetClassAction::ImportAsset);
+
 	bool bShowCompareResult = ShowCompareResult();
 
 	auto AddRefreshCustomDetailEvent = [this](TSharedPtr<IPropertyHandle> Handle)
@@ -388,6 +435,13 @@ void FFbxImportUIDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuilder 
 		}
 	}
 
+	if (!bShowPhysicsAssetOptions)
+	{
+		TSharedRef<IPropertyHandle> CreatePhysicsAssetProperty = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UFbxImportUI, bCreatePhysicsAsset));
+		DetailBuilder.HideProperty(CreatePhysicsAssetProperty);
+		ImportUI->bCreatePhysicsAsset = false;
+	}
+
 	TMap<FString, TArray<TSharedPtr<IPropertyHandle>>> SubCategoriesProperties;
 	TMap<FString, bool > SubCategoriesAdvanced;
 	TMap<FString, FText > SubCategoriesTooltip;
@@ -418,10 +472,16 @@ void FFbxImportUIDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuilder 
 			}
 			else if (!SubCategoryData.IsEmpty())
 			{
-				TArray<TSharedPtr<IPropertyHandle> >& SubCategoryProperties = SubCategoriesProperties.FindOrAdd(SubCategoryData);
+				//Localize the sub category
+				FString SubCategoryLocalizeName = SubCategoryData;
+				if (SubCategoryData.Equals(TEXT("Thresholds")))
+				{
+					SubCategoryLocalizeName = LOCTEXT("Thresholds_subcategory_name", "Thresholds").ToString();
+				}
+				TArray<TSharedPtr<IPropertyHandle> >& SubCategoryProperties = SubCategoriesProperties.FindOrAdd(SubCategoryLocalizeName);
 				SubCategoryProperties.Add(Handle);
-				bool& SubCategoryAdvanced = SubCategoriesAdvanced.FindOrAdd(SubCategoryData);
-				FText& SubCategoryTooltip = SubCategoriesTooltip.FindOrAdd(SubCategoryData);
+				bool& SubCategoryAdvanced = SubCategoriesAdvanced.FindOrAdd(SubCategoryLocalizeName);
+				FText& SubCategoryTooltip = SubCategoriesTooltip.FindOrAdd(SubCategoryLocalizeName);
 				if (SubCategoryData.Equals(TEXT("Thresholds")))
 				{
 					SubCategoryAdvanced = true;

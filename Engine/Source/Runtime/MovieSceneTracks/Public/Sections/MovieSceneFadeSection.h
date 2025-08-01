@@ -2,10 +2,18 @@
 
 #pragma once
 
+#include "Channels/MovieSceneFloatChannel.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "Math/Color.h"
+#include "MovieSceneSection.h"
+#include "EntitySystem/IMovieSceneEntityProvider.h"
 #include "UObject/ObjectMacros.h"
-#include "Sections/MovieSceneFloatSection.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneFadeSection.generated.h"
+
+class UObject;
 
 
 /**
@@ -14,11 +22,15 @@
 UCLASS(MinimalAPI)
 class UMovieSceneFadeSection
 	: public UMovieSceneSection
+	, public IMovieSceneEntityProvider
 {
 	GENERATED_BODY()
 
 	/** Default constructor. */
 	UMovieSceneFadeSection();
+
+	/** IMovieSceneEntityProvider interface */
+	void ImportEntityImpl(UMovieSceneEntitySystemLinker* EntityLinker, const FEntityImportParams& Params, FImportedEntity* OutImportedEntity) override;
 
 public:
 

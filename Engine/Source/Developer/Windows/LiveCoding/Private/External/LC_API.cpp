@@ -1,14 +1,19 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
+// EPIC BEGIN MOD
+//#include PCH_INCLUDE
+// EPIC END MOD
 #include "LC_API.h"
 #include "LC_ClientStartupThread.h"
 #include "LC_CriticalSection.h"
 #include "LC_SyncPoint.h"
 #include "LC_Restart.h"
 #include "LC_RunMode.h"
-#include "LC_Logging.h"
 #include "LC_Memory.h"
 #include "LPP_API.h"
+// BEGIN EPIC MOD
+#include "LC_Logging.h"
+// END EPIC MOD
 
 namespace
 {
@@ -26,7 +31,7 @@ namespace
 	{
 		if (!g_startupThread)
 		{
-			LC_ERROR_USER("Live++ was not started properly. Call lppStartup() first.");
+			LC_ERROR_USER("%s", "Live++ was not started properly. Call lppStartup() first.");
 			return false;
 		}
 
@@ -35,22 +40,12 @@ namespace
 }
 
 
-
-namespace
+LPP_DLL_API(void) LppStartup(void)
 {
-	// startup thread
-	static ClientStartupThread* g_mainStartupThread = nullptr;
-}
-
-
-// BEGIN EPIC MOD - Adding instance to startup function
-LPP_DLL_API(void) LppStartup(void* thisInstance)
-{
-	g_startupThread = new ClientStartupThread((HINSTANCE)thisInstance);
+	g_startupThread = new ClientStartupThread();
 
 	restart::Startup();
 }
-// END EPIC MOD
 
 
 LPP_DLL_API(void) LppShutdown(void)
@@ -347,6 +342,32 @@ LPP_DLL_API(void*) LppEnableLazyLoadedModule(const wchar_t* nameOfExeOrDll)
 {
 	HMODULE baseAddress = GetModuleHandle(nameOfExeOrDll);
 	return g_startupThread->EnableLazyLoadedModule(nameOfExeOrDll, baseAddress);
+}
+// END EPIC MOD
+
+// BEGIN EPIC MOD
+LPP_DLL_API(void) LppSetReinstancingFlow(bool enable)
+{
+	g_startupThread->SetReinstancingFlow(enable);
+}
+// END EPIC MOD
+
+// BEGIN EPIC MOD
+LPP_DLL_API(void) LppDisableCompileFinishNotification()
+{
+	g_startupThread->DisableCompileFinishNotification();
+}
+// END EPIC MOD
+
+// BEGIN EPIC MOD
+LPP_DLL_API(void*) LppEnableModulesEx(const wchar_t* moduleNames[], unsigned int moduleCount, const wchar_t* lazyLoadModuleNames[], unsigned int lazyLoadModuleCount, const uintptr_t* reservedPages, unsigned int reservedPagesCount)
+{
+	if (!CheckForStartup())
+	{
+		return nullptr;
+	}
+
+	return g_startupThread->EnableModulesEx(moduleNames, moduleCount, lazyLoadModuleNames, lazyLoadModuleCount, reservedPages, reservedPagesCount);
 }
 // END EPIC MOD
 

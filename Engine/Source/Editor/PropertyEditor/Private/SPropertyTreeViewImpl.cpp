@@ -7,7 +7,7 @@
 #include "EngineGlobals.h"
 #include "GameFramework/Actor.h"
 #include "Engine/Engine.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Presentation/PropertyEditor/PropertyEditor.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
@@ -20,6 +20,7 @@
 #include "UserInterface/PropertyTree/SPropertyTreeCategoryRow.h"
 #include "ScopedTransaction.h"
 #include "PropertyEditorHelpers.h"
+#include "PropertyPermissionList.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Widgets/Colors/SColorPicker.h"
 #include "Widgets/Input/SSearchBox.h"
@@ -32,7 +33,7 @@ public:
 	FPropertyUtilitiesTreeView( SPropertyTreeViewImpl& InView )
 		: View( InView )
 	{
-		EditConditionParser = MakeShareable(new FEditConditionParser());
+		EditConditionParser = MakeShared<FEditConditionParser>();
 	}
 
 	virtual class FNotifyHook* GetNotifyHook() const override
@@ -70,6 +71,12 @@ public:
 		View.RequestRefresh();
 	}
 
+	virtual void RequestForceRefresh() override
+	{
+		// RequestRefresh is already a deferred ForceRefresh
+		RequestRefresh();
+	}
+
 	virtual bool IsPropertyEditingEnabled() const override
 	{
 		return true;
@@ -78,6 +85,13 @@ public:
 	virtual TSharedPtr<class FAssetThumbnailPool> GetThumbnailPool() const override
 	{
 		return NULL;
+	}
+
+	virtual const TArray<TSharedRef<class IClassViewerFilter>>& GetClassViewerFilters() const override
+	{
+		// not implemented
+		static TArray<TSharedRef<class IClassViewerFilter>> NotImplemented;
+		return NotImplemented;
 	}
 
 	virtual void NotifyFinishedChangingProperties(const FPropertyChangedEvent& PropertyChangedEvent) override {}
@@ -146,11 +160,19 @@ void SPropertyTreeViewImpl::Construct(const FArguments& InArgs)
 	bFavoritesEnabled = bFavoritesEnabled && bFavoritesAllowed;
 
 	// Create the root property now
-	RootPropertyNode = MakeShareable( new FObjectPropertyNode );
+	RootPropertyNode = MakeShared<FObjectPropertyNode>();
 
-	PropertySettings = MakeShareable( new FPropertyUtilitiesTreeView(*this) );
+	PropertySettings = MakeShared<FPropertyUtilitiesTreeView>(*this);
 
 	ConstructPropertyTree();
+	
+	FPropertyEditorPermissionList::Get().PermissionListUpdatedDelegate.AddSP(this, &SPropertyTreeViewImpl::OnPermissionListUpdated);
+	FPropertyEditorPermissionList::Get().PermissionListEnabledDelegate.AddSP(this, &SPropertyTreeViewImpl::RequestRefresh);
+}
+
+void SPropertyTreeViewImpl::OnPermissionListUpdated(TSoftObjectPtr<UStruct>, FName)
+{
+	RequestRefresh();
 }
 
 /** Reconstructs the entire property tree widgets */
@@ -184,7 +206,7 @@ void SPropertyTreeViewImpl::ConstructPropertyTree()
 			SNew( SHorizontalBox )
 			+ SHorizontalBox::Slot()
 			.HAlign( HAlign_Fill )
-			.FillWidth(1)
+			.FillWidth(1.0f)
 			.Padding(0,0,3,0)
 			[
 				SAssignNew( FilterTextBox, SSearchBox )
@@ -199,8 +221,8 @@ void SPropertyTreeViewImpl::ConstructPropertyTree()
 				SNew( SButton )
 				.Visibility( bFavoritesAllowed ? EVisibility::Visible : EVisibility::Collapsed )
 				.OnClicked( this, &SPropertyTreeViewImpl::OnToggleFavoritesClicked )
-				.ContentPadding(1)
-				.ButtonStyle( FEditorStyle::Get(), "NoBorder" )
+				.ContentPadding(1.0f)
+				.ButtonStyle( FAppStyle::Get(), "NoBorder" )
 				[
 					SNew( SImage )
 						.Image( this, &SPropertyTreeViewImpl::OnGetFavoriteButtonImageResource )
@@ -214,11 +236,12 @@ void SPropertyTreeViewImpl::ConstructPropertyTree()
 				SNew( SButton )
 				.Visibility( bLockable ? EVisibility::Visible : EVisibility::Collapsed )
 				.OnClicked( this, &SPropertyTreeViewImpl::OnLockButtonClicked )
-				.ContentPadding(1)
-				.ButtonStyle( FEditorStyle::Get(), "NoBorder" )
+				.ContentPadding(1.0f)
+				.ButtonStyle( FAppStyle::Get(), "NoBorder" )
 				[
 					SNew( SImage )
 					.Image( this, &SPropertyTreeViewImpl::OnGetLockButtonImageResource )
+					.ColorAndOpacity(FSlateColor::UseForeground())
 				]
 			]
 		]
@@ -248,7 +271,7 @@ void SPropertyTreeViewImpl::ConstructPropertyTree()
 		]
 		+SVerticalBox::Slot()
 			.VAlign( VAlign_Fill )
-			.FillHeight(1)
+			.FillHeight(1.0f)
 			.Padding( 0.0f, PaddingAfterFilter, 0.0f, 0.0f )
 		[
 			SAssignNew( PropertyTree, SPropertyTree )
@@ -265,8 +288,8 @@ void SPropertyTreeViewImpl::ConstructPropertyTree()
 					.FillWidth(InitialNameColumnWidth)
 					[
 						SNew(SBorder)
-						.Padding(3)
-						.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+						.Padding(3.0f)
+						.BorderImage( FAppStyle::GetBrush("NoBorder") )
 						[
 							SNew(STextBlock)
 							.Text( NSLOCTEXT("PropertyEditor", "NameColumn", "Name") )
@@ -276,8 +299,8 @@ void SPropertyTreeViewImpl::ConstructPropertyTree()
 					.FillWidth(1.0f)
 					[
 						SNew(SBorder)
-						.Padding(3)
-						.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+						.Padding(3.0f)
+						.BorderImage( FAppStyle::GetBrush("NoBorder") )
 						[
 							SNew(STextBlock)
 							.Text( NSLOCTEXT("PropertyEditor", "PropertyColumn", "Value") )
@@ -368,11 +391,11 @@ const FSlateBrush* SPropertyTreeViewImpl::OnGetFilterButtonImageResource() const
 {
 	if( bHasActiveFilter )
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.FilterCancel"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.FilterCancel"));
 	}
 	else
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.FilterSearch"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.FilterSearch"));
 	}
 }
 
@@ -381,11 +404,11 @@ const FSlateBrush* SPropertyTreeViewImpl::OnGetFavoriteButtonImageResource() con
 {
 	if( bFavoritesEnabled )
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.Favorites_Enabled"));
+		return FAppStyle::GetBrush(TEXT("Icons.Star"));
 	}
 	else
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.Favorites_Disabled"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.Favorites_Disabled"));
 	}
 }
 
@@ -394,11 +417,11 @@ const FSlateBrush* SPropertyTreeViewImpl::OnGetLockButtonImageResource() const
 {
 	if( bIsLocked )
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.Locked"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.Locked"));
 	}
 	else
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.Unlocked"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.Unlocked"));
 	}
 }
 
@@ -645,6 +668,86 @@ void SPropertyTreeViewImpl::MarkFavoritesInternal( TSharedPtr<FPropertyNode> InP
 	}
 }
 
+bool SPropertyTreeViewImpl::IsPropertyNodeVisible(TSharedPtr<FPropertyNode> InPropertyNode)
+{
+	// Object nodes always mark themselves as visible (but are never actually shown)
+	if(InPropertyNode->AsObjectNode())
+	{
+		return true;
+	}
+
+	// The node is marked not visible due to filtering etc
+	if(!InPropertyNode->IsVisible())
+	{
+		return false;
+	}
+	
+	// Category nodes are visible if they have any visible children
+	if(InPropertyNode->AsCategoryNode())
+	{
+		bool bHasVisibleChild = false;
+
+		// If we have a permission list in use, make sure the category has at least one child visible otherwise hide it
+		if(FPropertyEditorPermissionList::Get().IsEnabled())
+		{
+			for( int32 GrandChildIndex = 0; GrandChildIndex < InPropertyNode->GetNumChildNodes(); ++GrandChildIndex )
+			{
+				const TSharedPtr<FPropertyNode> GrandChildNode = InPropertyNode->GetChildNode( GrandChildIndex );
+
+				if(IsPropertyNodeVisible(GrandChildNode) && GrandChildNode->IsVisible())
+				{
+					bHasVisibleChild = true;
+					break;
+				}
+			}
+		}
+		// If we don't have a permission list, we can trivially check the child node count to see if there are any children
+		else
+		{
+			bHasVisibleChild = InPropertyNode->GetNumChildNodes() > 0;
+		}
+
+		return bHasVisibleChild;
+	}
+
+	// Regular property nodes are visible if they pass the IsPropertyVisible delegate and any permission lists if valid
+	bool bPropertyVisible = true;
+	
+	const FProperty* Property = InPropertyNode->GetProperty();
+	if(Property != NULL)
+	{
+		// If we have a permission list in use, make sure this property is in the list for the most common base class and the class of all objects we are viewing
+		if(FPropertyEditorPermissionList::Get().IsEnabled())
+		{
+			bPropertyVisible &= FPropertyEditorPermissionList::Get().DoesPropertyPassFilter(FDetailTreeNode::GetPropertyNodeBaseStructure(InPropertyNode->GetParentNode()), Property->GetFName());
+
+			for (int32 ObjectIndex = 0; ObjectIndex < RootPropertyNode->GetNumObjects(); ++ObjectIndex)
+			{
+				UObject* ObjectToCheck = RootPropertyNode->GetUObject(ObjectIndex);
+
+				const UClass* ObjClass = Cast<UClass>(ObjectToCheck);
+				if (ObjClass == nullptr)
+				{
+					ObjClass = ObjectToCheck->GetClass();
+				}
+
+				if(ObjClass)
+				{
+					bPropertyVisible &= FPropertyEditorPermissionList::Get().DoesPropertyPassFilter(ObjClass, Property->GetFName());
+				}
+			}
+		}
+
+		if(IsPropertyVisible.IsBound())
+		{
+			const FPropertyAndParent PropertyAndParent(InPropertyNode.ToSharedRef());
+			bPropertyVisible &= IsPropertyVisible.Execute(PropertyAndParent);
+		}
+	}
+
+	return bPropertyVisible;
+}
+
 void SPropertyTreeViewImpl::OnGetChildrenForPropertyNode( TSharedPtr<FPropertyNode> InPropertyNode, TArray< TSharedPtr<FPropertyNode> >& OutChildren )
 {
 	if( CurrentFilterText.Len() > 0 ) 
@@ -680,29 +783,13 @@ void SPropertyTreeViewImpl::OnGetChildrenForPropertyNode( TSharedPtr<FPropertyNo
 	for( int32 ChildIndex = 0; ChildIndex < InPropertyNode->GetNumChildNodes(); ++ChildIndex )
 	{
 		TSharedPtr<FPropertyNode> ChildNode = InPropertyNode->GetChildNode( ChildIndex );
-		FObjectPropertyNode* ObjNode = ChildNode->AsObjectNode();
 
-		bool bPropertyVisible = true;
-		FProperty* Property = ChildNode->GetProperty();
-		if(Property != NULL && IsPropertyVisible.IsBound())
-		{
-			TArray< TWeakObjectPtr<UObject> > Objects;
-			if ( ObjNode )
-			{
-				for (int32 ObjectIndex = 0; ObjectIndex < ObjNode->GetNumObjects(); ++ObjectIndex)
-				{
-					Objects.Add(ObjNode->GetUObject(ObjectIndex));
-				}
-			}
-
-			TSharedPtr<IPropertyHandle> ChildHandle = PropertyEditorHelpers::GetPropertyHandle(ChildNode.ToSharedRef(), nullptr, nullptr);
-			FPropertyAndParent PropertyAndParent(ChildHandle.ToSharedRef(), Objects);
-
-			bPropertyVisible = IsPropertyVisible.Execute( PropertyAndParent );
-		}
-
+		const bool bPropertyVisible = IsPropertyNodeVisible(ChildNode);
+		
 		if(bPropertyVisible)
 		{
+			const FObjectPropertyNode* ObjNode = ChildNode->AsObjectNode();
+
 			if( ObjNode )
 			{
 				// Currently object property nodes do not provide any useful information other than being a container for its children.  We do not draw anything for them.
@@ -711,14 +798,7 @@ void SPropertyTreeViewImpl::OnGetChildrenForPropertyNode( TSharedPtr<FPropertyNo
 			}
 			else
 			{
-				if( ChildNode->IsVisible() )
-				{				
-					// Don't add empty category nodes
-					if( ChildNode->AsCategoryNode() == NULL || ChildNode->GetNumChildNodes() > 0 )
-					{
-						OutChildren.Add( ChildNode );
-					}
-				}
+				OutChildren.Add(ChildNode);
 			}
 		}
 	}
@@ -963,7 +1043,6 @@ void SPropertyTreeViewImpl::PostSetObject()
 	check( !bNodeTreeExternallyManaged );
 
 	DestroyColorPicker();
-	ColorPropertyNode = NULL;
 
 	// Reconstruct the property tree so we don't have a tree filled with data we are about to destroy
 	ConstructPropertyTree();
@@ -1199,52 +1278,69 @@ void SPropertyTreeViewImpl::SaveFavorites()
 	}
 }
 
-/** 
- * Creates the color picker window for this property view.
- *
- * @param Node				The slate property node to edit.
- * @param bUseAlpha			Whether or not alpha is supported
- */
+namespace UE::PropertyEditor::Private
+{
+/** Set the color for the property node */
+void CreateColorPickerWindow_SetColor(FLinearColor NewColor, TWeakPtr<IPropertyHandle> WeakPropertyHandle)
+{
+	if (TSharedPtr<IPropertyHandle> PropertyHandle = WeakPropertyHandle.Pin())
+	{
+		FProperty* NodeProperty = PropertyHandle->GetProperty();
+		check(NodeProperty);
+
+		const UScriptStruct* Struct = CastField<FStructProperty>(NodeProperty)->Struct;
+		if (Struct->GetFName() == NAME_Color)
+		{
+			const bool bSRGB = true;
+			FColor NewFColor = NewColor.ToFColor(bSRGB);
+			ensure(PropertyHandle->SetValueFromFormattedString(NewFColor.ToString(), EPropertyValueSetFlags::DefaultFlags) == FPropertyAccess::Result::Success);
+		}
+		else
+		{
+			check(Struct->GetFName() == NAME_LinearColor);
+			ensure(PropertyHandle->SetValueFromFormattedString(NewColor.ToString(), EPropertyValueSetFlags::DefaultFlags) == FPropertyAccess::Result::Success);
+		}
+	}
+}
+}//namespace
+
 void SPropertyTreeViewImpl::CreateColorPickerWindow(const TSharedRef< class FPropertyEditor >& PropertyEditor, bool bUseAlpha)
 {
-	const TSharedRef< FPropertyNode > PropertyNode = PropertyEditor->GetPropertyNode();
-	ColorPropertyNode = &PropertyNode.Get();
-
-	check(ColorPropertyNode);
-	FProperty* Property = ColorPropertyNode->GetProperty();
+	const FProperty* Property = PropertyEditor->GetProperty();
 	check(Property);
 
 	FReadAddressList ReadAddresses;
-	ColorPropertyNode->GetReadAddress( false, ReadAddresses, false );
+	PropertyEditor->GetPropertyNode()->GetReadAddress(false, ReadAddresses, false);
 
-	TArray<FLinearColor*> LinearColor;
-	TArray<FColor*> DWORDColor;
-	if( ReadAddresses.Num() ) 
+	// Use the first address for the initial color
+	TOptional<FLinearColor> DefaultColor;
+	bool bClampValue = false;
+	if (ReadAddresses.Num())
 	{
 		const uint8* Addr = ReadAddresses.GetAddress(0);
-		if( Addr )
+		if (Addr)
 		{
-			if( CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_Color )
+			if (CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_Color)
 			{
-				DWORDColor.Add((FColor*)Addr);
+				DefaultColor = *reinterpret_cast<const FColor*>(Addr);
+				bClampValue = true;
 			}
 			else
 			{
-				check( CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_LinearColor );
-				LinearColor.Add((FLinearColor*)Addr);
+				check(CastField<FStructProperty>(Property)->Struct->GetFName() == NAME_LinearColor);
+				DefaultColor = *reinterpret_cast<const FLinearColor*>(Addr);
 			}
 		}
 	}
 
-	if( DWORDColor.Num() || LinearColor.Num() )
+	if (DefaultColor.IsSet())
 	{
-		FColorPickerArgs PickerArgs;
+		TWeakPtr<IPropertyHandle> WeakPropertyHandle = PropertyEditor->GetPropertyHandle();
+		FColorPickerArgs PickerArgs = FColorPickerArgs(DefaultColor.GetValue(), FOnLinearColorValueChanged::CreateStatic(&UE::PropertyEditor::Private::CreateColorPickerWindow_SetColor, WeakPropertyHandle));
 		PickerArgs.ParentWidget = AsShared();
 		PickerArgs.bUseAlpha = bUseAlpha;
-		PickerArgs.DisplayGamma = TAttribute<float>::Create( TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma) );
-		PickerArgs.ColorArray = &DWORDColor;
-		PickerArgs.LinearColorArray = &LinearColor;
-		PickerArgs.OnColorCommitted = FOnLinearColorValueChanged::CreateSP( this, &SPropertyTreeViewImpl::SetColor);
+		PickerArgs.bClampValue = bClampValue;
+		PickerArgs.DisplayGamma = TAttribute<float>::Create(TAttribute<float>::FGetter::CreateUObject(GEngine, &UEngine::GetDisplayGamma));
 
 		OpenColorPicker(PickerArgs);
 	}
@@ -1269,27 +1365,6 @@ void SPropertyTreeViewImpl::SetIsPropertyVisible(FIsPropertyVisible IsPropertyVi
 
 		// Refresh the entire tree
 		SetObjectArray( Objects );			
-	}
-}
-
-/** Set the color for the property node */
-void SPropertyTreeViewImpl::SetColor(FLinearColor NewColor)
-{
-	check(ColorPropertyNode);
-	FProperty* NodeProperty = ColorPropertyNode->GetProperty();
-	check(NodeProperty);
-	FObjectPropertyNode* ObjectNode = ColorPropertyNode->FindObjectItemParent();
-	
-	// If more than one object is selected, an empty field indicates their values for this property differ.
-	// Don't send it to the objects value in this case (if we did, they would all get set to None which isn't good).
-	if( ObjectNode && ObjectNode->GetNumObjects() == 1 )
-	{
-		FScopedTransaction Transaction( NSLOCTEXT("UnrealEd", "SetColorProperty", "Set Color Property") );
-
-		ColorPropertyNode->NotifyPreChange(NodeProperty, GetNotifyHook());
-
-		FPropertyChangedEvent ChangeEvent(NodeProperty, EPropertyChangeType::ValueSet);
-		ColorPropertyNode->NotifyPostChange( ChangeEvent, GetNotifyHook() );
 	}
 }
 

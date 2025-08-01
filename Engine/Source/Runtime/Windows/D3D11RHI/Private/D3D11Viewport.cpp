@@ -6,15 +6,13 @@
 
 #include "D3D11RHIPrivate.h"
 #include "RenderCore.h"
+#include "HDRHelper.h"
 #include "Engine/RendererSettings.h"
 #include "HAL/ThreadHeartBeat.h"
+#include "RHIUtilities.h"
 
 #ifndef D3D11_WITH_DWMAPI
-#if WINVER > 0x502		// Windows XP doesn't support DWM
-	#define D3D11_WITH_DWMAPI	1
-#else
-	#define D3D11_WITH_DWMAPI	0
-#endif
+#define D3D11_WITH_DWMAPI	1
 #endif
 
 #if D3D11_WITH_DWMAPI
@@ -93,8 +91,6 @@ namespace RHIConsoleVariables
 		);
 };
 
-extern void D3D11TextureAllocated2D( FD3D11Texture2D& Texture );
-
 /**
  * Returns the current swap chain flags but with the same tearing policy used during construction.
  */
@@ -115,7 +111,7 @@ uint32 FD3D11Viewport::GetSwapChainFlags()
 /**
  * Creates a FD3D11Surface to represent a swap chain's back buffer.
  */
-FD3D11Texture2D* FD3D11Viewport::GetSwapChainSurface(FD3D11DynamicRHI* D3DRHI, EPixelFormat PixelFormat, uint32 SizeX, uint32 SizeY, IDXGISwapChain* SwapChain)
+FD3D11Texture* FD3D11Viewport::GetSwapChainSurface(FD3D11DynamicRHI* D3DRHI, EPixelFormat PixelFormat, uint32 SizeX, uint32 SizeY, IDXGISwapChain* SwapChain)
 {
 	// Grab the back buffer
 	TRefCountPtr<ID3D11Texture2D> BackBufferResource;
@@ -186,50 +182,37 @@ FD3D11Texture2D* FD3D11Viewport::GetSwapChainSurface(FD3D11DynamicRHI* D3DRHI, E
 	SRVDesc.Texture2D.MipLevels = 1;
 	VERIFYD3D11RESULT_EX(D3DRHI->GetDevice()->CreateShaderResourceView(BackBufferResource,&SRVDesc,BackBufferShaderResourceView.GetInitReference()), D3DRHI->GetDevice());
 
-	FD3D11Texture2D* NewTexture = new FD3D11Texture2D(
-		D3DRHI,
+	const FRHITextureCreateDesc CreateDesc =
+		FRHITextureCreateDesc::Create2D(TEXT("FD3D11Viewport::GetSwapChainSurface"), TextureDesc.Width, TextureDesc.Height, PixelFormat)
+		.SetFlags(ETextureCreateFlags::RenderTargetable)
+		.DetermineInititialState();
+
+	FD3D11Texture* NewTexture = new FD3D11Texture(
+		CreateDesc,
 		BackBufferResource,
 		BackBufferShaderResourceView,
-		false,
 		1,
+		false,
 		RenderTargetViews,
-		NULL,
-		TextureDesc.Width,
-		TextureDesc.Height,
-		1,
-		1,
-		1,
-		PixelFormat,
-		false,
-		TexCreate_RenderTargetable,
-		false,
-		FClearValueBinding()
-		);
-
-	D3D11TextureAllocated2D(*NewTexture);
-
-	NewTexture->DoNoDeferDelete();
+		{}
+	);
 
 	return NewTexture;
 }
 
 FD3D11Viewport::~FD3D11Viewport()
 {
-	check(IsInRenderingThread());
+	check(IsInRHIThread() || IsInRenderingThread());
 
 	// Turn off HDR display mode
 	D3DRHI->ShutdownHDR();
 
 	// If the swap chain was in fullscreen mode, switch back to windowed before releasing the swap chain.
 	// DXGI throws an error otherwise.
-#if !PLATFORM_HOLOLENS
 	if (SwapChain)
 	{
 		VERIFYD3D11RESULT_EX(SwapChain->SetFullscreenState(false, NULL), D3DRHI->GetDevice());
 	}
-#endif
-
-	FrameSyncEvent.ReleaseResource();
 
 	D3DRHI->Viewports.Remove(this);
 }
@@ -271,6 +254,10 @@ void FD3D11Viewport::Resize(uint32 InSizeX, uint32 InSizeY, bool bInIsFullscreen
 		checkComRefCount(BackBuffer->GetShaderResourceView(),1);
 	}
 	BackBuffer.SafeRelease();
+
+	// Flush the outstanding GPU work and wait for it to complete.
+	FlushRenderingCommands();
+	FRHICommandListExecutor::CheckNoOutstandingCmdLists();
 
 	// Make sure we use a format the current device supports.
 	PreferredPixelFormat = D3DRHI->GetDisplayFormat(PreferredPixelFormat);
@@ -320,10 +307,31 @@ void FD3D11Viewport::Resize(uint32 InSizeX, uint32 InSizeY, bool bInIsFullscreen
 			// Use ConditionalResetSwapChain to call SetFullscreenState, to handle the failure case.
 			// Ignore the viewport's focus state; since Resize is called as the result of a user action we assume authority without waiting for Focus.
 			ResetSwapChainInternal(true);
+
+			if (!bIsFullscreen)
+			{
+				// When exiting fullscreen, make sure that the window has the correct size. This is necessary in the following scenario:
+				//	* we enter exclusive fullscreen with a resolution lower than the monitor's native resolution, or from windowed with a window size smaller than the screen
+				//	* the application loses focus, so Slate asks us to switch to Windowed Fullscreen (see FSlateRenderer::IsViewportFullscreen)
+				//	* InSizeX and InSizeY are given to us as the monitor resolution, so we resize the buffers to the correct resolution below
+				//	* however, the target still has the smaller size, because Slate doesn't know it has to resize the window too (as far as it's concerned, it's already the right size)
+				//	* therefore, we need to call ResizeTarget, which in windowed mode behaves like SetWindowPos.
+				const DXGI_MODE_DESC BufferDesc = SetupDXGI_MODE_DESC();
+				SwapChain->ResizeTarget(&BufferDesc);
+			}
+
 			DXGI_FORMAT RenderTargetFormat = GetRenderTargetFormat(PixelFormat);
 			VERIFYD3D11RESIZEVIEWPORTRESULT(SwapChain->ResizeBuffers(0, SizeX, SizeY, RenderTargetFormat, GetSwapChainFlags()), OldState, NewState, D3DRHI->GetDevice());
 		}
 	}
+
+	RECT WindowRect = {};
+	GetWindowRect(WindowHandle, &WindowRect);
+
+	FVector2D WindowTopLeft((float)WindowRect.left, (float)WindowRect.top);
+	FVector2D WindowBottomRight((float)WindowRect.right, (float)WindowRect.bottom);
+	bool bHDREnabled;
+	HDRGetMetaData(DisplayOutputFormat, DisplayColorGamut, bHDREnabled, WindowTopLeft, WindowBottomRight, (void*)WindowHandle);
 
 	// Float RGBA backbuffers are requested whenever HDR mode is desired
 	if (PixelFormat == GRHIHDRDisplayOutputFormat && bIsFullscreen)
@@ -595,7 +603,6 @@ bool FD3D11Viewport::Present(bool bLockToVsync)
 {
 	bool bNativelyPresented = true;
 #if	D3D11_WITH_DWMAPI
-#if !PLATFORM_HOLOLENS
 	// We can't call Present if !bIsValid, as it waits a window message to be processed, but the main thread may not be pumping the message handler.
 	if(ValidState != 0 && SwapChain.IsValid())
 	{
@@ -609,7 +616,6 @@ bool FD3D11Viewport::Present(bool bLockToVsync)
 			ValidState = VIEWPORT_INVALID;
 		}
 	}
-#endif
 	if (MaximumFrameLatency != RHIConsoleVariables::MaximumFrameLatency)
 	{
 		MaximumFrameLatency = RHIConsoleVariables::MaximumFrameLatency;	
@@ -719,7 +725,6 @@ void FD3D11DynamicRHI::RHIBeginDrawingViewport(FRHIViewport* ViewportRHI, FRHITe
 	if( RenderTarget == NULL )
 	{
 		RenderTarget = Viewport->GetBackBuffer();
-		// @todo - fix this RHITransitionResources(EResourceTransitionAccess::EWritable, &RenderTarget, 1);
 	}
 	FRHIRenderTargetView View(RenderTarget, ERenderTargetLoadAction::ELoad);
 	SetRenderTargets(1,&View,nullptr);
@@ -774,8 +779,6 @@ void FD3D11DynamicRHI::RHIEndDrawingViewport(FRHIViewport* ViewportRHI,bool bPre
 	MaxBoundVertexBufferIndex = INDEX_NONE;
 	
 	StateCache.SetPixelShader(nullptr);
-	StateCache.SetHullShader(nullptr);
-	StateCache.SetDomainShader(nullptr);
 	StateCache.SetGeometryShader(nullptr);
 	// Compute Shader is set to NULL after each Dispatch call, so no need to clear it here
 
@@ -785,35 +788,31 @@ void FD3D11DynamicRHI::RHIEndDrawingViewport(FRHIViewport* ViewportRHI,bool bPre
 		bNativelyPresented = Viewport->Present(bLockToVsync);
 	}
 
-	// Don't wait on the GPU when using SLI, let the driver determine how many frames behind the GPU should be allowed to get
-	if (GNumAlternateFrameRenderingGroups == 1)
-	{
-		if (bNativelyPresented)
-		{ 
-			static const auto CFinishFrameVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.FinishCurrentFrame"));
-			if (!CFinishFrameVar->GetValueOnRenderThread())
-			{
-				// Wait for the GPU to finish rendering the previous frame before finishing this frame.
-				Viewport->WaitForFrameEventCompletion();
-				Viewport->IssueFrameEvent();
-			}
-			else
-			{
-				// Finish current frame immediately to reduce latency
-				Viewport->IssueFrameEvent();
-				Viewport->WaitForFrameEventCompletion();
-			}
-		}
-
-		// If the input latency timer has been triggered, block until the GPU is completely
-		// finished displaying this frame and calculate the delta time.
-		if ( GInputLatencyTimer.RenderThreadTrigger )
+	if (bNativelyPresented)
+	{ 
+		static const auto CFinishFrameVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.FinishCurrentFrame"));
+		if (!CFinishFrameVar->GetValueOnRenderThread())
 		{
+			// Wait for the GPU to finish rendering the previous frame before finishing this frame.
 			Viewport->WaitForFrameEventCompletion();
-			uint32 EndTime = FPlatformTime::Cycles();
-			GInputLatencyTimer.DeltaTime = EndTime - GInputLatencyTimer.StartTime;
-			GInputLatencyTimer.RenderThreadTrigger = false;
+			Viewport->IssueFrameEvent();
 		}
+		else
+		{
+			// Finish current frame immediately to reduce latency
+			Viewport->IssueFrameEvent();
+			Viewport->WaitForFrameEventCompletion();
+		}
+	}
+
+	// If the input latency timer has been triggered, block until the GPU is completely
+	// finished displaying this frame and calculate the delta time.
+	if ( GInputLatencyTimer.RenderThreadTrigger )
+	{
+		Viewport->WaitForFrameEventCompletion();
+		uint32 EndTime = FPlatformTime::Cycles();
+		GInputLatencyTimer.DeltaTime = EndTime - GInputLatencyTimer.StartTime;
+		GInputLatencyTimer.RenderThreadTrigger = false;
 	}
 }
 

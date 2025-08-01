@@ -2,18 +2,22 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
 #include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
+#include "Templates/SharedPointer.h"
 
-class BACKGROUNDHTTP_API FBackgroundHttpNotificationObject
+class FBackgroundHttpNotificationObject
 	: public TSharedFromThis<FBackgroundHttpNotificationObject, ESPMode::ThreadSafe>
 {
 public:
-	FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess);
-	FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess, bool bOnlySendNotificationInBackground);
-	~FBackgroundHttpNotificationObject();
+	BACKGROUNDHTTP_API FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess);
+	BACKGROUNDHTTP_API FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess, bool bOnlySendNotificationInBackground, int32 InIdOverride);
+	BACKGROUNDHTTP_API ~FBackgroundHttpNotificationObject();
 
-	void NotifyOfDownloadResult(bool bWasSuccess);
+	BACKGROUNDHTTP_API void NotifyOfDownloadResult(bool bWasSuccess);
 
 private:
 	void OnApp_EnteringBackground();
@@ -30,6 +34,8 @@ private:
 	
 	volatile bool bIsInBackground;
 	volatile int32 NumFailedDownloads;
+
+	int32 IdOverride;
 
 	class ILocalNotificationService* PlatformNotificationService;
 

@@ -5,6 +5,8 @@
 #include "CoreMinimal.h"
 #include "HAL/Thread.h"
 
+#include <atomic>
+
 class IAnalyticsProvider;
 class IAnalyticsProviderET;
 struct FAnalyticsEventAttribute;
@@ -12,7 +14,7 @@ struct FAnalyticsEventAttribute;
 /**
  * The public interface for the game studio to gather information about internal development metrics.
  */
-class FStudioAnalytics : FNoncopyable
+class UE_DEPRECATED(5.4, "FStudioAnalytics is deprecated, please use FStudioTelemetry instead.") FStudioAnalytics : FNoncopyable
 {
 public:
 	static ENGINE_API void SetProvider(TSharedRef<IAnalyticsProviderET> InAnalytics);
@@ -33,7 +35,7 @@ public:
 	static ENGINE_API IAnalyticsProviderET& GetProvider();
 
 	/** Helper function to determine if the provider is valid. */
-	static ENGINE_API bool IsAvailable() { return Analytics.IsValid(); }
+	static bool IsAvailable() { return Analytics.IsValid(); }
 
 	static ENGINE_API double GetAnalyticSeconds();
 
@@ -45,9 +47,6 @@ public:
 	static ENGINE_API void RecordEvent(const FString& EventName);
 	static ENGINE_API void RecordEvent(const FString& EventName, const TArray<FAnalyticsEventAttribute>& Attributes);
 
-	/** An event for reporting load time that blocks the editor. */
-	static ENGINE_API void FireEvent_Loading(const FString& LoadingName, double SecondsSpentLoading, const TArray<FAnalyticsEventAttribute>& Attributes = TArray<FAnalyticsEventAttribute>());
-
 private:
 	static void RunTimer_Concurrent();
 
@@ -56,6 +55,6 @@ private:
 	static ENGINE_API TSharedPtr<IAnalyticsProviderET> Analytics;
 	static TArray<FAnalyticsEventAttribute> DefaultAttributes;
 	static FThread TimerThread;
-	static volatile double TimeEstimation;
+	static std::atomic<double> TimeEstimation;
 };
 

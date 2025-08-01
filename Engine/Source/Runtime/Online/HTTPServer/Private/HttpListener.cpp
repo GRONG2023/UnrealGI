@@ -7,6 +7,7 @@
 #include "HttpServerConfig.h"
 
 #include "Sockets.h"
+#include "Stats/Stats.h"
 #include "IPAddress.h"
 
 DEFINE_LOG_CATEGORY(LogHttpListener)
@@ -64,6 +65,10 @@ bool FHttpListener::StartListening()
 	{
 		BindAddress->SetAnyAddress();
 	}
+	else if (0 == Config.BindAddress.Compare(TEXT("localhost"), ESearchCase::IgnoreCase))
+	{
+		BindAddress->SetLoopbackAddress();
+	}
 	else
 	{
 		bool bIsValidAddress = false;
@@ -77,7 +82,20 @@ bool FHttpListener::StartListening()
 		}
 	}
 
+	if (!BindAddress->IsPortValid(ListenPort))
+	{
+		UE_LOG(LogHttpListener, Error,
+			TEXT("HttpListener detected invalid port %u"),
+			ListenPort, *Config.BindAddress, ListenPort);
+		return false;
+	}
 	BindAddress->SetPort(ListenPort);
+
+	if (Config.bReuseAddressAndPort)
+	{
+		NewSocket->SetReuseAddr(true);
+	}
+
 	if (!NewSocket->Bind(*BindAddress))
 	{
 		UE_LOG(LogHttpListener, Error, 
@@ -90,7 +108,7 @@ bool FHttpListener::StartListening()
 	NewSocket->SetSendBufferSize(Config.BufferSize, ActualBufferSize);
 	if (ActualBufferSize < Config.BufferSize)
 	{
-		UE_LOG(LogHttpListener, Warning, 
+		UE_LOG(LogHttpListener, Log, 
 			TEXT("HttpListener unable to set desired buffer size (%d): Limited to %d"),
 			Config.BufferSize, ActualBufferSize);
 	}
@@ -166,6 +184,7 @@ bool FHttpListener::HasPendingConnections() const
 // --------------------------------------------------------------------------------------------
 void FHttpListener::AcceptConnections()
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpListener_AcceptConnections);
 	check(ListenSocket);
 
 	for (int32 i = 0; i < Config.MaxConnectionsAcceptPerFrame; ++i)
@@ -209,6 +228,7 @@ void FHttpListener::AcceptConnections()
 
 void FHttpListener::TickConnections(float DeltaTime)
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpListener_TickConnections);
 	for (const auto& Connection : Connections)
 	{
 		check(Connection.IsValid());
@@ -237,6 +257,7 @@ void FHttpListener::TickConnections(float DeltaTime)
 
 void FHttpListener::RemoveDestroyedConnections()
 {
+	QUICK_SCOPE_CYCLE_COUNTER(STAT_FHttpListener_RemoveDestroyedConnections);
 	for (auto ConnectionsIter = Connections.CreateIterator(); ConnectionsIter; ++ConnectionsIter)
 	{
 		// Remove any destroyed connections

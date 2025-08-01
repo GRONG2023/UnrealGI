@@ -10,8 +10,8 @@
 
 struct FPropertyChangedEvent;
 
-UCLASS(Abstract, config = "Game", hidedropdown)
-class GAMEPLAYTASKS_API UGameplayTaskResource : public UObject
+UCLASS(Abstract, config = "Game", hidedropdown, MinimalAPI)
+class UGameplayTaskResource : public UObject
 {
 	GENERATED_BODY()
 
@@ -30,11 +30,11 @@ public:
 
 public:
 
-	UGameplayTaskResource(const FObjectInitializer& ObjectInitializer);
+	GAMEPLAYTASKS_API UGameplayTaskResource(const FObjectInitializer& ObjectInitializer);
 
 	uint8 GetResourceID() const
 	{
-		return bManuallySetID || (ManualResourceID != INDEX_NONE) ? ManualResourceID : AutoResourceID;
+		return bManuallySetID || (ManualResourceID != INDEX_NONE) ? IntCastChecked<uint8>(ManualResourceID) : AutoResourceID;
 	}
 
 	template <class T>
@@ -48,19 +48,19 @@ public:
 		return RequiredResource->GetDefaultObject<UGameplayTaskResource>()->GetResourceID();
 	}
 
-	virtual void PostInitProperties() override;
+	GAMEPLAYTASKS_API virtual void PostInitProperties() override;
 
 protected:
 #if WITH_EDITOR
-	void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent);
+	GAMEPLAYTASKS_API void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent);
 #endif // WITH_EDITOR
 
-	void UpdateAutoResourceID();
+	GAMEPLAYTASKS_API void UpdateAutoResourceID();
 
 #if WITH_GAMEPLAYTASK_DEBUG
 protected:
-	static TArray<FString> ResourceDescriptions;
-	virtual FString GenerateDebugDescription() const;
+	static GAMEPLAYTASKS_API TArray<FString> ResourceDescriptions;
+	GAMEPLAYTASKS_API virtual FString GenerateDebugDescription() const;
 
 public:
 	static FString GetDebugDescription(uint8 ResourceId)

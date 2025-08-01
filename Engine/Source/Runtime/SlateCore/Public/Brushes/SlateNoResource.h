@@ -5,11 +5,12 @@
 #include "CoreMinimal.h"
 #include "Layout/Margin.h"
 #include "Styling/SlateBrush.h"
+#include "Types/SlateVector2.h"
 
 /**
  * A resource that has no appearance
  */
-struct SLATECORE_API FSlateNoResource
+struct FSlateNoResource
 	: public FSlateBrush
 {
 	/**
@@ -17,7 +18,21 @@ struct SLATECORE_API FSlateNoResource
 	 *
 	 * @param InImageSize An optional image size (default is zero).
 	 */
-	FORCENOINLINE FSlateNoResource( const FVector2D& InImageSize = FVector2D::ZeroVector )
+	FORCENOINLINE FSlateNoResource( const UE::Slate::FDeprecateVector2DParameter& InImageSize = FVector2f::ZeroVector )
 		: FSlateBrush(ESlateBrushDrawType::NoDrawType, FName(NAME_None), FMargin(0), ESlateBrushTileType::NoTile, ESlateBrushImageType::NoImage, InImageSize)
 	{ }
+};
+
+/** 
+ * This represents an undefined brush. FSlateNoResource is a valid brush which means don't render anything.  FSlateOptionalBrush means let the widget decide what to do if the brush is unset. 
+ * Widgets that don't check for the brush being unspecified will draw nothing
+ */
+struct FSlateOptionalBrush
+	: public FSlateBrush
+{
+	FSlateOptionalBrush(const UE::Slate::FDeprecateVector2DParameter& InImageSize = FVector2f::ZeroVector)
+		: FSlateBrush(ESlateBrushDrawType::NoDrawType, FName(NAME_None), FMargin(0), ESlateBrushTileType::NoTile, ESlateBrushImageType::NoImage, InImageSize)
+	{
+		bIsSet = false;
+	}
 };

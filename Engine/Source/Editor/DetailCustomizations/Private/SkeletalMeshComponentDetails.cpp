@@ -1,27 +1,59 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SkeletalMeshComponentDetails.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SComboButton.h"
-#include "EditorStyleSet.h"
-#include "Animation/AnimInstance.h"
+
 #include "Animation/AnimBlueprint.h"
-#include "Editor.h"
-#include "EditorCategoryUtils.h"
-#include "DetailLayoutBuilder.h"
-#include "IDetailPropertyRow.h"
-#include "DetailCategoryBuilder.h"
-#include "PropertyCustomizationHelpers.h"
-#include "ClassViewerModule.h"
-#include "ClassViewerFilter.h"
-#include "Engine/Selection.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
-#include "Widgets/Images/SImage.h"
-#include "PhysicsEngine/PhysicsSettings.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimationAsset.h"
+#include "Animation/Skeleton.h"
+#include "ClassViewerFilter.h"
+#include "ClassViewerModule.h"
+#include "Components/PrimitiveComponent.h"
+#include "Containers/Set.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "EditorCategoryUtils.h"
+#include "Engine/SkeletalMesh.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailPropertyRow.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyCustomizationHelpers.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "Selection.h"
+#include "SingleAnimationPlayData.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Settings/AnimBlueprintSettings.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "SkeletalMeshComponentDetails"
 
@@ -49,6 +81,7 @@ public:
 
 FSkeletalMeshComponentDetails::FSkeletalMeshComponentDetails()
 	: CurrentDetailBuilder(NULL)
+	, Skeleton(nullptr)
 	, bAnimPickerEnabled(false)
 {
 
@@ -99,16 +132,19 @@ void FSkeletalMeshComponentDetails::UpdateAnimationCategory(IDetailLayoutBuilder
 	AnimationModeHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(USkeletalMeshComponent, AnimationMode));
 	check (AnimationModeHandle->IsValidHandle());
 
-	AnimationBlueprintHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(USkeletalMeshComponent, AnimClass));
+	const FName AnimationBlueprintName = GET_MEMBER_NAME_CHECKED(USkeletalMeshComponent, AnimClass);
+	AnimationBlueprintHandle = DetailBuilder.GetProperty(AnimationBlueprintName);
 	check(AnimationBlueprintHandle->IsValidHandle());
 
-	AnimationCategory.AddProperty(AnimationModeHandle);
+	AnimationCategory.AddProperty(AnimationModeHandle)
+		.Visibility({ this, &FSkeletalMeshComponentDetails::VisibilityForAnimModeProperty });
 
 	// Place the blueprint property next (which may be hidden, depending on the mode)
 	TAttribute<EVisibility> BlueprintVisibility( this, &FSkeletalMeshComponentDetails::VisibilityForBlueprintMode );
 
 	DetailBuilder.HideProperty(AnimationBlueprintHandle);
 	AnimationCategory.AddCustomRow(AnimationBlueprintHandle->GetPropertyDisplayName())
+		.RowTag(AnimationBlueprintName)
 		.Visibility(BlueprintVisibility)
 		.NameContent()
 		[
@@ -139,7 +175,7 @@ void FSkeletalMeshComponentDetails::UpdateAnimationCategory(IDetailLayoutBuilder
 			.VAlign(VAlign_Center)
 			.Padding(2.0f, 1.0f)
 			[
-				PropertyCustomizationHelpers::MakeBrowseButton(FSimpleDelegate::CreateSP(this, &FSkeletalMeshComponentDetails::OnBrowseToAnimBlueprint))
+				PropertyCustomizationHelpers::MakeUseSelectedButton(FSimpleDelegate::CreateSP(this, &FSkeletalMeshComponentDetails::UseSelectedAnimBlueprint))
 			]
 			+ SHorizontalBox::Slot()
 			.AutoWidth()
@@ -147,7 +183,7 @@ void FSkeletalMeshComponentDetails::UpdateAnimationCategory(IDetailLayoutBuilder
 			.VAlign(VAlign_Center)
 			.Padding(2.0f, 1.0f)
 			[
-				PropertyCustomizationHelpers::MakeUseSelectedButton(FSimpleDelegate::CreateSP(this, &FSkeletalMeshComponentDetails::UseSelectedAnimBlueprint))
+				PropertyCustomizationHelpers::MakeBrowseButton(FSimpleDelegate::CreateSP(this, &FSkeletalMeshComponentDetails::OnBrowseToAnimBlueprint))
 			]
 		];
 
@@ -183,8 +219,9 @@ void FSkeletalMeshComponentDetails::UpdateAnimationCategory(IDetailLayoutBuilder
 
 			TAttribute<bool> AnimPickerEnabledAttr(this, &FSkeletalMeshComponentDetails::AnimPickerIsEnabled);
 
-			AnimationCategory.AddCustomRow(ChildHandle->GetPropertyDisplayName())
+			AnimationCategory.AddProperty(ChildHandle)
 				.Visibility(SingleAnimVisibility)
+				.CustomWidget()
 				.IsEnabled(AnimPickerEnabledAttr)
 				.NameContent()
 				[
@@ -205,6 +242,20 @@ void FSkeletalMeshComponentDetails::UpdateAnimationCategory(IDetailLayoutBuilder
 	}
 }
 
+EVisibility FSkeletalMeshComponentDetails::VisibilityForAnimModeProperty() const
+{
+	return GetDefault<UAnimBlueprintSettings>()->bAllowAnimBlueprints ? EVisibility::Visible : EVisibility::Hidden;
+}
+
+EVisibility FSkeletalMeshComponentDetails::VisibilityForBlueprintMode() const
+{
+	if (!GetDefault<UAnimBlueprintSettings>()->bAllowAnimBlueprints)
+	{
+		return EVisibility::Hidden;
+	}
+	return VisibilityForAnimationMode(EAnimationMode::AnimationBlueprint);
+}
+
 void FSkeletalMeshComponentDetails::UpdatePhysicsCategory(IDetailLayoutBuilder& DetailBuilder)
 {
 }
@@ -223,8 +274,13 @@ EVisibility FSkeletalMeshComponentDetails::VisibilityForAnimationMode(EAnimation
 
 bool FSkeletalMeshComponentDetails::OnShouldFilterAnimAsset( const FAssetData& AssetData )
 {
-	const FString SkeletonName = AssetData.GetTagValueRef<FString>("Skeleton");
-	return SkeletonName != SelectedSkeletonName;
+	// Check the compatible skeletons.
+	if (Skeleton && Skeleton->IsCompatibleForEditor(AssetData))
+	{
+		return false;
+	}
+
+	return true;
 }
 
 void FSkeletalMeshComponentDetails::SkeletalMeshPropertyChanged()
@@ -235,12 +291,12 @@ void FSkeletalMeshComponentDetails::SkeletalMeshPropertyChanged()
 void FSkeletalMeshComponentDetails::UpdateSkeletonNameAndPickerVisibility()
 {
 	// Update the selected skeleton name and the picker visibility
-	USkeleton* Skeleton = GetValidSkeletonFromRegisteredMeshes();
+	Skeleton = GetValidSkeletonFromRegisteredMeshes();
 
 	if (Skeleton)
 	{
 		bAnimPickerEnabled = true;
-		SelectedSkeletonName = FString::Printf(TEXT("%s'%s'"), *Skeleton->GetClass()->GetName(), *Skeleton->GetPathName());
+		SelectedSkeletonName = FObjectPropertyBase::GetExportPath(Skeleton);
 	}
 	else
 	{
@@ -291,13 +347,13 @@ TSharedRef<SWidget> FSkeletalMeshComponentDetails::GetClassPickerMenuContent()
 	FClassViewerModule& ClassViewerModule = FModuleManager::LoadModuleChecked<FClassViewerModule>("ClassViewer");
 	FClassViewerInitializationOptions InitOptions;
 	InitOptions.Mode = EClassViewerMode::ClassPicker;
-	InitOptions.ClassFilter = Filter;
+	InitOptions.ClassFilters.Add(Filter.ToSharedRef());
 	InitOptions.bShowNoneOption = true;
 
 	return SNew(SBorder)
 		.Padding(3)
-		.BorderImage(FEditorStyle::GetBrush("Menu.Background"))
-		.ForegroundColor(FEditorStyle::GetColor("DefaultForeground"))
+		.BorderImage(FAppStyle::GetBrush("Menu.Background"))
+		.ForegroundColor(FAppStyle::GetColor("DefaultForeground"))
 		[
 			SNew(SBox)
 			.WidthOverride(280)
@@ -356,8 +412,7 @@ void FSkeletalMeshComponentDetails::UseSelectedAnimBlueprint()
 		{
 			if(USkeleton* AnimBlueprintSkeleton = AnimBlueprintToAssign->TargetSkeleton)
 			{
-				FString BlueprintSkeletonName = FString::Printf(TEXT("%s'%s'"), *AnimBlueprintSkeleton->GetClass()->GetName(), *AnimBlueprintSkeleton->GetPathName());
-				if (BlueprintSkeletonName == SelectedSkeletonName)
+				if (Skeleton && Skeleton->IsCompatibleForEditor(AnimBlueprintSkeleton))
 				{
 					OnClassPicked(AnimBlueprintToAssign->GetAnimBlueprintGeneratedClass());
 				}
@@ -385,33 +440,33 @@ void FSkeletalMeshComponentDetails::PerformInitialRegistrationOfSkeletalMeshes(I
 
 USkeleton* FSkeletalMeshComponentDetails::GetValidSkeletonFromRegisteredMeshes() const
 {
-	USkeleton* Skeleton = NULL;
+	USkeleton* ResultSkeleton = NULL;
 
 	for (auto ObjectIter = SelectedObjects.CreateConstIterator(); ObjectIter; ++ObjectIter)
 	{
 		USkeletalMeshComponent* const Mesh = Cast<USkeletalMeshComponent>(ObjectIter->Get());
-		if ( !Mesh || !Mesh->SkeletalMesh )
+		if ( !Mesh || !Mesh->GetSkeletalMeshAsset())
 		{
 			continue;
 		}
 
 		// If we've not come across a valid skeleton yet, store this one.
-		if (!Skeleton)
+		if (!ResultSkeleton)
 		{
-			Skeleton = Mesh->SkeletalMesh->GetSkeleton();
+			ResultSkeleton = Mesh->GetSkeletalMeshAsset()->GetSkeleton();
 			continue;
 		}
 
 		// We've encountered a valid skeleton before.
 		// If this skeleton is not the same one, that means there are multiple
 		// skeletons selected, so we don't want to take any action.
-		if (Mesh->SkeletalMesh->GetSkeleton() != Skeleton)
+		if (Mesh->GetSkeletalMeshAsset()->GetSkeleton() != ResultSkeleton)
 		{
 			return NULL;
 		}
 	}
 
-	return Skeleton;
+	return ResultSkeleton;
 }
 
 #undef LOCTEXT_NAMESPACE

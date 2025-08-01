@@ -2,10 +2,15 @@
 
 #pragma once
 
+#include "Async/TaskGraphInterfaces.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
 #include "GenericPlatform/GenericPlatformFile.h"
-#include "Async/TaskGraphInterfaces.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformFile.h"
 #include "Misc/MemoryReadStream.h"
+
+class IAsyncReadFileHandle;
 
 //
 struct FFileCachePreloadEntry
@@ -34,19 +39,19 @@ public:
 	 * @return	A IFileCacheHandle that can be used to make read requests. This will be a nullptr if the target file can not be accessed
 	 *			for any given reason.
 	 */
-	CORE_API static IFileCacheHandle* CreateFileCacheHandle(const TCHAR* InFileName);
+	CORE_API static IFileCacheHandle* CreateFileCacheHandle(const TCHAR* InFileName, int64 InBaseOffset = 0);
 
 	/**
 	 * Create a IFileCacheHandle from a IAsyncReadFileHandle.
 	 * @param	FileHandle			A valid IAsyncReadFileHandle that has already been created elsewhere.
 	 * @return	A IFileCacheHandle that can be used to make read requests. This will be a nullptr if the FileHandle was not valid.
 	 */
-	CORE_API static IFileCacheHandle* CreateFileCacheHandle(IAsyncReadFileHandle* FileHandle);
+	CORE_API static IFileCacheHandle* CreateFileCacheHandle(IAsyncReadFileHandle* FileHandle, int64 InBaseOffset = 0);
 
 	virtual ~IFileCacheHandle() {};
 
 	/** Return size of underlying file cache in bytes. */
-	CORE_API static uint32 GetFileCacheSize();
+	CORE_API static int64 GetFileCacheSize();
 
 	/**
 	 * Read a byte range form the file. This can be a high-throughput operation and done lots of times for small reads.
@@ -64,3 +69,11 @@ public:
 	 */
 	virtual void WaitAll() = 0;
 };
+
+#if !UE_BUILD_SHIPPING
+//
+// Called by the IoStore system to inform the FileCache of used compression block sizes,
+// for usage warning purposes. (FFileIoStoreReader::ReadContainerHeader)
+//
+void CORE_API FileCache_PostIoStoreCompressionBlockSize(uint32 InCompressionBlockSize, FString const& InContainerFilePath);
+#endif // !UE_BUILD_SHIPPING

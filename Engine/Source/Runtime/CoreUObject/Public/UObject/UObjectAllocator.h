@@ -7,8 +7,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/PlatformMath.h"
 
-class COREUOBJECT_API FUObjectAllocator
+class UObjectBase;
+
+class FUObjectAllocator
 {
 public:
 
@@ -28,19 +31,14 @@ public:
 	 *
 	 * @param InPermanentObjectPoolSize size of permanent object pool
 	 */
-	void AllocatePermanentObjectPool(int32 InPermanentObjectPoolSize);
+	COREUOBJECT_API void AllocatePermanentObjectPool(int32 InPermanentObjectPoolSize);
 
 	/**
 	 * Prints a debugf message to allow tuning
 	 */
-	void BootMessage();
+	COREUOBJECT_API void BootMessage();
 
-	/**
-	 * Checks whether object is part of permanent object pool.
-	 *
-	 * @param Object object to test as a member of permanent object pool
-	 * @return true if object is part of permanent object pool, false otherwise
-	 */
+	UE_DEPRECATED(5.1, "Use the more efficient FPermanentObjectPoolExtents instead")
 	FORCEINLINE bool ResidesInPermanentPool(const UObjectBase *Object) const
 	{
 		return ((const uint8*)Object >= PermanentObjectPool) && ((const uint8*)Object < PermanentObjectPoolTail);
@@ -54,16 +52,17 @@ public:
 	 * @param bAllowPermanent if true, allow allocation in the permanent object pool, if it fits
 	 * @return newly allocated UObjectBase (not really a UObjectBase yet, no constructor like thing has been called).
 	 */
-	UObjectBase* AllocateUObject(int32 Size, int32 Alignment, bool bAllowPermanent);
+	COREUOBJECT_API UObjectBase* AllocateUObject(int32 Size, int32 Alignment, bool bAllowPermanent);
 
 	/**
 	 * Returns a UObjectBase to the free store, unless it is in the permanent object pool
 	 *
 	 * @param Object object to free
 	 */
-	void FreeUObject(UObjectBase *Object) const;
+	COREUOBJECT_API void FreeUObject(UObjectBase *Object) const;
 
 private:
+	friend class FPermanentObjectPoolExtents;
 
 	/** Size in bytes of pool for objects disregarded for GC.								*/
 	int32							PermanentObjectPoolSize;
@@ -78,3 +77,21 @@ private:
 /** Global UObjectBase allocator							*/
 extern COREUOBJECT_API FUObjectAllocator GUObjectAllocator;
 
+/** Helps check if an object is part of permanent object pool */
+class FPermanentObjectPoolExtents
+{
+public:
+	FORCEINLINE FPermanentObjectPoolExtents(const FUObjectAllocator& ObjectAllocator = GUObjectAllocator)
+		: Address(reinterpret_cast<uint64>(ObjectAllocator.PermanentObjectPool))
+		, Size(static_cast<uint64>(ObjectAllocator.PermanentObjectPoolSize))
+	{}
+	
+	FORCEINLINE bool Contains(const UObjectBase* Object) const
+	{
+		return reinterpret_cast<uint64>(Object) - Address < Size;
+	}
+
+private:
+	const uint64 Address;
+	const uint64 Size;
+};

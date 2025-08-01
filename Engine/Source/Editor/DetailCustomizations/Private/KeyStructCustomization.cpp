@@ -1,15 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "KeyStructCustomization.h"
+
+#include "Containers/Array.h"
 #include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "InputCoreTypes.h"
 #include "InputSettingsDetails.h"
-#include "SKeySelector.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "PropertyHandle.h"
+#include "SlotBase.h"
+#include "Types/SlateEnums.h"
+#include "UObject/ObjectMacros.h"
 #include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SBoxPanel.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "FKeyStructCustomization"
 
+FKeyStructCustomization::FKeyStructCustomization() = default;
+
 /* FKeyStructCustomization static interface
  *****************************************************************************/
+
+void FKeyStructCustomization::SetEnableKeySelector(bool bKeySelectorEnabled)
+{
+	bEnableKeySelector = bKeySelectorEnabled;
+	if (KeySelector)
+	{
+		KeySelector->SetEnabledFromKeyStructCustomization(bEnableKeySelector);
+	}
+}
+
+void FKeyStructCustomization::SetKey(const FString& KeyName)
+{
+	PropertyHandle->SetValueFromFormattedString(KeyName);
+}
 
 TSharedRef<IPropertyTypeCustomization> FKeyStructCustomization::MakeInstance( )
 {
@@ -45,6 +76,20 @@ void FKeyStructCustomization::CustomizeHeaderOnlyWithButton(TSharedRef<class IPr
 {
 	PropertyHandle = StructPropertyHandle;
 
+	KeySelector = SNew(SKeySelector)
+		.CurrentKey(this, &FKeyStructCustomization::GetCurrentKey)
+		.OnKeyChanged(this, &FKeyStructCustomization::OnKeyChanged)
+		.Font(StructCustomizationUtils.GetRegularFont())
+		.AllowClear(!StructPropertyHandle->GetProperty()->HasAnyPropertyFlags(CPF_NoClear))
+		.FilterBlueprintBindable(false)
+		.IsEnabled_Lambda([this]() -> bool
+	    {
+		    return bEnableKeySelector;
+	    });
+	
+	KeySelector->SetEnabledFromKeyStructCustomization(bEnableKeySelector);
+	KeySelector->SetDisabledKeySelectorToolTip(DisabledKeySelectorToolTip);
+	
 	// create struct header
 	HeaderRow.NameContent()
 	.MinDesiredWidth(125.0f)
@@ -52,18 +97,13 @@ void FKeyStructCustomization::CustomizeHeaderOnlyWithButton(TSharedRef<class IPr
 	[
 		SNew(SHorizontalBox)
 		+ SHorizontalBox::Slot()
-		.Padding(InputConstants::PropertyPadding)
+		.Padding(InputSettingsDetails::InputConstants::PropertyPadding)
 		//.AutoWidth()
 		[
-			SNew(SKeySelector)
-			.CurrentKey(this, &FKeyStructCustomization::GetCurrentKey)
-			.OnKeyChanged(this, &FKeyStructCustomization::OnKeyChanged)
-			.Font(StructCustomizationUtils.GetRegularFont())
-			.AllowClear(!StructPropertyHandle->GetProperty()->HasAnyPropertyFlags(CPF_NoClear))
-		    .FilterBlueprintBindable(false)
+			KeySelector.ToSharedRef()
 		]
 		+ SHorizontalBox::Slot()
-		.Padding(InputConstants::PropertyPadding)
+		.Padding(InputSettingsDetails::InputConstants::PropertyPadding)
 		.HAlign(HAlign_Center)
 		.VAlign(VAlign_Center)
 		.AutoWidth()
@@ -75,6 +115,11 @@ void FKeyStructCustomization::CustomizeHeaderOnlyWithButton(TSharedRef<class IPr
 
 TOptional<FKey> FKeyStructCustomization::GetCurrentKey() const
 {
+	if (!bEnableKeySelector)
+	{
+		PropertyHandle->SetValueFromFormattedString(DefaultKeyName);
+	}
+	
 	TArray<void*> StructPtrs;
 	PropertyHandle->AccessRawData(StructPtrs);
 

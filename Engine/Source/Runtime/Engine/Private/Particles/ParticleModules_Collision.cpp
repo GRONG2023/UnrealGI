@@ -5,29 +5,33 @@
 	Collision-related particle module implementations.
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Stats/Stats.h"
-#include "HAL/IConsoleManager.h"
-#include "EngineDefines.h"
-#include "Engine/EngineTypes.h"
+#include "Components/PrimitiveComponent.h"
+#include "Engine/World.h"
 #include "GameFramework/Pawn.h"
-#include "CollisionQueryParams.h"
+#include "MaterialDomain.h"
 #include "Materials/Material.h"
-#include "ParticleHelper.h"
+#include "MaterialShared.h"
 #include "Distributions/DistributionFloatConstant.h"
 #include "Distributions/DistributionFloatUniform.h"
 #include "Distributions/DistributionVectorConstant.h"
 #include "Distributions/DistributionVectorUniform.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/TriggerBase.h"
+#include "ParticleEmitterInstances.h"
 #include "Particles/Collision/ParticleModuleCollisionBase.h"
 #include "Particles/Collision/ParticleModuleCollision.h"
 #include "Particles/Collision/ParticleModuleCollisionGPU.h"
 #include "Particles/Event/ParticleModuleEventGenerator.h"
+#include "Particles/ParticleEmitter.h"
 #include "Particles/TypeData/ParticleModuleTypeDataMesh.h"
+#include "Particles/ParticleModule.h"
 #include "Particles/TypeData/ParticleModuleTypeDataGpu.h"
 #include "Particles/ParticleLODLevel.h"
 #include "Particles/ParticleModuleRequired.h"
+#include "Particles/ParticleSystem.h"
+#include "Particles/ParticleSystemComponent.h"
+#include "Particles/TypeData/ParticleModuleTypeDataBase.h"
+#include "SceneManagement.h"
 
 UParticleModuleCollisionBase::UParticleModuleCollisionBase(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -150,8 +154,8 @@ void UParticleModuleCollision::Spawn(FParticleEmitterInstance* Owner, int32 Offs
 	SPAWN_INIT;
 	{
 		PARTICLE_ELEMENT(FParticleCollisionPayload, CollisionPayload);
-		CollisionPayload.UsedDampingFactor = DampingFactor.GetValue(Owner->EmitterTime, Owner->Component);
-		CollisionPayload.UsedDampingFactorRotation = DampingFactorRotation.GetValue(Owner->EmitterTime, Owner->Component);
+		CollisionPayload.UsedDampingFactor = (FVector3f)DampingFactor.GetValue(Owner->EmitterTime, Owner->Component);
+		CollisionPayload.UsedDampingFactorRotation = (FVector3f)DampingFactorRotation.GetValue(Owner->EmitterTime, Owner->Component);
 		CollisionPayload.UsedCollisions = FMath::RoundToInt(MaxCollisions.GetValue(Owner->EmitterTime, Owner->Component));
 		CollisionPayload.Delay = DelayAmount.GetValue(Owner->EmitterTime, Owner->Component);
 		if (CollisionPayload.Delay > SpawnTime)
@@ -225,7 +229,7 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 		else
 		{
 			// If the MaxCollisionDistance is greater than WORLD_MAX, they obviously want the check disabled...
-			if (MaxCollisionDistance < WORLD_MAX)
+			if (MaxCollisionDistance < UE_OLD_WORLD_MAX)	// LWC_TODO: Fix needed to handle WORLD_MAX increase. Remove?
 			{
 				// If we have at least a few particles, do a simple check vs. the bounds
 				if (Owner->ActiveParticles > 7)
@@ -255,7 +259,7 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 							// bounds rather than shorten the distance checked as it is usually used for.
 							float InvDistanceFactor = 1.0f / PlayerLODDistanceFactor[PlyrIdx];
 							FBox CheckBounds = BoundingBox;
-							float BoxExpansionValue = MaxCollisionDistance * InvDistanceFactor;
+							FBox::FReal BoxExpansionValue = MaxCollisionDistance * InvDistanceFactor;
 							BoxExpansionValue += BoxExpansionValue * 0.075f;
 							// Expand it by the max collision distance (and a little bit extra)
 							CheckBounds = CheckBounds.ExpandBy(BoxExpansionValue);
@@ -302,7 +306,7 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 		}
 	}
 
-	float SquaredMaxCollisionDistance = FMath::Square(MaxCollisionDistance);
+	FVector::FReal SquaredMaxCollisionDistance = FMath::Square<FVector::FReal>(MaxCollisionDistance);
 	BEGIN_UPDATE_LOOP;
 	{
 		if ((Particle.Flags & STATE_Particle_CollisionIgnoreCheck) != 0)
@@ -324,7 +328,7 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 		FVector			OldLocation;
 
 		// Location won't be calculated till after tick so we need to calculate an intermediate one here.
-		Location	= Particle.Location + Particle.Velocity * DeltaTime;
+		Location	= Particle.Location + (FVector)Particle.Velocity * DeltaTime;
 		if (LODLevel->RequiredModule->bUseLocalSpace)
 		{
 			// Transform the location and old location into world space
@@ -338,7 +342,7 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 		FVector	Direction = (Location - OldLocation).GetSafeNormal();
 
 		// Determine the size
-		FVector Size = Particle.Size * ParentScale;
+		FVector Size = (FVector)Particle.Size * ParentScale;
 		FVector	Extent(0.0f);
 
 		// Setup extent for mesh particles. 
@@ -359,7 +363,7 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 
 		FVector End = Location + Direction * Size / DirScalar;
 
-		if ((World->IsGameWorld() == true) && (MaxCollisionDistance < WORLD_MAX))
+		if ((World->IsGameWorld() == true) && (MaxCollisionDistance < UE_OLD_WORLD_MAX))	// LWC_TODO: Fix needed to handle WORLD_MAX increase.
 		{
 			// LOD collision by distance
 			bool bCloseEnough = false;
@@ -385,10 +389,10 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 		{
 			bool bDecrementMaxCount = true;
 			bool bIgnoreCollision = false;
-			if (Hit.GetActor())
+			if (Hit.HitObjectHandle.IsValid())
 			{
-				bDecrementMaxCount = !bPawnsDoNotDecrementCount || !Cast<APawn>(Hit.GetActor());
-				bIgnoreCollision = bIgnoreTriggerVolumes && Hit.GetActor()->IsA(ATriggerBase::StaticClass());
+				bDecrementMaxCount = !bPawnsDoNotDecrementCount || !Hit.HitObjectHandle.DoesRepresentClass(APawn::StaticClass());
+				bIgnoreCollision = bIgnoreTriggerVolumes && Hit.HitObjectHandle.DoesRepresentClass(ATriggerBase::StaticClass());
 				//@todo.SAS. Allow for PSys to say what it wants to collide w/?
 			}
 
@@ -413,11 +417,11 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 					if (LODLevel->RequiredModule->bUseLocalSpace)
 					{
 						// Transform the particle velocity to world space
-						FVector OldVelocity		= OwnerTM.TransformVector(Particle.Velocity);
-						FVector	BaseVelocity	= OwnerTM.TransformVector(Particle.BaseVelocity);
-						BaseVelocity			= BaseVelocity.MirrorByVector(Hit.Normal) * CollisionPayload.UsedDampingFactor;
+						FVector OldVelocity		= OwnerTM.TransformVector((FVector)Particle.Velocity);
+						FVector	BaseVelocity	= OwnerTM.TransformVector((FVector)Particle.BaseVelocity);
+						BaseVelocity			= BaseVelocity.MirrorByVector(Hit.Normal) * (FVector)CollisionPayload.UsedDampingFactor;
 
-						Particle.BaseVelocity		= OwnerTM.InverseTransformVector(BaseVelocity);
+						Particle.BaseVelocity		= (FVector3f)OwnerTM.InverseTransformVector(BaseVelocity);
 						Particle.BaseRotationRate	= Particle.BaseRotationRate * CollisionPayload.UsedDampingFactorRotation.X;
 						if (bMeshRotationActive && MeshRotationOffset > 0)
 						{
@@ -426,8 +430,8 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 						}
 
 						// Reset the current velocity and manually adjust location to bounce off based on normal and time of collision.
-						FVector NewVelocity	= Direction.MirrorByVector(Hit.Normal) * (Location - OldLocation).Size() * CollisionPayload.UsedDampingFactor;
-						Particle.Velocity		= FVector::ZeroVector;
+						FVector NewVelocity	= Direction.MirrorByVector(Hit.Normal) * (Location - OldLocation).Size() * (FVector)CollisionPayload.UsedDampingFactor;
+						Particle.Velocity		= FVector3f::ZeroVector;
 
 						// New location
 						FVector	NewLocation		= Location + NewVelocity * (1.f - Hit.Time);
@@ -447,10 +451,10 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 					}
 					else
 					{
-						FVector vOldVelocity = Particle.Velocity;
+						FVector vOldVelocity(Particle.Velocity);
 
 						// Reflect base velocity and apply damping factor.
-						Particle.BaseVelocity		= Particle.BaseVelocity.MirrorByVector(Hit.Normal) * CollisionPayload.UsedDampingFactor;
+						Particle.BaseVelocity		= Particle.BaseVelocity.MirrorByVector((FVector3f)Hit.Normal) * CollisionPayload.UsedDampingFactor;
 						Particle.BaseRotationRate	= Particle.BaseRotationRate * CollisionPayload.UsedDampingFactorRotation.X;
 						if (bMeshRotationActive && MeshRotationOffset > 0)
 						{
@@ -459,8 +463,8 @@ void UParticleModuleCollision::Update(FParticleEmitterInstance* Owner, int32 Off
 						}
 
 						// Reset the current velocity and manually adjust location to bounce off based on normal and time of collision.
-						FVector vNewVelocity	= Direction.MirrorByVector(Hit.Normal) * (Location - OldLocation).Size() * CollisionPayload.UsedDampingFactor;
-						Particle.Velocity		= FVector::ZeroVector;
+						FVector vNewVelocity	= Direction.MirrorByVector(Hit.Normal) * (Location - OldLocation).Size() * (FVector)CollisionPayload.UsedDampingFactor;
+						Particle.Velocity		= FVector3f::ZeroVector;
 						Particle.Location	   += vNewVelocity * (1.f - Hit.Time);
 
 						if (bApplyPhysics)
@@ -672,15 +676,15 @@ bool UParticleModuleCollisionGPU::IsValidForLODLevel(UParticleLODLevel* LODLevel
 	}
 	check(Material);
 
-	EBlendMode BlendMode = BLEND_Opaque;
+	bool bIsOpaqueOrMasked = true;
 	UWorld* World = GetWorld();
-	const FMaterialResource* MaterialResource = Material->GetMaterialResource(World ? World->FeatureLevel.GetValue() : GMaxRHIFeatureLevel);
-	if(MaterialResource)
+	const FMaterialResource* MaterialResource = Material->GetMaterialResource(World ? World->GetFeatureLevel() : GMaxRHIFeatureLevel);
+	if (MaterialResource)
 	{
-		BlendMode = MaterialResource->GetBlendMode();
+		bIsOpaqueOrMasked = IsOpaqueOrMaskedBlendMode(*MaterialResource);
 	}
 
-	if (CollisionMode == EParticleCollisionMode::SceneDepth && (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked))
+	if (CollisionMode == EParticleCollisionMode::SceneDepth && bIsOpaqueOrMasked)
 	{
 		OutErrorString = NSLOCTEXT("UnrealEd", "CollisionOnOpaqueEmitter", "Scene depth collision cannot be used on emitters with an opaque material.").ToString();
 		return false;
@@ -688,9 +692,7 @@ bool UParticleModuleCollisionGPU::IsValidForLODLevel(UParticleLODLevel* LODLevel
 
 	if (CollisionMode == EParticleCollisionMode::DistanceField)
 	{
-		static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.GenerateMeshDistanceFields"));
-
-		if (CVar->GetValueOnGameThread() == 0)
+		if (DoesProjectSupportDistanceFields())
 		{
 			OutErrorString = NSLOCTEXT("UnrealEd", "CollisionWithoutDistanceField", "Distance Field collision requires the 'Generate Mesh Distance Fields' Renderer project setting to be enabled.").ToString();
 			return false;

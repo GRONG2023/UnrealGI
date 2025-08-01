@@ -23,6 +23,7 @@ struct FSystemSettingsData
 	ENGINE_API void LoadFromIni(const TCHAR* IniSection, const FString& IniFilename = GEngineIni, bool bAllowMissingValues = true, bool* FoundValues=NULL);
 };
 
+UE_DEPRECATED(5.1, "Use UE::ConfigUtilities::OnSetCVarFromIniEntry")
 ENGINE_API void OnSetCVarFromIniEntry(const TCHAR *IniFile, const TCHAR *Key, const TCHAR* Value, uint32 SetBy, bool bAllowCheating = false);
 
 
@@ -46,7 +47,9 @@ public:
 	void ApplyOverrides();
 	
 	//~ Begin Exec Interface
+#if UE_ALLOW_EXEC_COMMANDS
 	virtual bool Exec( UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar ) override;
+#endif
 	//~ End Exec Interface
 
 	/** Mask where 1 bits mean we want to force the engine show flag to be off */

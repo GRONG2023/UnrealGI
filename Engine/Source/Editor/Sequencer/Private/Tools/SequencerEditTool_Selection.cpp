@@ -1,93 +1,181 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Tools/SequencerEditTool_Selection.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SequencerCommonHelpers.h"
 #include "SSequencer.h"
+#include "ISequencerEditTool.h"
+#include "ISequencerSection.h"
+#include "SequencerHotspots.h"
+#include "IKeyArea.h"
 #include "Tools/SequencerEntityVisitor.h"
-#include "SSequencerTreeView.h"
-#include "ISequencerHotspot.h"
-#include "VirtualTrackArea.h"
+#include "SequencerCommands.h"
+#include "MVVM/Selection/Selection.h"
+#include "MVVM/Views/ISequencerTreeView.h"
+#include "MVVM/Views/ITrackAreaHotspot.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
+#include "MVVM/ViewModels/VirtualTrackArea.h"
+
+#include "MVVM/ViewModels/ViewModel.h"
+#include "MVVM/ViewModels/SequenceModel.h"
+#include "MVVM/Views/STrackAreaView.h"
+#include "MVVM/Views/SOutlinerView.h"
+#include "MVVM/Extensions/IOutlinerExtension.h"
+#include "MVVM/Extensions/IPinnableExtension.h"
+#include "MVVM/Extensions/ISelectableExtension.h"
 
 
 struct FSelectionPreviewVisitor final
 	: ISequencerEntityVisitor
 {
-	FSelectionPreviewVisitor(FSequencerSelectionPreview& InSelectionPreview, FSequencerSelection& InSelection, ESelectionPreviewState InSetStateTo, bool bInPinned)
+	FSelectionPreviewVisitor(FSequencerSelectionPreview& InSelectionPreview, UE::Sequencer::FSequencerSelection& InSelection, ESelectionPreviewState InSetStateTo, bool bInPinned)
 		: SelectionPreview(InSelectionPreview)
-		, ExistingSelection(InSelection)
+		, ExistingSelection(InSelection.KeySelection.GetSelected())
 		, SetStateTo(InSetStateTo)
 		, bPinned(bInPinned)
-	{}
-
-	virtual void VisitKey(FKeyHandle KeyHandle, FFrameNumber KeyTime, const TSharedPtr<IKeyArea>& KeyArea, UMovieSceneSection* Section, TSharedRef<FSequencerDisplayNode> Node) const override
 	{
-		if (Node->IsPinned() != bPinned)
+		bIsControlDown = FSlateApplication::Get().GetModifierKeys().IsControlDown();
+	}
+
+	virtual void VisitKeys(const UE::Sequencer::TViewModelPtr<UE::Sequencer::FChannelModel>& Channel, const TRange<FFrameNumber>& VisitRangeFrames) const override
+	{
+		using namespace UE::Sequencer;
+
+		TSharedPtr<IPinnableExtension> PinnableItem = Channel->GetLinkedOutlinerItem().ImplicitCast();
+		if (PinnableItem && PinnableItem->IsPinned() != bPinned)
 		{
 			return;
 		}
 
-		FSequencerSelectedKey Key(*Section, KeyArea, KeyHandle);
+		KeyHandlesScratch.Reset();
+		Channel->GetKeyArea()->GetKeyInfo(&KeyHandlesScratch, nullptr, VisitRangeFrames);
 
-		// Under default behavior keys have priority, so if a key is changing selection state then we remove any sections from the selection. The user can bypass this
-		// by holding down the control key which will allow selecting both keys and sections.
-		bool bKeySelectionHasPriority = !FSlateApplication::Get().GetModifierKeys().IsControlDown();
-		bool bKeyIsSelected = ExistingSelection.IsSelected(Key);
-
-		if (bKeySelectionHasPriority && 
-			((bKeyIsSelected && SetStateTo == ESelectionPreviewState::NotSelected) ||
-			(!bKeyIsSelected && SetStateTo == ESelectionPreviewState::Selected)))
+		for (int32 Index = 0; Index < KeyHandlesScratch.Num(); ++Index)
 		{
-			// Clear selected nodes
-			for (TSharedRef<FSequencerDisplayNode> SelectedNode : NodesSelectedBySections)
-			{
-				if (!NodesSelectedByKeys.Contains(SelectedNode))
-				{
-					SelectionPreview.SetSelectionState(SelectedNode, ESelectionPreviewState::Undefined);
-				}
-			}
-			
-			// Clear selected sections
-			SelectionPreview.EmptyDefinedSectionStates();
-		}
+			// Under default behavior keys have priority, so if a key is changing selection state then we remove any sections from the selection. The user can bypass this
+			// by holding down the control key which will allow selecting both keys and sections.
+			bool bKeySelectionHasPriority = !bIsControlDown;
+			bool bKeyIsSelected = ExistingSelection.Contains(KeyHandlesScratch[Index]);
 
-		SelectionPreview.SetSelectionState(Key, SetStateTo);
-		SelectionPreview.SetSelectionState(Node, SetStateTo);
-		NodesSelectedByKeys.Add(Node);
+			if (bKeySelectionHasPriority && 
+				((bKeyIsSelected && SetStateTo == ESelectionPreviewState::NotSelected) ||
+				(!bKeyIsSelected && SetStateTo == ESelectionPreviewState::Selected)))
+			{
+				// Clear selected models
+				SelectionPreview.EmptyDefinedModelStates();
+			}
+
+			SelectionPreview.SetSelectionState(Channel, KeyHandlesScratch[Index], SetStateTo);
+		}
 	}
 
-	virtual void VisitSection(UMovieSceneSection* Section, TSharedRef<FSequencerDisplayNode> Node) const
+	virtual void VisitDataModel(UE::Sequencer::FViewModel* DataModel) const override
 	{
+		using namespace UE::Sequencer;
+
+		ISelectableExtension* Selectable = DataModel->CastThis<ISelectableExtension>();
+		if (!Selectable || !EnumHasAnyFlags(Selectable->IsSelectable(), ESelectionIntent::PersistentSelection))
+		{
+			return;
+		}
+
 		// If key selection has priority then we check to see if there are any keys selected. If there are key selected, we don't add this section.
-		// Otherwise, we bypass this check and only care that the range isn't infinite (those are selectable via right click)
+		// Otherwise, we bypass this check
 		bool bKeySelectionHasPriority = !FSlateApplication::Get().GetModifierKeys().IsControlDown();
 		bool bKeyStateCheck = bKeySelectionHasPriority ? SelectionPreview.GetDefinedKeyStates().Num() == 0 : true;
 
-		if (bKeyStateCheck && Section->GetRange() != TRange<FFrameNumber>::All())
+		if (bKeyStateCheck)
 		{
-			SelectionPreview.SetSelectionState(Section, SetStateTo);
-			SelectionPreview.SetSelectionState(Node, SetStateTo);
-			NodesSelectedBySections.Add(Node);
+			SelectionPreview.SetSelectionState(DataModel->AsShared(), SetStateTo);
 		}
 	}
 
 private:
-	mutable TSet<TSharedRef<FSequencerDisplayNode>> NodesSelectedBySections;
-	mutable TSet<TSharedRef<FSequencerDisplayNode>> NodesSelectedByKeys;
 
 	FSequencerSelectionPreview& SelectionPreview;
-	FSequencerSelection& ExistingSelection;
+	const TSet<FKeyHandle>& ExistingSelection;
+	mutable TArray<FKeyHandle> KeyHandlesScratch;
 	ESelectionPreviewState SetStateTo;
 	bool bPinned;
+	bool bIsControlDown;
 };
 
-
-class FMarqueeDragOperation
-	: public ISequencerEditToolDragOperation
+class FScrubTimeDragOperation
+	: public UE::Sequencer::ISequencerEditToolDragOperation
 {
 public:
 
-	FMarqueeDragOperation(FSequencer& InSequencer, SSequencerTrackArea& InTrackArea)
+	FScrubTimeDragOperation(FSequencer& InSequencer, UE::Sequencer::STrackAreaView& InTrackArea)
+		: Sequencer(InSequencer)
+	{}
+
+public:
+
+	// ISequencerEditToolDragOperation interface
+
+	virtual FCursorReply GetCursor() const override
+	{
+		return FCursorReply::Cursor(EMouseCursor::Default);
+	}
+
+	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override
+	{
+		// Start a new marquee selection
+		InitialPosition = CurrentPosition = VirtualTrackArea.PhysicalToVirtual(LocalMousePos);
+		CurrentMousePos = LocalMousePos;
+
+		Sequencer.SetPlaybackStatus(EMovieScenePlayerStatus::Scrubbing);
+		SequencerStartTime = Sequencer.GetLocalTime();
+		InitialTime = VirtualTrackArea.PixelToSeconds(LocalMousePos.X);
+	}
+
+	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override
+	{
+		CurrentTime = VirtualTrackArea.PixelToSeconds(LocalMousePos.X);
+		FFrameTime FrameTime = CalculateScrubTime();
+
+		Sequencer.SnapSequencerTime(FrameTime);
+		Sequencer.SetLocalTimeDirectly(FrameTime, true);
+	}
+
+	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override
+	{
+		Sequencer.SetPlaybackStatus(EMovieScenePlayerStatus::Stopped);
+	}
+
+	virtual int32 OnPaint(const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId) const override
+	{
+		return LayerId;
+	}
+
+private:
+
+	FFrameTime CalculateScrubTime()
+	{
+		double Diff = CurrentTime - InitialTime;
+		FFrameTime FrameTime= SequencerStartTime.Rate.AsFrameTime(Diff);
+		FrameTime += SequencerStartTime.Time;
+		return FrameTime;
+	}
+
+	/** The sequencer itself */
+	FSequencer& Sequencer;
+
+	FVector2D InitialPosition;
+	FVector2D CurrentPosition;
+	FVector2D CurrentMousePos;
+
+	FQualifiedFrameTime SequencerStartTime;
+	double InitialTime;
+	double CurrentTime;
+};
+
+class FMarqueeDragOperation
+	: public UE::Sequencer::ISequencerEditToolDragOperation
+{
+public:
+
+	FMarqueeDragOperation(FSequencer& InSequencer, UE::Sequencer::STrackAreaView& InTrackArea)
 		: Sequencer(InSequencer)
 		, TrackArea(InTrackArea)
 		, SequencerWidget(StaticCastSharedRef<SSequencer>(InSequencer.GetSequencerWidget()))
@@ -103,13 +191,13 @@ public:
 		return FCursorReply::Cursor( EMouseCursor::Default );
 	}
 
-	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override
+	virtual void OnBeginDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override
 	{
 		// Start a new marquee selection
 		InitialPosition = CurrentPosition = VirtualTrackArea.PhysicalToVirtual(LocalMousePos);
 		CurrentMousePos = LocalMousePos;
 
-		Sequencer.GetSelection().SuspendBroadcast();
+		EventSuppressor = Sequencer.GetViewModel()->GetSelection()->SuppressEventsLongRunning();
 
 		if (MouseEvent.IsShiftDown())
 		{
@@ -124,12 +212,16 @@ public:
 			PreviewState = ESelectionPreviewState::Selected;
 
 			// @todo: selection in transactions
-			Sequencer.GetSelection().Empty();
+			//leave selections in the tree view alone so that dragging operations act similarly to click operations which don't change treeview selection state.
+			Sequencer.GetViewModel()->GetSelection()->KeySelection.Empty();
+			Sequencer.GetViewModel()->GetSelection()->TrackArea.Empty();
 		}
 	}
 
-	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override
+	virtual void OnDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override
 	{
+		using namespace UE::Sequencer;
+
 		// hange the current marquee selection
 		const FVector2D MouseDelta = MouseEvent.GetCursorDelta();
 
@@ -137,7 +229,7 @@ public:
 		{
 			const float ScrollThresholdV = VirtualTrackArea.GetPhysicalSize().Y * 0.025f;
 
-			TSharedPtr<SSequencerTreeView> TreeView = TrackArea.GetTreeView().Pin();
+			TSharedPtr<SOutlinerView> TreeView = TrackArea.GetOutliner().Pin();
 
 			float Difference = LocalMousePos.Y - ScrollThresholdV;
 			if (Difference < 0 && MouseDelta.Y < 0)
@@ -197,81 +289,58 @@ public:
 		// Ensure the preview is empty before calculating the intersection
 		SelectionPreview.Empty();
 
-		const auto& RootNodes = SequencerWidget->GetTreeView()->GetNodeTree()->GetRootNodes();
-
 		// Now walk everything within the current marquee range, setting preview selection states as we go
 		FSequencerEntityWalker Walker(FSequencerEntityRange(TopLeft(), BottomRight(), VirtualTrackArea.GetTickResolution()), VirtualKeySize);
-		Walker.Traverse(FSelectionPreviewVisitor(SelectionPreview, Sequencer.GetSelection(), PreviewState, TrackArea.ShowPinned()), RootNodes);
+		Walker.Traverse(FSelectionPreviewVisitor(SelectionPreview, *Sequencer.GetViewModel()->GetSelection(), PreviewState, TrackArea.ShowPinned()), Sequencer.GetViewModel()->GetRootModel());
 	}
 
-	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const FVirtualTrackArea& VirtualTrackArea) override
+	virtual void OnEndDrag(const FPointerEvent& MouseEvent, FVector2D LocalMousePos, const UE::Sequencer::FVirtualTrackArea& VirtualTrackArea) override
 	{
+		using namespace UE::Sequencer;
+
 		// finish dragging the marquee selection
-		auto& Selection = Sequencer.GetSelection();
-		auto& SelectionPreview = Sequencer.GetSelectionPreview();
+		FSequencerSelection& Selection = *Sequencer.GetViewModel()->GetSelection();
+		FSequencerSelectionPreview& SelectionPreview = Sequencer.GetSelectionPreview();
 
 		// Patch everything from the selection preview into the actual selection
-		for (const auto& Pair : SelectionPreview.GetDefinedKeyStates())
+		for (const TPair<FKeyHandle, ESelectionPreviewState>& Pair : SelectionPreview.GetDefinedKeyStates())
 		{
 			if (Pair.Value == ESelectionPreviewState::Selected)
 			{
-				// Select it in the main selection
-				Selection.AddToSelection(Pair.Key);
+				Selection.KeySelection.Select(SelectionPreview.GetChannelForKey(Pair.Key), Pair.Key);
 			}
 			else
 			{
-				Selection.RemoveFromSelection(Pair.Key);
+				Selection.KeySelection.Deselect(Pair.Key);
 			}
 		}
 
-		for (const auto& Pair : SelectionPreview.GetDefinedSectionStates())
+		for (const TPair<TWeakPtr<FViewModel>, ESelectionPreviewState>& Pair : SelectionPreview.GetDefinedModelStates())
 		{
-			UMovieSceneSection* Section = Pair.Key.Get();
-
-			if (Pair.Value == ESelectionPreviewState::Selected)
+			if (TSharedPtr<FViewModel> Model = Pair.Key.Pin())
 			{
-				// Select it in the main selection
-				Selection.AddToSelection(Section);
-			}
-			else
-			{
-				Selection.RemoveFromSelection(Section);
-			}
-		}
-
-		for (const auto& Pair : SelectionPreview.GetDefinedOutlinerNodeStates())
-		{
-			if (Pair.Value == ESelectionPreviewState::Selected)
-			{
-				Selection.AddToNodesWithSelectedKeysOrSections(Pair.Key);
-
-				// If this node exists inside a collapsed parent, we add such parents to the selection preview as well so that the node highlight is correct for accumulated keys
-				TSharedPtr<FSequencerDisplayNode> ParentNode = Pair.Key->GetParent();
-				while (ParentNode.IsValid())
+				if (TViewModelPtr<IOutlinerExtension> OutlinerItem = CastViewModel<IOutlinerExtension>(Model))
 				{
-					if (!ParentNode->IsExpanded())
-					{
-						Selection.AddToNodesWithSelectedKeysOrSections(ParentNode.ToSharedRef());
-					}
-					ParentNode = ParentNode->GetParent();
+					Selection.Outliner.Select(OutlinerItem);
+				}
+				else
+				{
+					Selection.TrackArea.Select(Model);
 				}
 			}
-			else
-			{
-				Selection.RemoveFromNodesWithSelectedKeysOrSections(Pair.Key);
-			}
 		}
 
-		Selection.ResumeBroadcast();
-		Selection.RequestOutlinerNodeSelectionChangedBroadcast();
+		// Broadcast selection events
+		EventSuppressor = nullptr;
 
 		// We're done with this now
 		SelectionPreview.Empty();
-		SequencerHelpers::ValidateNodesWithSelectedKeysOrSections(Sequencer);
 	}
 
-	virtual int32 OnPaint(const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId) const
+	virtual int32 OnPaint(const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId) const override
 	{
+		using namespace UE::Sequencer;
+
 		// convert to physical space for rendering
 		const FVirtualTrackArea VirtualTrackArea = SequencerWidget->GetVirtualTrackArea(&TrackArea);
 
@@ -281,8 +350,8 @@ public:
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			LayerId,
-			AllottedGeometry.ToPaintGeometry(SelectionTopLeft, SelectionBottomRight - SelectionTopLeft),
-			FEditorStyle::GetBrush(TEXT("MarqueeSelection"))
+			AllottedGeometry.ToPaintGeometry(SelectionBottomRight - SelectionTopLeft, FSlateLayoutTransform(SelectionTopLeft)),
+			FAppStyle::GetBrush(TEXT("MarqueeSelection"))
 			);
 
 		return LayerId + 1;
@@ -309,7 +378,9 @@ private:
 	/** The sequencer itself */
 	FSequencer& Sequencer;
 
-	SSequencerTrackArea& TrackArea;
+	UE::Sequencer::STrackAreaView& TrackArea;
+
+	TUniquePtr<UE::Sequencer::FSelectionEventSuppressor> EventSuppressor;
 
 	/** Sequencer widget */
 	TSharedRef<SSequencer> SequencerWidget;
@@ -325,7 +396,7 @@ private:
 
 const FName FSequencerEditTool_Selection::Identifier = "Selection";
 
-FSequencerEditTool_Selection::FSequencerEditTool_Selection(FSequencer& InSequencer, SSequencerTrackArea& InTrackArea)
+FSequencerEditTool_Selection::FSequencerEditTool_Selection(FSequencer& InSequencer, UE::Sequencer::STrackAreaView& InTrackArea)
 	: FSequencerEditTool(InSequencer)
 	, TrackArea(InTrackArea)
 	, CursorDecorator(nullptr)
@@ -334,6 +405,11 @@ FSequencerEditTool_Selection::FSequencerEditTool_Selection(FSequencer& InSequenc
 
 FCursorReply FSequencerEditTool_Selection::OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const
 {
+	if (DragOperation)
+	{
+		return DragOperation->GetCursor();
+	}
+
 	return FCursorReply::Cursor(EMouseCursor::Crosshairs);
 }
 
@@ -350,7 +426,7 @@ int32 FSequencerEditTool_Selection::OnPaint(const FGeometry& AllottedGeometry, c
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			++LayerId,
-			AllottedGeometry.ToPaintGeometry(MousePosition + FVector2D(5, 5), CursorDecorator->ImageSize),
+			AllottedGeometry.ToPaintGeometry(CursorDecorator->ImageSize, FSlateLayoutTransform(MousePosition + FVector2D(5.f, 5.f))),
 			CursorDecorator
 			);
 	}
@@ -361,13 +437,17 @@ int32 FSequencerEditTool_Selection::OnPaint(const FGeometry& AllottedGeometry, c
 
 FReply FSequencerEditTool_Selection::OnMouseButtonDown(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	using namespace UE::Sequencer;
+
 	UpdateCursor(MyGeometry, MouseEvent);
 
 	DelayedDrag.Reset();
 
 	if (MouseEvent.GetEffectingButton() == EKeys::LeftMouseButton)
 	{
-		DelayedDrag = FDelayedDrag_Hotspot(MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()), EKeys::LeftMouseButton, Sequencer.GetHotspot());
+		TSharedPtr<FSequencerEditorViewModel> SequencerViewModel = Sequencer.GetViewModel()->CastThisShared<FSequencerEditorViewModel>();
+		TSharedPtr<ITrackAreaHotspot> Hotspot = SequencerViewModel->GetHotspot();
+		DelayedDrag = FDelayedDrag_Hotspot(MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()), EKeys::LeftMouseButton, Hotspot);
 		return FReply::Handled();
 	}
 	return FReply::Unhandled();
@@ -376,6 +456,8 @@ FReply FSequencerEditTool_Selection::OnMouseButtonDown(SWidget& OwnerWidget, con
 
 FReply FSequencerEditTool_Selection::OnMouseMove(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
 {
+	using namespace UE::Sequencer;
+
 	UpdateCursor(MyGeometry, MouseEvent);
 
 	if (DelayedDrag.IsSet())
@@ -395,16 +477,22 @@ FReply FSequencerEditTool_Selection::OnMouseMove(SWidget& OwnerWidget, const FGe
 			if (DelayedDrag->Hotspot.IsValid())
 			{
 				// We only allow resizing with the marquee selection tool enabled
-				auto HotspotType = DelayedDrag->Hotspot->GetType();
-				if (HotspotType != ESequencerHotspot::Section && HotspotType != ESequencerHotspot::Key)
+				if (DelayedDrag->Hotspot->CastThis<FSectionHotspot>() == nullptr && DelayedDrag->Hotspot->CastThis<FKeyHotspot>() == nullptr)
 				{
-					DragOperation = DelayedDrag->Hotspot->InitiateDrag(Sequencer);
+					DragOperation = DelayedDrag->Hotspot->InitiateDrag(MouseEvent);
 				}
 			}
 
 			if (!DragOperation.IsValid())
 			{
-				DragOperation = MakeShareable( new FMarqueeDragOperation(Sequencer, TrackArea) );
+				if (bIsScrubbingTime)
+				{
+					DragOperation = MakeShareable(new FScrubTimeDragOperation(Sequencer, TrackArea));
+				}
+				else
+				{
+					DragOperation = MakeShareable(new FMarqueeDragOperation(Sequencer, TrackArea));
+				}
 			}
 
 			if (DragOperation.IsValid())
@@ -473,16 +561,59 @@ void FSequencerEditTool_Selection::OnMouseLeave(SWidget& OwnerWidget, const FPoi
 	{
 		CursorDecorator = nullptr;
 	}
+	bIsScrubbingTime = false;
 }
 
 
 void FSequencerEditTool_Selection::OnMouseCaptureLost()
 {
-	DelayedDrag.Reset();
-	DragOperation = nullptr;
-	CursorDecorator = nullptr;
+	// Delaying nulling out until next tick because this could be invoked during OnMouseMove()
+	GEditor->GetTimerManager()->SetTimerForNextTick([this]()
+	{
+		DelayedDrag.Reset();
+		DragOperation = nullptr;
+		CursorDecorator = nullptr;
+		bIsScrubbingTime = false;
+	});
 }
 
+bool FSequencerEditTool_Selection::IsScrubTimeKeyEvent(const FKeyEvent& InKeyEvent)
+{
+	const FSequencerCommands& Commands = FSequencerCommands::Get();
+	// Need to iterate through primary and secondary to make sure they are all pressed.
+	for (uint32 i = 0; i < static_cast<uint8>(EMultipleKeyBindingIndex::NumChords); ++i)
+	{
+		EMultipleKeyBindingIndex ChordIndex = static_cast<EMultipleKeyBindingIndex>(i);
+		const FInputChord& Chord = *Commands.ScrubTimeViewport->GetActiveChord(ChordIndex);
+		const bool bIsMovingTimeSlider = Chord.IsValidChord() && InKeyEvent.GetKey() == Chord.Key;
+		if (bIsMovingTimeSlider)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+FReply FSequencerEditTool_Selection::OnKeyDown(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (IsScrubTimeKeyEvent(InKeyEvent))
+	{
+		bIsScrubbingTime = true;
+		return FReply::Handled();
+	}
+	return FReply::Unhandled();
+}
+
+FReply FSequencerEditTool_Selection::OnKeyUp(SWidget& OwnerWidget, const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (IsScrubTimeKeyEvent(InKeyEvent) && bIsScrubbingTime)
+	{
+		bIsScrubbingTime = false;
+		//would be nice to cancle the drag but doesn't seem like we can like we can with curve editor drag handlers.
+		return FReply::Handled();
+	}
+	return FReply::Unhandled();
+}
 
 FName FSequencerEditTool_Selection::GetIdentifier() const
 {
@@ -494,9 +625,9 @@ bool FSequencerEditTool_Selection::CanDeactivate() const
 	return !DelayedDrag.IsSet();
 }
 
-const ISequencerHotspot* FSequencerEditTool_Selection::GetDragHotspot() const
+TSharedPtr<UE::Sequencer::ITrackAreaHotspot> FSequencerEditTool_Selection::GetDragHotspot() const
 {
-	return DelayedDrag.IsSet() ? DelayedDrag->Hotspot.Get() : nullptr;
+	return DelayedDrag.IsSet() ? DelayedDrag->Hotspot : nullptr;
 }
 
 void FSequencerEditTool_Selection::UpdateCursor(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)
@@ -508,11 +639,11 @@ void FSequencerEditTool_Selection::UpdateCursor(const FGeometry& MyGeometry, con
 	{
 		if (MouseEvent.IsShiftDown())
 		{
-			CursorDecorator = FEditorStyle::Get().GetBrush(TEXT("Sequencer.CursorDecorator_MarqueeAdd"));
+			CursorDecorator = FAppStyle::Get().GetBrush(TEXT("Sequencer.CursorDecorator_MarqueeAdd"));
 		}
 		else if (MouseEvent.IsAltDown())
 		{
-			CursorDecorator = FEditorStyle::Get().GetBrush(TEXT("Sequencer.CursorDecorator_MarqueeSubtract"));
+			CursorDecorator = FAppStyle::Get().GetBrush(TEXT("Sequencer.CursorDecorator_MarqueeSubtract"));
 		}
 		else
 		{

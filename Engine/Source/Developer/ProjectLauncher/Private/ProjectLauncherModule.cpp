@@ -7,7 +7,7 @@
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/Docking/TabManager.h"
 #include "Textures/SlateIcon.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
@@ -32,26 +32,18 @@ public:
 	
 	virtual void StartupModule() override
 	{
-#if WITH_EDITOR
-		FGlobalTabmanager::Get()->RegisterTabSpawner(ProjectLauncherTabName, FOnSpawnTab::CreateRaw(this, &FProjectLauncherModule::SpawnProjectLauncherTab));
-#else
 		// This is still experimental in the editor, so it'll be invoked specifically in FMainMenu if the experimental settings flag is set.
 		//@todo Enable this in the editor when no longer experimental
 		FGlobalTabmanager::Get()->RegisterNomadTabSpawner(ProjectLauncherTabName, FOnSpawnTab::CreateRaw(this, &FProjectLauncherModule::SpawnProjectLauncherTab))
 			.SetDisplayName(NSLOCTEXT("FProjectLauncherModule", "ProjectLauncherTabTitle", "Project Launcher"))
 			.SetTooltipText(NSLOCTEXT("FProjectLauncherModule", "ProjectLauncherTooltipText", "Open the Project Launcher tab."))
-			.SetIcon(FSlateIcon(FEditorStyle::GetStyleSetName(), "Launcher.TabIcon"))
+			.SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "Launcher.TabIcon"))
 			.SetGroup(WorkspaceMenu::GetMenuStructure().GetToolsCategory());
-#endif
 	}
 
 	virtual void ShutdownModule() override
 	{
-#if WITH_EDITOR
-		FGlobalTabmanager::Get()->UnregisterTabSpawner(ProjectLauncherTabName);
-#else
 		FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(ProjectLauncherTabName);
-#endif
 	}
 
 private:
@@ -65,7 +57,6 @@ private:
 	TSharedRef<SDockTab> SpawnProjectLauncherTab(const FSpawnTabArgs& SpawnTabArgs)
 	{
 		const TSharedRef<SDockTab> DockTab = SNew(SDockTab)
-			.Icon(FEditorStyle::GetBrush("Launcher.TabIcon"))
 			.TabRole(ETabRole::NomadTab);
 
 		ILauncherServicesModule& ProjectLauncherServicesModule = FModuleManager::LoadModuleChecked<ILauncherServicesModule>("LauncherServices");

@@ -1,19 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-/*=============================================================================
-	PlayerState.cpp: 
-=============================================================================*/
-
 #include "GameFramework/PlayerState.h"
 #include "Engine/World.h"
-#include "GameFramework/Controller.h"
-#include "GameFramework/PlayerController.h"
 #include "GameFramework/EngineMessage.h"
 #include "Net/UnrealNetwork.h"
 #include "Net/OnlineEngineInterface.h"
 #include "GameFramework/GameStateBase.h"
 #include "Net/Core/PushModel/PushModel.h"
+#if UE_WITH_IRIS
+#include "Net/Iris/ReplicationSystem/ReplicationSystemUtil.h"
+#include "Iris/ReplicationSystem/ReplicationSystem.h"
+#include "Iris/ReplicationSystem/Prioritization/NetObjectPrioritizer.h"
+#endif
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PlayerState)
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 APlayerState::APlayerState(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer
 		.DoNotCreateDefaultSubobject(TEXT("Sprite")) )
@@ -36,6 +38,7 @@ APlayerState::APlayerState(const FObjectInitializer& ObjectInitializer)
 	bShouldUpdateReplicatedPing = true; // Preserved behavior before bShouldUpdateReplicatedPing was added
 	bUseCustomPlayerNames = false;
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 PRAGMA_DISABLE_DEPRECATION_WARNINGS
 APlayerState::~APlayerState()
@@ -66,33 +69,12 @@ void APlayerState::UpdatePing(float InPing)
 
 		PingBucket[CurPingBucket].PingSum = FMath::FloorToInt(InPingInMs);
 		PingBucket[CurPingBucket].PingCount = 1;
-
-		PingBucketV2[CurPingBucket] = PingAvgDataV2();
 	}
 	// Limit the number of pings we accept per-bucket, to avoid overflowing PingBucket values
 	else if (PingBucket[CurPingBucket].PingCount < 7)
 	{
 		PingBucket[CurPingBucket].PingSum += FMath::FloorToInt(InPingInMs);
 		PingBucket[CurPingBucket].PingCount++;
-	}
-
-	TArray<uint16>& CurrentBucketPingValues = PingBucketV2[CurPingBucket].PingValues;
-
-	// This makes sure we will actually add the ping value to the list, since much of the time the new ping value will be higher than
-	// what is already there.
-	if (InPingInMs < CurrentBucketPingValues[PingAvgDataV2::MAX_PING_VALUES_SIZE - 1])
-	{
-		for (int32 i = 0; i < PingAvgDataV2::MAX_PING_VALUES_SIZE; i++)
-		{
-			// This will keep the list of ping values we're currently using sorted - this will insert
-			// a ping value if it is less than any in current list and remove the new max value.
-			if (InPingInMs < CurrentBucketPingValues[i])
-			{
-				CurrentBucketPingValues.Insert(FMath::FloorToInt(InPingInMs), i);
-				CurrentBucketPingValues.RemoveAt(PingAvgDataV2::MAX_PING_VALUES_SIZE);
-				break;
-			}
-		}
 	}
 }
 
@@ -107,33 +89,12 @@ void APlayerState::RecalculateAvgPing()
 		Count += PingBucket[i].PingCount;
 	}
 
-	int32 SumV2 = 0;
-	int32 NumValidValues = 0;
-	for (; NumValidValues < PingAvgDataV2::MAX_PING_VALUES_SIZE; NumValidValues++)
-	{
-		if (PingBucketV2[CurPingBucket].PingValues[NumValidValues] != MAX_uint16)
-		{
-			SumV2 += PingBucketV2[CurPingBucket].PingValues[NumValidValues];
-		}
-	}
-
-	// Use NumValidValues instead of MAX_PING_VALUES_SIZE in case there are fewer valid values.
-	PingBucketV2[CurPingBucket].AvgPingV2 = NumValidValues > 0 ? SumV2 / NumValidValues : MAX_flt;
-
-	float AvgSumV2 = 0.0f;
-	for (int32 i = 0; i < UE_ARRAY_COUNT(PingBucketV2); i++)
-	{
-		AvgSumV2 += PingBucketV2[i].AvgPingV2;
-	}
-
-	ExactPingV2 = AvgSumV2 / UE_ARRAY_COUNT(PingBucketV2);
-
 	// Calculate the average, and divide it by 4 to optimize replication
 	ExactPing = (Count > 0 ? ((float)Sum / (float)Count) : 0.f);
 
 	if (bShouldUpdateReplicatedPing || !HasAuthority())
 	{
-		SetPing(FMath::Min(255, (int32)(ExactPing * 0.25f)));
+		SetCompressedPing(FMath::Min(255, (int32)(ExactPing * 0.25f)));
 	}
 }
 
@@ -153,7 +114,7 @@ void APlayerState::OverrideWith(APlayerState* PlayerState)
 {
 	SetIsSpectator(PlayerState->IsSpectator());
 	SetIsOnlyASpectator(PlayerState->IsOnlyASpectator());
-	SetUniqueId(PlayerState->GetUniqueId().GetUniqueNetId());
+	SetUniqueId(PlayerState->GetUniqueId());
 	SetPlayerNameInternal(PlayerState->GetPlayerName());
 }
 
@@ -161,10 +122,10 @@ void APlayerState::OverrideWith(APlayerState* PlayerState)
 void APlayerState::CopyProperties(APlayerState* PlayerState)
 {
 	PlayerState->SetScore(GetScore());
-	PlayerState->SetPing(GetPing());
+	PlayerState->SetCompressedPing(GetCompressedPing());
 	PlayerState->ExactPing = ExactPing;
 	PlayerState->SetPlayerId(GetPlayerId());
-	PlayerState->SetUniqueId(GetUniqueId().GetUniqueNetId());
+	PlayerState->SetUniqueId(GetUniqueId());
 	PlayerState->SetPlayerNameInternal(GetPlayerName());
 	PlayerState->SetStartTime(GetStartTime());
 	PlayerState->SavedNetworkAddress = SavedNetworkAddress;
@@ -199,8 +160,8 @@ void APlayerState::PostInitializeComponents()
 		return;
 	}
 
-	AController* OwningController = Cast<AController>(GetOwner());
-	if (OwningController != NULL)
+	AController* OwningController = GetOwningController();
+	if (OwningController != nullptr)
 	{
 		SetIsABot(Cast<APlayerController>(OwningController) == nullptr);
 	}
@@ -209,6 +170,16 @@ void APlayerState::PostInitializeComponents()
 	{
 		SetStartTime(GameStateBase->GetPlayerStartTime(OwningController));
 	}
+}
+
+class AController* APlayerState::GetOwningController() const
+{
+	return Cast<AController>(GetOwner());
+}
+
+class APlayerController* APlayerState::GetPlayerController() const
+{
+	return Cast<APlayerController>(GetOwner());
 }
 
 void APlayerState::ClientInitialize(AController* C)
@@ -224,7 +195,7 @@ void APlayerState::OnRep_bIsInactive()
 {
 	// remove and re-add from the GameState so it's in the right list  
 	UWorld* World = GetWorld();
-	if (ensure(World && World->GetGameState()))
+	if (World && World->GetGameState())
 	{
 		World->GetGameState()->RemovePlayerState(this);
 		World->GetGameState()->AddPlayerState(this);
@@ -370,17 +341,12 @@ void APlayerState::OnRep_PlayerId()
 
 void APlayerState::OnRep_UniqueId()
 {
+	// First notify it's changed
+	OnSetUniqueId();
+
 	// Register player with session
 	RegisterPlayerWithSession(false);
 }
-
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
-void APlayerState::SetUniqueId(const FUniqueNetIdPtr& InUniqueId)
-{
-	MARK_PROPERTY_DIRTY_FROM_NAME(APlayerState, UniqueId, this);
-	UniqueId.SetUniqueNetId(InUniqueId);
-}
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 void APlayerState::RegisterPlayerWithSession(bool bWasFromInvite)
 {
@@ -390,7 +356,10 @@ void APlayerState::RegisterPlayerWithSession(bool bWasFromInvite)
 		{
 			// Register the player as part of the session
 			const APlayerState* PlayerState = GetDefault<APlayerState>();
-			UOnlineEngineInterface::Get()->RegisterPlayer(GetWorld(), PlayerState->SessionName, *GetUniqueId(), bWasFromInvite);
+			if (UOnlineEngineInterface::Get()->DoesSessionExist(GetWorld(), PlayerState->SessionName))
+			{
+				UOnlineEngineInterface::Get()->RegisterPlayer(GetWorld(), PlayerState->SessionName, GetUniqueId(), bWasFromInvite);
+			}
 		}
 	}
 }
@@ -402,7 +371,10 @@ void APlayerState::UnregisterPlayerWithSession()
 		const APlayerState* PlayerState = GetDefault<APlayerState>();
 		if (PlayerState->SessionName != NAME_None)
 		{
-			UOnlineEngineInterface::Get()->UnregisterPlayer(GetWorld(), PlayerState->SessionName, *GetUniqueId());
+			if (UOnlineEngineInterface::Get()->DoesSessionExist(GetWorld(), PlayerState->SessionName))
+			{
+				UOnlineEngineInterface::Get()->UnregisterPlayer(GetWorld(), PlayerState->SessionName, GetUniqueId());
+			}
 		}
 	}
 }
@@ -449,7 +421,7 @@ void APlayerState::GetLifetimeReplicatedProps(TArray< FLifetimeProperty > & OutL
 	DOREPLIFETIME_WITH_PARAMS_FAST(APlayerState, PlayerNamePrivate, SharedParams);
 
 	SharedParams.Condition = COND_SkipOwner;
-	DOREPLIFETIME_WITH_PARAMS_FAST(APlayerState, Ping, SharedParams);
+	DOREPLIFETIME_WITH_PARAMS_FAST(APlayerState, CompressedPing, SharedParams);
 
 	SharedParams.Condition = COND_InitialOnly;
 	DOREPLIFETIME_WITH_PARAMS_FAST(APlayerState, PlayerId, SharedParams);
@@ -472,10 +444,24 @@ void APlayerState::SetPlayerId(const int32 NewId)
 	PlayerId = NewId;
 }
 
-void APlayerState::SetPing(const uint8 NewPing)
+void APlayerState::SetCompressedPing(const uint8 NewPing)
 {
-	MARK_PROPERTY_DIRTY_FROM_NAME(APlayerState, Ping, this);
-	Ping = NewPing;
+	MARK_PROPERTY_DIRTY_FROM_NAME(APlayerState, CompressedPing, this);
+	CompressedPing = NewPing;
+}
+
+float APlayerState::GetPingInMilliseconds() const
+{
+	if (ExactPing > 0.0f)
+	{
+		// Prefer the exact ping if set (only on the server or for the local players)
+		return ExactPing;
+	}
+	else
+	{
+		// Otherwise, use the replicated compressed ping
+		return CompressedPing * 4.0f;
+	}
 }
 
 void APlayerState::SetIsSpectator(const bool bNewSpectator)
@@ -514,15 +500,52 @@ void APlayerState::SetStartTime(const int32 NewStartTime)
 	StartTime = NewStartTime;
 }
 
+FUniqueNetIdRepl APlayerState::BP_GetUniqueId() const
+{
+	return GetUniqueId();
+}
+
 void APlayerState::SetUniqueId(const FUniqueNetIdRepl& NewUniqueId)
 {
 	MARK_PROPERTY_DIRTY_FROM_NAME(APlayerState, UniqueId, this);
 	UniqueId = NewUniqueId;
+	OnSetUniqueId();
 }
 
 void APlayerState::SetUniqueId(FUniqueNetIdRepl&& NewUniqueId)
 {
 	MARK_PROPERTY_DIRTY_FROM_NAME(APlayerState, UniqueId, this);
 	UniqueId = MoveTemp(NewUniqueId);
+	OnSetUniqueId();
 }
+
+void APlayerState::OnSetUniqueId()
+{
+
+}
+
+void APlayerState::SetPawnPrivate(APawn* InPawn)
+{
+	if (InPawn != PawnPrivate)
+	{
+		if (PawnPrivate)
+		{
+			PawnPrivate->OnDestroyed.RemoveDynamic(this, &APlayerState::OnPawnPrivateDestroyed);
+		}
+		PawnPrivate = InPawn;
+		if (PawnPrivate)
+		{
+			PawnPrivate->OnDestroyed.AddDynamic(this, &APlayerState::OnPawnPrivateDestroyed);
+		}
+	}
+}
+
+void APlayerState::OnPawnPrivateDestroyed(AActor* InActor)
+{
+	if (InActor == PawnPrivate)
+	{
+		PawnPrivate = nullptr;
+	}
+}
+
 PRAGMA_ENABLE_DEPRECATION_WARNINGS

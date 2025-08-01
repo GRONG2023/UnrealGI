@@ -2,7 +2,7 @@
 
 #include "AnimGraphNode_MultiWayBlend.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "GraphEditorActions.h"
+#include "AnimGraphCommands.h"
 #include "ScopedTransaction.h"
 #include "ToolMenus.h"
 
@@ -19,7 +19,7 @@ UAnimGraphNode_MultiWayBlend::UAnimGraphNode_MultiWayBlend(const FObjectInitiali
 
 FString UAnimGraphNode_MultiWayBlend::GetNodeCategory() const
 {
-	return TEXT("Blends");
+	return TEXT("Animation|Blends");
 }
 
 FLinearColor UAnimGraphNode_MultiWayBlend::GetNodeTitleColor() const
@@ -48,12 +48,12 @@ void UAnimGraphNode_MultiWayBlend::GetNodeContextMenuActions(UToolMenu* Menu, UG
 				// we only do this for normal BlendMulti/BlendMulti by enum, BlendMulti by Bool doesn't support add/remove pins
 				if (Context->Pin->Direction == EGPD_Input)
 				{
-					Section.AddMenuEntry(FGraphEditorCommands::Get().RemoveBlendListPin);
+					Section.AddMenuEntry(FAnimGraphCommands::Get().RemoveBlendListPin);
 				}
 			}
 			else
 			{
-				Section.AddMenuEntry(FGraphEditorCommands::Get().AddBlendListPin);
+				Section.AddMenuEntry(FAnimGraphCommands::Get().AddBlendListPin);
 			}
 		}
 	}
@@ -94,6 +94,8 @@ void UAnimGraphNode_MultiWayBlend::RemovePinFromBlendNode(UEdGraphPin* Pin)
 
 void UAnimGraphNode_MultiWayBlend::PostPlacedNewNode()
 {
+	Super::PostPlacedNewNode();
+	
 	// Make sure we start out with two inputs
 	Node.AddPose();
 	Node.AddPose();
@@ -158,7 +160,7 @@ void UAnimGraphNode_MultiWayBlend::RemovePinsFromOldPins(TArray<UEdGraphPin*>& O
 				// and if array index is greater than removed index, decrease index
 				if (ArrayIndex == RemovedArrayIndex)
 				{
-					OldPins[PinIdx]->MarkPendingKill();
+					OldPins[PinIdx]->MarkAsGarbage();
 					OldPins.RemoveAt(PinIdx);
 					--PinIdx;
 				}

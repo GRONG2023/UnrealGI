@@ -2,13 +2,24 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "ModuleDescriptor.h"
 #include "CustomBuildSteps.h"
+#include "HAL/Platform.h"
 #include "LocalizationDescriptor.h"
+#include "Misc/Optional.h"
+#include "ModuleDescriptor.h"
+#include "PluginDisallowedDescriptor.h"
 #include "PluginReferenceDescriptor.h"
+#include "Serialization/JsonWriter.h"
+#include "Templates/SharedPointer.h"
+#include "VerseScope.h"
 
 class FJsonObject;
+class FJsonValue;
+class FText;
 
 /**
  * Setting for whether a plugin is enabled by default
@@ -23,7 +34,7 @@ enum class EPluginEnabledByDefault : uint8
 /**
  * Descriptor for plugins. Contains all the information contained within a .uplugin file.
  */
-struct PROJECTS_API FPluginDescriptor
+struct FPluginDescriptor
 {
 	/** Version number for the plugin.  The version number must increase with every version of the plugin, so that the system 
 	    can determine whether one version of a plugin is newer than another, or to enforce other requirements.  This version
@@ -80,11 +91,27 @@ struct PROJECTS_API FPluginDescriptor
 	/** List of all localization targets associated with this plugin */
 	TArray<FLocalizationTargetDescriptor> LocalizationTargets;
 
+	/** The Verse path to the root of this plugin's content directory */
+	FString VersePath;
+
+	/** Origin/visibility of Verse code in this plugin's Content/Verse folder */
+	EVerseScope::Type VerseScope = EVerseScope::PublicUser;
+
+	/** The version of the Verse language that this plugin targets.
+		If no value is specified, the latest stable version is used. */
+	TOptional<uint32> VerseVersion;
+
+	/** If to generate Verse source code definitions from assets contained in this plugin */
+	bool bEnableVerseAssetReflection = false;
+
 	/** Whether this plugin should be enabled by default for all projects */
 	EPluginEnabledByDefault EnabledByDefault;
 
 	/** Can this plugin contain content? */
 	bool bCanContainContent;
+
+	/** Can this plugin contain Verse code? */
+	bool bCanContainVerse;
 
 	/** Marks the plugin as beta in the UI */
 	bool bIsBetaVersion;
@@ -101,8 +128,17 @@ struct PROJECTS_API FPluginDescriptor
 	/** For auto-generated plugins that should not be listed in the plugin browser for users to disable freely. */
 	bool bIsHidden;
 
+	/** Prevents other plugins from depending on this plugin. */
+	bool bIsSealed;
+
+	/** Prevents this plugin from containing code or modules. */
+	bool bNoCode;
+
 	/** When true, this plugin's modules will not be loaded automatically nor will it's content be mounted automatically. It will load/mount when explicitly requested and LoadingPhases will be ignored */
 	bool bExplicitlyLoaded;
+
+	/** When true, an empty SupportedTargetPlatforms is interpreted as 'no platforms' with the expectation that explicit platforms will be added in plugin platform extensions */
+	bool bHasExplicitPlatforms;
 
 	/** If true, this plugin from a platform extension extending another plugin */
 	bool bIsPluginExtension;
@@ -116,42 +152,76 @@ struct PROJECTS_API FPluginDescriptor
 	/** Plugins used by this plugin */
 	TArray<FPluginReferenceDescriptor> Plugins;
 
+	/** Plugins that cannot be used by this plugin */
+	TArray<FPluginDisallowedDescriptor> DisallowedPlugins;
+
+
 #if WITH_EDITOR
 	/** Cached json for custom data */
-	TSharedPtr<FJsonObject> CachedJson;
+	mutable TSharedPtr<FJsonObject> CachedJson;
+
+	/** Additional fields to write */
+	TMap<FString, TSharedPtr<FJsonValue>> AdditionalFieldsToWrite;
 #endif
 
+	/** Return the .uplugin extension (with dot) */
+	static PROJECTS_API const FString& GetFileExtension();
+
 	/** Constructor. */
-	FPluginDescriptor();
+	PROJECTS_API FPluginDescriptor();
 
 	/** Loads the descriptor from the given file. */
-	bool Load(const FString& FileName, FText& OutFailReason);
+	PROJECTS_API bool Load(const TCHAR* FileName, FText* OutFailReason = nullptr);
+
+	/** Loads the descriptor from the given file. */
+	PROJECTS_API bool Load(const FString& FileName, FText* OutFailReason = nullptr);
+
+	/** Loads the descriptor from the given file. */
+	PROJECTS_API bool Load(const FString& FileName, FText& OutFailReason);
 
 	/** Reads the descriptor from the given string */
-	bool Read(const FString& Text, FText& OutFailReason);
+	PROJECTS_API bool Read(const FString& Text, FText* OutFailReason = nullptr);
+
+	/** Reads the descriptor from the given string */
+	PROJECTS_API bool Read(const FString& Text, FText& OutFailReason);
 
 	/** Reads the descriptor from the given JSON object */
-	bool Read(const FJsonObject& Object, FText& OutFailReason);
+	PROJECTS_API bool Read(const FJsonObject& Object, FText* OutFailReason = nullptr);
 
-	/** Saves the descriptor from the given file. */
-	bool Save(const FString& FileName, FText& OutFailReason) const;
+	/** Reads the descriptor from the given JSON object */
+	PROJECTS_API bool Read(const FJsonObject& Object, FText& OutFailReason);
+
+	/** Saves the descriptor to the given file. */
+	PROJECTS_API bool Save(const TCHAR* FileName, FText* OutFailReason = nullptr) const;
+
+	/** Saves the descriptor to the given file. */
+	PROJECTS_API bool Save(const FString& FileName, FText* OutFailReason = nullptr) const;
+
+	/** Saves the descriptor to the given file. */
+	PROJECTS_API bool Save(const FString& FileName, FText& OutFailReason) const;
 
 	/** Writes a descriptor to JSON */
-	void Write(FString& Text) const;
+	PROJECTS_API void Write(FString& Text) const;
 
 	/** Writes a descriptor to JSON */
-	void Write(TJsonWriter<>& Writer) const;
+	PROJECTS_API void Write(TJsonWriter<>& Writer) const;
 
 	/** Updates the given json object with values in this descriptor */
-	void UpdateJson(FJsonObject& JsonObject) const;
+	PROJECTS_API void UpdateJson(FJsonObject& JsonObject) const;
 
 	/**
 	 * Updates the content of the specified plugin file with values in this descriptor
 	 * (hence preserving json fields that the plugin descriptor doesn't know about)
 	 */
-	bool UpdatePluginFile(const FString& FileName, FText& OutFailReason) const;
+	PROJECTS_API bool UpdatePluginFile(const FString& FileName, FText* OutFailReason = nullptr) const;
+
+	/**
+	 * Updates the content of the specified plugin file with values in this descriptor
+	 * (hence preserving json fields that the plugin descriptor doesn't know about)
+	 */
+	PROJECTS_API bool UpdatePluginFile(const FString& FileName, FText& OutFailReason) const;
 
 	/** Determines whether the plugin supports the given platform */
-	bool SupportsTargetPlatform(const FString& Platform) const;
+	PROJECTS_API bool SupportsTargetPlatform(const FString& Platform) const;
 };
 

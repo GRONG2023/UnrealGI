@@ -2,7 +2,7 @@
 
 
 #include "BoneSelectionWidget.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "DetailLayoutBuilder.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Input/SComboButton.h"
@@ -35,13 +35,13 @@ void SBoneTreeMenu::Construct(const FArguments& InArgs)
 	ChildSlot
 	[
 		SNew(SBorder)
-		.Padding(6)
-		.BorderImage(FEditorStyle::GetBrush("NoBorder"))
+		.Padding(6.f)
+		.BorderImage(FAppStyle::GetBrush("NoBorder"))
 		.Content()
 		[
 			SNew(SBox)
-			.WidthOverride(300)
-			.HeightOverride(512)
+			.WidthOverride(300.f)
+			.HeightOverride(512.f)
 			.Content()
 			[
 				SNew(SVerticalBox)
@@ -49,14 +49,14 @@ void SBoneTreeMenu::Construct(const FArguments& InArgs)
 				.AutoHeight()
 				[
 					SNew(STextBlock)
-					.Font(FEditorStyle::GetFontStyle("BoldFont"))
+					.Font(FAppStyle::GetFontStyle("BoldFont"))
 					.Text(TitleToUse)
 				]
 				+ SVerticalBox::Slot()
 				.AutoHeight()
 				[
 					SNew(SSeparator)
-					.SeparatorImage(FEditorStyle::GetBrush("Menu.Separator"))
+					.SeparatorImage(FAppStyle::GetBrush("Menu.Separator"))
 					.Orientation(Orient_Horizontal)
 				]
 				+ SVerticalBox::Slot()
@@ -107,10 +107,30 @@ void SBoneTreeMenu::OnFilterTextChanged(const FText& InFilterText)
 void SBoneTreeMenu::OnSelectionChanged(TSharedPtr<SBoneTreeMenu::FBoneNameInfo> BoneInfo, ESelectInfo::Type SelectInfo)
 {
 	//Because we recreate all our items on tree refresh we will get a spurious null selection event initially.
-	if (BoneInfo.IsValid() && SelectInfo != ESelectInfo::Direct)
+	if (BoneInfo.IsValid() && SelectInfo == ESelectInfo::OnMouseClick)
 	{
-		OnSelectionChangedDelegate.ExecuteIfBound(BoneInfo->BoneName);
+		SelectBone(BoneInfo);
 	}
+}
+
+void SBoneTreeMenu::SelectBone(TSharedPtr<SBoneTreeMenu::FBoneNameInfo> BoneInfo)
+{
+	OnSelectionChangedDelegate.ExecuteIfBound(BoneInfo->BoneName);
+}
+
+FReply SBoneTreeMenu::OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent)
+{
+	if(InKeyEvent.GetKey() == EKeys::Enter)
+	{
+		TArray<TSharedPtr<SBoneTreeMenu::FBoneNameInfo>> SelectedItems = TreeView->GetSelectedItems();
+		if(SelectedItems.Num() > 0)
+		{
+			SelectBone(SelectedItems[0]);
+			return FReply::Handled();
+		}
+	}
+
+	return FReply::Unhandled();
 }
 
 void SBoneTreeMenu::RebuildBoneList(const FName& SelectedBone)

@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Windows/WindowsApplication.h"
-
+#include "Null/NullApplication.h"
 #include "Containers/StringConv.h"
 #include "CoreGlobals.h"
 #include "Internationalization/Text.h"
@@ -10,7 +10,6 @@
 #include "Misc/App.h"
 #include "Windows/WindowsWindow.h"
 #include "Windows/WindowsCursor.h"
-#include "XInputInterface.h"
 #include "Features/IModularFeatures.h"
 #include "IInputDeviceModule.h"
 #include "IInputDevice.h"
@@ -18,14 +17,15 @@
 #include "HAL/ThreadHeartBeat.h"
 #include "Templates/UniquePtr.h"
 #include "Windows/WindowsPlatformApplicationMisc.h"
+#include "Null/NullPlatformApplicationMisc.h"
 #include "Stats/Stats.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_EDITOR
 #include "Modules/ModuleManager.h"
-#include "Developer/SourceCodeAccess/Public/ISourceCodeAccessModule.h"
 #endif
 
-#if WITH_ACCESSIBILITY
+#if WITH_ACCESSIBILITY && UE_WINDOWS_USING_UIA
 #include "Windows/Accessibility/WindowsUIAManager.h"
 #include "Windows/Accessibility/WindowsUIAWidgetProvider.h"
 #include <UIAutomation.h>
@@ -47,15 +47,6 @@ THIRD_PARTY_INCLUDES_END
 // Platform code uses IsMaximized which is defined to IsZoomed by windowsx.h
 #pragma push_macro("IsMaximized")
 #undef IsMaximized
-
-// This might not be defined by Windows when maintaining backwards-compatibility to pre-Vista builds
-#ifndef WM_MOUSEHWHEEL
-#define WM_MOUSEHWHEEL                  0x020E
-#endif
-
-#ifndef WM_DPICHANGED
-#define WM_DPICHANGED                   0x02E0
-#endif
 
 DEFINE_LOG_CATEGORY(LogWindowsDesktop);
 
@@ -91,6 +82,16 @@ static int32 ForceRawInputSimulation = false;
 static int32 EnableRawInputSimulationOverRDP = false;
 #endif
 
+/* 
+* Enabling first touch event will prevent small pop on some touch input devices.
+*/
+static bool bEnableFirstTouchEvent = false;
+FAutoConsoleVariableRef CVarEnableFirstTouchEvent(
+	TEXT("WindowsApplication.EnableFirstTouchEvent"),
+	bEnableFirstTouchEvent,
+	TEXT("Enable FirstTouch Event which prevents small pop on some touch input devices")
+);
+
 const FIntPoint FWindowsApplication::MinimizedWindowPosition(-32000,-32000);
 
 FWindowsApplication* WindowsApplication = nullptr;
@@ -116,7 +117,6 @@ FWindowsApplication::FWindowsApplication( const HINSTANCE HInstance, const HICON
 	, bForceActivateByMouse( false )
 	, bForceNoGamepads( false )
 	, bConsumeAltSpace( false )
-	, XInput( XInputInterface::Create( MessageHandler ) )
 	, bHasLoadedInputPlugins( false )
 	, bAllowedToDeferMessageProcessing(true)
 	, CVarDeferMessageProcessing( 
@@ -124,7 +124,7 @@ FWindowsApplication::FWindowsApplication( const HINSTANCE HInstance, const HICON
 		bAllowedToDeferMessageProcessing,
 		TEXT( "Whether windows message processing is deferred until tick or if they are processed immediately" ) )
 	, bInModalSizeLoop( false )
-#if WITH_ACCESSIBILITY
+#if WITH_ACCESSIBILITY && UE_WINDOWS_USING_UIA
 	, UIAManager(new FWindowsUIAManager(*this))
 #endif
 	, bSimulatingHighPrecisionMouseInputForRDP(false)
@@ -149,11 +149,15 @@ FWindowsApplication::FWindowsApplication( const HINSTANCE HInstance, const HICON
 	CA_SUPPRESS(6031);
 	OleInitialize( NULL );
 
+#if !USING_ADDRESS_SANITISER
+	// Disabled under AddressSanitizer as otherwise AddresSanitizer catches an issue in the cleanup code
+	// of one of the input method Microsoft DLLs during shutdown
 	TextInputMethodSystem = MakeShareable( new FWindowsTextInputMethodSystem );
 	if(!TextInputMethodSystem->Initialize())
 	{
 		TextInputMethodSystem.Reset();
 	}
+#endif
 
 	TaskbarList = FTaskbarList::Create();
 
@@ -222,18 +226,31 @@ FWindowsApplication::FWindowsApplication( const HINSTANCE HInstance, const HICON
 		bForceNoGamepads = true;
 	}
 
-#if WINVER >= 0x0601
-
 	if (FParse::Param(FCommandLine::Get(), TEXT("FilterLowLevelMouse")))
 	{
-		//Only check fake mouse inputs in game or digitizer devices will not work in the editor.
-		if (FApp::IsGame())
-		{
-			LowLevelMouseFilterHook = ::SetWindowsHookEx(WH_MOUSE_LL, HandleLowLevelMouseFilterHook, NULL, 0);
-		}
-	}
+		ApplyLowLevelMouseFilter();
+	}	
+	IConsoleManager::Get().RegisterConsoleCommand(TEXT("WindowsApplication.ApplyLowLevelMouseFilter"), TEXT("Applies Low Level mouse filter that filters out mouse inputs that act like touch inputs"), FConsoleCommandDelegate::CreateRaw(this, &FWindowsApplication::ApplyLowLevelMouseFilter));
+	IConsoleManager::Get().RegisterConsoleCommand(TEXT("WindowsApplication.RemoveLowLevelMouseFilter"), TEXT("Removes Low Level mouse filter that filters out mouse inputs that act like touch inputs"), FConsoleCommandDelegate::CreateRaw(this, &FWindowsApplication::RemoveLowLevelMouseFilter));
+}
 
-#endif
+void FWindowsApplication::ApplyLowLevelMouseFilter()
+{
+	//Only check fake mouse inputs in game or digitizer devices will not work in the editor.
+	if (FApp::IsGame() && !bLowLevelMouseFilterIsApplied)
+	{
+		LowLevelMouseFilterHook = ::SetWindowsHookEx(WH_MOUSE_LL, HandleLowLevelMouseFilterHook, NULL, 0);
+		bLowLevelMouseFilterIsApplied = true;
+	}
+}
+
+void FWindowsApplication::RemoveLowLevelMouseFilter()
+{
+	if (FApp::IsGame() && bLowLevelMouseFilterIsApplied)
+	{
+		::UnhookWindowsHookEx(LowLevelMouseFilterHook);
+		bLowLevelMouseFilterIsApplied = false;
+	}
 }
 
 void FWindowsApplication::AllowAccessibilityShortcutKeys(const bool bAllowKeys)
@@ -290,7 +307,9 @@ void FWindowsApplication::DestroyApplication()
 
 	TaskbarList = nullptr;
 
-	::UnhookWindowsHookEx(LowLevelMouseFilterHook);
+	RemoveLowLevelMouseFilter();
+	IConsoleManager::Get().UnregisterConsoleObject(TEXT("WindowsApplication.ApplyLowLevelMouseFilter"));
+	IConsoleManager::Get().UnregisterConsoleObject(TEXT("WindowsApplication.RemoveLowLevelMouseFilter"));
 }
 
 void FWindowsApplication::ShutDownAfterError()
@@ -301,7 +320,9 @@ void FWindowsApplication::ShutDownAfterError()
 
 	TaskbarList = nullptr;
 
-	::UnhookWindowsHookEx(LowLevelMouseFilterHook);
+	RemoveLowLevelMouseFilter();
+	IConsoleManager::Get().UnregisterConsoleObject(TEXT("WindowsApplication.ApplyLowLevelMouseFilter"));
+	IConsoleManager::Get().UnregisterConsoleObject(TEXT("WindowsApplication.RemoveLowLevelMouseFilter"));
 }
 
 bool FWindowsApplication::RegisterClass( const HINSTANCE HInstance, const HICON HIcon )
@@ -361,7 +382,6 @@ void FWindowsApplication::InitializeWindow( const TSharedRef< FGenericWindow >& 
 void FWindowsApplication::SetMessageHandler( const TSharedRef< FGenericApplicationMessageHandler >& InMessageHandler )
 {
 	GenericApplication::SetMessageHandler(InMessageHandler);
-	XInput->SetMessageHandler( InMessageHandler );
 
 	TArray<IInputDeviceModule*> PluginImplementations = IModularFeatures::Get().GetModularFeatureImplementations<IInputDeviceModule>( IInputDeviceModule::GetModularFeatureName() );
 	for( auto DeviceIt = ExternalInputDevices.CreateIterator(); DeviceIt; ++DeviceIt )
@@ -375,7 +395,9 @@ void FWindowsApplication::SetMessageHandler( const TSharedRef< FGenericApplicati
 void FWindowsApplication::SetAccessibleMessageHandler(const TSharedRef<FGenericAccessibleMessageHandler>& InAccessibleMessageHandler)
 {
 	GenericApplication::SetAccessibleMessageHandler(InAccessibleMessageHandler);
+#if UE_WINDOWS_USING_UIA
 	UIAManager->OnAccessibleMessageHandlerChanged();
+#endif
 }
 #endif
 
@@ -384,11 +406,6 @@ bool FWindowsApplication::IsGamepadAttached() const
 	if (bForceNoGamepads)
 	{
 		return false;
-	}
-
-	if (XInput->IsGamepadAttached())
-	{
-		return true;
 	}
 
 	for( auto DeviceIt = ExternalInputDevices.CreateConstIterator(); DeviceIt; ++DeviceIt )
@@ -673,7 +690,7 @@ inline bool GetSizeForDevID(const FString& TargetDevID, int32& Width, int32& Hei
 			if (CM_Get_Device_ID(DevInfoData.DevInst, Buffer, MAX_DEVICE_ID_LEN, 0) == CR_SUCCESS)
 			{
 				FString DevID(Buffer);
-				DevID.MidInline(8, DevID.Find(TEXT("\\"), ESearchCase::CaseSensitive, ESearchDir::FromStart, 9) - 8, false);
+				DevID.MidInline(8, DevID.Find(TEXT("\\"), ESearchCase::CaseSensitive, ESearchDir::FromStart, 9) - 8, EAllowShrinking::No);
 				if (DevID == TargetDevID)
 				{
 					HKEY hDevRegKey = SetupDiOpenDevRegKey(DevInfo, &DevInfoData, DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ);
@@ -794,10 +811,10 @@ static void GetMonitorsInfo(TArray<FMonitorInfo>& OutMonitorInfo)
 						else
 						{
 							// we also need to include the OS scaling value
-							const float CenterX = 0.5f * (Info.WorkArea.Right + Info.WorkArea.Left);
-							const float CenterY = 0.5f * (Info.WorkArea.Top + Info.WorkArea.Bottom);
+							const float CenterX = 0.5f * float(Info.WorkArea.Right + Info.WorkArea.Left);
+							const float CenterY = 0.5f * float(Info.WorkArea.Top + Info.WorkArea.Bottom);
 							const float DPIScaleFactor = FWindowsPlatformApplicationMisc::GetDPIScaleFactorAtPoint(CenterX, CenterY);
-							Info.DPI *= DPIScaleFactor;
+							Info.DPI = (int32)((float)Info.DPI * DPIScaleFactor);
 						}
 
 						// The editor shouldn't care about lower level display resolutions. This is only necessary for fullscreen exclusive situations.
@@ -824,30 +841,37 @@ static void GetMonitorsInfo(TArray<FMonitorInfo>& OutMonitorInfo)
 
 void FDisplayMetrics::RebuildDisplayMetrics(struct FDisplayMetrics& OutDisplayMetrics)
 {
-	// Total screen size of the primary monitor
-	OutDisplayMetrics.PrimaryDisplayWidth = ::GetSystemMetrics( SM_CXSCREEN );
-	OutDisplayMetrics.PrimaryDisplayHeight = ::GetSystemMetrics( SM_CYSCREEN );
-
-	// Get the screen rect of the primary monitor, excluding taskbar etc.
-	RECT WorkAreaRect;
-	if(!SystemParametersInfo(SPI_GETWORKAREA, 0, &WorkAreaRect, 0))
+	if (FNullPlatformApplicationMisc::IsUsingNullApplication())
 	{
-		WorkAreaRect.top = WorkAreaRect.bottom = WorkAreaRect.left = WorkAreaRect.right = 0;
+		FNullPlatformDisplayMetrics::RebuildDisplayMetrics(OutDisplayMetrics);
 	}
+	else
+	{
+		// Total screen size of the primary monitor
+		OutDisplayMetrics.PrimaryDisplayWidth = ::GetSystemMetrics( SM_CXSCREEN );
+		OutDisplayMetrics.PrimaryDisplayHeight = ::GetSystemMetrics( SM_CYSCREEN );
 
-	OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Left = WorkAreaRect.left;
-	OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Top = WorkAreaRect.top;
-	OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Right = WorkAreaRect.right;
-	OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Bottom = WorkAreaRect.bottom;
-	
-	// Virtual desktop area
-	OutDisplayMetrics.VirtualDisplayRect.Left = ::GetSystemMetrics( SM_XVIRTUALSCREEN );
-	OutDisplayMetrics.VirtualDisplayRect.Top = ::GetSystemMetrics( SM_YVIRTUALSCREEN );
-	OutDisplayMetrics.VirtualDisplayRect.Right = OutDisplayMetrics.VirtualDisplayRect.Left + ::GetSystemMetrics( SM_CXVIRTUALSCREEN );
-	OutDisplayMetrics.VirtualDisplayRect.Bottom = OutDisplayMetrics.VirtualDisplayRect.Top + ::GetSystemMetrics( SM_CYVIRTUALSCREEN );
+		// Get the screen rect of the primary monitor, excluding taskbar etc.
+		RECT WorkAreaRect;
+		if(!SystemParametersInfo(SPI_GETWORKAREA, 0, &WorkAreaRect, 0))
+		{
+			WorkAreaRect.top = WorkAreaRect.bottom = WorkAreaRect.left = WorkAreaRect.right = 0;
+		}
 
-	// Get connected monitor information
-	GetMonitorsInfo(OutDisplayMetrics.MonitorInfo);
+		OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Left = WorkAreaRect.left;
+		OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Top = WorkAreaRect.top;
+		OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Right = WorkAreaRect.right;
+		OutDisplayMetrics.PrimaryDisplayWorkAreaRect.Bottom = WorkAreaRect.bottom;
+		
+		// Virtual desktop area
+		OutDisplayMetrics.VirtualDisplayRect.Left = ::GetSystemMetrics( SM_XVIRTUALSCREEN );
+		OutDisplayMetrics.VirtualDisplayRect.Top = ::GetSystemMetrics( SM_YVIRTUALSCREEN );
+		OutDisplayMetrics.VirtualDisplayRect.Right = OutDisplayMetrics.VirtualDisplayRect.Left + ::GetSystemMetrics( SM_CXVIRTUALSCREEN );
+		OutDisplayMetrics.VirtualDisplayRect.Bottom = OutDisplayMetrics.VirtualDisplayRect.Top + ::GetSystemMetrics( SM_CYVIRTUALSCREEN );
+
+		// Get connected monitor information
+		GetMonitorsInfo(OutDisplayMetrics.MonitorInfo);
+	}
 
 	// Apply the debug safe zones
 	OutDisplayMetrics.ApplyDefaultSafeZones();
@@ -867,7 +891,7 @@ EWindowTitleAlignment::Type FWindowsApplication::GetWindowTitleAlignment() const
 	VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
 
 	DWORDLONG LongConditionMask = 0;
-	int ConditionMask = VER_GREATER_EQUAL;
+	BYTE ConditionMask = VER_GREATER_EQUAL;
 	VER_SET_CONDITION(LongConditionMask, VER_MAJORVERSION, ConditionMask);
 	VER_SET_CONDITION(LongConditionMask, VER_MINORVERSION, ConditionMask);
 
@@ -983,15 +1007,11 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 			}
 		}
 
-#if WINVER >= 0x0601
-
 		//Only check fake mouse inputs in game or digitizer devices will not work in the editor.
 		if (FApp::IsGame() && IsFakeMouseInputMessage(msg))
 		{
 			return 0;
 		}
-	
-#endif
 
 		switch(msg)
 		{
@@ -1006,11 +1026,11 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 			DeferMessage( CurrentNativeEventWindowPtr, hwnd, msg, wParam, lParam );
 			return 0;
 		case WM_IME_NOTIFY:
-			UE_LOG(LogWindowsDesktop, Verbose, TEXT("WM_IME_NOTIFY - %s"), IMNStrings.Find(wParam) ? *(IMNStrings[wParam]) : nullptr);
+			UE_LOG(LogWindowsDesktop, Verbose, TEXT("WM_IME_NOTIFY - %s"), IMNStrings.Find(IntCastChecked<uint32>(wParam)) ? *(IMNStrings[(uint32)wParam]) : nullptr);
 			DeferMessage( CurrentNativeEventWindowPtr, hwnd, msg, wParam, lParam );
 			return 0;
 		case WM_IME_REQUEST:
-			UE_LOG(LogWindowsDesktop, Verbose, TEXT("WM_IME_REQUEST - %s"), IMRStrings.Find(wParam) ? *(IMRStrings[wParam]) : nullptr);
+			UE_LOG(LogWindowsDesktop, Verbose, TEXT("WM_IME_REQUEST - %s"), IMRStrings.Find(IntCastChecked<uint32>(wParam)) ? *(IMRStrings[(uint32)wParam]) : nullptr);
 			DeferMessage( CurrentNativeEventWindowPtr, hwnd, msg, wParam, lParam );
 			return 0;
 			// Character
@@ -1048,6 +1068,12 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 			}
 			break;
 
+		case WM_CLIPBOARDUPDATE:
+			{
+				OnClipboardContentChangedEvent.Broadcast();
+			}
+			break;
+		
 		case WM_KEYDOWN:
 		case WM_SYSKEYUP:
 		case WM_KEYUP:
@@ -1066,9 +1092,7 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 		case WM_NCMOUSEMOVE:
 		case WM_MOUSEMOVE:
 		case WM_MOUSEWHEEL:
-#if WINVER >= 0x0601
 		case WM_TOUCH:
-#endif
 			{
 				DeferMessage( CurrentNativeEventWindowPtr, hwnd, msg, wParam, lParam );
 				// Handled
@@ -1119,8 +1143,8 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 								const int32 Width = GetSystemMetrics(IsVirtualScreen ? SM_CXVIRTUALSCREEN : SM_CXSCREEN);
 								const int32 Height = GetSystemMetrics(IsVirtualScreen ? SM_CYVIRTUALSCREEN : SM_CYSCREEN);
 
-								CursorPoint.x = static_cast<int>((float(Raw->data.mouse.lLastX) / 65535.0f) * Width) + Left;
-								CursorPoint.y = static_cast<int>((float(Raw->data.mouse.lLastY) / 65535.0f) * Height) + Top;
+								CursorPoint.x = static_cast<int>((float(Raw->data.mouse.lLastX) / 65535.0f) * (float)Width) + Left;
+								CursorPoint.y = static_cast<int>((float(Raw->data.mouse.lLastY) / 65535.0f) * (float)Height) + Top;
 
 								const int32 ClipWidth = ClipCursorRect.right - ClipCursorRect.left;
 								const int32 ClipHeight = ClipCursorRect.bottom - ClipCursorRect.top;
@@ -1138,8 +1162,10 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 								int32 DeltaX = CursorPoint.x - LastCursorPoint.X;
 								int32 DeltaY = CursorPoint.y - LastCursorPoint.Y;
 
-								bool bAcceptingPreWrapDelta = false;
-								if (bCanAcceptPreWrapMsg)
+								// Always skip wrapping if no movement has occured.
+								bool bAcceptingPreWrapDelta = DeltaX == 0 && DeltaY == 0;
+
+								if (bCanAcceptPreWrapMsg && !bAcceptingPreWrapDelta)
 								{
 									const int32 DeltaXPreWrap = CursorPoint.x - LastCursorPointPreWrap.X;
 									const int32 DeltaYPreWrap = CursorPoint.y - LastCursorPointPreWrap.Y;
@@ -1343,14 +1369,14 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 						HANDLE hTimer = CreateWaitableTimer(NULL, TRUE, NULL);
 						if (NULL != hTimer)
 						{
-							float WaitTimeMilliseconds = 0.0;
+							double WaitTimeMilliseconds = 0.0;
 							if (Freq.QuadPart > 0)
 							{
-								WaitTimeMilliseconds = 1000.0 * WaitTime / (float)Freq.QuadPart;
+								WaitTimeMilliseconds = 1000.0 * (double)WaitTime / (double)Freq.QuadPart;
 							}
 
 							// Due time for WaitForSingleObject is in 100 nanosecond units.							
-							float WaitTime100NanoSeconds = (1000.0f * 10.0f * WaitTimeMilliseconds);
+							double WaitTime100NanoSeconds = (1000.0f * 10.0f * WaitTimeMilliseconds);
 
 							LARGE_INTEGER DueTime;
 
@@ -1409,15 +1435,19 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 					WindowInfo.cbSize = sizeof(WindowInfo);
 					::GetWindowInfo(hwnd, &WindowInfo);
 
-					RECT TestRect;
-					TestRect.left = TestRect.right = TestRect.top = TestRect.bottom = 0;
-					AdjustWindowRectEx(&TestRect, WindowInfo.dwStyle, false, WindowInfo.dwExStyle);
-
 					RECT* Rect = (RECT*)lParam;
-					Rect->left -= TestRect.left;
-					Rect->right -= TestRect.right;
-					Rect->top -= TestRect.top;
-					Rect->bottom -= TestRect.bottom;
+					if (CurrentNativeEventWindow->GetDefinition().HasOSWindowBorder)
+					{
+						RECT TestRect;
+						TestRect.left = TestRect.right = TestRect.top = TestRect.bottom = 0;
+						AdjustWindowRectEx(&TestRect, WindowInfo.dwStyle, false, WindowInfo.dwExStyle);
+
+					
+						Rect->left -= TestRect.left;
+						Rect->right -= TestRect.right;
+						Rect->top -= TestRect.top;
+						Rect->bottom -= TestRect.bottom;
+					}
 
 					const float AspectRatio = CurrentNativeEventWindowPtr->GetAspectRatio();
 					int32 NewWidth = Rect->right - Rect->left;
@@ -1434,10 +1464,10 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 					case WMSZ_TOPLEFT:
 					case WMSZ_TOPRIGHT:
 					{
-						int32 MinWidth = SizeLimits.GetMinWidth().GetValue();
+						int32 MinWidth = (int32)SizeLimits.GetMinWidth().GetValue();
 						if (SizeLimits.GetMinHeight().GetValue() < SizeLimits.GetMinWidth().GetValue())
 						{
-							MinWidth = SizeLimits.GetMinHeight().GetValue() * AspectRatio;
+							MinWidth = (int32)(SizeLimits.GetMinHeight().GetValue() * AspectRatio);
 						}
 
 						if (NewWidth < MinWidth)
@@ -1459,10 +1489,10 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 					case WMSZ_TOP:
 					case WMSZ_BOTTOM:
 					{
-						int32 MinHeight = SizeLimits.GetMinHeight().GetValue();
+						int32 MinHeight = (int32)SizeLimits.GetMinHeight().GetValue();
 						if (SizeLimits.GetMinWidth().GetValue() < SizeLimits.GetMinHeight().GetValue())
 						{
-							MinHeight = SizeLimits.GetMinWidth().GetValue() / AspectRatio;
+							MinHeight = (int32)(SizeLimits.GetMinWidth().GetValue() / AspectRatio);
 						}
 
 						if (NewHeight < MinHeight)
@@ -1487,7 +1517,7 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 					case WMSZ_LEFT:
 					case WMSZ_RIGHT:
 						{
-							int32 AdjustedHeight = NewWidth / AspectRatio;
+							int32 AdjustedHeight = (int32)((float)NewWidth / AspectRatio);
 							Rect->top -= (AdjustedHeight - NewHeight) / 2;
 							Rect->bottom += (AdjustedHeight - NewHeight) / 2;
 							break;
@@ -1495,38 +1525,41 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 					case WMSZ_TOP:
 					case WMSZ_BOTTOM:
 						{
-							int32 AdjustedWidth = NewHeight * AspectRatio;
+							int32 AdjustedWidth = (int32)((float)NewHeight * AspectRatio);
 							Rect->left -= (AdjustedWidth - NewWidth) / 2;
 							Rect->right += (AdjustedWidth - NewWidth) / 2;
 							break;
 						}
 					case WMSZ_TOPLEFT:
 						{
-							int32 AdjustedHeight = NewWidth / AspectRatio;
+							int32 AdjustedHeight = (int32)((float)NewWidth / AspectRatio);
 							Rect->top -= AdjustedHeight - NewHeight;
 							break;
 						}
 					case WMSZ_TOPRIGHT:
 						{
-							int32 AdjustedHeight = NewWidth / AspectRatio;
+							int32 AdjustedHeight = (int32)((float)NewWidth / AspectRatio);
 							Rect->top -= AdjustedHeight - NewHeight;
 							break;
 						}
 					case WMSZ_BOTTOMLEFT:
 						{
-							int32 AdjustedHeight = NewWidth / AspectRatio;
+							int32 AdjustedHeight = (int32)((float)NewWidth / AspectRatio);
 							Rect->bottom += AdjustedHeight - NewHeight;
 							break;
 						}
 					case WMSZ_BOTTOMRIGHT:
 						{
-							int32 AdjustedHeight = NewWidth / AspectRatio;
+							int32 AdjustedHeight = (int32)((float)NewWidth / AspectRatio);
 							Rect->bottom += AdjustedHeight - NewHeight;
 							break;
 						}
 					}
 
-					AdjustWindowRectEx(Rect, WindowInfo.dwStyle, false, WindowInfo.dwExStyle);
+					if (CurrentNativeEventWindow->GetDefinition().HasOSWindowBorder)
+					{
+						AdjustWindowRectEx(Rect, WindowInfo.dwStyle, false, WindowInfo.dwExStyle);
+					}
 
 					return TRUE;
 				}
@@ -1593,19 +1626,17 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 							HTRIGHT, HTBOTTOMLEFT, HTBOTTOM, HTBOTTOMRIGHT,
 							HTCAPTION, HTMINBUTTON, HTMAXBUTTON, HTCLOSE, HTSYSMENU};
 
-						return Results[Zone];
+						return IntCastChecked<int32>(Results[Zone]);
 					}
 				}
 			}
 			break;
 			
-#if WINVER > 0x502
 		case WM_DWMCOMPOSITIONCHANGED:
 			{
 				DeferMessage( CurrentNativeEventWindowPtr, hwnd, msg, wParam, lParam );
 			}
 			break;
-#endif
 
 			// Window focus and activation
 		case WM_MOUSEACTIVATE:
@@ -1680,7 +1711,7 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 		case WM_DESTROY:
 			{
 				Windows.Remove( CurrentNativeEventWindow );
-#if WITH_ACCESSIBILITY
+#if WITH_ACCESSIBILITY && UE_WINDOWS_USING_UIA
 				// Tell UIA that the window no longer exists so that it can release some resources
 				if (GetAccessibleMessageHandler()->ApplicationIsAccessible())
 				{
@@ -1698,7 +1729,6 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 			}
 			break;
 
-#if WITH_EDITOR // WM_ENDSESSION was added for Editor analytics purpose to detect when the Editor dies unexpectedly because it gets killed by a logoff/shutdown.
 		case WM_ENDSESSION:
 			{
 				// wParam is true if the user session is going away. Note that WM_SESSION is a follow up for WM_QUERYENDSESSION, so wParam can be false if the user (from UI)
@@ -1707,9 +1737,10 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 				{
 					FCoreDelegates::OnUserLoginChangedEvent.Broadcast(false, 0, 0);
 				}
-				return DefWindowProc(hwnd, msg, wParam, lParam);
+				return IntCastChecked<int32>(DefWindowProc(hwnd, msg, wParam, lParam));
 			}
-#endif
+			break;
+
 		case WM_SYSCOMMAND:
 			{
 				switch( wParam & 0xfff0 )
@@ -1782,10 +1813,10 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 				const float DPIScaleFactor = CurrentNativeEventWindow->GetDPIScaleFactor();
 
 				// We always apply BorderWidth and BorderHeight since Slate always works with client area window sizes
-				MinMaxInfo->ptMinTrackSize.x = FMath::RoundToInt( SizeLimits.GetMinWidth().Get(MinMaxInfo->ptMinTrackSize.x) * DPIScaleFactor );
-				MinMaxInfo->ptMinTrackSize.y = FMath::RoundToInt( SizeLimits.GetMinHeight().Get(MinMaxInfo->ptMinTrackSize.y) * DPIScaleFactor );
-				MinMaxInfo->ptMaxTrackSize.x = FMath::RoundToInt( SizeLimits.GetMaxWidth().Get(MinMaxInfo->ptMaxTrackSize.x) * DPIScaleFactor ) + BorderWidth;
-				MinMaxInfo->ptMaxTrackSize.y = FMath::RoundToInt( SizeLimits.GetMaxHeight().Get(MinMaxInfo->ptMaxTrackSize.y) * DPIScaleFactor ) + BorderHeight;
+				MinMaxInfo->ptMinTrackSize.x = FMath::RoundToInt( SizeLimits.GetMinWidth().Get((float)MinMaxInfo->ptMinTrackSize.x) * DPIScaleFactor );
+				MinMaxInfo->ptMinTrackSize.y = FMath::RoundToInt( SizeLimits.GetMinHeight().Get((float)MinMaxInfo->ptMinTrackSize.y) * DPIScaleFactor );
+				MinMaxInfo->ptMaxTrackSize.x = FMath::RoundToInt( SizeLimits.GetMaxWidth().Get((float)MinMaxInfo->ptMaxTrackSize.x) * DPIScaleFactor ) + BorderWidth;
+				MinMaxInfo->ptMaxTrackSize.y = FMath::RoundToInt( SizeLimits.GetMaxHeight().Get((float)MinMaxInfo->ptMaxTrackSize.y) * DPIScaleFactor ) + BorderHeight;
 				return 0;
 			}
 			break;
@@ -1857,19 +1888,26 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 
 		case WM_DEVICECHANGE:
 			{
-				XInput->SetNeedsControllerStateUpdate(); 
+				static const FInputDeviceProperty RequestUpdateProp(TEXT("Request_Device_Update"));
+				for( auto DeviceIt = ExternalInputDevices.CreateIterator(); DeviceIt; ++DeviceIt )
+				{
+					// Pass in -1 because this isn't for any specific device, it is just a message requesting an update to any attached controllers.
+					// At the moment, this will only be listened for by XInput.
+					(*DeviceIt)->SetDeviceProperty(-1, &RequestUpdateProp);
+				}
+				
 				QueryConnectedMice();
 			}
 			break;
 
-#if WITH_ACCESSIBILITY
+#if WITH_ACCESSIBILITY && UE_WINDOWS_USING_UIA
 		case WM_GETOBJECT:
 		{
 			if (GetAccessibleMessageHandler()->ApplicationIsAccessible())
 			{
 				FScopedWidgetProvider Provider(UIAManager->GetWindowProvider(CurrentNativeEventWindow));
 				LRESULT Result = UiaReturnRawElementProvider(hwnd, wParam, lParam, &Provider.Provider);
-				return Result;
+				return IntCastChecked<int32>(Result);
 			}
 			break;
 		}
@@ -1883,7 +1921,7 @@ int32 FWindowsApplication::ProcessMessage( HWND hwnd, uint32 msg, WPARAM wParam,
 		}
 	}
 
-	return DefWindowProc(hwnd, msg, wParam, lParam);
+	return IntCastChecked<int32>(DefWindowProc(hwnd, msg, wParam, lParam));
 }
 
 void FWindowsApplication::CheckForShiftUpEvents(const int32 KeyCode)
@@ -1949,7 +1987,7 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 		case WM_CHAR:
 			{
 				// Character code is stored in WPARAM
-				const TCHAR Character = wParam;
+				const TCHAR Character = IntCastChecked<TCHAR>(wParam);
 
 				// LPARAM bit 30 will be ZERO for new presses, or ONE if this is a repeat
 				const bool bIsRepeat = ( lParam & 0x40000000 ) != 0;
@@ -1967,7 +2005,7 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 		case WM_KEYDOWN:
 			{
 				// Character code is stored in WPARAM
-				const int32 Win32Key = wParam;
+				const int32 Win32Key = IntCastChecked<int32>(wParam);
 
 				// The actual key to use.  Some keys will be translated into other keys. 
 				// I.E VK_CONTROL will be translated to either VK_LCONTROL or VK_RCONTROL as these
@@ -2051,7 +2089,7 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 		case WM_KEYUP:
 			{
 				// Character code is stored in WPARAM
-				int32 Win32Key = wParam;
+				int32 Win32Key = IntCastChecked<int32>(wParam);
 
 				// The actual key to use.  Some keys will be translated into other keys. 
 				// I.E VK_CONTROL will be translated to either VK_LCONTROL or VK_RCONTROL as these
@@ -2283,7 +2321,6 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 			}
 			break;
 
-#if WINVER >= 0x0601
 		case WM_TOUCH:
 			{
 				UINT InputCount = LOWORD( wParam );
@@ -2295,7 +2332,7 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 						for ( uint32 i = 0; i < InputCount; i++ )
 						{
 							TOUCHINPUT Input = Inputs[i];
-							FVector2D Location( Input.x / 100.0f, Input.y / 100.0f );
+							FVector2D Location((float)Input.x / 100.0f, (float)Input.y / 100.0f );
 							if ( Input.dwFlags & TOUCHEVENTF_DOWN )
 							{
 								int32 TouchIndex = GetTouchIndexForID( Input.dwID );
@@ -2304,7 +2341,10 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 									TouchIndex = GetFirstFreeTouchIndex();
 									check(TouchIndex >= 0);
 									
-									TouchIDs[TouchIndex] = TOptional<int32>(Input.dwID);
+									TouchInfoArray[TouchIndex].TouchID = TOptional<int32>(Input.dwID);
+									TouchInfoArray[TouchIndex].HasMoved = false;
+									TouchInfoArray[TouchIndex].PreviousLocation = Location;
+
 									UE_LOG(LogWindowsDesktop, Verbose, TEXT("OnTouchStarted at (%f, %f), finger %d (system touch id %d)"), Location.X, Location.Y, TouchIndex, Input.dwID);
 									MessageHandler->OnTouchStarted(CurrentNativeEventWindowPtr, Location, 1.0f, TouchIndex, 0);
 								}
@@ -2319,6 +2359,21 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 								if ( TouchIndex >= 0 )
 								{
 									UE_LOG(LogWindowsDesktop, Verbose, TEXT("OnTouchMoved at (%f, %f), finger %d (system touch id %d)"), Location.X, Location.Y, TouchIndex, Input.dwID);
+
+									if (bEnableFirstTouchEvent)
+									{
+										// track first move event, for helping with "pop" on the filtered small movements
+										if (!TouchInfoArray[TouchIndex].HasMoved)
+										{
+											if (TouchInfoArray[TouchIndex].PreviousLocation != Location)
+											{
+												TouchInfoArray[TouchIndex].HasMoved = true;
+												MessageHandler->OnTouchFirstMove(Location, 1.0f, TouchIndex, 0);
+											}
+										}
+									}
+
+									TouchInfoArray[TouchIndex].PreviousLocation = Location;
 									MessageHandler->OnTouchMoved(Location, 1.0f, TouchIndex, 0);
 								}
 							}
@@ -2327,7 +2382,7 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 								int32 TouchIndex = GetTouchIndexForID( Input.dwID );
 								if ( TouchIndex >= 0 )
 								{
-									TouchIDs[TouchIndex] = TOptional<int32>();
+									TouchInfoArray[TouchIndex].TouchID = TOptional<int32>();
 									UE_LOG(LogWindowsDesktop, Verbose, TEXT("OnTouchEnded at (%f, %f), finger %d (system touch id %d)"), Location.X, Location.Y, TouchIndex, Input.dwID);
 									MessageHandler->OnTouchEnded(Location, TouchIndex, 0);
 								}
@@ -2343,7 +2398,6 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 				}
 				break;
 			}
-#endif
 
 			// Window focus and activation
 		case WM_MOUSEACTIVATE:
@@ -2505,13 +2559,11 @@ int32 FWindowsApplication::ProcessDeferredMessage( const FDeferredWindowsMessage
 			}
 			break;
 
-#if WINVER > 0x502
 		case WM_DWMCOMPOSITIONCHANGED:
 			{
 				CurrentNativeEventWindowPtr->OnTransparencySupportChanged(GetWindowTransparencySupport());
 			}
 			break;
-#endif
 
 		case WM_DPICHANGED:
 			{
@@ -2639,7 +2691,7 @@ bool FWindowsApplication::IsInputMessage( uint32 msg )
 
 bool FWindowsApplication::IsFakeMouseInputMessage(uint32 msg)
 {
-	const bool bShouldPrevent = IsWindowsVistaOrGreater() || bPreventDuplicateMouseEventsForTouch;
+	const bool bShouldPrevent = !!bPreventDuplicateMouseEventsForTouch;
 
 	if (bShouldPrevent && IsMouseInputMessage(msg))
 	{
@@ -2768,9 +2820,6 @@ void FWindowsApplication::PollGameDeviceState( const float TimeDelta )
 		return; // do not proceed if the app uses VR focus but doesn't have it
 	}
 
-	// Poll game device states and send new events
-	XInput->SendControllerEvents();
-
 	// Poll externally-implemented devices
 	for( auto DeviceIt = ExternalInputDevices.CreateIterator(); DeviceIt; ++DeviceIt )
 	{
@@ -2802,13 +2851,9 @@ void FWindowsApplication::SetForceFeedbackChannelValues(int32 ControllerId, cons
 
 	const FForceFeedbackValues* InternalValues = &Values;
  
-	XInput->SetChannelValues( ControllerId, *InternalValues );
- 
 	// send vibration to externally-implemented devices
 	for( auto DeviceIt = ExternalInputDevices.CreateIterator(); DeviceIt; ++DeviceIt )
 	{
-		// *N.B 06/20/2016*: Ideally, we would want to use GetHapticDevice instead
-		// but they're not implemented for SteamController and SteamVRController
 		if ((*DeviceIt)->IsGamepadAttached()) 
 		{
 			(*DeviceIt)->SetChannelValues(ControllerId, Values);
@@ -3029,12 +3074,11 @@ void FWindowsApplication::QueryConnectedMice()
 	bIsMouseAttached = MouseCount > 0;
 }
 
-#if WINVER >= 0x0601
 uint32 FWindowsApplication::GetTouchIndexForID( int32 TouchID )
 {
-	for (int i = 0; i < TouchIDs.Num(); i++)
+	for (int i = 0; i < TouchInfoArray.Num(); i++)
 	{
-		if ( TouchIDs[i].IsSet() && TouchIDs[i].GetValue() == TouchID )
+		if (TouchInfoArray[i].TouchID.IsSet() && TouchInfoArray[i].TouchID.GetValue() == TouchID )
 		{
 			return i;
 		}
@@ -3044,17 +3088,16 @@ uint32 FWindowsApplication::GetTouchIndexForID( int32 TouchID )
 
 uint32 FWindowsApplication::GetFirstFreeTouchIndex()
 {
-	for ( int i = 0; i < TouchIDs.Num(); i++ )
+	for ( int i = 0; i < TouchInfoArray.Num(); i++ )
 	{
-		if ( TouchIDs[i].IsSet() == false )
+		if (!TouchInfoArray[i].TouchID.IsSet())
 		{
 			return i;
 		}
 	}
 
-	return TouchIDs.Add(TOptional<int32>());
+	return TouchInfoArray.Add(TouchInfo());
 }
-#endif
 
 void FTaskbarList::Initialize()
 {
@@ -3083,30 +3126,27 @@ FTaskbarList::~FTaskbarList()
 	TaskBarList3 = NULL;
 }
 
-void FTaskbarList::SetOverlayIcon(const TSharedRef<FGenericWindow>& NativeWindow, HICON Icon, FText Description)
+void FTaskbarList::SetOverlayIcon(HWND WindowHandle, HICON Icon, FText Description)
 {
 	if (TaskBarList3)
 	{
-		const TSharedRef< FWindowsWindow > Window = StaticCastSharedRef< FWindowsWindow >(NativeWindow);
-		TaskBarList3->SetOverlayIcon(Window->GetHWnd(), Icon, *Description.ToString());
+		TaskBarList3->SetOverlayIcon(WindowHandle, Icon, *Description.ToString());
 	}
 }
 
-void FTaskbarList::SetProgressValue(const TSharedRef<FGenericWindow>& NativeWindow, uint64 Current, uint64 Total)
+void FTaskbarList::SetProgressValue(HWND WindowHandle, uint64 Current, uint64 Total)
 {
 	if (TaskBarList3)
 	{
-		const TSharedRef< FWindowsWindow > Window = StaticCastSharedRef< FWindowsWindow >(NativeWindow);
-		TaskBarList3->SetProgressValue(Window->GetHWnd(), (ULONGLONG)Current, (ULONGLONG)Total);
+		TaskBarList3->SetProgressValue(WindowHandle, (ULONGLONG)Current, (ULONGLONG)Total);
 	}
 }
 
-void FTaskbarList::SetProgressState(const TSharedRef<FGenericWindow>& NativeWindow, ETaskbarProgressState::Type State)
+void FTaskbarList::SetProgressState(HWND WindowHandle, ETaskbarProgressState::Type State)
 {
 	if (TaskBarList3)
 	{
-		const TSharedRef< FWindowsWindow > Window = StaticCastSharedRef< FWindowsWindow >(NativeWindow);
-		TaskBarList3->SetProgressState(Window->GetHWnd(), (TBPFLAG)State);
+		TaskBarList3->SetProgressState(WindowHandle, (TBPFLAG)State);
 	}
 }
 

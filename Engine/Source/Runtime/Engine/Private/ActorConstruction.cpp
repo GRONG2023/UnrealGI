@@ -1,39 +1,27 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
+#include "EngineLogs.h"
 #include "Math/RandomStream.h"
-#include "Stats/Stats.h"
-#include "UObject/Script.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-#include "UObject/Class.h"
-#include "UObject/UnrealType.h"
+#include "Misc/ScopeExit.h"
+#include "ProfilingDebugging/CsvProfiler.h"
 #include "UObject/UObjectThreadContext.h"
 #include "Serialization/ObjectReader.h"
-#include "Engine/EngineTypes.h"
 #include "Engine/Blueprint.h"
-#include "ComponentInstanceDataCache.h"
-#include "HAL/IConsoleManager.h"
-#include "Components/ActorComponent.h"
-#include "Components/SceneComponent.h"
-#include "GameFramework/Actor.h"
-#include "Components/PrimitiveComponent.h"
+#include "ActorTransactionAnnotation.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/BillboardComponent.h"
 #include "Misc/ConfigCacheIni.h"
-#include "Engine/World.h"
 #include "Engine/Texture2D.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/LevelScriptActor.h"
 #include "Engine/CullDistanceVolume.h"
 #include "Engine/SimpleConstructionScript.h"
-#include "Components/ChildActorComponent.h"
-#include "ProfilingDebugging/CsvProfiler.h"
-#include "Algo/Transform.h"
-#include "Misc/ScopeExit.h"
 
 #if WITH_EDITOR
 #include "Editor.h"
+#else
+#include "Engine/World.h"
+#include "UObject/Package.h"
 #endif
 
 DEFINE_LOG_CATEGORY(LogBlueprintUserMessages);
@@ -194,6 +182,19 @@ void AActor::DestroyConstructedComponents()
 				}
 			}
 
+			if (!bDestroyComponent)
+			{
+				// check for orphaned natively created components:
+				if (Component->CreationMethod == EComponentCreationMethod::Native && Component->HasAnyFlags(RF_DefaultSubObject))
+				{
+					UObject* ComponentArchetype = Component->GetArchetype();
+					if (ComponentArchetype == ComponentArchetype->GetClass()->ClassDefaultObject)
+					{
+						bDestroyComponent = true;
+					}
+				}
+			}
+
 			if (bDestroyComponent)
 			{
 				if (Component == RootComponent)
@@ -218,8 +219,27 @@ void AActor::DestroyConstructedComponents()
 	{
 		GetPackage()->MarkPackageDirty();
 	}
+
+	// When a constructed component is destroyed, it is removed from this set. We compact the set to ensure any newly-constructed components
+	// will get added back into the set contiguously, so that the iteration order remains stable after re-running actor construction scripts.
+	if (PreviouslyAttachedComponents.Num() > OwnedComponents.Num())
+	{
+		OwnedComponents.CompactStable();
+	}
 }
 
+
+bool AActor::HasNonTrivialUserConstructionScript() const
+{
+	UFunction* UCS = GetClass()->FindFunctionByName(FName(TEXT("UserConstructionScript"))/*UEdGraphSchema_K2::FN_UserConstructionScript*/);
+	if (UCS && UCS->Script.Num())
+	{
+		return true;
+	}
+	return false;
+}
+
+#if WITH_EDITOR
 void AActor::RerunConstructionScripts()
 {
 	checkf(!HasAnyFlags(RF_ClassDefaultObject), TEXT("RerunConstructionScripts should never be called on a CDO as it can mutate the transient data on the CDO which then propagates to instances!"));
@@ -227,34 +247,34 @@ void AActor::RerunConstructionScripts()
 	FEditorScriptExecutionGuard ScriptGuard;
 	// don't allow (re)running construction scripts on dying actors and Actors that seamless traveled 
 	// were constructed in the previous level and should not have construction scripts rerun
-	bool bAllowReconstruction = !bActorSeamlessTraveled && !IsPendingKill() && !HasAnyFlags(RF_BeginDestroyed|RF_FinishDestroyed);
-#if WITH_EDITOR
-	if(bAllowReconstruction && GIsEditor)
+	bool bAllowReconstruction = !bActorSeamlessTraveled && IsValidChecked(this) && !HasAnyFlags(RF_BeginDestroyed|RF_FinishDestroyed);
+	if (bAllowReconstruction)
 	{
-		// Don't allow reconstruction if we're still in the middle of construction.
-		bAllowReconstruction = !bActorIsBeingConstructed;
-		if (ensureMsgf(bAllowReconstruction, TEXT("Attempted to rerun construction scripts on an Actor that isn't fully constructed yet (%s)."), *GetFullName()))
+		TRACE_CPUPROFILER_EVENT_SCOPE(AActor::RerunConstructionScripts);
+		if(GIsEditor)
 		{
-			// Generate the blueprint hierarchy for this actor
-			TArray<UBlueprint*> ParentBPStack;
-			bAllowReconstruction = UBlueprint::GetBlueprintHierarchyFromClass(GetClass(), ParentBPStack);
-			if (bAllowReconstruction)
+			// Don't allow reconstruction if we're still in the middle of construction.
+			bAllowReconstruction = !bActorIsBeingConstructed;
+			if (ensureMsgf(bAllowReconstruction, TEXT("Attempted to rerun construction scripts on an Actor that isn't fully constructed yet (%s)."), *GetFullName()))
 			{
-				for (int i = ParentBPStack.Num() - 1; i > 0 && bAllowReconstruction; --i)
+				// Generate the blueprint hierarchy for this actor
+				TArray<UBlueprint*> ParentBPStack;
+				bAllowReconstruction = UBlueprint::GetBlueprintHierarchyFromClass(GetClass(), ParentBPStack);
+				if (bAllowReconstruction)
 				{
-					const UBlueprint* ParentBP = ParentBPStack[i];
-					if (ParentBP && ParentBP->bBeingCompiled)
+					for (int i = ParentBPStack.Num() - 1; i > 0 && bAllowReconstruction; --i)
 					{
-						// don't allow (re)running construction scripts if a parent BP is being compiled
-						bAllowReconstruction = false;
+						const UBlueprint* ParentBP = ParentBPStack[i];
+						if (ParentBP && ParentBP->bBeingCompiled)
+						{
+							// don't allow (re)running construction scripts if a parent BP is being compiled
+							bAllowReconstruction = false;
+						}
 					}
 				}
 			}
 		}
-	}
-#endif
-	if(bAllowReconstruction)
-	{
+
 		// Child Actors can be customized in many ways by their parents construction scripts and rerunning directly on them would wipe
 		// that out. So instead we redirect up the hierarchy
 		if (IsChildActor())
@@ -272,6 +292,21 @@ void AActor::RerunConstructionScripts()
 		// Temporarily suspend the undo buffer; we don't need to record reconstructed component objects into the current transaction
 		ITransaction* CurrentTransaction = GUndo;
 		GUndo = nullptr;
+
+		// Keep track of non-dirty packages, so we can clear the dirty state after reconstruction.
+		TSet<UPackage*> CleanPackageList;
+		auto CheckAndSaveOuterPackageToCleanList = [&CleanPackageList](const UObject* InObject)
+		{
+			check(InObject);
+			UPackage* ObjectPackage = InObject->GetPackage();
+			if (ObjectPackage && !ObjectPackage->IsDirty() && ObjectPackage != GetTransientPackage())
+			{
+				CleanPackageList.Add(ObjectPackage);
+			}
+		};
+
+		// Mark package as clean on exit if not transient and not already dirty.
+		CheckAndSaveOuterPackageToCleanList(this);
 		
 		// Create cache to store component data across rerunning construction scripts
 		FComponentInstanceDataCache* InstanceDataCache;
@@ -291,6 +326,7 @@ void AActor::RerunConstructionScripts()
 			FName AttachedToSocket;
 			bool bSetRelativeTransform;
 			FTransform RelativeTransform;
+			FName AttachParentName;
 		};
 
 		// Save info about attached actors
@@ -316,32 +352,47 @@ void AActor::RerunConstructionScripts()
 			}
 		}
 
-#if WITH_EDITOR
+		// Generate name to node lookup maps for each SCS.  This used to be done just during ExecuteConstruction, but it also optimizes
+		// calls to GetArchetype elsewhere during RerunConstructionScripts, so it's advantageous to run it here.
+		TArray<const UBlueprintGeneratedClass*> ParentBPClassStack;
+		UBlueprintGeneratedClass::GetGeneratedClassesHierarchy(GetClass(), ParentBPClassStack);
+		for (const UBlueprintGeneratedClass* BPClass : ParentBPClassStack)
+		{
+			if (BPClass->SimpleConstructionScript)
+			{
+				BPClass->SimpleConstructionScript->CreateNameToSCSNodeMap();
+			}
+		}
+
 		if (!CurrentTransactionAnnotation.IsValid())
 		{
 			CurrentTransactionAnnotation = FActorTransactionAnnotation::Create(this, false);
 		}
 		FActorTransactionAnnotation* ActorTransactionAnnotation = CurrentTransactionAnnotation.Get();
-		InstanceDataCache = &ActorTransactionAnnotation->ComponentInstanceData;
+		InstanceDataCache = &ActorTransactionAnnotation->ActorTransactionAnnotationData.ComponentInstanceData;
 
-		if (ActorTransactionAnnotation->bRootComponentDataCached)
+		if (ActorTransactionAnnotation->ActorTransactionAnnotationData.bRootComponentDataCached)
 		{
-			OldTransform = ActorTransactionAnnotation->RootComponentData.Transform;
-			OldTransformRotationCache = ActorTransactionAnnotation->RootComponentData.TransformRotationCache;
-			Parent = ActorTransactionAnnotation->RootComponentData.AttachedParentInfo.Actor.Get();
+			OldTransform = ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.Transform;
+			OldTransformRotationCache = ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.TransformRotationCache;
+			Parent = ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.AttachedParentInfo.Actor.Get();
 			if (Parent)
 			{
-				USceneComponent* AttachParent = ActorTransactionAnnotation->RootComponentData.AttachedParentInfo.AttachParent.Get();
-				AttachParentComponent = (AttachParent ? AttachParent : FindObjectFast<USceneComponent>(Parent, ActorTransactionAnnotation->RootComponentData.AttachedParentInfo.AttachParentName));
-				SocketName = ActorTransactionAnnotation->RootComponentData.AttachedParentInfo.SocketName;
+				USceneComponent* AttachParent = ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.AttachedParentInfo.AttachParent.Get();
+				AttachParentComponent = (AttachParent ? AttachParent : FindObjectFast<USceneComponent>(Parent, ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.AttachedParentInfo.AttachParentName));
+				SocketName = ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.AttachedParentInfo.SocketName;
 				DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 			}
 
-			for (const FActorRootComponentReconstructionData::FAttachedActorInfo& CachedAttachInfo : ActorTransactionAnnotation->RootComponentData.AttachedToInfo)
+			for (const FActorRootComponentReconstructionData::FAttachedActorInfo& CachedAttachInfo : ActorTransactionAnnotation->ActorTransactionAnnotationData.RootComponentData.AttachedToInfo)
 			{
 				AActor* AttachedActor = CachedAttachInfo.Actor.Get();
 				if (AttachedActor)
 				{
+					// Detaching will mark the attached actor's package as dirty, but we don't actually need
+					// it to be re-saved after reconstruction since attachment relationships will be restored.
+					CheckAndSaveOuterPackageToCleanList(AttachedActor);
+
 					FAttachedActorInfo Info;
 					Info.AttachedActor = AttachedActor;
 					Info.AttachedToSocket = CachedAttachInfo.SocketName;
@@ -355,9 +406,6 @@ void AActor::RerunConstructionScripts()
 
 			bUseRootComponentProperties = false;
 		}
-#else
-		InstanceDataCache = new FComponentInstanceDataCache(this);
-#endif
 
 		if (bUseRootComponentProperties)
 		{
@@ -367,6 +415,10 @@ void AActor::RerunConstructionScripts()
 
 			for (AActor* AttachedActor : AttachedActors)
 			{
+				// Detaching will mark the attached actor's package as dirty, but we don't actually need
+				// it to be re-saved after reconstruction since attachment relationships will be restored.
+				CheckAndSaveOuterPackageToCleanList(AttachedActor);
+
 				// We don't need to detach child actors, that will be handled by component tear down
 				if (!AttachedActor->IsChildActor())
 				{
@@ -379,6 +431,10 @@ void AActor::RerunConstructionScripts()
 						Info.AttachedActor = AttachedActor;
 						Info.AttachedToSocket = EachRoot->GetAttachSocketName();
 						Info.bSetRelativeTransform = false;
+						if (EachRoot->GetAttachParent() != RootComponent)
+						{
+							Info.AttachParentName = EachRoot->GetAttachParent()->GetFName();
+						}
 						AttachedActorInfos.Add(Info);
 
 						// Now detach it
@@ -417,8 +473,6 @@ void AActor::RerunConstructionScripts()
 				OldTransformRotationCache = RootComponent->GetRelativeRotationCache();
 			}
 		}
-
-#if WITH_EDITOR
 
 		// Return the component which was added by the construction script.
 		// It may be the same as the argument, or a parent component if the argument was a native subobject.
@@ -481,7 +535,7 @@ void AActor::RerunConstructionScripts()
 				// Determine if this component is an inner of a component added by the construction script
 				const bool bIsInnerComponent = (CSAddedComponent != Component);
 
-				// Poor man's topological sort - try to ensure that children are added to the list after the parents
+				// Try to ensure that children are added to the list after the parents.
 				// IndexOffset specifies how many items from the end new items are added.
 				const int32 Index = ComponentMapping.Num() - IndexOffset;
 				if (bIsInnerComponent)
@@ -504,7 +558,6 @@ void AActor::RerunConstructionScripts()
 				ComponentData.UCSComponentIndex = Component->GetUCSSerializationIndex();
 			}
 		}
-#endif
 
 		// Destroy existing components
 		DestroyConstructedComponents();
@@ -514,13 +567,25 @@ void AActor::RerunConstructionScripts()
 
 		// Exchange net roles before running construction scripts
 		UWorld *OwningWorld = GetWorld();
-		if (OwningWorld && !OwningWorld->IsServer())
+		if (OwningWorld && OwningWorld->IsNetMode(NM_Client))
 		{
 			ExchangeNetRoles(true);
 		}
 
+		// Determine if we already have the correct world transform on the RootComponent. If so, we don't want to try to set it again in ExecuteConstruction()
+		// or else a re-computation of the relative transform can cause error accumulation on the RelativeLocation/etc which is supposed to derive the ComponentToWorld.
+		bool bIsDefaultTransform = false;
+		if (RootComponent != nullptr && bUseRootComponentProperties)
+		{
+			const double TransformTolerance = 0.0;
+			if (OldTransform.Equals(RootComponent->GetComponentTransform(), TransformTolerance))
+			{
+				bIsDefaultTransform = true;
+			}
+		}
+
 		// Run the construction scripts
-		const bool bErrorFree = ExecuteConstruction(OldTransform, &OldTransformRotationCache, InstanceDataCache);
+		const bool bErrorFree = ExecuteConstruction(OldTransform, &OldTransformRotationCache, InstanceDataCache, bIsDefaultTransform);
 
 		if(Parent)
 		{
@@ -539,12 +604,38 @@ void AActor::RerunConstructionScripts()
 		for(FAttachedActorInfo& Info : AttachedActorInfos)
 		{
 			// If this actor is no longer attached to anything, reattach
-			if (!Info.AttachedActor->IsPendingKill() && Info.AttachedActor->GetAttachParentActor() == nullptr)
+			if (IsValid(Info.AttachedActor) && Info.AttachedActor->GetAttachParentActor() == nullptr)
 			{
 				USceneComponent* ChildRoot = Info.AttachedActor->GetRootComponent();
 				if (ChildRoot && ChildRoot->GetAttachParent() != RootComponent)
 				{
-					ChildRoot->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform, Info.AttachedToSocket);
+					if (Info.AttachParentName != NAME_None)
+					{
+						TArray<USceneComponent*> ChildComponents;
+						RootComponent->GetChildrenComponents(true, ChildComponents);
+						for (USceneComponent* Child : ChildComponents)
+						{
+							if (Child->GetFName() == Info.AttachParentName)
+							{
+								ChildRoot->AttachToComponent(Child, FAttachmentTransformRules::SnapToTargetIncludingScale, Info.AttachedToSocket);
+								break;
+							}
+						}
+						// if we couldn't find component by name, attach it to root and log a warning
+						if (!ChildRoot->GetAttachParent())
+						{
+							UE_LOG(LogBlueprint, Warning,
+								TEXT("Couldn't find a component named \'%s\' when reattaching. Attaching to root component instead."),
+								*Info.AttachParentName.ToString()
+							);
+							ChildRoot->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform, Info.AttachedToSocket);
+						}
+					}
+					else
+					{
+						ChildRoot->AttachToComponent(RootComponent, FAttachmentTransformRules::KeepWorldTransform, Info.AttachedToSocket);
+					}
+
 					if (Info.bSetRelativeTransform)
 					{
 						ChildRoot->SetRelativeTransform(Info.RelativeTransform);
@@ -554,10 +645,19 @@ void AActor::RerunConstructionScripts()
 			}
 		}
 
+		// If any of the code above caused a package dirty state to change, we reset it back to a "clean" state now. Note that we have to do this
+		// before we restore the undo buffer below - otherwise, the state change will become part of the current transaction, and we don't want that.
+		for (UPackage* PackageToMarkAsClean : CleanPackageList)
+		{
+			check(PackageToMarkAsClean);
+			PackageToMarkAsClean->SetDirtyFlag(false);
+		}
+
+		CleanPackageList.Empty();
+
 		// Restore the undo buffer
 		GUndo = CurrentTransaction;
 
-#if WITH_EDITOR
 		// Create the mapping of old->new components and notify the editor of the replacements
 		TInlineComponentArray<UActorComponent*> NewComponents;
 		GetComponents(NewComponents);
@@ -593,6 +693,8 @@ void AActor::RerunConstructionScripts()
 		// Now iterate through all previous construction script created components, looking for a match with reinstanced components.
 		for (const FComponentData& ComponentData : ComponentMapping)
 		{
+			UActorComponent* ResolvedNewComponent = nullptr;
+			
 			if (ComponentData.OldComponent->CreationMethod == EComponentCreationMethod::UserConstructionScript)
 			{
 				if (ComponentData.UCSComponentIndex >= 0)
@@ -606,8 +708,8 @@ void AActor::RerunConstructionScripts()
 							if (   ComponentData.OldComponent->GetClass() == NewComponent->GetClass() 
 							    && ComponentData.OldArchetype == ComponentToArchetypeMap[NewComponent])
 							{
-								OldToNewComponentMapping.Add(ComponentData.OldComponent, NewComponent);
-								NewUCSComponentsToConsider->RemoveAtSwap(Index, 1, false);
+								ResolvedNewComponent = NewComponent;
+								NewUCSComponentsToConsider->RemoveAtSwap(Index, 1, EAllowShrinking::No);
 								break;
 							}
 						}
@@ -643,12 +745,14 @@ void AActor::RerunConstructionScripts()
 					{
 						if (!OuterToMatch || GetComponentAddedByConstructionScript(MatchedComponent) == OuterToMatch)
 						{
-							OldToNewComponentMapping.Add(ComponentData.OldComponent, MatchedComponent);
+							ResolvedNewComponent = MatchedComponent;
 							break;
 						}
 					}
 				}
 			}
+
+			OldToNewComponentMapping.Add(ComponentData.OldComponent, ResolvedNewComponent);
 		}
 
 		if (GEditor && (OldToNewComponentMapping.Num() > 0))
@@ -660,21 +764,27 @@ void AActor::RerunConstructionScripts()
 		{
 			CurrentTransactionAnnotation = nullptr;
 		}
-#else
-		delete InstanceDataCache;
-#endif
 
+		// Remove the name to SCS node maps now that we're done constructing
+		for (const UBlueprintGeneratedClass* BPClass : ParentBPClassStack)
+		{
+			if (BPClass->SimpleConstructionScript)
+			{
+				BPClass->SimpleConstructionScript->RemoveNameToSCSNodeMap();
+			}
+		}
 	}
 }
+#endif
 
 namespace
 {
 	TMap<const AActor*, TMap<const UObject*, int32>, TInlineSetAllocator<4>> UCSBlueprintComponentArchetypeCounts;
 }
 
-bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationConversionCache* TransformRotationCache, const FComponentInstanceDataCache* InstanceDataCache, bool bIsDefaultTransform)
+bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationConversionCache* TransformRotationCache, const FComponentInstanceDataCache* InstanceDataCache, bool bIsDefaultTransform, ESpawnActorScaleMethod TransformScaleMethod)
 {
-	check(!IsPendingKill());
+	check(IsValid(this));
 	check(!HasAnyFlags(RF_BeginDestroyed|RF_FinishDestroyed));
 
 #if WITH_EDITOR
@@ -704,19 +814,6 @@ bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationCon
 	TArray<const UBlueprintGeneratedClass*> ParentBPClassStack;
 	const bool bErrorFree = UBlueprintGeneratedClass::GetGeneratedClassesHierarchy(GetClass(), ParentBPClassStack);
 
-	TArray<const UDynamicClass*> ParentDynamicClassStack;
-	for (UClass* ClassIt = GetClass(); ClassIt; ClassIt = ClassIt->GetSuperClass())
-	{
-		if (UDynamicClass* DynamicClass = Cast<UDynamicClass>(ClassIt))
-		{
-			ParentDynamicClassStack.Add(DynamicClass);
-		}
-	}
-	for (int32 i = ParentDynamicClassStack.Num() - 1; i >= 0; i--)
-	{
-		UBlueprintGeneratedClass::CreateComponentsForActor(ParentDynamicClassStack[i], this);
-	}
-
 	// If this actor has a blueprint lineage, go ahead and run the construction scripts from least derived to most
 	if( (ParentBPClassStack.Num() > 0)  )
 	{
@@ -737,11 +834,21 @@ bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationCon
 					if (SceneComponent->CreationMethod == EComponentCreationMethod::Native && SceneComponent->GetOuter()->IsA<AActor>())
 					{
 						// If RootComponent is not set, the first unattached native scene component will be used as root. This matches what's done in FixupNativeActorComponents().
-						// @TODO - consider removing this; keeping here as a fallback just in case it wasn't set prior to SCS execution, but in most cases now this should be valid. 
+												// In cases like BP reparenting between native classes, this is needed to fix up changes in root component type
 						if (RootComponent == nullptr && SceneComponent->GetAttachParent() == nullptr)
 						{
 							// Note: All native scene components should already have been registered at this point, so we don't need to register the component here.
 							SetRootComponent(SceneComponent);
+
+							// Update the transform on the newly set root component
+							if (ensure(RootComponent) && !bIsDefaultTransform)
+							{
+								if (TransformRotationCache)
+								{
+									RootComponent->SetRelativeRotationCache(*TransformRotationCache);
+								}
+								RootComponent->SetWorldTransform(Transform, /*bSweep=*/false, /*OutSweepHitResult=*/nullptr, ETeleportType::TeleportPhysics);
+							}
 						}
 
 						NativeSceneComponents.Add(SceneComponent);
@@ -758,15 +865,14 @@ bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationCon
 				USimpleConstructionScript* SCS = CurrentBPGClass->SimpleConstructionScript;
 				if (SCS)
 				{
-					SCS->CreateNameToSCSNodeMap();
-					SCS->ExecuteScriptOnActor(this, NativeSceneComponents, Transform, TransformRotationCache, bIsDefaultTransform);
+					SCS->ExecuteScriptOnActor(this, NativeSceneComponents, Transform, TransformRotationCache, bIsDefaultTransform, TransformScaleMethod);
 				}
 				// Now that the construction scripts have been run, we can create timelines and hook them up
 				UBlueprintGeneratedClass::CreateComponentsForActor(CurrentBPGClass, this);
 			}
 
 			// Ensure that we've called RegisterAllComponents(), in case it was deferred and the SCS could not be fully executed.
-			if (HasDeferredComponentRegistration())
+			if (HasDeferredComponentRegistration() && GetWorld()->bIsWorldInitialized)
 			{
 				RegisterAllComponents();
 			}
@@ -777,7 +883,7 @@ bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationCon
 			for (UActorComponent* ActorComponent : PostSCSComponents)
 			{
 				// Limit registration to components that are known to have been created during SCS execution
-				if (!ActorComponent->IsRegistered() && ActorComponent->bAutoRegister && !ActorComponent->IsPendingKill()
+				if (!ActorComponent->IsRegistered() && ActorComponent->bAutoRegister && IsValidChecked(ActorComponent) && GetWorld()->bIsWorldInitialized
 					&& (ActorComponent->CreationMethod == EComponentCreationMethod::SimpleConstructionScript || !PreSCSComponents.Contains(ActorComponent)))
 				{
 					USimpleConstructionScript::RegisterInstancedComponent(ActorComponent);
@@ -822,17 +928,6 @@ bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationCon
 			{
 				InstanceDataCache->ApplyToActor(this, ECacheApplyPhase::PostUserConstructionScript);
 			}
-
-			// Remove name to SCS_Node cached map
-			for (const UBlueprintGeneratedClass* CurrentBPGClass : ParentBPClassStack)
-			{
-				check(CurrentBPGClass);
-				USimpleConstructionScript* SCS = CurrentBPGClass->SimpleConstructionScript;
-				if (SCS)
-				{
-					SCS->RemoveNameToSCSNodeMap();
-				}
-			}
 		}
 		else
 		{
@@ -853,7 +948,7 @@ bool AActor::ExecuteConstruction(const FTransform& Transform, const FRotationCon
 			}
 
 			// Ensure that we've called RegisterAllComponents(), in case it was deferred and the SCS could not be executed (due to error).
-			if (HasDeferredComponentRegistration())
+			if (HasDeferredComponentRegistration() && GetWorld()->bIsWorldInitialized)
 			{
 				RegisterAllComponents();
 			}
@@ -913,7 +1008,10 @@ void AActor::ProcessUserConstructionScript()
 
 void AActor::FinishAndRegisterComponent(UActorComponent* Component)
 {
-	Component->RegisterComponent();
+	if (GetWorld()->bIsWorldInitialized)
+	{
+		Component->RegisterComponent();
+	}
 	BlueprintCreatedComponents.Add(Component);
 }
 
@@ -1090,10 +1188,21 @@ UActorComponent* AActor::CreateComponentFromTemplateData(const FBlueprintCookedC
 
 UActorComponent* AActor::AddComponent(FName TemplateName, bool bManualAttachment, const FTransform& RelativeTransform, const UObject* ComponentTemplateContext, bool bDeferredFinish)
 {
-	UWorld* World = GetWorld();
-	if (World->bIsTearingDown)
+	if (const UWorld* World = GetWorld())
 	{
-		UE_LOG(LogActor, Warning, TEXT("AddComponent failed because we are in the process of tearing down the world"));
+		if (World->bIsTearingDown)
+		{
+			UE_LOG(LogActor, Warning, TEXT("AddComponent failed for actor: [%s] with param TemplateName: [%s] because we are in the process of tearing down the world")
+				, *GetName()
+				, *TemplateName.ToString());
+			return nullptr;
+		}
+	}
+	else
+	{
+		UE_LOG(LogActor, Warning, TEXT("AddComponent failed for actor: [%s] with param TemplateName: [%s] because world == nullptr")
+			, *GetName()
+			, *TemplateName.ToString());
 		return nullptr;
 	}
 
@@ -1117,14 +1226,6 @@ UActorComponent* AActor::AddComponent(FName TemplateName, bool bManualAttachment
 				Template = BPGC->FindComponentTemplateByName(TemplateName);
 			}
 		}
-		else if (UDynamicClass* DynamicClass = Cast<UDynamicClass>(TemplateOwnerClass))
-		{
-			UObject** FoundTemplatePtr = DynamicClass->ComponentTemplates.FindByPredicate([=](UObject* Obj) -> bool
-			{
-				return Obj && Obj->IsA<UActorComponent>() && (Obj->GetFName() == TemplateName);
-			});
-			Template = (nullptr != FoundTemplatePtr) ? Cast<UActorComponent>(*FoundTemplatePtr) : nullptr;
-		}
 	}
 
 	UActorComponent* NewActorComp = TemplateData ? CreateComponentFromTemplateData(TemplateData) : CreateComponentFromTemplate(Template);
@@ -1144,10 +1245,21 @@ UActorComponent* AActor::AddComponentByClass(TSubclassOf<UActorComponent> Class,
 		return nullptr;
 	}
 
-	UWorld* World = GetWorld();
-	if (World->bIsTearingDown)
+	if (const UWorld* World = GetWorld())
 	{
-		UE_LOG(LogActor, Warning, TEXT("AddComponent failed because we are in the process of tearing down the world"));
+		if (World->bIsTearingDown)
+		{
+			UE_LOG(LogActor, Warning, TEXT("AddComponentByClass failed for actor: [%s] with param Class: [%s] because we are in the process of tearing down the world")
+				, *GetName()
+				, *GetNameSafe(Class));
+			return nullptr;
+		}
+	}
+	else
+	{
+		UE_LOG(LogActor, Warning, TEXT("AddComponentByClass failed for actor: [%s] with param Class: [%s] because world == nullptr")
+			, *GetName()
+			, *GetNameSafe(Class));
 		return nullptr;
 	}
 
@@ -1236,7 +1348,7 @@ void AActor::CheckComponentInstanceName(const FName InName)
 			if (CharIndex < ConflictingObjectName.Len() - 1)
 			{
 				Counter = FCString::Atoi(*ConflictingObjectName.RightChop(CharIndex + 1));
-				ConflictingObjectName.LeftInline(CharIndex + 1, false);
+				ConflictingObjectName.LeftInline(CharIndex + 1, EAllowShrinking::No);
 			}
 			FString NewObjectName;
 			do
@@ -1276,6 +1388,8 @@ void AActor::PostCreateBlueprintComponent(UActorComponent* NewActorComp)
 			int32& Count = ComponentArchetypeCounts.FindOrAdd(NewActorComp->GetArchetype());
 			FSetUCSSerializationIndex::Set(NewActorComp, Count);
 			++Count;
+
+			NewActorComp->SetNetAddressable();
 		}
 
 		// The component may not have been added to ReplicatedComponents if it was duplicated from
@@ -1284,6 +1398,8 @@ void AActor::PostCreateBlueprintComponent(UActorComponent* NewActorComp)
 		if (NewActorComp->GetIsReplicated())
 		{
 			ReplicatedComponents.AddUnique(NewActorComp);
+
+			AddComponentForReplication(NewActorComp);
 		}
 	}
 }

@@ -2,14 +2,23 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include "HAL/Platform.h"
 #include "Templates/Function.h"
 #include "TraceServices/Containers/Tables.h"
 #include "TraceServices/Model/AnalysisSession.h"
+#include "UObject/NameTypes.h"
+
 #include <limits>
 
-namespace Trace
+namespace TraceServices
 {
+
+enum class ENetProfilerAggregationMode : uint32
+{
+	None,
+	Aggregate,
+	InstanceMax,
+};
 
 enum class ENetProfilerDeliveryStatus : uint8
 {
@@ -35,7 +44,17 @@ enum class ENetProfilerChannelCloseReason : uint8
 	TearOff,
 };
 
+// Mirrored from EConnectionState on the runtime side
+enum class ENetProfilerConnectionState : uint8
+{
+	USOCK_Invalid = 0, // Connection is invalid, possibly uninitialized.
+	USOCK_Closed = 1, // Connection permanently closed.
+	USOCK_Pending = 2, // Connection is awaiting connection.
+	USOCK_Open = 3, // Connection is open.
+};
+
 TRACESERVICES_API const TCHAR* LexToString(const ENetProfilerChannelCloseReason Value);
+TRACESERVICES_API const TCHAR* LexToString(const ENetProfilerConnectionState Value);
 
 struct FNetProfilerName
 {
@@ -69,11 +88,16 @@ struct FNetProfilerLifeTime
 
 struct FNetProfilerObjectInstance
 {
-	uint32 ObjectIndex = 0U;		// Index in the object array
-	uint16 NameIndex = 0U;			// Index in the Name array
-	uint64 TypeId = uint64(0);		// ProtocolIdentifier
-	uint32 NetId = 0U;				// NetHandleIndex or NetGUID
-	FNetProfilerLifeTime LifeTime;	// Lifetime of this instance
+	FNetProfilerLifeTime LifeTime;			// Lifetime of this instance
+	union
+	{
+		UE_DEPRECATED(5.3, "Please use NetObjectId instead")
+		uint32 NetId;						// NetHandleIndex or NetGUID
+		uint64 NetObjectId = 0;				// NetHandleIndex or NetGUID
+	};
+	uint64 TypeId = uint64(0);				// ProtocolIdentifier
+	uint32 ObjectIndex = 0U;				// Index in the object array
+	uint16 NameIndex = 0U;					// Index in the Name array
 };
 
 union FNetProfilerBunchInfo
@@ -87,6 +111,7 @@ union FNetProfilerBunchInfo
 		uint64 bPartial : 1;
 		uint64 bPartialInitial : 1;
 		uint64 bPartialFinal : 1;
+		UE_DEPRECATED(5.3, "Replication pausing is now deprecated.")
 		uint64 bIsReplicationPaused : 1;
 		uint64 bOpen : 1;
 		uint64 bClose : 1;
@@ -107,14 +132,34 @@ struct FNetProfilerContentEvent
 {
 	uint64 StartPos : 24;		// Inclusive start position in the packet
 	uint64 EndPos : 24;			// Exclusive end position in the packet; BitSize = EndPos - StartPos
-	uint64 Level : 4;			// Level
-	uint64 Padding : 12;		// Padding
+	uint64 Level : 8;			// Level
+	uint64 Padding : 8;		// Padding
 
-	FNetProfilerBunchInfo BunchInfo;	
+	FNetProfilerBunchInfo BunchInfo;
 
 	uint32 EventTypeIndex;		// Will replace name index
 	uint32 NameIndex;			// Identify the name / type, should we store the actual Name as well
 	uint32 ObjectInstanceIndex;	// Object instance, Non zero if this is a NetObject, we can then look up data by indexing into ObjectInstances
+};
+
+// This must be kept in sync with ENetTraceStatsCounterType in NetTrace.h
+enum class ENetProfilerStatsCounterType : uint8
+{
+	Packet = 0,
+	Frame = 1,
+};
+
+struct FNetProfilerStatsCounterType
+{
+	uint32 StatsCounterTypeIndex;
+	uint32 NameIndex;
+	ENetProfilerStatsCounterType Type;
+};
+
+struct FNetProfilerStats
+{
+	uint32 StatsCounterTypeIndex;
+	uint32 StatsValue;
 };
 
 struct FNetProfilerPacket
@@ -123,16 +168,33 @@ struct FNetProfilerPacket
 	uint32 SequenceNumber;
 	uint32 ContentSizeInBits;						// This is the part that is tracked by the PacketContents
 	uint32 TotalPacketSizeInBytes;					// This is the actual size of the packet sent on the socket
-	ENetProfilerDeliveryStatus DeliveryStatus;		// Indicates if the packet was delivered or not, updated as soon as we know
 
 	// Index into Events
 	uint32 StartEventIndex;
 	uint32 EventCount;
+
+	uint32 StartStatsIndex;
+	uint32 StatsCount;
+
+	// Index into network profiler frames
+	uint32 NetProfilerFrameIndex;
+
+	ENetProfilerDeliveryStatus DeliveryStatus;		// Indicates if the packet was delivered or not, updated as soon as we know
+	ENetProfilerConnectionState ConnectionState;
+};
+
+struct FNetProfilerFrame
+{
+	FNetProfilerTimeStamp TimeStamp;
+	uint64 EngineFrameNumber = 0;
+	uint32 StartStatsIndex = 0;
+	uint32 StatsCount = 0;
 };
 
 struct FNetProfilerConnection
 {
-	const TCHAR* Name;
+	const TCHAR* Name = nullptr;
+	const TCHAR* AddressString = nullptr;
 	FNetProfilerLifeTime LifeTime;
 	uint32 GameInstanceIndex;
 	uint32 ConnectionIndex : 16;
@@ -146,9 +208,11 @@ struct FNetProfilerGameInstance
 	FNetProfilerLifeTime LifeTime;
 	uint32 GameInstanceIndex;
 	uint32 GameInstanceId;
+	const TCHAR* InstanceName = nullptr;
+	bool bIsUsingIrisReplication = false;
+	bool bIsServer = false;
 };
 
-// What do we need?
 struct FNetProfilerAggregatedStats
 {
 	uint32 EventTypeIndex;
@@ -160,10 +224,31 @@ struct FNetProfilerAggregatedStats
 	uint32 MaxExclusive = 0U;
 };
 
+struct FNetProfilerAggregatedStatsCounterStats
+{
+	uint32 StatsCounterTypeIndex;
+	uint32 Sum;
+	uint32 Min;
+	uint32 Max;
+	uint32 Average;
+	uint32 Count;
+
+	void Reset()
+	{
+		Sum = 0;
+		Min = 0;
+		Max = 0;
+		Average = 0;
+		Count = 0;
+	}
+};
+
 // What queries do we need?
 class INetProfilerProvider : public IProvider
 {
 public:
+	virtual ~INetProfilerProvider() = default;
+
 	// Return the version reported in the trace
 	// A return value of 0 indicates no network trace data
 	virtual uint32 GetNetTraceVersion() const = 0;
@@ -181,6 +266,7 @@ public:
 	// Access GameInstances
 	virtual uint32 GetGameInstanceCount() const = 0;
 	virtual void ReadGameInstances(TFunctionRef<void(const FNetProfilerGameInstance&)> Callback) const = 0;
+	virtual uint32 GetGameInstanceChangeCount() const = 0;
 
 	// Access Connections
 	virtual uint32 GetConnectionCount(uint32 GameInstanceIndex) const = 0;
@@ -212,12 +298,22 @@ public:
 	// Returns a change number incremented each time a change occurs in the packet content events for the specified connection and connection mode. */
 	virtual uint32 GetPacketContentEventChangeCount(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode) const = 0;
 
+	// Access StatsCounterTypes
+	virtual uint32 GetNetStatsCounterTypesCount() const = 0;
+	virtual void ReadNetStatsCounterTypes(TFunctionRef<void(const FNetProfilerStatsCounterType*, uint64)> Callback) const = 0;
+	virtual void ReadNetStatsCounterType(uint32 TypeIndex, TFunctionRef<void(const FNetProfilerStatsCounterType&)> Callback) const = 0;
+
 	// Computes aggregated stats for a packet interval or for a range of content events in a single packet.
 	// [PacketIndexIntervalStart, PacketIndexIntervalEnd] is the inclusive packet interval.
 	// [StartPosition, EndPosition) is the exclusive bit range interval; only used when PacketIndexIntervalStart == PacketIndexIntervalEnd.
 	virtual ITable<FNetProfilerAggregatedStats>* CreateAggregation(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode, uint32 PacketIndexIntervalStart, uint32 PacketIndexIntervalEnd, uint32 StartPosition, uint32 EndPosition) const = 0;
+
+	// Computes aggregated statscounters for a packet interval
+	// [PacketIndexIntervalStart, PacketIndexIntervalEnd] is the inclusive packet interval.
+	virtual ITable<FNetProfilerAggregatedStatsCounterStats>* CreateStatsCountersAggregation(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode, uint32 PacketIndexIntervalStart, uint32 PacketIndexIntervalEnd) const = 0;
 };
 
-TRACESERVICES_API const INetProfilerProvider& ReadNetProfilerProvider(const IAnalysisSession& Session);
+TRACESERVICES_API FName GetNetProfilerProviderName();
+TRACESERVICES_API const INetProfilerProvider* ReadNetProfilerProvider(const IAnalysisSession& Session);
 
-}
+} // namespace TraceServices

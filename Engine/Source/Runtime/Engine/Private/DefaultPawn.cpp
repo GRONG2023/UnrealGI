@@ -2,16 +2,18 @@
 
 
 #include "GameFramework/DefaultPawn.h"
+#include "GameFramework/Controller.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Components/InputComponent.h"
 #include "Engine/World.h"
 #include "Components/StaticMeshComponent.h"
-#include "GameFramework/PlayerController.h"
 #include "Engine/CollisionProfile.h"
 #include "Engine/StaticMesh.h"
 #include "Components/SphereComponent.h"
-#include "GameFramework/PawnMovementComponent.h"
 #include "GameFramework/FloatingPawnMovement.h"
 #include "GameFramework/PlayerInput.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DefaultPawn)
 
 FName ADefaultPawn::MovementComponentName(TEXT("MovementComponent0"));
 FName ADefaultPawn::CollisionComponentName(TEXT("CollisionComponent0"));
@@ -203,4 +205,5 @@ UPawnMovementComponent* ADefaultPawn::GetMovementComponent() const
 {
 	return MovementComponent;
 }
+
 

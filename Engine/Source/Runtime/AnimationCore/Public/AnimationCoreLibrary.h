@@ -6,10 +6,18 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "EulerTransform.h"
+#include "Math/MathFwd.h"
+#include "Math/Quat.h"
+#include "Math/Transform.h"
+#include "Math/Vector.h"
 
-struct FTransformConstraint;
+class FName;
 struct FConstraintData;
+struct FTransformConstraint;
 
 DECLARE_DELEGATE_RetVal_OneParam(FTransform, FGetGlobalTransform, FName);
 
@@ -51,4 +59,21 @@ namespace AnimationCore
 	 * @return  Delta Rotation to turn
 	 */
 	ANIMATIONCORE_API FQuat SolveAim(const FTransform& CurrentTransform, const FVector& TargetPosition, const FVector& AimVector, bool bUseUpVector = false, const FVector& UpVector = FVector::UpVector, float AimClampInDegree = 0.f);
+
+	/**
+	 * Converts a euler rotation represented by a vector of rotations in degrees and a rotation order to a quaternion
+	 * bUseUEHandyness If True will use UE handyness with right handed X and Y angles left handed Z, if False all are left handed
+	 */
+	ANIMATIONCORE_API FQuat QuatFromEuler(const FVector& XYZAnglesInDegrees, EEulerRotationOrder RotationOrderr = EEulerRotationOrder::ZYX, bool bUseUEHandyness = false);
+
+	/**
+	* Converts a quaternion to a euler rotation represented by a vector of rotations in degrees and a rotation order
+	* bUseUEHandyness If True will use UE handyness with right handed X and Y angles left handed Z, if False all are left handed
+	*/
+	ANIMATIONCORE_API FVector EulerFromQuat(const FQuat& Rotation, EEulerRotationOrder RotationOrder = EEulerRotationOrder::ZYX, bool bUseUEHandyness = false);
+
+	/**
+	 * Converts a euler rotation from one rotation order to another
+	 */
+	ANIMATIONCORE_API FVector ChangeEulerRotationOrder(const FVector& XYZAnglesInDegrees, EEulerRotationOrder SourceRotationOrder, EEulerRotationOrder TargetRotationOrder, bool bUseUEHandyness = false);
 }

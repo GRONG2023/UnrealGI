@@ -6,33 +6,32 @@
 =============================================================================*/
 
 #include "Engine/DebugCameraController.h"
+#include "Components/MeshComponent.h"
 #include "Engine/DebugCameraControllerSettings.h"
-#include "EngineGlobals.h"
-#include "CollisionQueryParams.h"
-#include "Engine/World.h"
-#include "Components/StaticMeshComponent.h"
-#include "Engine/MapBuildDataRegistry.h"
+#include "Components/InputComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/Player.h"
-#include "Materials/Material.h"
+#include "FinalPostProcessSettings.h"
+#include "ShaderCore.h"
 #include "EngineUtils.h"
 #include "GameFramework/SpectatorPawn.h"
 #include "GameFramework/SpectatorPawnMovement.h"
 #include "Engine/DebugCameraHUD.h"
-#include "LightMap.h"
 #include "Components/DrawFrustumComponent.h"
 #include "GameFramework/PlayerInput.h"
 #include "GameFramework/GameStateBase.h"
 #include "BufferVisualizationData.h"
+#include "Materials/MaterialInterface.h"
 
-static const float SPEED_SCALE_ADJUSTMENT = 0.5f;
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DebugCameraController)
+
+static const float SPEED_SCALE_ADJUSTMENT = 0.05f;
 static const float MIN_ORBIT_RADIUS = 30.0f;
 
 ADebugCameraController::ADebugCameraController(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
-	SelectedActor = nullptr;
-	SelectedComponent = nullptr;
 	OriginalControllerRef = nullptr;
 	OriginalPlayer = nullptr;
 
@@ -131,7 +130,9 @@ void ADebugCameraController::SetupInputComponent()
 	InputComponent->BindAction("DebugCamera_DecreaseSpeed", IE_Pressed, this, &ADebugCameraController::DecreaseCameraSpeed);
 
 	InputComponent->BindAction("DebugCamera_IncreaseFOV", IE_Pressed, this, &ADebugCameraController::IncreaseFOV);
+	InputComponent->BindAction("DebugCamera_IncreaseFOV", IE_Repeat, this, &ADebugCameraController::IncreaseFOV);
 	InputComponent->BindAction("DebugCamera_DecreaseFOV", IE_Pressed, this, &ADebugCameraController::DecreaseFOV);
+	InputComponent->BindAction("DebugCamera_DecreaseFOV", IE_Repeat, this, &ADebugCameraController::DecreaseFOV);
 
 	InputComponent->BindAction("DebugCamera_ToggleDisplay", IE_Pressed, this, &ADebugCameraController::ToggleDisplay);
 	InputComponent->BindAction("DebugCamera_FreezeRendering", IE_Pressed, this, &ADebugCameraController::ToggleFreezeRendering);
@@ -201,7 +202,7 @@ void ADebugCameraController::SetupBufferVisualizationOverviewInput()
 					const FInputAxisBinding& Binding = InputComponent->AxisBindings[CurrentAxisBindingIndex];
 					if (Binding.AxisName == "DebugCamera_DisableAxisMotion")
 					{
-						InputComponent->AxisBindings.RemoveAt(CurrentAxisBindingIndex, 1, false);
+						InputComponent->AxisBindings.RemoveAt(CurrentAxisBindingIndex, 1, EAllowShrinking::No);
 						--CurrentAxisBindingIndex;
 					}
 				}
@@ -246,25 +247,27 @@ void ADebugCameraController::OnFingerMove(ETouchIndex::Type FingerIndex, FVector
 
 AActor* ADebugCameraController::GetSelectedActor() const
 {
-	return SelectedActor;
+	return SelectedActor.Get();
 }
 
 void ADebugCameraController::Select( FHitResult const& Hit )
 {
+	AActor* HitActor = Hit.HitObjectHandle.FetchActor();
+
 	// store selection
-	SelectedActor = Hit.GetActor();
-	SelectedComponent = Hit.Component.Get();
+	SelectedActor = HitActor;
+	SelectedComponent = Hit.Component;
 	SelectedHitPoint = Hit;
 
 	//BP Event
-	ReceiveOnActorSelected(SelectedActor, Hit.ImpactPoint, Hit.ImpactNormal, Hit);
+	ReceiveOnActorSelected(HitActor, Hit.ImpactPoint, Hit.ImpactNormal, Hit);
 }
 
 
 void ADebugCameraController::Unselect()
 {	
-	SelectedActor = nullptr;
-	SelectedComponent = nullptr;
+	SelectedActor.Reset();
+	SelectedComponent.Reset();
 }
 
 FString ADebugCameraController::ConsoleCommand(const FString& Cmd,bool bWriteToLog)
@@ -340,7 +343,7 @@ ASpectatorPawn* ADebugCameraController::SpawnSpectatorPawn()
 			if (SpawnedSpectator)
 			{
 				SpawnedSpectator->PossessedBy(this);
-				SpawnedSpectator->PawnClientRestart();
+				SpawnedSpectator->DispatchRestart(true);
 				if (SpawnedSpectator->PrimaryActorTick.bStartWithTickEnabled)
 				{
 					SpawnedSpectator->SetActorTickEnabled(true);
@@ -489,7 +492,11 @@ void ADebugCameraController::OnDeactivate( APlayerController* RestoredPC )
 	ConsoleCommand(TEXT("show camfrustums"));
 	DrawFrustum->UnregisterComponent();
 	RestoredPC->SetActorHiddenInGame(true);
-	RestoredPC->PlayerCameraManager->SetActorHiddenInGame(true);
+	
+	if (RestoredPC->PlayerCameraManager)
+	{
+		RestoredPC->PlayerCameraManager->SetActorHiddenInGame(true);
+	}
 
 	OriginalControllerRef = nullptr;
 	OriginalPlayer = nullptr;
@@ -565,7 +572,7 @@ void ADebugCameraController::UpdateRotationForOrbit(float DeltaTime)
 
 			// Handle either forward or lateral motion but not both, because small forward
 			// motion deltas while moving laterally cause the distance from pivot to drift
-			if (FMath::IsNearlyZero(MoveDeltaObj.Y, 0.01f))
+			if (FMath::IsNearlyZero(MoveDeltaObj.Y, FVector::FReal(0.01)))
 			{
 				// Clamp delta to avoid flipping to opposite view
 				const float ForwardScale = 3.0f;
@@ -590,8 +597,8 @@ void ADebugCameraController::UpdateRotationForOrbit(float DeltaTime)
 			FQuat::FindBetween(FVector::UpVector, OppositeViewVector).ToAxisAndAngle(Axis, Angle);
 
 			// Clamp rotation to 10 degrees from Up vector
-			const float MinAngle = PI / 18.f;
-			const float MaxAngle = PI - MinAngle;
+			const float MinAngle = UE_PI / 18.f;
+			const float MaxAngle = UE_PI - MinAngle;
 			if (Angle < MinAngle || Angle > MaxAngle)
 			{
 				float AdjustedAngle = FMath::Clamp(Angle, MinAngle, MaxAngle);
@@ -615,7 +622,7 @@ void ADebugCameraController::UpdateRotationForOrbit(float DeltaTime)
 
 bool ADebugCameraController::GetPivotForOrbit(FVector& PivotLocation) const
 {
-	if (SelectedActor)
+	if (SelectedActor.IsValid())
 	{
 		if (bOrbitPivotUseCenter)
 		{
@@ -625,7 +632,7 @@ bool ADebugCameraController::GetPivotForOrbit(FVector& PivotLocation) const
 			// Use the center of the bounding box of the current selected actor as the pivot point for orbiting the camera
 			int32 NumSelectedActors = 0;
 
-			TInlineComponentArray<UMeshComponent*> MeshComponents(SelectedActor);
+			TInlineComponentArray<UMeshComponent*> MeshComponents(SelectedActor.Get());
 
 			for (int32 ComponentIndex = 0; ComponentIndex < MeshComponents.Num(); ++ComponentIndex)
 			{
@@ -1096,3 +1103,4 @@ void ADebugCameraController::SetDisplay(bool bEnabled)
 		ToggleDisplay();
 	}
 }
+

@@ -2,6 +2,11 @@
 #pragma once
 
 #include "Math/Box.h"
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
+
+#include "Misc/SecureHash.h"
+
 
 class DATASMITHCORE_API FDatasmithMesh
 {
@@ -14,6 +19,9 @@ public:
 
 	FDatasmithMesh& operator=( const FDatasmithMesh& Other );
 	FDatasmithMesh& operator=( FDatasmithMesh&& Other );
+
+	// Calculate mesh data hash(doesn't include name)
+	FMD5Hash CalculateHash() const;
 
 	void SetName(const TCHAR* InName);
 	const TCHAR* GetName() const;
@@ -74,7 +82,7 @@ public:
 	 * @z position on the z axis
 	 */
 	void SetVertex(int32 Index, float X, float Y, float Z);
-	FVector GetVertex(int32 Index) const;
+	FVector3f GetVertex(int32 Index) const;
 
 	//--------------------------
 	// Normals
@@ -88,7 +96,7 @@ public:
 	 * @z direction on the z axis
 	 */
 	void SetNormal(int32 Index, float X, float Y, float Z);
-	FVector GetNormal(int32 Index) const;
+	FVector3f GetNormal(int32 Index) const;
 
 	//--------------------------
 	// UVs
@@ -138,7 +146,7 @@ public:
 	 */
 	uint32 GetHashForUVChannel(int32 Channel) const;
 
-	/** 
+	/**
 	 * Gets the UV coordinates for a channel
 	 *
 	 * @param Channel	The channel we want to retrieve the UVs from
@@ -215,10 +223,10 @@ public:
 	float ComputeArea() const;
 
 	/** Returns the bounding box containing all vertices of this mesh */
-	FBox GetExtents() const;
+	FBox3f GetExtents() const;
 
 private:
 	class FDatasmithMeshImpl;
-	FDatasmithMeshImpl* Impl;
 
+	FDatasmithMeshImpl* Impl;
 };

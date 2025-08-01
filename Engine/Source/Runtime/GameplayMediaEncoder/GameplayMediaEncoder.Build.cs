@@ -3,7 +3,7 @@
 using System.IO;
 using UnrealBuildTool;
 
-[SupportedPlatforms("Win32", "Win64")]
+[SupportedPlatformGroups("Windows")]
 public class GameplayMediaEncoder : ModuleRules
 {
 	public GameplayMediaEncoder(ReadOnlyTargetRules Target) : base(Target)
@@ -27,23 +27,14 @@ public class GameplayMediaEncoder : ModuleRules
 			"AVEncoder"
 		});
 
-		if (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64)
-		{			
-			AddEngineThirdPartyPrivateStaticDependencies(Target, "NVAftermath");
+		if (Target.IsInPlatformGroup(UnrealPlatformGroup.Windows))
+		{
+			PrivateDependencyModuleNames.Add("D3D11RHI");
+			AddEngineThirdPartyPrivateStaticDependencies(Target, "DX11");
 
-			if (Target.Platform == UnrealTargetPlatform.Win32 || Target.Platform == UnrealTargetPlatform.Win64)
-			{
-				PrivateDependencyModuleNames.AddRange(new string[]
-					{
-						"D3D11RHI"
-					});
-
-				PublicDelayLoadDLLs.Add("mfplat.dll");
-				PublicDelayLoadDLLs.Add("mfuuid.dll");
-				PublicDelayLoadDLLs.Add("Mfreadwrite.dll");
-
-				PublicSystemLibraries.Add("d3d11.lib");
-			}
+			PublicDelayLoadDLLs.Add("mfplat.dll");
+			PublicDelayLoadDLLs.Add("mfuuid.dll");
+			PublicDelayLoadDLLs.Add("Mfreadwrite.dll");
 		}
 	}
 }

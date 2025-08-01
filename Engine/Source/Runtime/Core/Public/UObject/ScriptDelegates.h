@@ -4,33 +4,153 @@
 
 #include "CoreTypes.h"
 #include "Misc/AssertionMacros.h"
-#include "Templates/AreTypesEqual.h"
 #include "Templates/UnrealTypeTraits.h"
 #include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/Array.h"
 #include "Containers/UnrealString.h"
 #include "UObject/NameTypes.h"
 #include "Templates/SharedPointer.h"
+#include "Delegates/DelegateAccessHandler.h"
 
-struct FWeakObjectPtr;
+namespace UE::Core::Private
+{
+	template <typename InThreadSafetyMode>
+	struct TScriptDelegateTraits
+	{
+		// Although templated, WeakPtrType is not intended to be anything other than FWeakObjectPtr,
+		// and is only a template for module organization reasons.
+		using WeakPtrType = FWeakObjectPtr;
+
+		using ThreadSafetyMode = InThreadSafetyMode;
+		using UnicastThreadSafetyModeForMulticasts = FNotThreadSafeNotCheckedDelegateMode;
+	};
+
+	template <>
+	struct UE_DEPRECATED(5.3, "TScriptDelegate<FWeakObjectPtr> and TMulticastScriptDelegate<FWeakObjectPtr> have been deprecated, please use FScriptDelegate or FMulticastScriptDelegate respectively.") TScriptDelegateTraits<FWeakObjectPtr>
+	{
+		// After this deprecated specialization has been removed, all of the functions inside
+		// TMulticastScriptDelegate which take OtherDummy parameters should also be removed,
+		// and also the TScriptDelegate(const TScriptDelegate<FWeakObjectPtr>&) constructor.
+
+		using WeakPtrType = FWeakObjectPtr;
+		using ThreadSafetyMode = FNotThreadSafeDelegateMode;
+		using UnicastThreadSafetyModeForMulticasts = FNotThreadSafeNotCheckedDelegateMode;
+	};
+
+	// This function only exists to allow compatibility between multicast and unicast delegate types which use an explicit FWeakObjectPtr template parameter
+	template <typename From, typename To>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	inline constexpr bool BackwardCompatibilityCheck()
+	{
+		if constexpr (std::is_same_v<From, FNotThreadSafeDelegateMode>)
+		{
+			return std::is_same_v<To, FWeakObjectPtr>;
+		}
+		else if constexpr (std::is_same_v<From, FWeakObjectPtr>)
+		{
+			return std::is_same_v<To, FNotThreadSafeDelegateMode>;
+		}
+		else
+		{
+			return false;
+		}
+	}
+}
 
 /**
  * Script delegate base class.
  */
-template <typename TWeakPtr = FWeakObjectPtr>
-class TScriptDelegate
+template <typename InThreadSafetyMode>
+class TScriptDelegate : public TDelegateAccessHandlerBase<typename UE::Core::Private::TScriptDelegateTraits<InThreadSafetyMode>::ThreadSafetyMode>
 {
-	// Although templated, the parameter is not intended to be anything other than the default,
-	// and is only a template for module organization reasons.
-	static_assert(TAreTypesEqual<TWeakPtr, FWeakObjectPtr>::Value, "TWeakPtr should not be overridden");
+public:
+	using ThreadSafetyMode = typename UE::Core::Private::TScriptDelegateTraits<InThreadSafetyMode>::ThreadSafetyMode;
+	using WeakPtrType = typename UE::Core::Private::TScriptDelegateTraits<InThreadSafetyMode>::WeakPtrType;
+
+private:
+	template <typename>
+	friend class TScriptDelegate;
+
+	template<typename>
+	friend class TMulticastScriptDelegate;
+
+	using Super = TDelegateAccessHandlerBase<ThreadSafetyMode>;
+	using typename Super::FReadAccessScope;
+	using Super::GetReadAccessScope;
+	using typename Super::FWriteAccessScope;
+	using Super::GetWriteAccessScope;
 
 public:
-
 	/** Default constructor. */
 	TScriptDelegate() 
-		: Object( nullptr ),
-		  FunctionName( NAME_None )
+		: Object( nullptr )
+		, FunctionName( NAME_None )
 	{ }
+
+	TScriptDelegate(const TScriptDelegate& Other)
+	{
+		FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+
+		Object = Other.Object;
+		FunctionName = Other.FunctionName;
+	}
+
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	TScriptDelegate(const TScriptDelegate<OtherThreadSafetyMode>& Other)
+	{
+		typename TScriptDelegate<OtherThreadSafetyMode>::FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+
+		Object = Other.Object;
+		FunctionName = Other.FunctionName;
+	}
+
+	TScriptDelegate& operator=(const TScriptDelegate& Other)
+	{
+		WeakPtrType OtherObject;
+		FName OtherFunctionName;
+
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			OtherObject = Other.Object;
+			OtherFunctionName = Other.FunctionName;
+		}
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+			Object = OtherObject;
+			FunctionName = OtherFunctionName;
+		}
+
+		return *this;
+	}
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	TScriptDelegate& operator=(const TScriptDelegate<OtherThreadSafetyMode>& Other)
+	{
+		WeakPtrType OtherObject;
+		FName OtherFunctionName;
+
+		{
+			typename TScriptDelegate<OtherThreadSafetyMode>::FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			OtherObject = Other.Object;
+			OtherFunctionName = Other.FunctionName;
+		}
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+			Object = OtherObject;
+			FunctionName = OtherFunctionName;
+		}
+
+		return *this;
+	}
 
 private:
 
@@ -58,6 +178,8 @@ public:
 	 */
 	void BindUFunction( UObject* InObject, const FName& InFunctionName )
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		Object = InObject;
 		FunctionName = InFunctionName;
 	}
@@ -69,6 +191,7 @@ public:
 	 */
 	inline bool IsBound() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
 		return IsBound_Internal<UObject>();
 	}
 
@@ -79,6 +202,7 @@ public:
 	 */
 	inline bool IsBoundToObject(void const* InUserObject) const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
 		return InUserObject && (InUserObject == GetUObject());
 	}
 
@@ -89,6 +213,7 @@ public:
 	 */
 	bool IsBoundToObjectEvenIfUnreachable(void const* InUserObject) const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
 		return InUserObject && InUserObject == GetUObjectEvenIfUnreachable();
 	}
 
@@ -99,6 +224,7 @@ public:
 	 */
 	inline bool IsCompactable() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
 		return FunctionName == NAME_None || !Object.Get(true);
 	}
 
@@ -107,6 +233,8 @@ public:
 	 */
 	void Unbind()
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		Object = nullptr;
 		FunctionName = NAME_None;
 	}
@@ -129,6 +257,7 @@ public:
 	{
 		if( IsBound() )
 		{
+			FReadAccessScope ReadScope = GetReadAccessScope();
 			return ((UObjectTemplate*)GetUObject())->GetPathName() + TEXT(".") + GetFunctionName().ToString();
 		}
 		return TEXT( "<Unbound>" );
@@ -137,6 +266,8 @@ public:
 	/** Delegate serialization */
 	friend FArchive& operator<<( FArchive& Ar, TScriptDelegate& D )
 	{
+		FReadAccessScope ReadScope = D.GetReadAccessScope();
+
 		Ar << D.Object << D.FunctionName;
 		return Ar;
 	}
@@ -144,6 +275,8 @@ public:
 	/** Delegate serialization */
 	friend void operator<<(FStructuredArchive::FSlot Slot, TScriptDelegate& D)
 	{
+		FReadAccessScope ReadScope = D.GetReadAccessScope();
+
 		FStructuredArchive::FRecord Record = Slot.EnterRecord();
 		Record << SA_VALUE(TEXT("Object"), D.Object) << SA_VALUE(TEXT("FunctionName"),D.FunctionName);
 	}
@@ -151,18 +284,62 @@ public:
 	/** Comparison operators */
 	FORCEINLINE bool operator==( const TScriptDelegate& Other ) const
 	{
-		return Object == Other.Object && FunctionName == Other.FunctionName;
+		WeakPtrType OtherObject;
+		FName OtherFunctionName;
+
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			OtherObject = Other.Object;
+			OtherFunctionName = Other.FunctionName;
+		}
+
+		bool bResult;
+
+		{
+			FReadAccessScope ThisReadScope = GetReadAccessScope();
+			bResult = Object == OtherObject && FunctionName == OtherFunctionName;
+		}
+
+		return bResult;
+	}
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	FORCEINLINE bool operator==(const TScriptDelegate<OtherThreadSafetyMode>& Other) const
+	{
+		WeakPtrType OtherObject;
+		FName OtherFunctionName;
+
+		{
+			typename TScriptDelegate<OtherThreadSafetyMode>::FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			OtherObject = Other.Object;
+			OtherFunctionName = Other.FunctionName;
+		}
+
+		bool bResult;
+
+		{
+			FReadAccessScope ThisReadScope = GetReadAccessScope();
+			bResult = Object == OtherObject && FunctionName == OtherFunctionName;
+		}
+
+		return bResult;
 	}
 
 	FORCEINLINE bool operator!=( const TScriptDelegate& Other ) const
 	{
-		return Object != Other.Object || FunctionName != Other.FunctionName;
+		return !operator==(Other);
 	}
-
-	void operator=( const TScriptDelegate& Other )
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	FORCEINLINE bool operator!=(const TScriptDelegate<OtherThreadSafetyMode>& Other) const
 	{
-		Object = Other.Object;
-		FunctionName = Other.FunctionName;
+		return !operator==(Other);
 	}
 
 	/** 
@@ -172,6 +349,8 @@ public:
 	 */
 	UObject* GetUObject()
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		// Downcast UObjectBase to UObject
 		return static_cast< UObject* >( Object.Get() );
 	}
@@ -183,6 +362,8 @@ public:
 	 */
 	const UObject* GetUObject() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
 		// Downcast UObjectBase to UObject
 		return static_cast< const UObject* >( Object.Get() );
 	}
@@ -194,6 +375,8 @@ public:
 	 */
 	UObject* GetUObjectEvenIfUnreachable()
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		// Downcast UObjectBase to UObject
 		return static_cast< UObject* >( Object.GetEvenIfUnreachable() );
 	}
@@ -205,8 +388,15 @@ public:
 	 */
 	const UObject* GetUObjectEvenIfUnreachable() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
 		// Downcast UObjectBase to UObject
 		return static_cast< const UObject* >( Object.GetEvenIfUnreachable() );
+	}
+
+	WeakPtrType& GetUObjectRef()
+	{
+		return Object;
 	}
 
 	/**
@@ -216,6 +406,7 @@ public:
 	 */
 	FName GetFunctionName() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
 		return FunctionName;
 	}
 
@@ -230,51 +421,152 @@ public:
 	template <class UObjectTemplate>
 	void ProcessDelegate( void* Parameters ) const
 	{
-		checkf( Object.IsValid() != false, TEXT( "ProcessDelegate() called with no object bound to delegate!" ) );
-		checkf( FunctionName != NAME_None, TEXT( "ProcessDelegate() called with no function name set!" ) );
+		UObjectTemplate* ObjectPtr;
+		UFunction* Function;
 
-		// Object was pending kill, so we cannot execute the delegate.  Note that it's important to assert
-		// here and not simply continue execution, as memory may be left uninitialized if the delegate is
-		// not able to execute, resulting in much harder-to-detect code errors.  Users should always make
-		// sure IsBound() returns true before calling ProcessDelegate()!
-		UObjectTemplate* ObjectPtr = static_cast< UObjectTemplate* >( Object.Get() );	// Down-cast
-		checkSlow( !ObjectPtr->IsPendingKill() );
+		{	// to avoid MT access check if the delegate is deleted from inside of its callback, we don't cover the callback execution
+			// by access protection scope
+			// the `const` on the method is a lie
+			FWriteAccessScope WriteScope = const_cast<TScriptDelegate*>(this)->GetWriteAccessScope();
 
-		// Object *must* implement the specified function
-		UFunction* Function = ObjectPtr->FindFunctionChecked( FunctionName );
+			checkf( Object.IsValid() != false, TEXT( "ProcessDelegate() called with no object bound to delegate!" ) );
+			checkf( FunctionName != NAME_None, TEXT( "ProcessDelegate() called with no function name set!" ) );
+
+			// Object was pending kill, so we cannot execute the delegate.  Note that it's important to assert
+			// here and not simply continue execution, as memory may be left uninitialized if the delegate is
+			// not able to execute, resulting in much harder-to-detect code errors.  Users should always make
+			// sure IsBound() returns true before calling ProcessDelegate()!
+			ObjectPtr = static_cast<UObjectTemplate*>(Object.Get());	// Down-cast
+			checkSlow( IsValid(ObjectPtr) );
+
+			// Object *must* implement the specified function
+			Function = ObjectPtr->FindFunctionChecked(FunctionName);
+		}
 
 		// Execute the delegate!
 		ObjectPtr->ProcessEvent(Function, Parameters);
 	}
 
+	friend uint32 GetTypeHash(const TScriptDelegate& Delegate)
+	{
+		FReadAccessScope ReadScope = Delegate.GetReadAccessScope();
+
+		return HashCombine(GetTypeHash(Delegate.Object), GetTypeHash(Delegate.GetFunctionName()));
+	}
+
+	template<typename OtherThreadSafetyMode>
+	static TScriptDelegate CopyFrom(const TScriptDelegate<OtherThreadSafetyMode>& Other)
+	{
+		static_assert(std::is_same_v<ThreadSafetyMode, typename UE::Core::Private::TScriptDelegateTraits<ThreadSafetyMode>::UnicastThreadSafetyModeForMulticasts>);
+
+		typename TScriptDelegate<OtherThreadSafetyMode>::FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+
+		TScriptDelegate Copy;
+		Copy.Object = Other.Object;
+		Copy.FunctionName = Other.FunctionName;
+
+		return Copy;
+	}
+
 protected:
 
 	/** The object bound to this delegate, or nullptr if no object is bound */
-	TWeakPtr Object;
+	WeakPtrType Object;
 
 	/** Name of the function to call on the bound object */
 	FName FunctionName;
 
 	// 
 	friend class FCallDelegateHelper;
+
+	friend struct TIsZeroConstructType<TScriptDelegate>;
 };
 
-
-template<typename TWeakPtr> struct TIsZeroConstructType<TScriptDelegate<TWeakPtr> > { enum { Value = TIsZeroConstructType<TWeakPtr>::Value }; };
-
+template<typename ThreadSafetyMode>
+struct TIsZeroConstructType<TScriptDelegate<ThreadSafetyMode>>
+{
+	static constexpr bool Value = 
+		TIsZeroConstructType<typename UE::Core::Private::TScriptDelegateTraits<ThreadSafetyMode>::WeakPtrType>::Value &&
+		TIsZeroConstructType<typename TScriptDelegate<ThreadSafetyMode>::Super>::Value;
+};
 
 /**
  * Script multi-cast delegate base class
  */
-template <typename TWeakPtr = FWeakObjectPtr>
-class TMulticastScriptDelegate
+template <typename InThreadSafetyMode>
+class TMulticastScriptDelegate : public TDelegateAccessHandlerBase<typename UE::Core::Private::TScriptDelegateTraits<InThreadSafetyMode>::ThreadSafetyMode>
 {
-public:
+private:
+	using Super = TDelegateAccessHandlerBase<InThreadSafetyMode>;
+	using typename Super::FReadAccessScope;
+	using Super::GetReadAccessScope;
+	using typename Super::FWriteAccessScope;
+	using Super::GetWriteAccessScope;
 
-	/**
-	 * Default constructor
-	 */
-	inline TMulticastScriptDelegate() { }
+	using UnicastDelegateType = TScriptDelegate<typename UE::Core::Private::TScriptDelegateTraits<InThreadSafetyMode>::UnicastThreadSafetyModeForMulticasts>;
+
+public:
+	using ThreadSafetyMode = typename UE::Core::Private::TScriptDelegateTraits<InThreadSafetyMode>::ThreadSafetyMode;
+	using InvocationListType = TArray<UnicastDelegateType>;
+
+	TMulticastScriptDelegate() = default;
+
+	TMulticastScriptDelegate(const TMulticastScriptDelegate& Other)
+	{
+		InvocationListType LocalCopy;
+
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			LocalCopy = Other.InvocationList;
+		}
+
+		InvocationList = MoveTemp(LocalCopy);
+	}
+
+	TMulticastScriptDelegate& operator=(const TMulticastScriptDelegate& Other)
+	{
+		InvocationListType LocalCopy;
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			LocalCopy = Other.InvocationList;
+		}
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+			InvocationList = MoveTemp(LocalCopy);
+		}
+
+		return *this;
+	}
+
+	TMulticastScriptDelegate(TMulticastScriptDelegate&& Other)
+	{
+		InvocationListType LocalStorage;
+
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			LocalStorage = MoveTemp(Other.InvocationList);
+		}
+
+		InvocationList = MoveTemp(LocalStorage);
+	}
+
+	TMulticastScriptDelegate& operator=(TMulticastScriptDelegate&& Other)
+	{
+		InvocationListType LocalStorage;
+
+		{
+			FReadAccessScope OtherReadScope = Other.GetReadAccessScope();
+			LocalStorage = MoveTemp(Other.InvocationList);
+		}
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+			InvocationList = MoveTemp(LocalStorage);
+		}
+
+		return *this;
+	}
 
 public:
 
@@ -285,6 +577,8 @@ public:
 	 */
 	inline bool IsBound() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
 		return InvocationList.Num() > 0;
 	}
 
@@ -294,9 +588,36 @@ public:
 	 * @param	InDelegate	Delegate to check
 	 * @return	True if the delegate is already in the list.
 	 */
-	bool Contains( const TScriptDelegate<TWeakPtr>& InDelegate ) const
+	bool Contains( const TScriptDelegate<ThreadSafetyMode>& InDelegate ) const
 	{
-		return InvocationList.Contains( InDelegate );
+		const UObject* Object;
+		FName FunctionName;
+
+		{
+			FReadAccessScope OtherReadScope = InDelegate.GetReadAccessScope();
+			Object = InDelegate.Object.Get();
+			FunctionName = InDelegate.FunctionName;
+		}
+
+		return Contains(Object, FunctionName);
+	}
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	bool Contains(const TScriptDelegate<OtherThreadSafetyMode>& InDelegate) const
+	{
+		const UObject* Object;
+		FName FunctionName;
+
+		{
+			typename TScriptDelegate<OtherThreadSafetyMode>::FReadAccessScope OtherReadScope = InDelegate.GetReadAccessScope();
+			Object = InDelegate.Object.Get();
+			FunctionName = InDelegate.FunctionName;
+		}
+
+		return Contains(Object, FunctionName);
 	}
 
 	/**
@@ -308,7 +629,9 @@ public:
 	 */
 	bool Contains( const UObject* InObject, FName InFunctionName ) const
 	{
-		return InvocationList.ContainsByPredicate( [=]( const TScriptDelegate<TWeakPtr>& Delegate ){
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
+		return InvocationList.ContainsByPredicate( [=]( const UnicastDelegateType& Delegate ){
 			return Delegate.GetFunctionName() == InFunctionName && Delegate.IsBoundToObjectEvenIfUnreachable(InObject);
 		} );
 	}
@@ -318,13 +641,38 @@ public:
 	 *
 	 * @param	InDelegate	Delegate to add
 	 */
-	void Add( const TScriptDelegate<TWeakPtr>& InDelegate )
+	void Add( const TScriptDelegate<ThreadSafetyMode>& InDelegate )
 	{
-		// First check for any objects that may have expired
-		CompactInvocationList();
+		UnicastDelegateType LocalCopy = UnicastDelegateType::CopyFrom(InDelegate);
 
-		// Add the delegate
-		AddInternal( InDelegate );
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			// First check for any objects that may have expired
+			CompactInvocationList();
+
+			// Add the delegate
+			AddInternal(MoveTemp(LocalCopy));
+		}
+	}
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	void Add(const TScriptDelegate<OtherThreadSafetyMode>& InDelegate)
+	{
+		UnicastDelegateType LocalCopy = UnicastDelegateType::CopyFrom(InDelegate);
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			// First check for any objects that may have expired
+			CompactInvocationList();
+
+			// Add the delegate
+			AddInternal(MoveTemp(LocalCopy));
+		}
 	}
 
 	/**
@@ -333,13 +681,38 @@ public:
 	 *
 	 * @param	InDelegate	Delegate to add
 	 */
-	void AddUnique( const TScriptDelegate<TWeakPtr>& InDelegate )
+	void AddUnique( const TScriptDelegate<ThreadSafetyMode>& InDelegate )
 	{
-		// Add the delegate, if possible
-		AddUniqueInternal( InDelegate );
+		UnicastDelegateType LocalCopy = UnicastDelegateType::CopyFrom(InDelegate);
 
-		// Then check for any objects that may have expired
-		CompactInvocationList();
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			// Add the delegate, if possible
+			AddUniqueInternal(MoveTemp(LocalCopy));
+
+			// Then check for any objects that may have expired
+			CompactInvocationList();
+		}
+	}
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	void AddUnique(const TScriptDelegate<OtherThreadSafetyMode>& InDelegate)
+	{
+		UnicastDelegateType LocalCopy = UnicastDelegateType::CopyFrom(InDelegate);
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			// Add the delegate
+			AddUniqueInternal(MoveTemp(LocalCopy));
+
+			// Then check for any objects that may have expired
+			CompactInvocationList();
+		}
 	}
 
 	/**
@@ -348,13 +721,38 @@ public:
 	 *
 	 * @param	InDelegate	Delegate to remove
 	 */
-	void Remove( const TScriptDelegate<TWeakPtr>& InDelegate )
+	void Remove( const TScriptDelegate<ThreadSafetyMode>& InDelegate )
 	{
-		// Remove the delegate
-		RemoveInternal( InDelegate );
+		UnicastDelegateType LocalCopy = UnicastDelegateType::CopyFrom(InDelegate);
 
-		// Check for any delegates that may have expired
-		CompactInvocationList();
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			// Remove the delegate
+			RemoveInternal(LocalCopy);
+
+			// Check for any delegates that may have expired
+			CompactInvocationList();
+		}
+	}
+	template <
+		typename OtherThreadSafetyMode
+		UE_REQUIRES(UE::Core::Private::BackwardCompatibilityCheck<InThreadSafetyMode, OtherThreadSafetyMode>())
+	>
+	/* UE_DEPRECATED(5.3, "Deprecated - remove after TScriptDelegateTraits<FWeakObjectPtr> is removed") */
+	void Remove(const TScriptDelegate<OtherThreadSafetyMode>& InDelegate)
+	{
+		UnicastDelegateType LocalCopy = UnicastDelegateType::CopyFrom(InDelegate);
+
+		{
+			FWriteAccessScope WriteScope = GetWriteAccessScope();
+
+			// Remove the delegate
+			RemoveInternal(LocalCopy);
+
+			// Check for any delegates that may have expired
+			CompactInvocationList();
+		}
 	}
 
 	/**
@@ -366,6 +764,8 @@ public:
 	 */
 	void Remove( const UObject* InObject, FName InFunctionName )
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		// Remove the delegate
 		RemoveInternal( InObject, InFunctionName );
 
@@ -383,9 +783,11 @@ public:
 	 */
 	void RemoveAll(const UObject* Object)
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
+
 		for (int32 BindingIndex = InvocationList.Num() - 1; BindingIndex >= 0; --BindingIndex)
 		{
-			const TScriptDelegate<TWeakPtr>& Binding = InvocationList[BindingIndex];
+			const UnicastDelegateType& Binding = InvocationList[BindingIndex];
 
 			if (Binding.IsBoundToObject(Object) || Binding.IsCompactable())
 			{
@@ -399,6 +801,7 @@ public:
 	 */
 	void Clear()
 	{
+		FWriteAccessScope WriteScope = GetWriteAccessScope();
 		InvocationList.Empty();
 	}
 
@@ -410,11 +813,13 @@ public:
 	template <typename UObjectTemplate>
 	inline FString ToString() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
 		if( IsBound() )
 		{
 			FString AllDelegatesString = TEXT( "[" );
 			bool bAddComma = false;
-			for( typename FInvocationList::TConstIterator CurDelegate( InvocationList ); CurDelegate; ++CurDelegate )
+			for( typename InvocationListType::TConstIterator CurDelegate( InvocationList ); CurDelegate; ++CurDelegate )
 			{
 				if (bAddComma)
 				{
@@ -430,27 +835,42 @@ public:
 	}
 
 	/** Multi-cast delegate serialization */
-	friend FArchive& operator<<( FArchive& Ar, TMulticastScriptDelegate<TWeakPtr>& D )
+	friend FArchive& operator<<( FArchive& Ar, TMulticastScriptDelegate& D )
 	{
-		if( Ar.IsSaving() )
+		// Special case to avoid taking a lock on empty script delegate.
+		// This is required for avoiding asserts on EmptyDelegate serialization.
+		if (Ar.IsSaving() && D.InvocationList.Num() == 0)
 		{
-			// When saving the delegate, clean up the list to make sure there are no bad object references
-			D.CompactInvocationList();
+			FReadAccessScope ReadScope = D.GetReadAccessScope();
+
+			Ar << D.InvocationList;
 		}
-
-		Ar << D.InvocationList;
-
-		if( Ar.IsLoading() )
+		else
 		{
-			// After loading the delegate, clean up the list to make sure there are no bad object references
-			D.CompactInvocationList();
+			FWriteAccessScope WriteScope = D.GetWriteAccessScope();
+
+			if( Ar.IsSaving() )
+			{
+				// When saving the delegate, clean up the list to make sure there are no bad object references
+				D.CompactInvocationList();
+			}
+
+			Ar << D.InvocationList;
+
+			if( Ar.IsLoading() )
+			{
+				// After loading the delegate, clean up the list to make sure there are no bad object references
+				D.CompactInvocationList();
+			}
 		}
 
 		return Ar;
 	}
 
-	friend void operator<<(FStructuredArchive::FSlot Slot, TMulticastScriptDelegate<TWeakPtr>& D)
+	friend void operator<<(FStructuredArchive::FSlot Slot, TMulticastScriptDelegate& D)
 	{
+		FWriteAccessScope WriteScope = D.GetWriteAccessScope();
+
 		FArchive& UnderlyingArchive = Slot.GetUnderlyingArchive();
 
 		if (UnderlyingArchive.IsSaving())
@@ -478,10 +898,13 @@ public:
 	template <class UObjectTemplate>
 	void ProcessMulticastDelegate(void* Parameters) const
 	{
+		// the `const` on the method is a lie
+		FWriteAccessScope WriteScope = const_cast<TMulticastScriptDelegate*>(this)->GetWriteAccessScope();
+
 		if( InvocationList.Num() > 0 )
 		{
 			// Create a copy of the invocation list, just in case the list is modified by one of the callbacks during the broadcast
-			typedef TArray< TScriptDelegate<TWeakPtr>, TInlineAllocator< 4 > > FInlineInvocationList;
+			typedef TArray< UnicastDelegateType, TInlineAllocator< 4 > > FInlineInvocationList;
 			FInlineInvocationList InvocationListCopy = FInlineInvocationList(InvocationList);
 	
 			// Invoke each bound function
@@ -508,8 +931,10 @@ public:
 	 */
 	TArray< UObject* > GetAllObjects() const
 	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+
 		TArray< UObject* > OutputList;
-		for( typename FInvocationList::TIterator CurDelegate( InvocationList ); CurDelegate; ++CurDelegate )
+		for( typename InvocationListType::TIterator CurDelegate( InvocationList ); CurDelegate; ++CurDelegate )
 		{
 			UObject* CurObject = CurDelegate->GetUObject();
 			if( CurObject != nullptr )
@@ -527,16 +952,38 @@ public:
 	 */
 	TArray< UObject* > GetAllObjectsEvenIfUnreachable() const
 	{
-		TArray< UObject* > OutputList;
-		for( typename FInvocationList::TIterator CurDelegate( InvocationList ); CurDelegate; ++CurDelegate )
+		FReadAccessScope ReadScope = GetReadAccessScope();    
+		TArray<UObject*> Result;
+		for (auto* Ref : GetAllObjectRefsEvenIfUnreachable())
 		{
-			UObject* CurObject = CurDelegate->GetUObjectEvenIfUnreachable();
-			if( CurObject != nullptr )
+			Result.Add(Ref->GetEvenIfUnreachable());
+		}
+		return Result;
+	}
+	
+	TArray< typename UnicastDelegateType::WeakPtrType* > GetAllObjectRefsEvenIfUnreachable() const
+	{
+		FReadAccessScope ReadScope = GetReadAccessScope();        
+		using WeakPtrType = typename UnicastDelegateType::WeakPtrType;
+		TArray< WeakPtrType* > OutputList;
+		for( typename InvocationListType::TIterator CurDelegate( InvocationList ); CurDelegate; ++CurDelegate )
+		{
+			WeakPtrType& CurObject = CurDelegate->GetUObjectRef();
+			if( CurObject.GetEvenIfUnreachable() != nullptr )
 			{
-				OutputList.Add( CurObject );
+				OutputList.Add( &CurObject );
 			}
 		}
 		return OutputList;
+	}
+
+	/**
+	 * Returns the amount of memory allocated by this delegate's invocation list, not including sizeof(*this).
+	 */
+	SIZE_T GetAllocatedSize() const
+	{
+		FReadAccessScope ReadScope = GetReadAccessScope();
+		return InvocationList.GetAllocatedSize();
 	}
 
 protected:
@@ -546,17 +993,17 @@ protected:
 	 *
 	 * @param	InDelegate	Delegate to add
 	*/
-	void AddInternal( const TScriptDelegate<TWeakPtr>& InDelegate )
+	void AddInternal(UnicastDelegateType&& InDelegate)
 	{
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if DO_ENSURE
 		// Verify same function isn't already bound
 		const int32 NumFunctions = InvocationList.Num();
 		for( int32 CurFunctionIndex = 0; CurFunctionIndex < NumFunctions; ++CurFunctionIndex )
 		{
 			(void)ensure( InvocationList[ CurFunctionIndex ] != InDelegate );
 		}
-#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
-		InvocationList.Add( InDelegate );
+#endif // DO_CHECK
+		InvocationList.Add(MoveTemp(InDelegate));
 	}
 
 	/**
@@ -565,10 +1012,10 @@ protected:
 	 *
 	 * @param	InDelegate	Delegate to add
 	 */
-	void AddUniqueInternal( const TScriptDelegate<TWeakPtr>& InDelegate )
+	void AddUniqueInternal(UnicastDelegateType&& InDelegate)
 	{
 		// Add the item to the invocation list only if it is unique
-		InvocationList.AddUnique( InDelegate );
+		InvocationList.AddUnique(MoveTemp(InDelegate));
 	}
 
 	/**
@@ -577,7 +1024,7 @@ protected:
 	 *
 	 * @param	InDelegate	Delegate to remove
 	*/
-	void RemoveInternal( const TScriptDelegate<TWeakPtr>& InDelegate ) const
+	void RemoveInternal( const UnicastDelegateType& InDelegate ) const
 	{
 		InvocationList.RemoveSingleSwap(InDelegate);
 	}
@@ -591,31 +1038,28 @@ protected:
 	*/
 	void RemoveInternal( const UObject* InObject, FName InFunctionName ) const
 	{
-		int32 FoundDelegate = InvocationList.IndexOfByPredicate([=](const TScriptDelegate<TWeakPtr>& Delegate) {
+		int32 FoundDelegate = InvocationList.IndexOfByPredicate([=](const UnicastDelegateType& Delegate) {
 			return Delegate.GetFunctionName() == InFunctionName && Delegate.IsBoundToObjectEvenIfUnreachable(InObject);
 		});
 
 		if (FoundDelegate != INDEX_NONE)
 		{
-			InvocationList.RemoveAtSwap(FoundDelegate, 1, false);
+			InvocationList.RemoveAtSwap(FoundDelegate, 1, EAllowShrinking::No);
 		}
 	}
 
 	/** Cleans up any delegates in our invocation list that have expired (performance is O(N)) */
 	void CompactInvocationList() const
 	{
-		InvocationList.RemoveAllSwap([](const TScriptDelegate<TWeakPtr>& Delegate){
+		InvocationList.RemoveAllSwap([](const UnicastDelegateType& Delegate){
 			return Delegate.IsCompactable();
 		});
 	}
 
-public:
-	typedef TArray< TScriptDelegate<TWeakPtr> > FInvocationList;
-
 protected:
 
 	/** Ordered list functions to invoke when the Broadcast function is called */
-	mutable FInvocationList InvocationList;		// Mutable so that we can housekeep list even with 'const' broadcasts
+	mutable InvocationListType InvocationList;		// Mutable so that we can housekeep list even with 'const' broadcasts
 
 	// Declare ourselves as a friend of FMulticastDelegateProperty so that it can access our function list
 	friend class FMulticastDelegateProperty;
@@ -625,8 +1069,12 @@ protected:
 	// 
 	friend class FCallDelegateHelper;
 
-	friend struct TIsZeroConstructType<TMulticastScriptDelegate<TWeakPtr> >;
+	friend struct TIsZeroConstructType<TMulticastScriptDelegate>;
 };
 
 
-template<typename TWeakPtr> struct TIsZeroConstructType<TMulticastScriptDelegate<TWeakPtr> > { enum { Value = TIsZeroConstructType<typename TMulticastScriptDelegate<TWeakPtr>::FInvocationList>::Value }; };
+template<typename ThreadSafetyMode> 
+struct TIsZeroConstructType<TMulticastScriptDelegate<ThreadSafetyMode> >
+{ 
+	static constexpr bool Value = TIsZeroConstructType<typename TMulticastScriptDelegate<ThreadSafetyMode>::InvocationListType>::Value;
+};

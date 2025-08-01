@@ -11,7 +11,7 @@
 #include "ToolMenus.h"
 #include "EdGraph/EdGraph.h"
 #include "Kismet2/BlueprintEditorUtils.h"
-#include "Classes/EditorStyleSettings.h"
+#include "Settings/EditorStyleSettings.h"
 #include "EdGraphNode_Comment.h"
 
 #include "AnimationStateMachineGraph.h"
@@ -21,6 +21,7 @@
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
 #include "AnimStateConduitNode.h"
+#include "AnimStateAliasNode.h"
 #include "AnimGraphNode_AssetPlayerBase.h"
 #include "ScopedTransaction.h"
 #include "GraphEditorActions.h"
@@ -66,8 +67,8 @@ UEdGraphNode* FEdGraphSchemaAction_NewStateNode::PerformAction(class UEdGraph* P
 		NodeTemplate->AllocateDefaultPins();
 		NodeTemplate->AutowireNewNode(FromPin);
 
-		NodeTemplate->NodePosX = Location.X;
-		NodeTemplate->NodePosY = Location.Y;
+		NodeTemplate->NodePosX = static_cast<int32>(Location.X);
+		NodeTemplate->NodePosY = static_cast<int32>(Location.Y);
 		NodeTemplate->SnapToGrid(GetDefault<UEditorStyleSettings>()->GridSnapSize);
 
 		ResultNode = NodeTemplate;
@@ -150,6 +151,7 @@ const FPinConnectionResponse UAnimationStateMachineSchema::CanCreateConnection(c
 	const bool bPinAIsStateNode = PinA->GetOwningNode()->IsA(UAnimStateNodeBase::StaticClass());
 	const bool bPinBIsStateNode = PinB->GetOwningNode()->IsA(UAnimStateNodeBase::StaticClass());
 
+	// Special case handling for entry states: Only allow creating connections starting at the entry state.
 	if (bPinAIsEntry || bPinBIsEntry)
 	{
 		if (bPinAIsEntry && bPinBIsStateNode)
@@ -157,14 +159,8 @@ const FPinConnectionResponse UAnimationStateMachineSchema::CanCreateConnection(c
 			return FPinConnectionResponse(CONNECT_RESPONSE_BREAK_OTHERS_A, TEXT(""));
 		}
 
-		if (bPinBIsEntry && bPinAIsStateNode)
-		{
-			return FPinConnectionResponse(CONNECT_RESPONSE_BREAK_OTHERS_B, TEXT(""));
-		}
-
 		return FPinConnectionResponse(CONNECT_RESPONSE_DISALLOW, TEXT("Entry must connect to a state node"));
 	}
-
 
 	const bool bPinAIsTransition = PinA->GetOwningNode()->IsA(UAnimStateTransitionNode::StaticClass());
 	const bool bPinBIsTransition = PinB->GetOwningNode()->IsA(UAnimStateTransitionNode::StaticClass());
@@ -249,7 +245,8 @@ bool UAnimationStateMachineSchema::CreateAutomaticConversionNodeAndConnections(U
 		&& (NodeA->GetInputPin() != NULL) && (NodeA->GetOutputPin() != NULL)
 		&& (NodeB->GetInputPin() != NULL) && (NodeB->GetOutputPin() != NULL))
 	{
-		UAnimStateTransitionNode* TransitionNode = FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate<UAnimStateTransitionNode>(NodeA->GetGraph(), NewObject<UAnimStateTransitionNode>(), FVector2D(0.0f, 0.0f), false);
+		FVector2D Location = (FVector2D(NodeA->NodePosX, NodeA->NodePosY) + FVector2D(NodeB->NodePosX, NodeB->NodePosY)) * 0.5f;
+		UAnimStateTransitionNode* TransitionNode = FEdGraphSchemaAction_NewStateNode::SpawnNodeFromTemplate<UAnimStateTransitionNode>(NodeA->GetGraph(), NewObject<UAnimStateTransitionNode>(), Location, false);
 
 		if (PinA->Direction == EGPD_Output)
 		{
@@ -269,17 +266,110 @@ bool UAnimationStateMachineSchema::CreateAutomaticConversionNodeAndConnections(U
 	return false;
 }
 
+bool UAnimationStateMachineSchema::TryRelinkConnectionTarget(UEdGraphPin* SourcePin, UEdGraphPin* OldTargetPin, UEdGraphPin* NewTargetPin, const TArray<UEdGraphNode*>& InSelectedGraphNodes) const
+{
+	const FPinConnectionResponse Response = CanCreateConnection(SourcePin, NewTargetPin);
+	if (Response.Response == ECanCreateConnectionResponse::CONNECT_RESPONSE_DISALLOW)
+	{
+		return false;
+	}
+
+	UAnimStateNodeBase* OldTargetState = Cast<UAnimStateNodeBase>(OldTargetPin->GetOwningNode());
+	UAnimStateNodeBase* NewTargetState = Cast<UAnimStateNodeBase>(NewTargetPin->GetOwningNode());
+	if (OldTargetState == nullptr || OldTargetState->GetInputPin() == nullptr || OldTargetState->GetOutputPin() == nullptr ||
+		NewTargetState == nullptr || NewTargetState->GetInputPin() == nullptr || NewTargetState->GetOutputPin() == nullptr)
+	{
+		return false;
+	}
+
+	// In the case we are relinking the transition starting at the entry state, the SourceState is nullptr. Special case handling.
+	UAnimStateEntryNode* EntryState = Cast<UAnimStateEntryNode>(SourcePin->GetOwningNode());
+	if (EntryState)
+	{
+		// Remove the incoming transition from the previous target state
+		OldTargetPin->Modify();
+		OldTargetPin->LinkedTo.Remove(SourcePin);
+		SourcePin->Modify();
+		SourcePin->LinkedTo.Remove(OldTargetPin);
+
+		// Add the new incoming transition to the new target state
+		TryCreateConnection(SourcePin, NewTargetPin);
+
+		UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(EntryState->GetGraph());
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		return true;
+	}
+
+	// Collect all transition nodes starting at the source state, filter them by the transitions and perform the actual relink operation.
+	const TArray<UAnimStateTransitionNode*> TransitionNodes = UAnimStateTransitionNode::GetListTransitionNodesToRelink(SourcePin, OldTargetPin, InSelectedGraphNodes);
+	for (UAnimStateTransitionNode* TransitionNode : TransitionNodes)
+	{
+		TransitionNode->RelinkHead(NewTargetState);
+	}
+
+	// In case one or more transitions got relinked, inform the blueprint about the changes
+#if WITH_EDITOR
+	if (!TransitionNodes.IsEmpty())
+	{
+		//UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(OneRelinkedTransition->GetBoundGraph());
+		UBlueprint* Blueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(TransitionNodes[0]->GetBoundGraph());
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+
+		SourcePin->GetOwningNode()->PinConnectionListChanged(SourcePin);
+		OldTargetPin->GetOwningNode()->PinConnectionListChanged(OldTargetPin);
+		NewTargetPin->GetOwningNode()->PinConnectionListChanged(NewTargetPin);
+	}
+#endif//#if WITH_EDITOR
+
+	return true;
+}
+
+bool UAnimationStateMachineSchema::IsConnectionRelinkingAllowed(UEdGraphPin* InPin) const
+{
+	if (InPin && InPin->GetOwningNode())
+	{
+		UAnimStateNodeBase* StateNode = Cast<UAnimStateNodeBase>(InPin->GetOwningNode());
+		UAnimStateTransitionNode* TransitionNode = Cast<UAnimStateTransitionNode>(InPin->GetOwningNode());
+		UAnimStateEntryNode* EntryNode = Cast<UAnimStateEntryNode>(InPin->GetOwningNode());
+		if (StateNode || TransitionNode || EntryNode)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+const FPinConnectionResponse UAnimationStateMachineSchema::CanRelinkConnectionToPin(const UEdGraphPin* OldSourcePin, const UEdGraphPin* TargetPinCandidate) const
+{
+	FPinConnectionResponse Response = CanCreateConnection(OldSourcePin, TargetPinCandidate);
+	if (Response.Response != CONNECT_RESPONSE_DISALLOW)
+	{
+		Response.Message = FText::FromString("Relink transition");
+	}
+
+	return Response;
+}
+
 void UAnimationStateMachineSchema::GetGraphContextActions(FGraphContextMenuBuilder& ContextMenuBuilder) const
 {
 	// Add state node
 	{
-		TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddState", "Add State..."), LOCTEXT("AddStateTooltip", "A new state"));
+		TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddState", "Add State"), LOCTEXT("AddStateTooltip", "A new state"));
 		Action->NodeTemplate = NewObject<UAnimStateNode>(ContextMenuBuilder.OwnerOfTemporaries);
+	}
+
+	// Add state alias node
+	{
+		TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddStateAlias", "Add State Alias"), LOCTEXT("AddStateAliasTooltip", "A new state alias"));
+		Action->NodeTemplate = NewObject<UAnimStateAliasNode>(ContextMenuBuilder.OwnerOfTemporaries);
 	}
 
 	// Add conduit node
 	{
-		TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddConduit", "Add Conduit..."), LOCTEXT("AddConduitTooltip", "A new conduit state"));
+		TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddConduit", "Add Conduit"), LOCTEXT("AddConduitTooltip", "A new conduit state"));
 		Action->NodeTemplate = NewObject<UAnimStateConduitNode>(ContextMenuBuilder.OwnerOfTemporaries);
 	}
 
@@ -298,7 +388,7 @@ void UAnimationStateMachineSchema::GetGraphContextActions(FGraphContextMenuBuild
 
 		if (!bHasEntry)
 		{
-			TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddEntryPoint", "Add Entry Point..."), LOCTEXT("AddEntryPointTooltip", "Define State Machine's Entry Point"));
+			TSharedPtr<FEdGraphSchemaAction_NewStateNode> Action = AddNewStateNodeAction(ContextMenuBuilder, FText::GetEmpty(), LOCTEXT("AddEntryPoint", "Add Entry Point"), LOCTEXT("AddEntryPointTooltip", "Define State Machine's Entry Point"));
 			Action->NodeTemplate = NewObject<UAnimStateEntryNode>(ContextMenuBuilder.OwnerOfTemporaries);
 		}
 	}
@@ -308,7 +398,7 @@ void UAnimationStateMachineSchema::GetGraphContextActions(FGraphContextMenuBuild
 	{
 		UBlueprint* OwnerBlueprint = FBlueprintEditorUtils::FindBlueprintForGraphChecked(ContextMenuBuilder.CurrentGraph);
 		const bool bIsManyNodesSelected = (FKismetEditorUtilities::GetNumberOfSelectedNodes(OwnerBlueprint) > 0);
-		const FText MenuDescription = bIsManyNodesSelected ? LOCTEXT("CreateCommentSelection", "Create Comment from Selection") : LOCTEXT("AddComment", "Add Comment...");
+		const FText MenuDescription = bIsManyNodesSelected ? LOCTEXT("CreateCommentSelection", "Create Comment from Selection") : LOCTEXT("AddComment", "Add Comment");
 		const FText ToolTip = LOCTEXT("CreateCommentSelectionTooltip", "Create a resizeable comment box around selected nodes.");
 
 		TSharedPtr<FEdGraphSchemaAction_NewStateComment> NewComment( new FEdGraphSchemaAction_NewStateComment(FText::GetEmpty(), MenuDescription, ToolTip, 0) );
@@ -352,13 +442,19 @@ void UAnimationStateMachineSchema::GetContextMenuActions(UToolMenu* Menu, UGraph
 
 FLinearColor UAnimationStateMachineSchema::GetPinTypeColor(const FEdGraphPinType& PinType) const
 {
-	return FLinearColor::White;
+	if (PinType.PinCategory == TEXT("Transition"))
+	{
+		return FLinearColor::White;
+	}
+
+	return GetDefault<UEdGraphSchema_K2>()->GetPinTypeColor(PinType);
 }
 
 void UAnimationStateMachineSchema::GetGraphDisplayInformation(const UEdGraph& Graph, /*out*/ FGraphDisplayInfo& DisplayInfo) const
 {
 	DisplayInfo.PlainName = FText::FromString( Graph.GetName() );
 	DisplayInfo.DisplayName = DisplayInfo.PlainName;
+	DisplayInfo.Tooltip = LOCTEXT("GraphTooltip_StateMachineSchema", "Graph used to transition between different states each with separate animation graphs");
 }
 
 void UAnimationStateMachineSchema::DroppedAssetsOnGraph(const TArray<FAssetData>& Assets, const FVector2D& GraphPosition, UEdGraph* Graph) const

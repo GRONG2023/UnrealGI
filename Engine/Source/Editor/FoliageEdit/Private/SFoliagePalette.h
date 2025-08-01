@@ -2,29 +2,48 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Layout/Visibility.h"
-#include "Input/Reply.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
-#include "Widgets/SCompoundWidget.h"
+#include "Containers/Array.h"
+#include "Containers/BitArray.h"
+#include "Containers/Set.h"
+#include "Containers/SparseArray.h"
+#include "Delegates/Delegate.h"
+#include "FoliageEdMode.h"
 #include "Framework/Text/SlateHyperlinkRun.h"
-#include "Widgets/Input/SComboButton.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "Input/Reply.h"
+#include "Internationalization/Text.h"
+#include "Layout/Visibility.h"
+#include "Math/Interval.h"
+#include "Misc/Optional.h"
+#include "Misc/TextFilter.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 #include "Widgets/Views/SHeaderRow.h"
 #include "Widgets/Views/STableViewBase.h"
-#include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/STileView.h"
 #include "Widgets/Views/STreeView.h"
-#include "Editor/FoliageEdit/Private/FoliageEdMode.h"
-#include "Misc/TextFilter.h"
 
-class FAssetThumbnailPool;
+class FDragDropEvent;
 class FFoliagePaletteItemModel;
 class FMenuBuilder;
+class FString;
 class FUICommandList;
-class IDetailsView;
+class ITableRow;
+class SWidget;
 class UFoliageType;
 struct FAssetData;
+struct FGeometry;
+struct FKeyEvent;
+struct FSlateBrush;
+template <typename FuncType> class TFunctionRef;
+template <typename ItemType> class SListView;
 
 typedef TSharedPtr<FFoliagePaletteItemModel> FFoliagePaletteItemModelPtr;
 typedef STreeView<FFoliagePaletteItemModelPtr> SFoliageTypeTreeView;
@@ -71,9 +90,13 @@ public:
 	FText GetSearchText() const;
 
 	/** Adds the foliage type asset to the instanced foliage actor's list of types. */
-	void AddFoliageType(const FAssetData& AssetData);
+	UFoliageType* AddFoliageType(const FAssetData& AssetData, bool bPlaceholderAsset = false);
 
+	/** Updates the selection of foliage types in the palette based on the selected foliage instances. */
+	void ReflectSelectionInPalette();
+	
 private:	// GENERAL
+	void AddFoliageTypePicker(const FAssetData& AssetData);
 
 	/** Binds commands used by the palette */
 	void BindCommands();
@@ -102,6 +125,8 @@ private:	// GENERAL
 
 	/** Handler to trigger a refresh of the details view when the active tool changes */
 	void HandleOnToolChanged();
+
+	void OnExternalContentResolved(const FGuid& Identifier, const FAssetData& PlaceholderAsset, const FAssetData& ResolvedAsset);
 
 	/** Sets the view mode of the palette */
 	void SetViewMode(EFoliagePaletteViewMode::Type NewViewMode);
@@ -190,9 +215,6 @@ private:	// CONTEXT MENU
 	/** @return Whether selecting instances is currently possible */
 	bool CanSelectInstances() const;
 
-	/** Handler for 'Reflect Selection in Palette ' command */
-	void OnReflectSelectionInPalette();
-
 	/** Selects Foliage Type in palette */
 	void SelectFoliageTypesInPalette(const TArray<const UFoliageType*>& FoliageTypes);
 
@@ -249,7 +271,7 @@ private:	// DETAILS
 	const FSlateBrush* GetShowHideDetailsImage() const;
 
 	/** Handles the show/hide details button click */
-	FReply OnShowHideDetailsClicked() const;
+	void OnShowHideDetailsClicked(const ECheckBoxState ) const;
 
 	/** Gets the visibility of the uneditable blueprint foliage type warning */
 	EVisibility GetUneditableFoliageTypeWarningVisibility() const;
@@ -278,7 +300,7 @@ private:
 	TSharedPtr<class SWidgetSwitcher> WidgetSwitcher;
 
 	/** The Add Foliage Type combo button */
-	TSharedPtr<class SComboButton> AddFoliageTypeCombo;
+	TSharedPtr<class SPositiveActionButton> AddFoliageTypeCombo;
 
 	/** The header row of the foliage mesh tree */
 	TSharedPtr<class SHeaderRow> TreeViewHeaderRow;
@@ -302,6 +324,8 @@ private:
 	TSharedPtr<class FAssetThumbnailPool> ThumbnailPool;
 
 	FEdModeFoliage* FoliageEditMode;
+
+	TMap<FGuid, TArray<TWeakObjectPtr<UFoliageType>>> ExternalContentFoliageTypes;
 
 	bool bItemsNeedRebuild : 1;
 	bool bIsUneditableFoliageTypeSelected : 1;

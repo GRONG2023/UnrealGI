@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Kismet/KismetGuidLibrary.h"
+#include "Misc/Guid.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(KismetGuidLibrary)
 
 
 /* Guid functions
@@ -51,3 +54,4 @@ void UKismetGuidLibrary::Parse_StringToGuid( const FString& GuidString, FGuid& O
 {
 	Success = FGuid::Parse(GuidString, OutGuid);
 }
+

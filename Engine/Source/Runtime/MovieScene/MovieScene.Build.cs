@@ -6,12 +6,11 @@ public class MovieScene : ModuleRules
 {
 	public MovieScene(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Runtime/MovieScene/Private");
-
         PrivateIncludePathModuleNames.AddRange(
             new string[] {
-                "TargetPlatform"
-            }
+                "TargetPlatform",
+				"UniversalObjectLocator"
+			}
         );
 
         PublicDependencyModuleNames.AddRange(
@@ -20,9 +19,10 @@ public class MovieScene : ModuleRules
 				"CoreUObject",
                 "InputCore",
                 "Engine",
-				"TimeManagement"
+				"TimeManagement",
+				"UniversalObjectLocator"
 			}
 		);
-
-    }
+		SetupIrisSupport(Target);
+	}
 }

@@ -41,8 +41,14 @@ void FUnixErrorOutputDevice::Serialize(const TCHAR* Msg, ELogVerbosity::Type Ver
 		{
 			UE_LOG(LogCore, Error, TEXT("appError called: %s"), Msg );
 		}
-		FCString::Strncpy( GErrorHist, Msg, UE_ARRAY_COUNT(GErrorHist) - 5 );
-		FCString::Strncat( GErrorHist, TEXT("\r\n\r\n"), UE_ARRAY_COUNT(GErrorHist) - 1 );
+
+		// CheckVerifyFailedImpl writes GErrorHist including a callstack and then calls GError->Logf with only the
+		// assertion expression and description. Keep GErrorHist intact if it begins with Msg.
+		if (FCString::Strncmp(GErrorHist, Msg, FMath::Min<int32>(UE_ARRAY_COUNT(GErrorHist), FCString::Strlen(Msg))))
+		{
+			FCString::Strncpy(GErrorHist, Msg, UE_ARRAY_COUNT(GErrorHist) - 5);
+			FCString::Strncat(GErrorHist, TEXT("\r\n\r\n"), UE_ARRAY_COUNT(GErrorHist) - 1);
+		}
 		ErrorPos = FCString::Strlen(GErrorHist);
 	}
 	else
@@ -55,26 +61,21 @@ void FUnixErrorOutputDevice::Serialize(const TCHAR* Msg, ELogVerbosity::Type Ver
 #if PLATFORM_EXCEPTIONS_DISABLED
 		UE_DEBUG_BREAK();
 #endif
-		// Generate the callstack.
-		// We do not ignore any stack frames since the optimization is
-		// brittle and the risk of trimming the valid frames is too high.
-		// The common frames will be instead filtered out in the web UI
-		const int32 NumStackFramesToIgnore = 0;
-
+		void* ErrorProgramCounter = GetErrorProgramCounter();
 		if (GIsGPUCrashed)
 		{
-			ReportGPUCrash(Msg, NumStackFramesToIgnore);
+			ReportGPUCrash(Msg, ErrorProgramCounter);
 		}
 		else
 		{
-			ReportAssert(Msg, NumStackFramesToIgnore);
+			ReportAssert(Msg, ErrorProgramCounter);
 		}
 	}
 	else
 	{
 		// We crashed outside the guarded code (e.g. appExit).
 		HandleError();
-		FPlatformMisc::RequestExit(true);
+		FPlatformMisc::RequestExit(true, TEXT("FUnixErrorOutputDevice.Serialize.!GIsGuarded"));
 	}
 }
 
@@ -106,7 +107,7 @@ void FUnixErrorOutputDevice::HandleError()
 		UE_LOG(LogCore, Log, TEXT("=== Critical error: ===") LINE_TERMINATOR TEXT("%s") LINE_TERMINATOR, GErrorExceptionDescription);
 		UE_LOG(LogCore, Log, TEXT("%s"), GErrorHist);
 
-		GLog->Flush();
+		GLog->Panic();
 
 		HandleErrorRestoreUI();
 

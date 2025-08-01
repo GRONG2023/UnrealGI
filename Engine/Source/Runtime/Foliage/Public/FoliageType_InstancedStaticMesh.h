@@ -14,11 +14,14 @@ class UFoliageType_InstancedStaticMesh : public UFoliageType
 {
 	GENERATED_UCLASS_BODY()
 
-	UPROPERTY(EditAnywhere, Category=Mesh, meta=(DisplayThumbnail="true"))
-	UStaticMesh* Mesh;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Mesh, meta=(DisplayThumbnail="true"))
+	TObjectPtr<UStaticMesh> Mesh;
 
-	UPROPERTY(EditAnywhere, AdvancedDisplay, Category = Mesh, Meta = (ToolTip = "Material overrides for foliage instances."))
-	TArray<class UMaterialInterface*> OverrideMaterials;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Mesh, Meta = (ToolTip = "Material overrides for foliage instances."))
+	TArray<TObjectPtr<class UMaterialInterface>> OverrideMaterials;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, AdvancedDisplay, Category = Mesh, Meta = (ToolTip = "Nanite material overrides for foliage instances."))
+	TArray<TObjectPtr<class UMaterialInterface>> NaniteOverrideMaterials;
 		
 	/** The component class to use for foliage instances. 
 	  * You can make a Blueprint subclass of FoliageInstancedStaticMeshComponent to implement custom behavior and assign that class here. */
@@ -38,6 +41,11 @@ class UFoliageType_InstancedStaticMesh : public UFoliageType
 	virtual UObject* GetSource() const override;
 
 #if WITH_EDITOR
+	virtual FString GetDefaultNewAssetName() const override
+	{
+		return TEXT("NewInstancedStaticMeshFoliage");
+	}
+
 	virtual void UpdateBounds() override;
 	virtual bool IsSourcePropertyChange(const FProperty* Property) const override
 	{

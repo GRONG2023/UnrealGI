@@ -6,7 +6,7 @@
 #include "Common/SlabAllocator.h"
 #include "Model/Tables.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 class FAnalysisSessionLock;
@@ -16,24 +16,33 @@ struct FNetProfilerGameInstanceInternal
 {
 	FNetProfilerGameInstance Instance;
 
-	TPagedArray<Trace::FNetProfilerObjectInstance>* Objects;
+	TPagedArray<FNetProfilerObjectInstance>* Objects;
 	TArray<uint32, TInlineAllocator<128>> Connections;
+
+	TPagedArray<FNetProfilerFrame>* Frames;
+	TPagedArray<FNetProfilerStats>* FrameStats;
+
 	uint32 ObjectsChangeCount;
+	uint32 FramesChangeCount;	
 };
 
 struct FNetProfilerConnectionData
 {
 	FNetProfilerConnectionData(ILinearAllocator& Allocator)
 		: Packets(Allocator, 1024)
+		, PacketStats(Allocator, 4096)
 		, ContentEvents(Allocator, 8192)
 		, PacketChangeCount(0u)
+		, PacketStatsChangeCount(0u)
 		, ContentEventChangeCount(0u)
 	{}
 
 	TPagedArray<FNetProfilerPacket> Packets;
+	TPagedArray<FNetProfilerStats> PacketStats;
 	TPagedArray<FNetProfilerContentEvent> ContentEvents;
 
 	uint32 PacketChangeCount;
+	uint32 PacketStatsChangeCount;
 	uint32 ContentEventChangeCount;
 };
 
@@ -48,8 +57,6 @@ class FNetProfilerProvider
 	: public INetProfilerProvider
 {
 public:
-	static const FName ProviderName;
-
 	explicit FNetProfilerProvider(IAnalysisSession& InSession);
 	virtual ~FNetProfilerProvider();
 
@@ -59,17 +66,20 @@ public:
 
 	uint32 AddNetProfilerEventType(uint32 NameIndex, uint32 Level);
 
-	Trace::FNetProfilerGameInstanceInternal& CreateGameInstance();
-	Trace::FNetProfilerGameInstanceInternal* EditGameInstance(uint32 GameInstanceIndex);
+	uint32 AddNetProfilerStatsCounterType(uint32 NameIndex, ENetProfilerStatsCounterType Type);
 
-	Trace::FNetProfilerConnectionInternal& CreateConnection(uint32 GameInstanceIndex);
-	Trace::FNetProfilerConnectionInternal* EditConnection(uint32 ConnectionIndex);
-	Trace::FNetProfilerConnectionData& EditConnectionData(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode);
+	FNetProfilerGameInstanceInternal& CreateGameInstance();
+	FNetProfilerGameInstanceInternal* EditGameInstance(uint32 GameInstanceIndex);
+	void MarkGameInstancesDirty();
+
+	FNetProfilerConnectionInternal& CreateConnection(uint32 GameInstanceIndex);
+	FNetProfilerConnectionInternal* EditConnection(uint32 ConnectionIndex);
+	FNetProfilerConnectionData& EditConnectionData(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode);
 
 	void EditPacketDeliveryStatus(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode, uint32 SequenceNumber, ENetProfilerDeliveryStatus DeliveryStatus);
 
-	Trace::FNetProfilerObjectInstance& CreateObject(uint32 GameInstanceIndex);
-	Trace::FNetProfilerObjectInstance* EditObject(uint32 GameInstanceIndex, uint32 ObjectIndex);
+	FNetProfilerObjectInstance& CreateObject(uint32 GameInstanceIndex);
+	FNetProfilerObjectInstance* EditObject(uint32 GameInstanceIndex, uint32 ObjectIndex);
 
 	// INetProfilerProvider Interface
 
@@ -88,6 +98,7 @@ public:
 	// Access GameInstances
 	virtual uint32 GetGameInstanceCount() const override { return GameInstances.Num(); }
 	virtual void ReadGameInstances(TFunctionRef<void(const FNetProfilerGameInstance&)> Callback) const override;
+	virtual uint32 GetGameInstanceChangeCount() const override { return GameInstanceChangeCount; }
 
 	// Access Connections
 	virtual uint32 GetConnectionCount(uint32 GameInstanceIndex) const override;
@@ -114,30 +125,42 @@ public:
 	virtual void EnumeratePacketContentEventsByPosition(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode, uint32 PacketIndex, uint32 StartPos, uint32 EndPos, TFunctionRef<void(const FNetProfilerContentEvent&)> Callback) const override;
 	virtual uint32 GetPacketContentEventChangeCount(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode) const override;
 
+	// Access StatsCounterTypes
+	virtual uint32 GetNetStatsCounterTypesCount() const override { return StatsCounterTypes.Num(); }
+	virtual void ReadNetStatsCounterTypes(TFunctionRef<void(const FNetProfilerStatsCounterType*, uint64)> Callback) const override;
+	virtual void ReadNetStatsCounterType(uint32 TypeIndex, TFunctionRef<void(const FNetProfilerStatsCounterType&)> Callback) const override;
+
 	// Stats queries
 	virtual ITable<FNetProfilerAggregatedStats>* CreateAggregation(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode, uint32 PacketIndexIntervalStart, uint32 PacketIndexIntervalEnd, uint32 StartPosition, uint32 EndPosition) const override;
+	virtual ITable<FNetProfilerAggregatedStatsCounterStats>* CreateStatsCountersAggregation(uint32 ConnectionIndex, ENetProfilerConnectionMode Mode, uint32 PacketIndexIntervalStart, uint32 PacketIndexIntervalEnd) const override;
 
 	const TCHAR* InternalGetNetProfilerName(uint32 NameIndex) const { return Names[NameIndex].Name; }
 private:
 	
 	const FNetProfilerName* GetNetProfilerName(uint32 ProfilerNameId) const;
 	const FNetProfilerEventType* GetNetProfilerEventType(uint32 ProfilerEventTypeId) const;
+	const FNetProfilerStatsCounterType* GetNetProfilerStatsCounterType(uint32 ProfilerStatsCounterTypeId) const;
 
 	IAnalysisSession& Session;
-
-	uint32 NetTraceVersion;
 
 	TArray<FNetProfilerName> Names;
 
 	TArray<FNetProfilerEventType> EventTypes;
+
+	TArray<FNetProfilerStatsCounterType> StatsCounterTypes;
 
 	// All GameInstances seen throughout the session
 	TArray<FNetProfilerGameInstanceInternal, TInlineAllocator<4>> GameInstances;
 
 	// All connections we have seen throughout the session
 	TPagedArray<FNetProfilerConnectionInternal> Connections;
-	uint32 ConnectionChangeCount;
+
 	TTableLayout<FNetProfilerAggregatedStats> AggregatedStatsTableLayout;
+	TTableLayout<FNetProfilerAggregatedStatsCounterStats> AggregatedStatsCounterStatsTableLayout;
+
+	uint32 NetTraceVersion;
+	uint32 ConnectionChangeCount;
+	uint32 GameInstanceChangeCount;
 };
 
-}
+} // namespace TraceServices

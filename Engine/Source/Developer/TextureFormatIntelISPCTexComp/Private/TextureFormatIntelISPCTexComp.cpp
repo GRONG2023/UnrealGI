@@ -13,13 +13,36 @@
 #include "Interfaces/ITextureFormatModule.h"
 #include "TextureCompressorModule.h"
 #include "PixelFormat.h"
+#include "Async/ParallelFor.h"
+#include "Serialization/CompactBinary.h"
+#include "Serialization/CompactBinaryWriter.h"
+#include "TextureBuildFunction.h"
+#include "DerivedDataBuildFunctionFactory.h"
+#include "DerivedDataSharedString.h"
+#include "Misc/WildcardString.h"
 
 #include "ispc_texcomp.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogTextureFormatIntelISPCTexComp, Log, All);
 
-// increment this if you change anything that will affect compression in this file, including FORCED_NORMAL_MAP_COMPRESSION_SIZE_VALUE
-#define BASE_ISPC_DX11_FORMAT_VERSION 4
+class FIntelISPCTexCompTextureBuildFunction final : public FTextureBuildFunction
+{
+	const UE::DerivedData::FUtf8SharedString& GetName() const final
+	{
+		static const UE::DerivedData::FUtf8SharedString Name(UTF8TEXTVIEW("IntelISPCTexCompTexture"));
+		return Name;
+	}
+
+	void GetVersion(UE::DerivedData::FBuildVersionBuilder& Builder, ITextureFormat*& OutTextureFormatVersioning) const final
+	{
+		static FGuid Version(TEXT("19d413ad-f529-4687-902a-3b71919cfd72"));
+		Builder << Version;
+		OutTextureFormatVersioning = FModuleManager::GetModuleChecked<ITextureFormatModule>(TEXT("TextureFormatIntelISPCTexComp")).GetTextureFormat();
+	}
+};
+
+// increment this if you change anything that will affect compression in this file
+#define BASE_ISPC_DX11_FORMAT_VERSION 9
 
 // For debugging intermediate image results by saving them out as files.
 #define DEBUG_SAVE_INTERMEDIATE_IMAGES 0
@@ -43,10 +66,18 @@ DEFINE_LOG_CATEGORY_STATIC(LogTextureFormatIntelISPCTexComp, Log, All);
 	#undef DECL_FORMAT_NAME_ENTRY
 #undef ENUM_SUPPORTED_FORMATS
 
+/**
+ * note : ASTC formats are NOT in the GSupportedTextureFormatNames
+ *  so we are not registered to support them
+ *  they will call into TextureFormatASTC and then optionally redirect to here
+ * this just defines the FNames
+ */
 #define ENUM_ASTC_FORMATS(op) \
 	op(ASTC_RGB) \
 	op(ASTC_RGBA) \
 	op(ASTC_RGBAuto) \
+	op(ASTC_RGBA_HQ) \
+	op(ASTC_RGB_HDR) \
 	op(ASTC_NormalAG) \
 	op(ASTC_NormalRG)
 
@@ -58,6 +89,10 @@ DEFINE_LOG_CATEGORY_STATIC(LogTextureFormatIntelISPCTexComp, Log, All);
 // BC6H, BC7, ASTC all have 16-byte block size
 #define BLOCK_SIZE_IN_BYTES 16
 
+
+#if DEBUG_SAVE_INTERMEDIATE_IMAGES
+namespace
+{
 
 	// Bitmap compression types.
 enum EBitmapCompression
@@ -113,10 +148,10 @@ struct FBitmapInfoHeader
 #pragma pack(pop)
 
 
-void SaveImageAsBMP( FArchive& Ar, const uint8* RawData, int SourceBytesPerPixel, int SizeX, int SizeY )
+static void SaveImageAsBMP( FArchive& Ar, const uint8* RawData, int SourceBytesPerPixel, int SizeX, int SizeY )
 {
 	FBitmapFileHeader bmf;
-	FBitmapInfoHeader bmhdr;
+	FBitmapInfoHeader bmh;
 
 	// File header.
 	bmf.bfType = 'B' + (256 * (int32)'M');
@@ -124,23 +159,23 @@ void SaveImageAsBMP( FArchive& Ar, const uint8* RawData, int SourceBytesPerPixel
 	bmf.bfReserved2 = 0;
 	int32 biSizeImage = SizeX * SizeY * 3;
 	bmf.bfOffBits = sizeof(FBitmapFileHeader) + sizeof(FBitmapInfoHeader);
-	bmhdr.biBitCount = 24;
+	bmh.biBitCount = 24;
 
 	bmf.bfSize = bmf.bfOffBits + biSizeImage;
 	Ar << bmf;
 
 	// Info header.
-	bmhdr.biSize = sizeof(FBitmapInfoHeader);
-	bmhdr.biWidth = SizeX;
-	bmhdr.biHeight = SizeY;
-	bmhdr.biPlanes = 1;
-	bmhdr.biCompression = BCBI_RGB;
-	bmhdr.biSizeImage = biSizeImage;
-	bmhdr.biXPelsPerMeter = 0;
-	bmhdr.biYPelsPerMeter = 0;
-	bmhdr.biClrUsed = 0;
-	bmhdr.biClrImportant = 0;
-	Ar << bmhdr;
+	bmh.biSize = sizeof(FBitmapInfoHeader);
+	bmh.biWidth = SizeX;
+	bmh.biHeight = SizeY;
+	bmh.biPlanes = 1;
+	bmh.biCompression = BCBI_RGB;
+	bmh.biSizeImage = biSizeImage;
+	bmh.biXPelsPerMeter = 0;
+	bmh.biYPelsPerMeter = 0;
+	bmh.biClrUsed = 0;
+	bmh.biClrImportant = 0;
+	Ar << bmh;
 
 	bool bIsRGBA16 = (SourceBytesPerPixel == 8);
 
@@ -196,7 +231,7 @@ struct astc_header
 };
 #pragma pack(pop)
 
-void SaveImageAsASTC(FArchive& Ar, uint8* RawData, int SizeX, int SizeY, int block_width, int block_height)
+static void SaveImageAsASTC(FArchive& Ar, uint8* RawData, int SizeX, int SizeY, int block_width, int block_height)
 {
 	astc_header file_header;
 
@@ -222,6 +257,10 @@ void SaveImageAsASTC(FArchive& Ar, uint8* RawData, int SizeX, int SizeY, int blo
 	Ar.Serialize(RawData, height_in_blocks * stride);
 }
 
+}; // namespace
+#endif 
+// DEBUG_SAVE_INTERMEDIATE_IMAGES
+
 struct FMultithreadSettings
 {
 	int iScansPerTask;
@@ -237,7 +276,7 @@ struct FMultithreadedCompression
 	{
 		if (bUseTasks)
 		{
-			class FIntelCompressWorker : public FNonAbandonableTask
+			class FIntelCompressWorker
 			{
 			public:
 				FIntelCompressWorker(EncoderSettingsType* pEncSettings, FImage* pInImage, FCompressedImage2D* pOutImage, int yStart, int yEnd, int SliceIndex, CompressFunction InFunctionCallback)
@@ -256,11 +295,6 @@ struct FMultithreadedCompression
 					mCallback(mpEncSettings, mpInImage, mpOutImage, mYStart, mYEnd, mSliceIndex);
 				}
 
-				FORCEINLINE TStatId GetStatId() const
-				{
-					RETURN_QUICK_DECLARE_CYCLE_STAT(FIntelCompressWorker, STATGROUP_ThreadPoolAsyncTasks);
-				}
-
 				EncoderSettingsType*	mpEncSettings;
 				FImage*					mpInImage;
 				FCompressedImage2D*		mpOutImage;
@@ -269,10 +303,9 @@ struct FMultithreadedCompression
 				int						mSliceIndex;
 				CompressFunction		mCallback;
 			};
-			typedef FAsyncTask<FIntelCompressWorker> FIntelCompressTask;
 
 			// One less task because we'll do the final + non multiple of 4 inside this task
-			TIndirectArray<FIntelCompressTask> CompressionTasks;
+			TArray<FIntelCompressWorker> CompressionTasks;
 			const int NumStasksPerSlice = MultithreadSettings.iNumTasks + 1;
 			CompressionTasks.Reserve(NumStasksPerSlice * Image.NumSlices - 1);
 			for (int SliceIndex = 0; SliceIndex < Image.NumSlices; ++SliceIndex)
@@ -282,19 +315,19 @@ struct FMultithreadedCompression
 					// Create a new task unless it's the last task in the last slice (that one will run on current thread, after these threads have been started)
 					if (SliceIndex < (Image.NumSlices - 1) || iTask < (NumStasksPerSlice - 1))
 					{
-						auto* AsyncTask = new FIntelCompressTask(&EncoderSettings, &Image, &OutCompressedImage, iTask * MultithreadSettings.iScansPerTask, (iTask + 1) * MultithreadSettings.iScansPerTask, SliceIndex, FunctionCallback);
-						CompressionTasks.Add(AsyncTask);
-						AsyncTask->StartBackgroundTask();
+						CompressionTasks.Emplace(&EncoderSettings, &Image, &OutCompressedImage, iTask * MultithreadSettings.iScansPerTask, (iTask + 1) * MultithreadSettings.iScansPerTask, SliceIndex, FunctionCallback);
 					}
 				}
 			}
-			FunctionCallback(&EncoderSettings, &Image, &OutCompressedImage, MultithreadSettings.iScansPerTask * MultithreadSettings.iNumTasks, Image.SizeY, Image.NumSlices - 1);
 
-			// Wait for all tasks to complete
-			for (int32 TaskIndex = 0; TaskIndex < CompressionTasks.Num(); ++TaskIndex)
+			ParallelForWithPreWork(CompressionTasks.Num(), [&CompressionTasks](int32 TaskIndex)
 			{
-				CompressionTasks[TaskIndex].EnsureCompletion();
-			}
+				CompressionTasks[TaskIndex].DoWork();
+			},
+			[&EncoderSettings, &Image, &OutCompressedImage, &MultithreadSettings, &FunctionCallback]()
+			{
+				FunctionCallback(&EncoderSettings, &Image, &OutCompressedImage, MultithreadSettings.iScansPerTask * MultithreadSettings.iNumTasks, Image.SizeY, Image.NumSlices - 1);
+			}, EParallelForFlags::Unbalanced);
 		}
 		else
 		{
@@ -313,14 +346,15 @@ static void IntelBC6HCompressScans(bc6h_enc_settings* pEncSettings, FImage* pInI
 {
 	check(pInImage->Format == ERawImageFormat::RGBA16F);
 	check((yStart % 4) == 0);
+	// sizes are padded to multiple of 4 for ISPC by PadImageToBlockSize :
 	check((pInImage->SizeX % 4) == 0);
 	check((yStart >= 0) && (yStart <= pInImage->SizeY));
 	check((yEnd   >= 0) && (yEnd   <= pInImage->SizeY));
 
 	const int64 InStride = (int64)pInImage->SizeX * 8;
-	const int64 OutStride = (int64)pInImage->SizeX / 4 * BLOCK_SIZE_IN_BYTES;
+	const int64 OutStride = (int64)((pInImage->SizeX + 3) / 4) * BLOCK_SIZE_IN_BYTES;
 	const int64 InSliceSize = (int64)pInImage->SizeY * InStride;
-	const int64 OutSliceSize = (int64)pInImage->SizeY / 4 * OutStride;
+	const int64 OutSliceSize = (int64)((pInImage->SizeY +3) / 4) * OutStride;
 
 	uint8* pInTexels = reinterpret_cast<uint8*>(&pInImage->RawData[0]) + InSliceSize * SliceIndex;
 	uint8* pOutTexels = reinterpret_cast<uint8*>(&pOutImage->RawData[0]) + OutSliceSize * SliceIndex;
@@ -342,14 +376,15 @@ static void IntelBC7CompressScans(bc7_enc_settings* pEncSettings, FImage* pInIma
 {
 	check(pInImage->Format == ERawImageFormat::BGRA8);
 	check((yStart % 4) == 0);
+	// sizes are padded to multiple of 4 for ISPC by PadImageToBlockSize :
 	check((pInImage->SizeX % 4) == 0);
 	check((yStart >= 0) && (yStart <= pInImage->SizeY));
 	check((yEnd   >= 0) && (yEnd   <= pInImage->SizeY));
 
 	const int64 InStride = (int64)pInImage->SizeX * 4;
-	const int64 OutStride = (int64)pInImage->SizeX / 4 * BLOCK_SIZE_IN_BYTES;
+	const int64 OutStride = (int64)((pInImage->SizeX + 3) / 4) * BLOCK_SIZE_IN_BYTES;
 	const int64 InSliceSize = (int64)pInImage->SizeY * InStride;
-	const int64 OutSliceSize = (int64)pInImage->SizeY / 4 * OutStride;
+	const int64 OutSliceSize = (int64)((pInImage->SizeY + 3) / 4) * OutStride;
 
 	uint8* pInTexels = reinterpret_cast<uint8*>(&pInImage->RawData[0]) + InSliceSize * SliceIndex;
 	uint8* pOutTexels = reinterpret_cast<uint8*>(&pOutImage->RawData[0]) + OutSliceSize * SliceIndex;
@@ -379,27 +414,68 @@ static void IntelBC7CompressScans(bc7_enc_settings* pEncSettings, FImage* pInIma
 }
 
 #define MAX_QUALITY_BY_SIZE 4
-#define FORCED_NORMAL_MAP_COMPRESSION_SIZE_VALUE 3
 
-static uint16 GetDefaultCompressionBySizeValue()
+static uint16 GetDefaultCompressionBySizeValue(FCbObjectView InFormatConfigOverride)
 {
-	// start at default quality, then lookup in .ini file
-	int32 CompressionModeValue = 0;
-	GConfig->GetInt(TEXT("/Script/UnrealEd.CookerSettings"), TEXT("DefaultASTCQualityBySize"), CompressionModeValue, GEngineIni);
+	// this is code duped between TextureFormatASTC and TextureFormatISPC
+	if (InFormatConfigOverride)
+	{
+		// If we have an explicit format config, then use it directly
+		FCbFieldView FieldView = InFormatConfigOverride.FindView("DefaultASTCQualityBySize");
+		checkf(FieldView.HasValue(), TEXT("Missing DefaultASTCQualityBySize key from FormatConfigOverride"));
+		int32 CompressionModeValue = FieldView.AsInt32();
+		checkf(!FieldView.HasError(), TEXT("Failed to parse DefaultASTCQualityBySize value from FormatConfigOverride"));
+		return IntCastChecked<uint16>(CompressionModeValue);
+	}
+	else
+	{
+		// default of 0 == 12x12 ?
+		// BaseEngine.ini sets DefaultASTCQualityBySize to 3 == 6x6
 
-	FParse::Value(FCommandLine::Get(), TEXT("-astcqualitybysize="), CompressionModeValue);
-	CompressionModeValue = FMath::Min<uint32>(CompressionModeValue, MAX_QUALITY_BY_SIZE);
+		auto GetCompressionModeValue = []() {
+			// start at default quality, then lookup in .ini file
+			int32 CompressionModeValue = 0;
+			GConfig->GetInt(TEXT("/Script/UnrealEd.CookerSettings"), TEXT("DefaultASTCQualityBySize"), CompressionModeValue, GEngineIni);
+	
+			FParse::Value(FCommandLine::Get(), TEXT("-astcqualitybysize="), CompressionModeValue);
+			
+			return FMath::Min<uint32>(CompressionModeValue, MAX_QUALITY_BY_SIZE);
+		};
 
-	return CompressionModeValue;
+		static uint16 CompressionModeValue = IntCastChecked<uint16>(GetCompressionModeValue());
+
+		return CompressionModeValue;
+	}
 }
 
-static EPixelFormat GetQualityFormat(int& BlockWidth, int& BlockHeight, int32 OverrideSizeValue = -1)
+static EPixelFormat GetASTCQualityFormat(int& BlockWidth, int& BlockHeight, const FTextureBuildSettings& BuildSettings)
 {
-	// Note: ISPC only supports 8x8 and higher quality, and only one speed (fast)
-	// convert to a string
-	EPixelFormat Format = PF_Unknown;
-	switch (OverrideSizeValue >= 0 ? OverrideSizeValue : GetDefaultCompressionBySizeValue())
+	// code dupe between TextureFormatASTC  and TextureFormatISPC
+
+	const FCbObjectView& InFormatConfigOverride = BuildSettings.FormatConfigOverride;
+	int32 OverrideSizeValue= BuildSettings.CompressionQuality;
+
+	bool bIsNormalMap = (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalAG || BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalRG);
+	bool bIsHQ = BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGBA_HQ;
+	bool bHDRFormat = BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGB_HDR;
+	check( ! bHDRFormat ); // HDR not supported here
+	
+	if ( bIsNormalMap )
 	{
+		BlockWidth = BlockHeight = 6;
+		return PF_ASTC_6x6;
+	}
+	else if ( bIsHQ || BuildSettings.bVirtualStreamable )
+	{
+		BlockWidth = BlockHeight = 4;
+		return PF_ASTC_4x4;		
+	}
+
+	// Note: ISPC only supports 8x8 and higher quality, and only one speed (fast)
+	EPixelFormat Format = PF_Unknown;
+	switch (OverrideSizeValue >= 0 ? OverrideSizeValue : GetDefaultCompressionBySizeValue(InFormatConfigOverride))
+	{
+		// NOTE: different than TextureFormatASTC which has the 10 and 12 size blocks here
 		case 0:	//Format = PF_ASTC_12x12; BlockWidth = BlockHeight = 12; break;
 		case 1:	//Format = PF_ASTC_10x10; BlockWidth = BlockHeight = 10; break;
 		case 2:	Format = PF_ASTC_8x8; BlockWidth = BlockHeight = 8; break;
@@ -414,6 +490,14 @@ static EPixelFormat GetQualityFormat(int& BlockWidth, int& BlockHeight, int32 Ov
 struct FASTCEncoderSettings : public astc_enc_settings
 {
 	FName TextureFormatName;
+	bool bISPCTexcompNormalizeNormals = false;
+
+	FASTCEncoderSettings()
+	{
+		// ensure astc_enc_settings are initialized :
+		astc_enc_settings * parent = this;
+		memset(parent,0,sizeof(*parent));
+	}
 };
 
 
@@ -424,17 +508,22 @@ static void IntelASTCCompressScans(FASTCEncoderSettings* pEncSettings, FImage* p
 {
 	check(pInImage->Format == ERawImageFormat::BGRA8);
 	check((yStart % pEncSettings->block_height) == 0);
+	
+	// sizes are padded for ISPC by PadImageToBlockSize :
 	check((pInImage->SizeX % pEncSettings->block_width) == 0);
 	check((yStart >= 0) && (yStart <= pInImage->SizeY));
 	check((yEnd   >= 0) && (yEnd   <= pInImage->SizeY));
 
 	const int64 InStride = (int64)pInImage->SizeX * 4;
-	const int64 OutStride = (int64)pInImage->SizeX / pEncSettings->block_width * BLOCK_SIZE_IN_BYTES;
+	const int64 OutStride = (int64)FMath::DivideAndRoundUp( pInImage->SizeX , pEncSettings->block_width) * BLOCK_SIZE_IN_BYTES;
 	const int64 InSliceSize = (int64)pInImage->SizeY * InStride;
-	const int64 OutSliceSize = (int64)pInImage->SizeY / pEncSettings->block_height * OutStride;
+	const int64 OutSliceSize = (int64)FMath::DivideAndRoundUp( pInImage->SizeY , pEncSettings->block_height) * OutStride;
 
 	uint8* pInTexels = reinterpret_cast<uint8*>(&pInImage->RawData[0]) + InSliceSize * SliceIndex;
 	uint8* pOutTexels = reinterpret_cast<uint8*>(&pOutImage->RawData[0]) + OutSliceSize * SliceIndex;
+
+	// TextureFormatName at this point should no longer be RGBAuto
+	//	it's mapped to _RGB or _RGBA concretely
 
 	if (pEncSettings->TextureFormatName == GTextureFormatNameASTC_RGB)
 	{
@@ -454,7 +543,7 @@ static void IntelASTCCompressScans(FASTCEncoderSettings* pEncSettings, FImage* p
 			}
 		}
 	}
-	else if (pEncSettings->TextureFormatName == GTextureFormatNameASTC_RGBA)
+	else if (pEncSettings->TextureFormatName == GTextureFormatNameASTC_RGBA || pEncSettings->TextureFormatName == GTextureFormatNameASTC_RGBA_HQ)
 	{
 		// Switch byte order for compressors input (BGRA -> RGBA)
 		for (int y = yStart; y < yEnd; ++y)
@@ -472,45 +561,93 @@ static void IntelASTCCompressScans(FASTCEncoderSettings* pEncSettings, FImage* p
 	}
 	else if (pEncSettings->TextureFormatName == GTextureFormatNameASTC_NormalAG)
 	{
-		// Switch byte order for compressors input (BGRA -> RGBA)
-		// Re-normalize
-		// Set any unused RGB components to 0, an unused A to 255.
-		for (int y = yStart; y < yEnd; ++y)
-		{
-			uint8* pInTexelsSwap = pInTexels + (y * InStride);
-			for (int x = 0; x < pInImage->SizeX; ++x)
-			{
-				FVector Normal = FVector(pInTexelsSwap[2] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[1] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[0] / 255.0f * 2.0f - 1.0f);
-				Normal = Normal.GetSafeNormal();
-				pInTexelsSwap[0] = 0;
-				pInTexelsSwap[1] = FMath::FloorToInt((Normal.Y * 0.5f + 0.5f) * 255.999f);
-				pInTexelsSwap[2] = 0;
-				pInTexelsSwap[3] = FMath::FloorToInt((Normal.X * 0.5f + 0.5f) * 255.999f);
+		// input BGRA -> output 0,G,0,A
 
-				pInTexelsSwap += 4;
+		if ( pEncSettings->bISPCTexcompNormalizeNormals )
+		{
+			// legacy behavior:
+			// Re-normalize normals before dropping components
+			// this is right, but doing it here makes this TextureFormat inconsistent with all others
+			for (int y = yStart; y < yEnd; ++y)
+			{
+				uint8* pInTexelsSwap = pInTexels + (y * InStride);
+				for (int x = 0; x < pInImage->SizeX; ++x)
+				{
+					FVector Normal = FVector(pInTexelsSwap[2] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[1] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[0] / 255.0f * 2.0f - 1.0f);
+					Normal = Normal.GetSafeNormal();
+					pInTexelsSwap[0] = 0;
+					pInTexelsSwap[1] = static_cast<uint8>(FMath::RoundToInt((Normal.Y * 0.5f + 0.5f) * 255.f));
+					pInTexelsSwap[2] = 0;
+					pInTexelsSwap[3] = static_cast<uint8>(FMath::RoundToInt((Normal.X * 0.5f + 0.5f) * 255.f));
+
+					pInTexelsSwap += 4;
+				}
+			}
+		}
+		else
+		{
+			// new preferred path: do not normalize normals here, use bNormalizeNormals in TextureCompressor
+			for (int y = yStart; y < yEnd; ++y)
+			{
+				uint8* pInTexelsSwap = pInTexels + (y * InStride);
+				for (int x = 0; x < pInImage->SizeX; ++x)
+				{
+					pInTexelsSwap[0] = 0;
+					//pInTexelsSwap[1] = pInTexelsSwap[1]; // G
+					pInTexelsSwap[3] = pInTexelsSwap[2]; // R->A
+					pInTexelsSwap[2] = 0;
+
+					pInTexelsSwap += 4;
+				}
 			}
 		}
 	}
 	else if (pEncSettings->TextureFormatName == GTextureFormatNameASTC_NormalRG)
 	{
-		// Switch byte order for compressors input (BGRA -> RGBA)
-		// Re-normalize
-		// Set any unused RGB components to 0, an unused A to 255.
-		for (int y = yStart; y < yEnd; ++y)
-		{
-			uint8* pInTexelsSwap = pInTexels + (y * InStride);
-			for (int x = 0; x < pInImage->SizeX; ++x)
-			{
-				FVector Normal = FVector(pInTexelsSwap[2] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[1] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[0] / 255.0f * 2.0f - 1.0f);
-				Normal = Normal.GetSafeNormal();
-				pInTexelsSwap[0] = FMath::FloorToInt((Normal.X * 0.5f + 0.5f) * 255.999f);
-				pInTexelsSwap[1] = FMath::FloorToInt((Normal.Y * 0.5f + 0.5f) * 255.999f);
-				pInTexelsSwap[2] = 0;
-				pInTexelsSwap[3] = 255;
+		// input BGRA -> output RG,0,255
 
-				pInTexelsSwap += 4;
+		if ( pEncSettings->bISPCTexcompNormalizeNormals )
+		{
+			// legacy behavior:
+			// Re-normalize normals before dropping components
+			// this is right, but doing it here makes this TextureFormat inconsistent with all others
+			for (int y = yStart; y < yEnd; ++y)
+			{
+				uint8* pInTexelsSwap = pInTexels + (y * InStride);
+				for (int x = 0; x < pInImage->SizeX; ++x)
+				{
+					FVector Normal = FVector(pInTexelsSwap[2] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[1] / 255.0f * 2.0f - 1.0f, pInTexelsSwap[0] / 255.0f * 2.0f - 1.0f);
+					Normal = Normal.GetSafeNormal();
+					pInTexelsSwap[0] = static_cast<uint8>(FMath::RoundToInt((Normal.X * 0.5f + 0.5f) * 255.f));
+					pInTexelsSwap[1] = static_cast<uint8>(FMath::RoundToInt((Normal.Y * 0.5f + 0.5f) * 255.f));
+					pInTexelsSwap[2] = 0;
+					pInTexelsSwap[3] = 255;
+
+					pInTexelsSwap += 4;
+				}
 			}
 		}
+		else
+		{
+			// new preferred path: do not normalize normals here, use bNormalizeNormals in TextureCompressor
+			for (int y = yStart; y < yEnd; ++y)
+			{
+				uint8* pInTexelsSwap = pInTexels + (y * InStride);
+				for (int x = 0; x < pInImage->SizeX; ++x)
+				{
+					pInTexelsSwap[0] = pInTexelsSwap[2]; // R
+					//pInTexelsSwap[1] = pInTexelsSwap[1]; // G
+					pInTexelsSwap[2] = 0;
+					pInTexelsSwap[3] = 255;
+
+					pInTexelsSwap += 4;
+				}
+			}
+		}
+	}
+	else
+	{
+		checkNoEntry();
 	}
 
 	rgba_surface insurface;
@@ -518,8 +655,9 @@ static void IntelASTCCompressScans(FASTCEncoderSettings* pEncSettings, FImage* p
 	insurface.width		= pInImage->SizeX;
 	insurface.height	= yEnd - yStart;
 	insurface.stride	= pInImage->SizeX * 4;
-
-	pOutTexels += yStart / pEncSettings->block_height * OutStride;
+	
+	check((yStart % pEncSettings->block_height) == 0);
+	pOutTexels += (yStart / pEncSettings->block_height) * OutStride;
 	CompressBlocksASTC(&insurface, pOutTexels, pEncSettings);
 }
 
@@ -529,43 +667,87 @@ static void IntelASTCCompressScans(FASTCEncoderSettings* pEncSettings, FImage* p
 class FTextureFormatIntelISPCTexComp : public ITextureFormat
 {
 public:
+
+	void* mDllHandle = nullptr;
+
 	FTextureFormatIntelISPCTexComp()
 	{
 	}
 	virtual ~FTextureFormatIntelISPCTexComp()
 	{
+		if ( mDllHandle != nullptr )
+		{
+			FPlatformProcess::FreeDllHandle(mDllHandle);
+			mDllHandle = nullptr;
+		}
 	}
+
+	void LoadDLLOnce()
+	{
+		// LoadDLL is delayed to first use
+		// should only be called once
+		check( mDllHandle == nullptr );
+
+		FString DLLPath;
+#if PLATFORM_WINDOWS
+		DLLPath = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/Intel/ISPCTexComp/Win64-Release/ispc_texcomp.dll");
+#elif PLATFORM_MAC
+		DLLPath = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/Intel/ISPCTexComp/Mac64-Release/libispc_texcomp.dylib");
+#elif PLATFORM_LINUX
+		DLLPath = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/Intel/ISPCTexComp/Linux64-Release/libispc_texcomp.so");
+#endif
+
+		if (DLLPath.Len() > 0)
+		{
+			mDllHandle = FPlatformProcess::GetDllHandle(*DLLPath);
+			UE_CLOG(mDllHandle == nullptr, LogTextureFormatIntelISPCTexComp, Error, TEXT("Unable to load %s"), *DLLPath);
+		}
+		else
+		{
+			UE_LOG(LogTextureFormatIntelISPCTexComp, Error, TEXT("Platform does not have an ispc_texcomp DLL/library"));
+		}
+	}
+
+
 	virtual bool AllowParallelBuild() const override
 	{
 		return true;
+	}
+	virtual FName GetEncoderName(FName Format) const override
+	{
+		static const FName IntelName("IntelISPC");
+		return IntelName;
+	}
+
+	virtual FCbObject ExportGlobalFormatConfig(const FTextureBuildSettings& BuildSettings) const override
+	{
+		FCbWriter Writer;
+		Writer.BeginObject("TextureFormatIntelISPCTexCompSettings");
+		Writer.AddInteger("DefaultASTCQualityBySize", GetDefaultCompressionBySizeValue(FCbObjectView()));
+		Writer.EndObject();
+		return Writer.Save().AsObject();
 	}
 
 	// Return the version for the DX11 formats BC6H and BC7 (not ASTC)
 	virtual uint16 GetVersion(
 		FName Format,
-		const struct FTextureBuildSettings* BuildSettings = nullptr
+		const FTextureBuildSettings* BuildSettings = nullptr
 	) const override
 	{
 		return BASE_ISPC_DX11_FORMAT_VERSION;
 	}
-
-	// Since we want to have per texture [group] compression settings, we need to have the key based on the texture
-	virtual FString GetDerivedDataKeyString(const class UTexture& Texture, const FTextureBuildSettings* BuildSettings) const override
+	
+	virtual FString GetDerivedDataKeyString(const FTextureBuildSettings& InBuildSettings, int32 InMipCount, const FIntVector3& InMip0Dimensions) const override
 	{
-		return TEXT("");
+		// ASTC block size chosen is in PixelFormat
+		EPixelFormat PixelFormat = GetPixelFormatForBuildSettings(InBuildSettings);
+		
+ 		return FString::Printf(TEXT("ISPC_%d"), (int)PixelFormat);
 	}
 
 	virtual void GetSupportedFormats(TArray<FName>& OutFormats) const override
 	{
-		for (int32 i = 0; i < UE_ARRAY_COUNT(GSupportedTextureFormatNames); ++i)
-		{
-			OutFormats.Add(GSupportedTextureFormatNames[i]);
-		}
-	}
-
-	virtual FTextureFormatCompressorCaps GetFormatCapabilities() const override
-	{
-		return FTextureFormatCompressorCaps(); // Default capabilities.
+		OutFormats.Append(GSupportedTextureFormatNames, UE_ARRAY_COUNT(GSupportedTextureFormatNames));
 	}
 
 	static void SetupScans(const FImage& InImage, int BlockWidth, int BlockHeight, FCompressedImage2D& OutCompressedImage, FMultithreadSettings &MultithreadSettings)
@@ -575,9 +757,10 @@ public:
 		const int WidthInBlocks = AlignedSizeX / BlockWidth;
 		const int HeightInBlocks = AlignedSizeY / BlockHeight;
 		const int64 SizePerSlice = (int64)WidthInBlocks * HeightInBlocks * BLOCK_SIZE_IN_BYTES;
+		// ISPC pads sizes, but OutCompressedImage gets the unpadded sizes :
 		OutCompressedImage.RawData.AddUninitialized(SizePerSlice * InImage.NumSlices);
-		OutCompressedImage.SizeX = FMath::Max(AlignedSizeX, BlockWidth);
-		OutCompressedImage.SizeY = FMath::Max(AlignedSizeY, BlockHeight);
+		OutCompressedImage.SizeX = InImage.SizeX;
+		OutCompressedImage.SizeY = InImage.SizeY;
 
 		// When we allow async tasks to execute we do so with BlockHeight lines of the image per task
 		// This isn't optimal for long thin textures, but works well with how ISPC works
@@ -598,9 +781,10 @@ public:
 		{
 			return;
 		}
+		
+		// ISPCtexcomp crashes on images not of block-aligned size
 
 		// Allocate temp buffer
-		//@TODO: Optimize away this temp buffer (could avoid last FMemory::Memcpy)
 		TArray64<uint8> TempBuffer;
 		TempBuffer.SetNumUninitialized(AlignedTotalSize);
 
@@ -644,29 +828,12 @@ public:
 		InOutImage.SizeY = AlignedSizeY;
 	}
 
-	/**
-	Remove Float16 values, which aren't correctly handled by the ISPCTextureCompressor.
-	https://docs.microsoft.com/en-us/windows/desktop/direct3d11/bc6h-format
-	*/
-	static void SanitizeFloat16ForBC6H(FImage& InOutImage)
+	virtual EPixelFormat GetEncodedPixelFormat(const FTextureBuildSettings& InBuildSettings, bool bInImageHasAlphaChannel) const override
 	{
-		check(InOutImage.Format == ERawImageFormat::RGBA16F);
-
-		const int64 TexelNum = InOutImage.RawData.Num() / sizeof(FFloat16);
-		FFloat16* Data = reinterpret_cast<FFloat16*>(&InOutImage.RawData[0]);
-		for (int64 TexelIndex = 0; TexelIndex < TexelNum; ++TexelIndex)
-		{
-			// Flush negative values to 0, as those aren't supported by BC6H_UF16.
-			FFloat16& F16Value = Data[TexelIndex];
-			const bool bNegative = F16Value.Components.Sign == 1;
-			if (bNegative)
-			{
-				F16Value = 0;
-			}
-		}
+		return GetPixelFormatForBuildSettings(InBuildSettings);
 	}
 
-	virtual EPixelFormat GetPixelFormatForImage(const struct FTextureBuildSettings& BuildSettings, const struct FImage& Image, bool bImageHasAlphaChannel) const override
+	EPixelFormat GetPixelFormatForBuildSettings(const FTextureBuildSettings& BuildSettings) const
 	{
 		if (BuildSettings.TextureFormatName == GTextureFormatNameBC6H)
 		{
@@ -676,23 +843,22 @@ public:
 		{
 			return PF_BC7;
 		}
-		else if (BuildSettings.bVirtualStreamable)
-		{
-			return PF_ASTC_4x4;
-		}
 		else
 		{
 			int _Width, _Height;
-			bool bIsNormalMap = (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalAG ||
-				BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalRG);
 
-			return GetQualityFormat(_Width, _Height, bIsNormalMap ? FORCED_NORMAL_MAP_COMPRESSION_SIZE_VALUE : BuildSettings.CompressionQuality);
+			return GetASTCQualityFormat(_Width, _Height, BuildSettings);
 		}
 	}
 
 	virtual bool CompressImage(
 		const FImage& InImage,
-		const struct FTextureBuildSettings& BuildSettings,
+		const FTextureBuildSettings& BuildSettings,
+		const FIntVector3& InMip0Dimensions,
+		int32 InMip0NumSlicesNoDepth,
+		int32 InMipIndex,
+		int32 InMipCount,
+		FStringView DebugTexturePathName,
 		bool bImageHasAlphaChannel,
 		FCompressedImage2D& OutCompressedImage
 		) const override
@@ -700,6 +866,9 @@ public:
 		check(InImage.SizeX > 0);
 		check(InImage.SizeY > 0);
 		check(InImage.NumSlices > 0);
+
+		// Load DLL on first use :
+		UE_CALL_ONCE( const_cast<FTextureFormatIntelISPCTexComp *>(this)->LoadDLLOnce );
 
 		bool bCompressionSucceeded = false;
 
@@ -709,14 +878,14 @@ public:
 		const bool bUseTasks = true;
 		FMultithreadSettings MultithreadSettings;
 
-		EPixelFormat CompressedPixelFormat = GetPixelFormatForImage(BuildSettings, InImage, bImageHasAlphaChannel);
+		EPixelFormat CompressedPixelFormat = GetEncodedPixelFormat(BuildSettings, bImageHasAlphaChannel);
 
 		if ( BuildSettings.TextureFormatName == GTextureFormatNameBC6H )
 		{
 			FImage Image;
 			InImage.CopyTo(Image, ERawImageFormat::RGBA16F, EGammaSpace::Linear);
 
-			SanitizeFloat16ForBC6H(Image);
+			FImageCore::SanitizeFloat16AndSetAlphaOpaqueForBC6H(Image);
 
 			bc6h_enc_settings settings;
 			GetProfile_bc6h_basic(&settings);
@@ -730,7 +899,7 @@ public:
 		else if ( BuildSettings.TextureFormatName == GTextureFormatNameBC7 )
 		{
 			FImage Image;
-			InImage.CopyTo(Image, ERawImageFormat::BGRA8, BuildSettings.GetGammaSpace());
+			InImage.CopyTo(Image, ERawImageFormat::BGRA8, BuildSettings.GetDestGammaSpace());
 
 			bc7_enc_settings settings;
 			if ( bImageHasAlphaChannel )
@@ -750,99 +919,136 @@ public:
 		}
 		else
 		{
-			bool bIsRGBColorASTC = (BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGB ||
-				((BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGBAuto) && !bImageHasAlphaChannel));
-			bool bIsRGBAColorASTC = (BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGBA ||
-				((BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGBAuto) && bImageHasAlphaChannel));
 			bool bIsNormalMap = (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalAG ||
 				BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalRG);
-
-			if (BuildSettings.bVirtualStreamable)
-			{
-				// Always use 4x4 for streamable VT, to reduce texture format fragmentation
-				BlockWidth = 4;
-				BlockHeight = 4;
-			}
-			else
-			{
-				 GetQualityFormat( BlockWidth, BlockHeight, bIsNormalMap ? FORCED_NORMAL_MAP_COMPRESSION_SIZE_VALUE : BuildSettings.CompressionQuality );
-			}
-			check(CompressedPixelFormat == PF_ASTC_4x4 || !BuildSettings.bVirtualStreamable);
+				
+			bool bHDRImage = BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGB_HDR;
+			check( ! bHDRImage ); // HDR not supported here
+			
+			GetASTCQualityFormat( BlockWidth, BlockHeight, BuildSettings );
 
 			FASTCEncoderSettings EncoderSettings;
-			if (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalAG)
+			EncoderSettings.TextureFormatName = BuildSettings.TextureFormatName;
+			
+			if ( bIsNormalMap )
 			{
-				GetProfile_astc_alpha_fast(&EncoderSettings, BlockWidth, BlockHeight);
-				EncoderSettings.TextureFormatName = BuildSettings.TextureFormatName;
-				bCompressionSucceeded = true;
-				check(EncoderSettings.block_width!=0);
-			}
-			else if (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalRG)
-			{
-				GetProfile_astc_fast(&EncoderSettings, BlockWidth, BlockHeight);
-				EncoderSettings.TextureFormatName = BuildSettings.TextureFormatName;
-				bCompressionSucceeded = true;
-				check(EncoderSettings.block_width!=0);
-			}
-			else if (bIsRGBColorASTC)
-			{
-				GetProfile_astc_fast(&EncoderSettings, BlockWidth, BlockHeight);
-				EncoderSettings.TextureFormatName = GTextureFormatNameASTC_RGB;
-				bCompressionSucceeded = true;
-				check(EncoderSettings.block_width!=0);
-			}
-			else if (bIsRGBAColorASTC)
-			{
-				GetProfile_astc_alpha_fast(&EncoderSettings, BlockWidth, BlockHeight);
-				EncoderSettings.TextureFormatName = GTextureFormatNameASTC_RGBA;
-				bCompressionSucceeded = true;
-				check(EncoderSettings.block_width!=0);
+				check( BlockWidth == 6 && BlockHeight == 6 );
+
+				if (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalAG)
+				{
+					GetProfile_astc_alpha_fast(&EncoderSettings, BlockWidth, BlockHeight);
+				}
+				else if (BuildSettings.TextureFormatName == GTextureFormatNameASTC_NormalRG)
+				{
+					GetProfile_astc_fast(&EncoderSettings, BlockWidth, BlockHeight);
+				}
+				else
+				{	
+					checkNoEntry();
+				}
+
+				if ( BuildSettings.bNormalizeNormals || BuildSettings.bUseNewMipFilter )
+				{
+					// newer texture build, do NOT normalize normals here
+					// it is done by bNormalizeNormals if wanted, at the TextureCompressor level before getting to the TextureFormat
+					EncoderSettings.bISPCTexcompNormalizeNormals = false;
+				}
+				else
+				{
+					// old texture build
+					// enable legacy behavior to maintain same output
+					// we would prefer bISPCTexcompNormalizeNormals to just always be off and use bNormalizeNormals instead
+					EncoderSettings.bISPCTexcompNormalizeNormals = true;
+				}
 			}
 			else
-			{
-				check(0);
-			}
+			{			
+				if( BuildSettings.TextureFormatName == GTextureFormatNameASTC_RGB || !bImageHasAlphaChannel )
+				{
+					// even if Name was RGBA we still use the RGB profile if !bImageHasAlphaChannel
+					//	so that "Compress Without Alpha" can force us to opaque
 
-			if (bCompressionSucceeded)
+					EncoderSettings.TextureFormatName = GTextureFormatNameASTC_RGB; // <- this will force A to 255 in IntelASTCCompressScans
+
+					GetProfile_astc_fast(&EncoderSettings, BlockWidth, BlockHeight);
+				}
+				else
+				{
+					EncoderSettings.TextureFormatName = GTextureFormatNameASTC_RGBA;
+					
+					GetProfile_astc_alpha_fast(&EncoderSettings, BlockWidth, BlockHeight);
+				}
+			}
+			
 			{
+				check(EncoderSettings.block_width!=0);
+
 				FImage Image;
-				InImage.CopyTo(Image, ERawImageFormat::BGRA8, BuildSettings.GetGammaSpace());
+				InImage.CopyTo(Image, ERawImageFormat::BGRA8, BuildSettings.GetDestGammaSpace());
 
 				SetupScans(Image, EncoderSettings.block_width, EncoderSettings.block_height, OutCompressedImage, MultithreadSettings);
 				PadImageToBlockSize(Image, EncoderSettings.block_width, EncoderSettings.block_height, 4 * 1);
 				
 #if DEBUG_SAVE_INTERMEDIATE_IMAGES
-				//@DEBUG (save padded input as BMP):
-				static bool SaveInputOutput = false;
-				static volatile int32 Counter = 0;
-				int LocalCounter = Counter;
-				if (SaveInputOutput)	// && LocalCounter < 10 && Image.SizeX >= 1024)
+				// To DebugDump specific files, modify DebugDumpFilter here
+				//  (currently not exposed to command line, but could be)
+				//static FString DebugDumpFilter(TEXT("*DummySpriteTexture*"));;
+				static FString DebugDumpFilter(TEXT("*"));
+				//static FString DebugDumpFilter;
+
+				bool SaveInputOutput = false;
+				if ( ! DebugDumpFilter.IsEmpty() )
 				{
-					const FString FileName = FString::Printf(TEXT("Smedis-Input-%d.bmp"), FPlatformTLS::GetCurrentThreadId());
+					SaveInputOutput = FWildcardString::IsMatchSubstring(*DebugDumpFilter, DebugTexturePathName.GetData(), DebugTexturePathName.GetData() + DebugTexturePathName.Len(), ESearchCase::IgnoreCase);
+				}
+
+				FString DebugDumpFileNameBase;
+				if (SaveInputOutput)
+				{
+					FString FileName = FString::Printf(TEXT("%.*s_%dx%d_%s_%dx%d"), DebugTexturePathName.Len(), DebugTexturePathName.GetData(), 
+						Image.SizeX, Image.SizeY, *BuildSettings.TextureFormatName.ToString(), BlockWidth,BlockHeight);
+
+					// Object paths a) can contain slashes as its a path, and we dont want a hierarchy and b) can have random characters we don't want
+					FileName = FPaths::MakeValidFileName(FileName, TEXT('_'));
+
+					FileName = FPaths::ProjectSavedDir() + TEXT("ISPCDebugImages/") + FileName;
+					
+					// limit to _MAX_PATH
+					if ( FileName.Len() >= 256 )
+					{
+						FileName = FileName.Right(255);
+					}
+
+					DebugDumpFileNameBase = FileName;
+				}
+
+				if (SaveInputOutput)
+				{
+					const FString FileName = FString::Printf(TEXT("%s-in.bmp"), *DebugDumpFileNameBase );
 					FArchive* FileWriter = IFileManager::Get().CreateFileWriter(*FileName);
 					SaveImageAsBMP(*FileWriter, Image.RawData.GetData(), 4, Image.SizeX, Image.SizeY);
 					delete FileWriter;
-					FPlatformAtomics::InterlockedIncrement(&Counter);
 				}
 #endif
 
 				FMultithreadedCompression<FASTCEncoderSettings>::Compress(MultithreadSettings, EncoderSettings, Image, OutCompressedImage, &IntelASTCCompressScans, bUseTasks);
 
+				bCompressionSucceeded = true;
+				
 #if DEBUG_SAVE_INTERMEDIATE_IMAGES
-				//@DEBUG (save swizzled/fixed-up input as BMP):
-				if (SaveInputOutput)	// && LocalCounter < 10 && Image.SizeX >= 1024)
+				// (save swizzled/fixed-up input as BMP):
+				if (SaveInputOutput)
 				{
-					const FString FileName = FString::Printf(TEXT("Smedis-InputSwizzled-%d.bmp"), FPlatformTLS::GetCurrentThreadId());
+					const FString FileName = FString::Printf(TEXT("%s-in-swiz.bmp"), *DebugDumpFileNameBase );
 					FArchive* FileWriter = IFileManager::Get().CreateFileWriter(*FileName);
 					SaveImageAsBMP(*FileWriter, Image.RawData.GetData(), 4, Image.SizeX, Image.SizeY);
 					delete FileWriter;
-					FPlatformAtomics::InterlockedIncrement(&Counter);
 				}
 
-				//@DEBUG (save output as .astc file):
-				if (SaveInputOutput)// && LocalCounter < 10 && Image.SizeX >= 1024)
+				// (save output as .astc file):
+				if (SaveInputOutput)
 				{
-					const FString FileName = FString::Printf(TEXT("Smedis-Output-%d.astc"), FPlatformTLS::GetCurrentThreadId());
+					const FString FileName = FString::Printf(TEXT("%s-out.astc"), *DebugDumpFileNameBase );
 					FArchive* FileWriter = IFileManager::Get().CreateFileWriter(*FileName);
 					SaveImageAsASTC(*FileWriter, OutCompressedImage.RawData.GetData(), OutCompressedImage.SizeX, OutCompressedImage.SizeY, EncoderSettings.block_width, EncoderSettings.block_height);
 					delete FileWriter;
@@ -868,54 +1074,29 @@ class FTextureFormatIntelISPCTexCompModule : public ITextureFormatModule
 public:
 	FTextureFormatIntelISPCTexCompModule()
 	{
-		mDllHandle = nullptr;
 	}
 
 	virtual ~FTextureFormatIntelISPCTexCompModule()
 	{
-		delete Singleton;
-		Singleton = nullptr;
-
-		if ( mDllHandle != nullptr )
+		if ( Singleton )
 		{
-			FPlatformProcess::FreeDllHandle(mDllHandle);
-			mDllHandle = nullptr;
+			delete Singleton;
+			Singleton = nullptr;
 		}
 	}
+	
+	virtual bool CanCallGetTextureFormats() override { return false; }
 
 	virtual ITextureFormat* GetTextureFormat()
 	{
 		if (!Singleton)
 		{
-			FString DLLPath;
-#if PLATFORM_WINDOWS
-	#if PLATFORM_64BITS
-			DLLPath = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/Intel/ISPCTexComp/Win64-Release/ispc_texcomp.dll");
-	#else	//32-bit platform
-			DLLPath = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/Intel/ISPCTexComp/Win32-Release/ispc_texcomp.dll");
-	#endif
-#elif PLATFORM_MAC
-			DLLPath = TEXT("libispc_texcomp.dylib");
-#elif PLATFORM_LINUX
-			DLLPath = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/Intel/ISPCTexComp/Linux64-Release/libispc_texcomp.so");
-#endif
-
-			if (DLLPath.Len() > 0)
-			{
-				mDllHandle = FPlatformProcess::GetDllHandle(*DLLPath);
-				UE_CLOG(mDllHandle == nullptr, LogTextureFormatIntelISPCTexComp, Warning, TEXT("Unable to load %s"), *DLLPath);
-			}
-			else
-			{
-				UE_LOG(LogTextureFormatIntelISPCTexComp, Warning, TEXT("Platform does not have an ispc_texcomp DLL/library"));
-			}
-
 			Singleton = new FTextureFormatIntelISPCTexComp();
 		}
 		return Singleton;
 	}
 
-	void* mDllHandle;
+	static inline UE::DerivedData::TBuildFunctionFactory<FIntelISPCTexCompTextureBuildFunction> BuildFunctionFactory;
 };
 
 IMPLEMENT_MODULE(FTextureFormatIntelISPCTexCompModule, TextureFormatIntelISPCTexComp);

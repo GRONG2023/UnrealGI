@@ -8,11 +8,14 @@
 #include "Materials/MaterialLayersFunctions.h"
 #include "DEditorMaterialLayersParameterValue.generated.h"
 
-UCLASS(hidecategories = Object, collapsecategories)
-class UNREALED_API UDEditorMaterialLayersParameterValue : public UDEditorParameterValue
+// FMaterialLayersFunctions are no longer treated as material parameters, so this should maybe be refactored at some point
+UCLASS(hidecategories = Object, collapsecategories, MinimalAPI)
+class UDEditorMaterialLayersParameterValue : public UDEditorParameterValue
 {
 	GENERATED_UCLASS_BODY()
 
 	UPROPERTY(EditAnywhere, Category=DEditorMaterialLayersParameterValue)
 	struct FMaterialLayersFunctions ParameterValue;
+
+	virtual FName GetDefaultGroupName() const override { return TEXT("Material Layers Parameter Values"); }
 };

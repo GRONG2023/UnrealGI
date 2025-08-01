@@ -6,7 +6,7 @@
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Factories/FbxSceneImportOptions.h"
 #include "Factories/FbxSceneImportOptionsSkeletalMesh.h"
 #include "Factories/FbxSceneImportOptionsStaticMesh.h"
@@ -112,7 +112,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSceneTab(const FSpawnTabArgs& A
 				.AutoHeight()
 				[
 					SNew(SUniformGridPanel)
-					.SlotPadding(2)
+					.SlotPadding(2.0f)
 					+ SUniformGridPanel::Slot(0, 0)
 					[
 						SNew(SHorizontalBox)
@@ -318,7 +318,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSkeletalMeshReimportTab(const F
 					.AutoHeight()
 					[
 						SNew(SUniformGridPanel)
-						.SlotPadding(2)
+						.SlotPadding(2.0f)
 						+ SUniformGridPanel::Slot(0, 0)
 						.VAlign(VAlign_Center)
 						.HAlign(HAlign_Left)
@@ -329,7 +329,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSkeletalMeshReimportTab(const F
 						+ SUniformGridPanel::Slot(1, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -353,7 +353,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSkeletalMeshReimportTab(const F
 						+ SUniformGridPanel::Slot(2, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -377,7 +377,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSkeletalMeshReimportTab(const F
 						+ SUniformGridPanel::Slot(3, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -401,7 +401,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSkeletalMeshReimportTab(const F
 						+ SUniformGridPanel::Slot(4, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -700,7 +700,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnMaterialTab(const FSpawnTabArgs
 				.VAlign(VAlign_Center)
 				[
 					SNew(SBorder)
-					.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+					.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 					[
 						SNew(SEditableText)
 						.SelectAllTextWhenFocused(true)
@@ -791,7 +791,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnSceneReimportTab(const FSpawnTa
 				.AutoHeight()
 				[
 					SNew(SUniformGridPanel)
-					.SlotPadding(2)
+					.SlotPadding(2.0f)
 					+ SUniformGridPanel::Slot(0, 0)
 					[
 						SNew(SHorizontalBox)
@@ -948,7 +948,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnStaticMeshReimportTab(const FSp
 					.AutoHeight()
 					[
 						SNew(SUniformGridPanel)
-						.SlotPadding(2)
+						.SlotPadding(2.0f)
 						+ SUniformGridPanel::Slot(0, 0)
 						.VAlign(VAlign_Center)
 						.HAlign(HAlign_Left)
@@ -959,7 +959,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnStaticMeshReimportTab(const FSp
 						+ SUniformGridPanel::Slot(1, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -983,7 +983,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnStaticMeshReimportTab(const FSp
 						+ SUniformGridPanel::Slot(2, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -1007,7 +1007,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnStaticMeshReimportTab(const FSp
 						+ SUniformGridPanel::Slot(3, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -1031,7 +1031,7 @@ TSharedRef<SDockTab> SFbxSceneOptionWindow::SpawnStaticMeshReimportTab(const FSp
 						+ SUniformGridPanel::Slot(4, 0)
 						[
 							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+							.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 							[
 								SNew(SHorizontalBox)
 								+ SHorizontalBox::Slot()
@@ -1239,7 +1239,7 @@ void SFbxSceneOptionWindow::Construct(const FArguments& InArgs)
 
 	check(OwnerWindow.IsValid());
 
-	MaterialBasePath = GlobalImportSettings->MaterialBasePath == NAME_None ? TEXT("") : GlobalImportSettings->MaterialBasePath.ToString();
+	MaterialBasePath = (GlobalImportSettings->MaterialBasePath == NAME_None) ? TEXT("") : GlobalImportSettings->MaterialBasePath.ToString();
 
 	InitAllTabs();
 
@@ -1249,23 +1249,23 @@ void SFbxSceneOptionWindow::Construct(const FArguments& InArgs)
 	[
 		SNew(SBorder)
 		.Padding(FMargin(10.0f, 3.0f))
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.DarkGroupBorder"))
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.DarkGroupBorder"))
 		[
 			SNew(SVerticalBox)
 			+SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SNew(SBorder)
 				.Padding(FMargin(3))
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SHorizontalBox)
 					+SHorizontalBox::Slot()
 					.AutoWidth()
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("CurveEd.LabelFont"))
+						.Font(FAppStyle::GetFontStyle("CurveEd.LabelFont"))
 						.Text(LOCTEXT("FbxSceneImport_CurrentPath", "Import Asset Path: "))
 					]
 					+SHorizontalBox::Slot()
@@ -1274,27 +1274,27 @@ void SFbxSceneOptionWindow::Construct(const FArguments& InArgs)
 					.VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("CurveEd.InfoFont"))
+						.Font(FAppStyle::GetFontStyle("CurveEd.InfoFont"))
 						.Text(FText::FromString(FullPath))
 					]
 				]
 			]
 			+ SVerticalBox::Slot()
 			.FillHeight(1.0f)
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SpawnDockTab().ToSharedRef()
 			]
 			+ SVerticalBox::Slot()
 			.AutoHeight()
 			.HAlign(HAlign_Right)
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SNew(SUniformGridPanel)
-				.SlotPadding(2)
+				.SlotPadding(2.0f)
 				+ SUniformGridPanel::Slot(0, 0)
 				[
-					IDocumentation::Get()->CreateAnchor(FString("Engine/Content/FBX/ImportOptions"))
+					IDocumentation::Get()->CreateAnchor(FString("fbx-import-options-reference-in-unreal-engine"))
 				]
 				+ SUniformGridPanel::Slot(1, 0)
 				[
@@ -1343,8 +1343,6 @@ void SFbxSceneOptionWindow::CloseFbxSceneOption()
 		FbxSceneImportTabManager->UnregisterAllTabSpawners();
 		FbxSceneImportTabManager->CloseAllAreas();
 	}
-	FbxSceneImportTabManager = nullptr;
-	Layout = nullptr;
 
 	//Clear scene tab resource
 	SceneTabTreeview = nullptr;
@@ -1383,6 +1381,9 @@ void SFbxSceneOptionWindow::CloseFbxSceneOption()
 		OwnerWindow.Pin()->RequestDestroyWindow();
 	}
 	OwnerWindow = nullptr;
+	//The tab manager must be deleted only after we destroy the windows, because it can be access by a WeakPtr and it must be valid
+	FbxSceneImportTabManager = nullptr;
+	Layout = nullptr;
 }
 
 bool SFbxSceneOptionWindow::CanImport()  const
@@ -1392,13 +1393,15 @@ bool SFbxSceneOptionWindow::CanImport()  const
 
 void SFbxSceneOptionWindow::CopyFbxOptionsToFbxOptions(UnFbx::FBXImportOptions *SourceOptions, UnFbx::FBXImportOptions *DestinationOptions)
 {
-	FMemory::BigBlockMemcpy(DestinationOptions, SourceOptions, sizeof(UnFbx::FBXImportOptions));
+	if (ensure(SourceOptions && DestinationOptions))
+	{
+		*DestinationOptions = *SourceOptions;
+	}
 }
 
 void SFbxSceneOptionWindow::CopyStaticMeshOptionsToFbxOptions(UnFbx::FBXImportOptions *ImportSettings, UFbxSceneImportOptionsStaticMesh* StaticMeshOptions)
 {
 	ImportSettings->bAutoGenerateCollision = StaticMeshOptions->bAutoGenerateCollision;
-	ImportSettings->bBuildAdjacencyBuffer = StaticMeshOptions->bBuildAdjacencyBuffer;
 	ImportSettings->bBuildReversedIndexBuffer = StaticMeshOptions->bBuildReversedIndexBuffer;
 	ImportSettings->bGenerateLightmapUVs = StaticMeshOptions->bGenerateLightmapUVs;
 	ImportSettings->bOneConvexHullPerUCX = StaticMeshOptions->bOneConvexHullPerUCX;
@@ -1445,7 +1448,6 @@ void SFbxSceneOptionWindow::CopyStaticMeshOptionsToFbxOptions(UnFbx::FBXImportOp
 void SFbxSceneOptionWindow::CopyFbxOptionsToStaticMeshOptions(UnFbx::FBXImportOptions *ImportSettings, UFbxSceneImportOptionsStaticMesh* StaticMeshOptions)
 {
 	StaticMeshOptions->bAutoGenerateCollision = ImportSettings->bAutoGenerateCollision;
-	StaticMeshOptions->bBuildAdjacencyBuffer = ImportSettings->bBuildAdjacencyBuffer;
 	StaticMeshOptions->bBuildReversedIndexBuffer = ImportSettings->bBuildReversedIndexBuffer;
 	StaticMeshOptions->bGenerateLightmapUVs = ImportSettings->bGenerateLightmapUVs;
 	StaticMeshOptions->bOneConvexHullPerUCX = ImportSettings->bOneConvexHullPerUCX;
@@ -1494,11 +1496,13 @@ void SFbxSceneOptionWindow::CopySkeletalMeshOptionsToFbxOptions(UnFbx::FBXImport
 	ImportSettings->bCreatePhysicsAsset = SkeletalMeshOptions->bCreatePhysicsAsset;
 	ImportSettings->bImportMeshesInBoneHierarchy = SkeletalMeshOptions->bImportMeshesInBoneHierarchy;
 	ImportSettings->bImportMorph = SkeletalMeshOptions->bImportMorphTargets;
+	ImportSettings->bImportVertexAttributes = SkeletalMeshOptions->bImportVertexAttributes;
 	ImportSettings->OverlappingThresholds.ThresholdPosition = SkeletalMeshOptions->ThresholdPosition;
 	ImportSettings->OverlappingThresholds.ThresholdTangentNormal = SkeletalMeshOptions->ThresholdTangentNormal;
 	ImportSettings->OverlappingThresholds.ThresholdUV = SkeletalMeshOptions->ThresholdUV;
 	ImportSettings->OverlappingThresholds.MorphThresholdPosition = SkeletalMeshOptions->MorphThresholdPosition;
 	ImportSettings->bPreserveSmoothingGroups = SkeletalMeshOptions->bPreserveSmoothingGroups;
+	ImportSettings->bKeepSectionsSeparate = SkeletalMeshOptions->bKeepSectionsSeparate;
 	ImportSettings->bUpdateSkeletonReferencePose = SkeletalMeshOptions->bUpdateSkeletonReferencePose;
 	ImportSettings->bUseT0AsRefPose = SkeletalMeshOptions->bUseT0AsRefPose;
 
@@ -1511,6 +1515,7 @@ void SFbxSceneOptionWindow::CopySkeletalMeshOptionsToFbxOptions(UnFbx::FBXImport
 	ImportSettings->bPreserveLocalTransform = SkeletalMeshOptions->bPreserveLocalTransform;
 	ImportSettings->bResample = !SkeletalMeshOptions->bUseDefaultSampleRate;
 	ImportSettings->ResampleRate = SkeletalMeshOptions->CustomSampleRate;
+	ImportSettings->bSnapToClosestFrameBoundary = SkeletalMeshOptions->bSnapToClosestFrameBoundary;	
 	ImportSettings->AnimationRange.X = SkeletalMeshOptions->FrameImportRange.Min;
 	ImportSettings->AnimationRange.Y = SkeletalMeshOptions->FrameImportRange.Max;
 }
@@ -1520,11 +1525,13 @@ void SFbxSceneOptionWindow::CopyFbxOptionsToSkeletalMeshOptions(UnFbx::FBXImport
 	SkeletalMeshOptions->bCreatePhysicsAsset = ImportSettings->bCreatePhysicsAsset;
 	SkeletalMeshOptions->bImportMeshesInBoneHierarchy = ImportSettings->bImportMeshesInBoneHierarchy;
 	SkeletalMeshOptions->bImportMorphTargets = ImportSettings->bImportMorph;
+	SkeletalMeshOptions->bImportVertexAttributes = ImportSettings->bImportVertexAttributes;
 	SkeletalMeshOptions->ThresholdPosition = ImportSettings->OverlappingThresholds.ThresholdPosition;
 	SkeletalMeshOptions->ThresholdTangentNormal = ImportSettings->OverlappingThresholds.ThresholdTangentNormal;
 	SkeletalMeshOptions->ThresholdUV = ImportSettings->OverlappingThresholds.ThresholdUV;
 	SkeletalMeshOptions->MorphThresholdPosition = ImportSettings->OverlappingThresholds.MorphThresholdPosition;
 	SkeletalMeshOptions->bPreserveSmoothingGroups = ImportSettings->bPreserveSmoothingGroups;
+	SkeletalMeshOptions->bKeepSectionsSeparate = ImportSettings->bKeepSectionsSeparate;
 	SkeletalMeshOptions->bUpdateSkeletonReferencePose = ImportSettings->bUpdateSkeletonReferencePose;
 	SkeletalMeshOptions->bUseT0AsRefPose = ImportSettings->bUseT0AsRefPose;
 

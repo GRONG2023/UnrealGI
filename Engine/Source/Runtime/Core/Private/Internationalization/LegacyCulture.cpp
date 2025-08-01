@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Internationalization/LegacyCulture.h"
+#include "Internationalization/InternationalizationUtilities.h"
 #include "Containers/ArrayBuilder.h"
 #include "Misc/ScopeLock.h"
 
@@ -62,8 +63,12 @@ FString FLegacyCultureImplementation::GetName() const
 	return Name;
 }
 
-FString FLegacyCultureImplementation::GetCanonicalName(const FString& Name)
+FString FLegacyCultureImplementation::GetCanonicalName(const FString& Name, FInternationalization& I18N)
 {
+	if (!Name.IsEmpty())
+	{
+		return InternationalizationUtilities::GetCanonicalCultureName(Name, FString(), I18N);
+	}
 	return Name;
 }
 
@@ -76,7 +81,7 @@ FString FLegacyCultureImplementation::GetNativeLanguage() const
 {
 	int32 LastBracket = INDEX_NONE;
 	int32 FirstBracket = INDEX_NONE;
-	if ( NativeName.FindLastChar( ')', LastBracket ) && NativeName.FindChar( '(', FirstBracket ) && LastBracket != FirstBracket )
+	if ( NativeName.FindLastChar( TEXT(')'), LastBracket ) && NativeName.FindChar( TEXT('('), FirstBracket ) && LastBracket != FirstBracket )
 	{
 		return NativeName.Left( FirstBracket-1 );
 	}
@@ -87,7 +92,7 @@ FString FLegacyCultureImplementation::GetNativeRegion() const
 {
 	int32 LastBracket = INDEX_NONE;
 	int32 FirstBracket = INDEX_NONE;
-	if ( NativeName.FindLastChar( ')', LastBracket ) && NativeName.FindChar( '(', FirstBracket ) && LastBracket != FirstBracket )
+	if ( NativeName.FindLastChar( TEXT(')'), LastBracket ) && NativeName.FindChar( TEXT('('), FirstBracket ) && LastBracket != FirstBracket )
 	{
 		return NativeName.Mid( FirstBracket+1, LastBracket-FirstBracket-1 );
 	}
@@ -221,7 +226,7 @@ ETextPluralForm FLegacyCultureImplementation::GetPluralForm(int32 Val, const ETe
 
 ETextPluralForm FLegacyCultureImplementation::GetPluralForm(double Val, const ETextPluralType PluralType) const
 {
-	checkf(!FMath::IsNegativeDouble(Val), TEXT("GetPluralFormImpl requires a positive value"));
+	checkf(!FMath::IsNegativeOrNegativeZero(Val), TEXT("GetPluralFormImpl requires a positive value"));
 	return GetDefaultPluralForm((int64)Val, PluralType);
 }
 

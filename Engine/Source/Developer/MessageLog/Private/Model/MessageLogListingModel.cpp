@@ -22,22 +22,17 @@ const TSharedPtr< FTokenizedMessage >  FMessageLogListingModel::GetMessageAtInde
 	return FoundMessage;
 }
 
-FText FMessageLogListingModel::GetAllMessagesAsText( const uint32 PageIndex ) const
+FString FMessageLogListingModel::GetAllMessagesAsString( const uint32 PageIndex ) const
 {
-	FText CompiledText;
-
 	// Go through all the messages and add it to the compiled one.
 	FPage* Page = PageAtIndex(PageIndex);
+	TArray<FString> AllLines;
 	for( int32 MessageID = 0; MessageID < Page->Messages.Num(); MessageID++ )
 	{
-		const TSharedPtr< FTokenizedMessage > Message = Page->Messages[ MessageID ];
-		FFormatNamedArguments Args;
-		Args.Add( TEXT("PreviousMessage"), CompiledText );
-		Args.Add( TEXT("NewMessage"), Message.Get()->ToText() );
-		CompiledText = FText::Format( LOCTEXT("AggregateMessagesFormatter", "{PreviousMessage}{NewMessage}\n"), Args );
+		AllLines.Add(Page->Messages[ MessageID ]->ToText().ToString());
 	}
 
-	return CompiledText;
+	return FString::Join(AllLines, TEXT("\n"));
 }
 
 void FMessageLogListingModel::AddMessageInternal( const TSharedRef<FTokenizedMessage>& NewMessage, bool bMirrorToOutputLog, bool bDiscardDuplicates )
@@ -105,8 +100,6 @@ void FMessageLogListingModel::ClearMessages()
 
 void FMessageLogListingModel::NewPage( const FText& InTitle, uint32 InMaxPages )
 {
-	FMsg::Logf(__FILE__, __LINE__, *LogName.ToString(), ELogVerbosity::Log, TEXT("New page: %s"), *InTitle.ToString());
-
 	// store the name of the page we will add if a new message is pushed
 	PendingPageName = InTitle;
 	MaxPages = InMaxPages;
@@ -116,6 +109,49 @@ void FMessageLogListingModel::NewPage( const FText& InTitle, uint32 InMaxPages )
 	{
 		CreateNewPageIfRequired();
 	}
+}
+
+bool FMessageLogListingModel::SetCurrentPage(const FText& InTitle, uint32 InMaxPages )
+{
+	if (CurrentPage().Title.CompareTo(InTitle) == 0)
+	{
+		return false;
+	}
+	
+	for (TDoubleLinkedList<FPage>::TIterator it = begin(Pages); it != end(Pages); ++it)
+	{
+		if (it.GetNode()->GetValue().Title.CompareTo(InTitle) == 0)
+		{
+			TDoubleLinkedList<FPage>::TDoubleLinkedListNode* SelectedNode = it.GetNode();
+			Pages.RemoveNode(SelectedNode, false);
+			Pages.AddHead(SelectedNode);
+
+			// invalidate cache as all indices will change
+			CachedPage = nullptr;
+			return true;
+		}
+	}
+
+	// If the page does not exist yet, create a new one
+	NewPage(InTitle, InMaxPages);
+
+	return true;
+}
+
+bool FMessageLogListingModel::SetCurrentPage( const uint32 InOldPageIndex  )
+{
+	if (InOldPageIndex == 0)
+	{
+		return false;
+	}
+
+	if (InOldPageIndex >= NumPages())
+	{
+		return false;
+	}
+
+	FPage* PageToSwitch = PageAtIndex(InOldPageIndex);
+	return SetCurrentPage(PageToSwitch->Title, MaxPages);
 }
 
 uint32 FMessageLogListingModel::NumPages() const

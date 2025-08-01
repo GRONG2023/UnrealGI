@@ -23,7 +23,10 @@ FChaosMarshallingManager::FChaosMarshallingManager()
 	PreparePullData();
 }
 
-FChaosMarshallingManager::~FChaosMarshallingManager() = default;
+FChaosMarshallingManager::~FChaosMarshallingManager()
+{
+	SetHistoryLength_Internal(0);	//ensure anything in pending history is cleared
+}
 
 void FChaosMarshallingManager::FinalizePullData_Internal(int32 LastExternalTimestampConsumed, FReal SimStartTime, FReal DeltaTime)
 {
@@ -54,7 +57,7 @@ void FChaosMarshallingManager::PrepareExternalQueue_External()
 	ProducerData->StartTime = ExternalTime_External;
 }
 
-void FChaosMarshallingManager::Step_External(FReal ExternalDT, const int32 NumSteps)
+void FChaosMarshallingManager::Step_External(FReal ExternalDT, const int32 NumSteps, bool bInSolverSubstepped)
 {
 	ensure(NumSteps > 0);
 
@@ -80,6 +83,7 @@ void FChaosMarshallingManager::Step_External(FReal ExternalDT, const int32 NumSt
 		ProducerData->InternalStep = InternalStep_External++;
 		ProducerData->IntervalStep = Step;
 		ProducerData->IntervalNumSteps = NumSteps;
+		ProducerData->bSolverSubstepped = bInSolverSubstepped;
 
 		ExternalQueue.Insert(ProducerData, 0);
 
@@ -106,7 +110,7 @@ FPushPhysicsData* FChaosMarshallingManager::StepInternalTime_External()
 	{
 		if(ExternalQueue.Num())
 		{
-			return ExternalQueue.Pop(/*bAllowShrinking=*/false);
+			return ExternalQueue.Pop(EAllowShrinking::No);
 		}
 	}
 	else
@@ -180,15 +184,21 @@ void FChaosMarshallingManager::FreeDataToHistory_Internal(FPushPhysicsData* Push
 
 void FChaosMarshallingManager::SetHistoryLength_Internal(int32 InHistoryLength)
 {
+	if (!ensure(InHistoryLength >= 0))
+	{
+		InHistoryLength = 0;
+	}
+	
 	HistoryLength = InHistoryLength;
 	//make sure late entries are pruned
 	if(HistoryQueue_Internal.Num() > HistoryLength)
 	{
-		for(int32 Idx = HistoryLength; Idx < HistoryQueue_Internal.Num(); ++Idx)
+		//need to go from oldest to latest (back to front) since we may delete callback at latest, but still have inputs for it to free from earlier frames
+		for(int32 Idx = HistoryQueue_Internal.Num() - 1; Idx >= HistoryLength; --Idx)
 		{
 			FreeData_Internal(HistoryQueue_Internal[Idx]);
 		}
-		HistoryQueue_Internal.SetNum(InHistoryLength, /*bAllowShrinking=*/false);
+		HistoryQueue_Internal.SetNum(InHistoryLength, EAllowShrinking::No);
 	}
 }
 
@@ -204,41 +214,41 @@ TArray<FPushPhysicsData*> FChaosMarshallingManager::StealHistory_Internal(int32 
 	{
 		History.Add(HistoryQueue_Internal[Idx]);
 	}
-
-	for(int32 Idx = UseNumFrames; Idx < HistoryQueue_Internal.Num(); ++Idx)
-	{
-		FreeData_Internal(HistoryQueue_Internal[Idx]);
-	}
-
-	HistoryQueue_Internal.Reset();
+	HistoryQueue_Internal.RemoveAt(0, UseNumFrames);
 	return History;
 }
 
 void FPushPhysicsData::CopySubstepData(const FPushPhysicsData& FirstStepData)
 {
 	const FDirtyPropertiesManager& FirstManager = FirstStepData.DirtyPropertiesManager;
-	DirtyPropertiesManager.SetNumParticles(FirstStepData.DirtyProxiesDataBuffer.NumDirtyProxies());
+	DirtyPropertiesManager.PrepareBuckets(FirstStepData.DirtyProxiesDataBuffer.GetDirtyProxyBucketInfo());
 	FirstStepData.DirtyProxiesDataBuffer.ForEachProxy([this, &FirstManager](int32 FirstDataIdx, const FDirtyProxy& Dirty)
 	{
-		if (Dirty.ParticleData.GetParticleBufferType() == EParticleType::Rigid)
+		//todo: use bucket type directly instead of iterating over each proxy
+		if (Dirty.Proxy->GetType() == EPhysicsProxyType::SingleParticleProxy && Dirty.PropertyData.GetParticleBufferType() == EParticleType::Rigid)
 		{
-			if (const FParticleDynamics* DynamicsData = Dirty.ParticleData.FindDynamics(FirstManager, FirstDataIdx))
+			if (const FParticleDynamics* DynamicsData = Dirty.PropertyData.FindDynamics(FirstManager, FirstDataIdx))
 			{
-				if (DynamicsData->F() != FVec3(0) || DynamicsData->Torque() != FVec3(0))	//don't bother interpolating 0. This is important because the input dirtys rewind data
+				if (DynamicsData->Acceleration() != FVec3(0) || DynamicsData->AngularAcceleration() != FVec3(0))	//don't bother interpolating 0. This is important because the input dirtys rewind data
 				{
 					DirtyProxiesDataBuffer.Add(Dirty.Proxy);
-					FParticleDynamics& SubsteppedDynamics = DirtyPropertiesManager.GetParticlePool<FParticleDynamics, EParticleProperty::Dynamics>().GetElement(Dirty.Proxy->GetDirtyIdx());
+					FParticleDynamics& SubsteppedDynamics = DirtyPropertiesManager.GetChaosPropertyPool<FParticleDynamics, EChaosProperty::Dynamics>().GetElement(Dirty.Proxy->GetDirtyIdx());
 					SubsteppedDynamics = *DynamicsData;
 					//we don't want to sub-step impulses so those are cleared in the sub-step
-					SubsteppedDynamics.SetAngularImpulse(FVec3(0));
-					SubsteppedDynamics.SetLinearImpulse(FVec3(0));
-					FDirtyProxy& NewDirtyProxy = DirtyProxiesDataBuffer.GetDirtyProxyAt(Dirty.Proxy->GetDirtyIdx());
-					NewDirtyProxy.ParticleData.DirtyFlag(EParticleFlags::Dynamics);
-					NewDirtyProxy.ParticleData.SetParticleBufferType(EParticleType::Rigid);
+					SubsteppedDynamics.SetAngularImpulseVelocity(FVec3(0));
+					SubsteppedDynamics.SetLinearImpulseVelocity(FVec3(0));
+					FDirtyProxy& NewDirtyProxy = DirtyProxiesDataBuffer.GetDirtyProxyAt(Dirty.Proxy->GetType(), Dirty.Proxy->GetDirtyIdx());
+					NewDirtyProxy.PropertyData.DirtyFlag(EChaosPropertyFlags::Dynamics);
+					NewDirtyProxy.PropertyData.SetParticleBufferType(EParticleType::Rigid);
 				}
 			}
 
 			Dirty.Proxy->ResetDirtyIdx();	//dirty idx is only used temporarily
+		}
+		else if (Dirty.Proxy->GetType() == EPhysicsProxyType::ClusterUnionProxy)
+		{
+			DirtyProxiesDataBuffer.Add(Dirty.Proxy);
+			Dirty.Proxy->ResetDirtyIdx();
 		}
 	});
 

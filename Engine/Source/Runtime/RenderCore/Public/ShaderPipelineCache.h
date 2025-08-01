@@ -14,14 +14,23 @@
 #include "TickableObjectRenderThread.h"
 #include "PipelineFileCache.h"
 #include "Delegates/DelegateCombinations.h"
+#include "ShaderStableKeyDebugInfoReader.h"
 
+class FBlendStateInitializerRHI;
+class FRHIBlendState;
+class FRHICommandListImmediate;
+class FRHIDepthStencilState;
+class FRHIRasterizerState;
+class FSHAHash;
 class FShaderPipelineCacheArchive;
+struct FDepthStencilStateInitializerRHI;
+struct FRasterizerStateInitializerRHI;
 
 /**
  * FShaderPipelineCache:
  * The FShaderPipelineCache provides the new Pipeline State Object (PSO) logging, serialisation & precompilation mechanism that replaces FShaderCache.
  * Caching Pipeline State Objects and serialising the initialisers to disk allows for precompilation of these states the next time the game is run, which reduces hitching.
- * To achieve this FShaderPipelineCache relies upon FShaderCodeLibrary & "Share Material Shader Code" and the RHI-level backend FPipelineFileCache.
+ * To achieve this FShaderPipelineCache relies upon FShaderCodeLibrary & "Share Material Shader Code" and the RHI-level backend FPipelineFileCacheManager.
  *
  * Basic Runtime Usage:
  * - Enable the cache with r.ShaderPipelineCache.Enabled = 1, which allows the pipeline cache to load existing data from disk and precompile it.
@@ -66,25 +75,21 @@ class FShaderPipelineCacheArchive;
  * - FShaderCodeLibrary must be enabled via Project Settings > Packaging > "Share Material Shader Code".
  * - Enabling "Native Shader Libraries" is optional, but strongly preferred for Metal.
  */
-class RENDERCORE_API FShaderPipelineCache : public FTickableObjectRenderThread
+class FShaderPipelineCache : public FTickableObjectRenderThread
 {
-	struct CompileJob
-	{
-		FPipelineCacheFileFormatPSO PSO;
-		FShaderPipelineCacheArchive* ReadRequests;
-	};
-
+	// the FShaderPipelineCacheTask class represents a pipeline precompile of a single PSO file cache.
+	friend class FShaderPipelineCacheTask;
 public:
 	/**
 	 * Initializes the shader pipeline cache for the desired platform, called by the engine.
 	 * The shader platform is used only to load the initial pipeline cache and can be changed by closing & reopening the cache if necessary.
 	 */
-	static void Initialize(EShaderPlatform Platform);
+	static RENDERCORE_API void Initialize(EShaderPlatform Platform);
 	/** Terminates the shader pipeline cache, called by the engine. */
-	static void Shutdown();
+	static RENDERCORE_API void Shutdown();
 
 	/** Pauses precompilation. */
-	static void PauseBatching();
+	static RENDERCORE_API void PauseBatching();
 	
 	enum class BatchMode
 	{
@@ -94,65 +99,71 @@ public:
 	};
 	
 	/** Sets the precompilation batching mode. */
-	static void SetBatchMode(BatchMode Mode);
+	static RENDERCORE_API void SetBatchMode(BatchMode Mode);
 	
 	/** Resumes precompilation batching. */
-	static void ResumeBatching();
+	static RENDERCORE_API void ResumeBatching();
 	
-	/** Returns the number of pipelines waiting for precompilation. */
-	static uint32 NumPrecompilesRemaining();
+	/** true if pipeline cache(s) are precompiling. */
+	static RENDERCORE_API bool IsPrecompiling();
+
+	/** Returns the number of pipelines waiting for precompilation of the current PSOFC task. 
+		if there are multiple PSOFCs pending this will return a minimum value of 1. It may increase as subsequent caches are processed.*/
+	static RENDERCORE_API uint32 NumPrecompilesRemaining();
     
-    /** Returns the number of pipelines actively being precompiled this frame. */
-    static uint32 NumPrecompilesActive();
-
 	/** Opens the shader pipeline cache file with either the LastOpened setting if available, or the project name otherwise */
-	static bool OpenPipelineFileCache(EShaderPlatform Platform);
+	static RENDERCORE_API bool OpenPipelineFileCache(EShaderPlatform Platform);
 
-	/** Opens the shader pipeline cache file with the given name and shader platform. */
-	static bool OpenPipelineFileCache(FString const& Name, EShaderPlatform Platform);
+ 	/** Opens the user pipeline cache file with either the LastOpened setting if available, or the project name otherwise */
+ 	static RENDERCORE_API bool OpenUserPipelineFileCache(EShaderPlatform Platform);
 	
 	/** Saves the current shader pipeline cache to disk using one of the defined save modes, Fast uses an incremental approach whereas Slow will consolidate all data into the file. */
-	static bool SavePipelineFileCache(FPipelineFileCache::SaveMode Mode);
+	static RENDERCORE_API bool SavePipelineFileCache(FPipelineFileCacheManager::SaveMode Mode);
 	
 	/** Closes the existing pipeline cache, allowing it to be reopened with a different file and/or shader platform. Will implicitly invoke a Fast Save. */
-	static void ClosePipelineFileCache();
+	static RENDERCORE_API void CloseUserPipelineFileCache();
 
-	static int32 GetGameVersionForPSOFileCache();
+	static RENDERCORE_API int32 GetGameVersionForPSOFileCache();
 	
 	/**
 	 * Set the current PSO Game Usage Mask and comparsion function .  Returns true if this mask is different from the old mask or false if not or the cache system is disabled or if the mask feature is disabled
-	 * Any new PSO's found will be logged with this value or existing PSO should have their masks updated.  See FPipelineFileCache for more details.
+	 * Any new PSO's found will be logged with this value or existing PSO should have their masks updated.  See FPipelineFileCacheManager for more details.
 	 */
-	static bool SetGameUsageMaskWithComparison(uint64 Mask, FPSOMaskComparisonFn InComparisonFnPtr);
+	static RENDERCORE_API bool SetGameUsageMaskWithComparison(uint64 Mask, FPSOMaskComparisonFn InComparisonFnPtr);
 
-    static bool IsBatchingPaused();
+    static RENDERCORE_API bool IsBatchingPaused();
     
-	FShaderPipelineCache(EShaderPlatform Platform);
-	virtual ~FShaderPipelineCache();
+	RENDERCORE_API FShaderPipelineCache(EShaderPlatform Platform);
+	RENDERCORE_API virtual ~FShaderPipelineCache();
 
-	bool IsTickable() const;
+	RENDERCORE_API bool IsTickable() const;
+
+	RENDERCORE_API void Tick( float DeltaTime );
+
+	RENDERCORE_API bool NeedsRenderingResumedForRenderingThreadTick() const;
 	
-	void Tick( float DeltaTime );
-	
-	bool NeedsRenderingResumedForRenderingThreadTick() const;
-	
-	TStatId GetStatId() const;
+	RENDERCORE_API TStatId GetStatId() const;
 	
 	enum ELibraryState
 	{
 		Opened,
+		OpenedComponent,
 		Closed
 	};
 	
     /** Called by FShaderCodeLibrary to notify us that the shader code library state changed and shader availability will need to be re-evaluated */
-    static void ShaderLibraryStateChanged(ELibraryState State, EShaderPlatform Platform, FString const& Name);
+    static RENDERCORE_API void ShaderLibraryStateChanged(ELibraryState State, EShaderPlatform Platform, FString const& Name, int32 ComponentID);
 
 	/** Allows handlers of FShaderCacheOpenedDelegate to send state to begin and complete pre-compilation delegates */
 	class FShaderCachePrecompileContext
 	{
-		bool bSlowPrecompileTask;
+		bool bSlowPrecompileTask = false;
+		FString CacheName;
 	public:
-		FShaderCachePrecompileContext() : bSlowPrecompileTask(false) {}
+		FShaderCachePrecompileContext() = default;
+		FShaderCachePrecompileContext(const FString& CacheNameIn) : CacheName(CacheNameIn) {}
+
+		const FString& GetCacheName() const { return CacheName; }
 		void SetPrecompilationIsSlowTask() { bSlowPrecompileTask = true; }
 		bool IsPrecompilationSlowTask() const { return bSlowPrecompileTask; }
 	};
@@ -208,71 +219,70 @@ public:
     static FShaderPrecompilationCompleteDelegate& GetPrecompilationCompleteDelegate() { return OnPrecompilationComplete; }
 
 private:
-	bool Open(FString const& Name, EShaderPlatform Platform);
-	bool Save(FPipelineFileCache::SaveMode Mode);
-	void Close(bool bShuttingDown = false);
+	static inline FShaderPipelineCache* Get() { return ShaderPipelineCache;	}
 
-	bool Precompile(FRHICommandListImmediate& RHICmdList, EShaderPlatform Platform, FPipelineCacheFileFormatPSO const& PSO);
-	void PreparePipelineBatch(TDoubleLinkedList<FPipelineCacheFileFormatPSORead*>& PipelineBatch);
-	bool ReadyForPrecompile();
-	void PrecompilePipelineBatch();
-	bool ReadyForNextBatch() const;
-	bool ReadyForAutoSave() const;
-	void PollShutdownItems();
-	void Flush(bool bClearCompiled = true);
-    
-    void OnShaderLibraryStateChanged(ELibraryState State, EShaderPlatform Platform, FString const& Name);
+	RENDERCORE_API bool OpenPipelineFileCacheInternal(bool bUserCache, const FString& PSOCacheKey, const FString& CacheName, EShaderPlatform Platform);
 
-	FRHIBlendState* GetOrCreateBlendState(const FBlendStateInitializerRHI& Initializer);
-	FRHIRasterizerState* GetOrCreateRasterizerState(const FRasterizerStateInitializerRHI& Initializer);
-	FRHIDepthStencilState* GetOrCreateDepthStencilState(const FDepthStencilStateInitializerRHI& Initializer);
+	RENDERCORE_API void BeginNextPrecompileCacheTask();
+	RENDERCORE_API void BeginNextPrecompileCacheTaskInternal();
+	RENDERCORE_API bool ReadyForAutoSave() const;
+
+	RENDERCORE_API void ClearPendingPrecompileTaskQueue();
+	RENDERCORE_API void EnqueuePendingPrecompileTask(const FString& PSOCacheKey);
+	RENDERCORE_API int ApplyNewUsageMaskToAllTasks(uint64 Mask);
+
+	RENDERCORE_API FRHIBlendState* GetOrCreateBlendState(const FBlendStateInitializerRHI& Initializer);
+	RENDERCORE_API FRHIRasterizerState* GetOrCreateRasterizerState(const FRasterizerStateInitializerRHI& Initializer);
+	RENDERCORE_API FRHIDepthStencilState* GetOrCreateDepthStencilState(const FDepthStencilStateInitializerRHI& Initializer);
 	
 private:
-	static FShaderPipelineCache* ShaderPipelineCache;
-	TArray<CompileJob> ReadTasks;
-	TArray<CompileJob> CompileTasks;
-	TArray<FPipelineCachePSOHeader> OrderedCompileTasks;
-	TDoubleLinkedList<FPipelineCacheFileFormatPSORead*> FetchTasks;
-	TSet<uint32> CompiledHashes;
-	FString FileName;
-    EShaderPlatform CurrentPlatform;
-	FGuid CacheFileGuid;
-	uint32 BatchSize;
-	float BatchTime;
+	static RENDERCORE_API FShaderPipelineCache* ShaderPipelineCache;
+	static RENDERCORE_API uint32 BatchSize;
+	static RENDERCORE_API float BatchTime;
 	bool bPaused;
-	bool bOpened;
-	bool bReady;
-	bool bPreOptimizing;
     int32 PausedCount;
-	FShaderCachePrecompileContext ShaderCachePrecompileContext;
-	
-	MS_ALIGN(8) volatile int64 TotalActiveTasks GCC_ALIGN(8);
-	MS_ALIGN(8) volatile int64 TotalWaitingTasks GCC_ALIGN(8);
-	MS_ALIGN(8) volatile int64 TotalCompleteTasks GCC_ALIGN(8);
-	MS_ALIGN(8) volatile int64 TotalPrecompileTime GCC_ALIGN(8);
-	double PrecompileStartTime;
+	double LastAutoSaveTime = 0.0;
+	double LastAutoSaveTimeLogBoundPSO = 0.0;
+	int32 LastAutoSaveNum = 0;
+	TSet<uint32> CompiledHashes;
 
-	FCriticalSection Mutex;
-	TArray<FPipelineCachePSOHeader> PreFetchedTasks;
-	
-	FGraphEventRef LastPrecompileRHIFence;
+	/** Development tool that can describe PSOs in non-Shipping builds. */
+	UE::ShaderUtils::FShaderStableKeyDebugInfoReader ShaderHashToStableKey;
 
-	TArray<CompileJob> ShutdownReadCompileTasks;
-	TDoubleLinkedList<FPipelineCacheFileFormatPSORead*> ShutdownFetchTasks;
-	
-	static FShaderCachePreOpenDelegate OnCachePreOpen;
-    static FShaderCacheOpenedDelegate OnCachedOpened;
-    static FShaderCacheClosedDelegate OnCachedClosed;
-	static FShaderPrecompilationBeginDelegate OnPrecompilationBegin;
-	static FShaderPrecompilationCompleteDelegate OnPrecompilationComplete;
+	static RENDERCORE_API FString UserCacheTaskKey;
 
-	double LastAutoSaveTime;
-	double LastAutoSaveTimeLogBoundPSO;
-	int32 LastAutoSaveNum;
+	struct FPipelineCachePSOContext
+	{
+		FString FileName;
+		EShaderPlatform CurrentPlatform;
+
+		FShaderCachePrecompileContext PrecompileContext;
+	};
 	
-	TSet<uint64> CompletedMasks;
-	float TotalPrecompileWallTime;
-	int64 TotalPrecompileTasks;
+	TMap<FString, TUniquePtr<class FShaderPipelineCacheTask>> ShaderCacheTasks;
+
+	class FShaderPipelineCacheTask* GetTask(const FString& Name) {
+		TUniquePtr<class FShaderPipelineCacheTask>* CacheTask = FShaderPipelineCache::Get()->ShaderCacheTasks.Find(Name);
+		return CacheTask ? CacheTask->Get() : nullptr;
+	}
+
+	// The list of pending PSO cache names to precompile.
+	TArray<FString> PendingPrecompilePSOCacheKeys;
+
+	// The name of the current precompiling PSO cache.
+	FString CurrentPrecompilingPSOFCKey;
+
+	// Used for threadsafe query of pending pipeline compiles.
+	std::atomic_bool bHasShaderPipelineTask = false;
+
+	mutable FCriticalSection Mutex;
+	FGraphEventRef NextPrecompileCacheTask;
+
+	static RENDERCORE_API FShaderCachePreOpenDelegate OnCachePreOpen;
+    static RENDERCORE_API FShaderCacheOpenedDelegate OnCachedOpened;
+    static RENDERCORE_API FShaderCacheClosedDelegate OnCachedClosed;
+	static RENDERCORE_API FShaderPrecompilationBeginDelegate OnPrecompilationBegin;
+	static RENDERCORE_API FShaderPrecompilationCompleteDelegate OnPrecompilationComplete;
 
 	TMap<FBlendStateInitializerRHI, FRHIBlendState*> BlendStateCache;
 	TMap<FRasterizerStateInitializerRHI, FRHIRasterizerState*> RasterizerStateCache;

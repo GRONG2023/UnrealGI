@@ -2,8 +2,10 @@
 
 #pragma once
 
-namespace Trace
-{
+// HEADER_UNIT_SKIP - Not included directly
+
+namespace UE {
+namespace Trace {
 
 #if defined(TRACE_PRIVATE_PROTOCOL_2)
 inline
@@ -42,3 +44,4 @@ static_assert(sizeof(FEventHeaderSync) == 7, "Packing assumption doesn't hold");
 
 } // namespace Protocol2
 } // namespace Trace
+} // namespace UE

@@ -8,8 +8,10 @@
 
 #include "CoreMinimal.h"
 #include "UObject/UObjectGlobals.h"
-#include "Misc/Guid.h"
+#include "Misc/PackagePath.h"
+#include "Misc/PackageAccessTracking.h"
 #include "Templates/UniquePtr.h"
+#include "UObject/ICookInfo.h"
 #include "UObject/LinkerInstancingContext.h"
 
 struct FAsyncPackageDesc
@@ -18,10 +20,8 @@ struct FAsyncPackageDesc
 	int32 RequestID;
 	/** Name of the UPackage to create. */
 	FName Name;
-	/** Name of the package to load. */
-	FName NameToLoad;
-	/** GUID of the package to load, or the zeroed invalid GUID for "don't care" */
-	FGuid Guid;
+	/** PackagePath of the package to load. */
+	FPackagePath PackagePath;
 	/** Delegate called on completion of loading. This delegate can only be created and consumed on the game thread */
 	TUniquePtr<FLoadPackageAsyncDelegate> PackageLoadedDelegate;
 	/** The flags that should be applied to the package */
@@ -30,45 +30,49 @@ struct FAsyncPackageDesc
 	TAsyncLoadPriority Priority;
 	/** PIE instance ID this package belongs to, INDEX_NONE otherwise */
 	int32 PIEInstanceID;
-
-#if WITH_EDITORONLY_DATA
 	/** Instancing context, maps original package to their instanced counterpart, used to remap imports. */
 	FLinkerInstancingContext InstancingContext;
+#if UE_WITH_PACKAGE_ACCESS_TRACKING
+	FName ReferencerPackageName;
+	FName ReferencerPackageOp;
+#endif
+#if WITH_EDITOR
+	ECookLoadType CookLoadType;
+#endif
 
 	const FLinkerInstancingContext* GetInstancingContext() const { return &InstancingContext; }
 	void SetInstancingContext(FLinkerInstancingContext InInstancingContext) { InstancingContext = MoveTemp(InInstancingContext); }
-#else
-	const FLinkerInstancingContext* GetInstancingContext() const { return nullptr; }
-	void SetInstancingContext(FLinkerInstancingContext) {}
-#endif 
 
-	FAsyncPackageDesc(int32 InRequestID, const FName& InName, FName InPackageToLoadFrom = NAME_None, const FGuid& InGuid = FGuid(), TUniquePtr<FLoadPackageAsyncDelegate>&& InCompletionDelegate = TUniquePtr<FLoadPackageAsyncDelegate>(), EPackageFlags InPackageFlags = PKG_None, int32 InPIEInstanceID = INDEX_NONE, TAsyncLoadPriority InPriority = 0)
+	FAsyncPackageDesc(int32 InRequestID, const FName& InName, const FPackagePath& InPackagePath, TUniquePtr<FLoadPackageAsyncDelegate>&& InCompletionDelegate = TUniquePtr<FLoadPackageAsyncDelegate>(), EPackageFlags InPackageFlags = PKG_None, int32 InPIEInstanceID = INDEX_NONE, TAsyncLoadPriority InPriority = 0)
 		: RequestID(InRequestID)
 		, Name(InName)
-		, NameToLoad(InPackageToLoadFrom)
-		, Guid(InGuid)
+		, PackagePath(InPackagePath)
 		, PackageLoadedDelegate(MoveTemp(InCompletionDelegate))
 		, PackageFlags(InPackageFlags)
 		, Priority(InPriority)
 		, PIEInstanceID(InPIEInstanceID)
+#if WITH_EDITOR
+		, CookLoadType(ECookLoadType::Unexpected)
+#endif
 	{
-		if (NameToLoad == NAME_None)
-		{
-			NameToLoad = Name;
-		}
+		check(!PackagePath.IsEmpty());
 	}
 
 	/** This constructor does not modify the package loaded delegate as this is not safe outside the game thread */
 	FAsyncPackageDesc(const FAsyncPackageDesc& OldPackage)
 		: RequestID(OldPackage.RequestID)
 		, Name(OldPackage.Name)
-		, NameToLoad(OldPackage.NameToLoad)
-		, Guid(OldPackage.Guid)
+		, PackagePath(OldPackage.PackagePath)
 		, PackageFlags(OldPackage.PackageFlags)
 		, Priority(OldPackage.Priority)
 		, PIEInstanceID(OldPackage.PIEInstanceID)
-#if WITH_EDITORONLY_DATA
 		, InstancingContext(OldPackage.InstancingContext)
+#if UE_WITH_PACKAGE_ACCESS_TRACKING
+		, ReferencerPackageName(OldPackage.ReferencerPackageName)
+		, ReferencerPackageOp(OldPackage.ReferencerPackageOp)
+#endif
+#if WITH_EDITOR
+		, CookLoadType(OldPackage.CookLoadType)
 #endif
 	{
 	}

@@ -10,6 +10,9 @@
 // Enabled cvar GSlateCheckUObjectRenderResources that will check for invalid reference in the slate resources manager
 #define SLATE_CHECK_UOBJECT_RENDER_RESOURCES !UE_BUILD_SHIPPING
 
+// Enabled cvar GSlateCheckUObjectShapedGlyphSequence that will check for invalid reference before using them
+#define SLATE_CHECK_UOBJECT_SHAPED_GLYPH_SEQUENCE !UE_BUILD_SHIPPING
+
 #ifndef SLATE_CULL_WIDGETS
 	#define SLATE_CULL_WIDGETS 1
 #endif
@@ -59,10 +62,16 @@ DECLARE_STATS_GROUP_MAYBE_COMPILED_OUT(TEXT("SlateVeryVerbose"), STATGROUP_Slate
 /** Whether or not we've enabled fast widget pathing which validates paths to widgets without arranging children. */
 extern SLATECORE_API bool GSlateFastWidgetPath;
 
+/** Whether or not the SWindow can be an Invalidation Panel (use the fast path update). Normal Invalidation Panel will be deactivated. */
 extern SLATECORE_API bool GSlateEnableGlobalInvalidation;
 
+/** Whether or not we currently Painting/Updating the widget from the FastUpdate path (global invalidation). */
 extern SLATECORE_API bool GSlateIsOnFastUpdatePath;
 
+/** Whether or not we currently processing the widget invalidation from the InvalidationRoot (global invalidation). */
+extern SLATECORE_API bool GSlateIsOnFastProcessInvalidation;
+
+/** Whether or not we are currently running building the list of widget in slow path (global invalidation). */
 extern SLATECORE_API bool GSlateIsInInvalidationSlowPath;
 
 extern SLATECORE_API int32 GSlateLayoutGeneration;
@@ -71,6 +80,10 @@ extern SLATECORE_API int32 GSlateLayoutGeneration;
 extern SLATECORE_API bool GSlateCheckUObjectRenderResources;
 // When we detect a none valid resource, should we log a fatal error (crash) or log it (ensure).
 extern SLATECORE_API bool GSlateCheckUObjectRenderResourcesShouldLogFatal;
+#endif
+
+#if SLATE_CHECK_UOBJECT_SHAPED_GLYPH_SEQUENCE
+extern SLATECORE_API bool GSlateCheckUObjectShapedGlyphSequence;
 #endif
 
 #if WITH_SLATE_DEBUGGING

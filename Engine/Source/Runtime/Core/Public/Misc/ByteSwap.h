@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
 
 // These macros are not safe to use unless data is UNSIGNED!
 #define BYTESWAP_ORDER16_unsigned(x) ((((x) >> 8) & 0xff) + (((x) << 8) & 0xff00))
@@ -46,7 +47,7 @@ namespace Internal
 	#endif
 #endif
 
-static FORCEINLINE uint16 BYTESWAP_ORDER16(uint16 Val)
+FORCEINLINE uint16 BYTESWAP_ORDER16(uint16 Val)
 {
 #if defined(UE_BYTESWAP_INTRINSIC_PRIVATE_16)
 	return UE_BYTESWAP_INTRINSIC_PRIVATE_16(Val);
@@ -55,12 +56,12 @@ static FORCEINLINE uint16 BYTESWAP_ORDER16(uint16 Val)
 #endif
 }
 
-static FORCEINLINE int16 BYTESWAP_ORDER16(int16 Val)
+FORCEINLINE int16 BYTESWAP_ORDER16(int16 Val)
 {
 	return static_cast<int16>(BYTESWAP_ORDER16(static_cast<uint16>(Val)));
 }
 
-static FORCEINLINE uint32 BYTESWAP_ORDER32(uint32 Val)
+FORCEINLINE uint32 BYTESWAP_ORDER32(uint32 Val)
 {
 #if defined(UE_BYTESWAP_INTRINSIC_PRIVATE_32)
 	return UE_BYTESWAP_INTRINSIC_PRIVATE_32(Val);
@@ -69,12 +70,12 @@ static FORCEINLINE uint32 BYTESWAP_ORDER32(uint32 Val)
 #endif
 }
 
-static FORCEINLINE int32 BYTESWAP_ORDER32(int32 val)
+FORCEINLINE int32 BYTESWAP_ORDER32(int32 val)
 {
 	return static_cast<int32>(BYTESWAP_ORDER32(static_cast<uint32>(val)));
 }
 
-static FORCEINLINE uint64 BYTESWAP_ORDER64(uint64 Value)
+FORCEINLINE uint64 BYTESWAP_ORDER64(uint64 Value)
 {
 #if defined(UE_BYTESWAP_INTRINSIC_PRIVATE_64)
 	return UE_BYTESWAP_INTRINSIC_PRIVATE_64(Value);
@@ -83,24 +84,35 @@ static FORCEINLINE uint64 BYTESWAP_ORDER64(uint64 Value)
 #endif
 }
 
-static FORCEINLINE int64 BYTESWAP_ORDER64(int64 Value)
+FORCEINLINE int64 BYTESWAP_ORDER64(int64 Value)
 {
 	return static_cast<int64>(BYTESWAP_ORDER64(static_cast<uint64>(Value)));
 }
 
-static FORCEINLINE float BYTESWAP_ORDERF(float val)
+FORCEINLINE float BYTESWAP_ORDERF(float val)
 {
 	uint32 uval = BYTESWAP_ORDER32(*reinterpret_cast<const uint32*>(&val));
 	return *reinterpret_cast<const float*>(&uval);
 }
 
-static FORCEINLINE double BYTESWAP_ORDERD(double val)
+FORCEINLINE double BYTESWAP_ORDERD(double val)
 {
 	uint64 uval = BYTESWAP_ORDER64(*reinterpret_cast<const uint64*>(&val));
 	return *reinterpret_cast<const double*>(&uval);
 }
 
-static FORCEINLINE void BYTESWAP_ORDER_TCHARARRAY(TCHAR* str)
+#if PLATFORM_TCHAR_IS_UTF8CHAR
+
+FORCEINLINE void BYTESWAP_ORDER_TCHARARRAY(TCHAR* str)
+{
+	static_assert(sizeof(TCHAR) == 1, "Assuming TCHAR is 1 byte wide.");
+
+	// No need to byteswap single bytes.
+}
+
+#else
+
+FORCEINLINE void BYTESWAP_ORDER_TCHARARRAY(TCHAR* str)
 {
 	static_assert(sizeof(TCHAR) == sizeof(uint16), "Assuming TCHAR is 2 bytes wide.");
 	for (TCHAR* c = str; *c; ++c)
@@ -109,6 +121,7 @@ static FORCEINLINE void BYTESWAP_ORDER_TCHARARRAY(TCHAR* str)
 	}
 }
 
+#endif
 
 // General byte swapping.
 #if PLATFORM_LITTLE_ENDIAN

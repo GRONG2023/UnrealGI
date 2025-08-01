@@ -16,7 +16,7 @@ class UNetDriver;
 struct FWorldContext;
 
 UCLASS(customConstructor, transient)
-class UPendingNetGame :
+class ENGINE_API UPendingNetGame :
 	public UObject,
 	public FNetworkNotify
 {
@@ -29,23 +29,22 @@ public:
 	 * Transferred to world on successful connection
 	 */
 	UPROPERTY()
-	class UNetDriver*		NetDriver;
+	TObjectPtr<class UNetDriver>		NetDriver;
 
+private:
 	/** 
 	 * Demo Net driver created for loading demos, but we need to go through pending net game
 	 * Transferred to world on successful connection
 	 */
-	UE_DEPRECATED(4.26, "DemoNetDriver will be made private in a future release.  Please use GetDemoNetDriver/SetDemoNetDriver instead.")
 	UPROPERTY()
-	class UDemoNetDriver*	DemoNetDriver;
+	TObjectPtr<class UDemoNetDriver>	DemoNetDriver;
 
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+public:
 	/** Gets the demo net driver for this pending world. */
 	UDemoNetDriver* GetDemoNetDriver() const { return DemoNetDriver; }
 
 	/** Sets the demo net driver for this pending world. */
 	void SetDemoNetDriver(UDemoNetDriver* const InDemoNetDriver) { DemoNetDriver = InDemoNetDriver; }
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	/**
 	 * Setup the connection for encryption with a given key
@@ -62,7 +61,10 @@ public:
 	 *
 	 * @param Response response from the game containing its encryption key or an error message
 	 */
-	ENGINE_API void SetEncryptionKey(const FEncryptionKeyResponse& Response);
+	void SetEncryptionKey(const FEncryptionKeyResponse& Response);
+
+	bool HasFailedTravel() const {return bFailedTravel; }
+	void SetFailedTravel(bool bInFailedTravel) { bFailedTravel = bInFailedTravel; }
 
 public:
 	/** URL associated with this level. */
@@ -74,6 +76,12 @@ public:
 	/** @todo document */
 	bool					bSentJoinRequest;
 
+	/** set when we call LoadMapCompleted */
+	bool					bLoadedMapSuccessfully;
+private:
+	/** initialized to true, delaytravel steps can set this to false to indicate error during pendingnetgame travel */
+	bool					bFailedTravel;
+public:
 	/** @todo document */
 	FString					ConnectionError;
 
@@ -86,9 +94,14 @@ public:
 	void	InitNetDriver();
 
 	/**
+	 * Begin initial handshake if needed, or call SendInitialJoin.
+	 */
+	void BeginHandshake();
+
+	/**
 	 * Send the packet for triggering the initial join
 	 */
-	ENGINE_API void SendInitialJoin();
+	void SendInitialJoin();
 
 	//~ Begin FNetworkNotify Interface.
 	virtual EAcceptConnection::Type NotifyAcceptingConnection() override;
@@ -124,5 +137,8 @@ public:
 	void InitPeerListen();
 
 	/** Called by the engine after it calls LoadMap for this PendingNetGame. */
-	virtual void LoadMapCompleted(UEngine* Engine, FWorldContext& Context, bool bLoadedMapSuccessfully, const FString& LoadMapError);
+	virtual bool LoadMapCompleted(UEngine* Engine, FWorldContext& Context, bool bLoadedMapSuccessfully, const FString& LoadMapError);
+
+	/** Called by the engine after loadmapCompleted and the GameInstance has finished delaying */
+	virtual void TravelCompleted(UEngine* Engine, FWorldContext& Context);
 };

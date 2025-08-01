@@ -2,6 +2,7 @@
 
 #include "Commandlets/GatherTextFromSourceCommandlet.h"
 #include "HAL/FileManager.h"
+#include "Misc/AsciiSet.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ExpressionParserTypes.h"
@@ -33,6 +34,13 @@ const FString UGatherTextFromSourceCommandlet::FPreProcessorDescriptor::IniNames
 const FString UGatherTextFromSourceCommandlet::FMacroDescriptor::TextMacroString(TEXT("TEXT"));
 const FString UGatherTextFromSourceCommandlet::ChangelistName(TEXT("Update Localization"));
 
+bool UGatherTextFromSourceCommandlet::ShouldRunInPreview(const TArray<FString>& Switches, const TMap<FString, FString>& ParamVals) const
+{
+	const FString* GatherType = ParamVals.Find(UGatherTextCommandletBase::GatherTypeParam);
+	// If the param is not specified, it is assumed that both source and assets are to be gathered 
+	return !GatherType || *GatherType == TEXT("Source") || *GatherType == TEXT("All");
+}
+
 int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 {
 	// Parse command line - we're interested in the param vals
@@ -40,7 +48,7 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	TArray<FString> Switches;
 	TMap<FString, FString> ParamVals;
 	UCommandlet::ParseCommandLine(*Params, Tokens, Switches, ParamVals);
-
+	
 	//Set config file
 	const FString* ParamVal = ParamVals.Find(FString(TEXT("Config")));
 	FString GatherTextConfigPath;
@@ -67,6 +75,14 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	{
 		UE_LOG(LogGatherTextFromSourceCommandlet, Error, TEXT("No config section specified."));
 		return -1;
+	}
+
+	// GatheredSourceBasePath
+	FString GatheredSourceBasePath;
+	GetPathFromConfig(*SectionName, TEXT("GatheredSourceBasePath"), GatheredSourceBasePath, GatherTextConfigPath);
+	if (GatheredSourceBasePath.IsEmpty())
+	{
+		GatheredSourceBasePath = UGatherTextCommandletBase::GetProjectBasePath();
 	}
 
 	// SearchDirectoryPaths
@@ -137,7 +153,10 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	TArray<FString> IncludePathFilters;
 	Algo::Transform(SearchDirectoryPaths, IncludePathFilters, [](const FString& SearchDirectoryPath)
 	{
-		return SearchDirectoryPath / TEXT("*");
+		const TCHAR LastChar = SearchDirectoryPath.Len() > 0 ? SearchDirectoryPath[SearchDirectoryPath.Len() - 1] : 0;
+		return (LastChar == TEXT('*') || LastChar == TEXT('?'))
+			? SearchDirectoryPath								// Already a wildcard
+			: FPaths::Combine(SearchDirectoryPath, TEXT("*"));	// Add a catch-all wildcard
 	});
 
 	FGatherTextDelegates::GetAdditionalGatherPaths.Broadcast(GatherManifestHelper->GetTargetName(), IncludePathFilters, ExcludePathFilters);
@@ -146,13 +165,24 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	TArray<FString> FilesToProcess;
 	{
 		TArray<FString> RootSourceFiles;
+		TSet<FString, FLocKeySetFuncs> ProcessedSearchDirectoryPaths;
 		for (const FString& IncludePathFilter : IncludePathFilters)
 		{
+			constexpr FAsciiSet Wildcards("*?");
+
 			FString SearchDirectoryPath = IncludePathFilter;
-			if (SearchDirectoryPath.EndsWith(TEXT("*"), ESearchCase::CaseSensitive))
+			if (const TCHAR* FirstWildcard = FAsciiSet::FindFirstOrEnd(*SearchDirectoryPath, Wildcards); *FirstWildcard != 0)
 			{
 				// Trim the wildcard from this search path
+				SearchDirectoryPath = SearchDirectoryPath.Left(UE_PTRDIFF_TO_INT32(FirstWildcard - *SearchDirectoryPath));
 				SearchDirectoryPath = FPaths::GetPath(MoveTemp(SearchDirectoryPath));
+			}
+
+			bool bAlreadyProcessed = false;
+			ProcessedSearchDirectoryPaths.Add(SearchDirectoryPath, &bAlreadyProcessed);
+			if (bAlreadyProcessed)
+			{
+				continue;
 			}
 
 			for (const FString& UniqueSourceFileSearchFilter : UniqueSourceFileSearchFilters)
@@ -177,7 +207,7 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	FilesToProcess.RemoveAll([&FuzzyPathMatcher](const FString& FoundFile)
 	{
 		// Filter out assets whose package file paths do not pass the "fuzzy path" filters.
-		if (FuzzyPathMatcher.TestPath(FoundFile) != FFuzzyPathMatcher::Included)
+		if (FuzzyPathMatcher.TestPath(FoundFile) != FFuzzyPathMatcher::EPathMatch::Included)
 		{
 			return true;
 		}
@@ -204,7 +234,7 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 			SourceFileSearchFiltersString += FString(SourceFileSearchFiltersString.IsEmpty() ? TEXT("") : TEXT(", ")) + Filter;
 		}
 
-		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("The GatherTextFromSource commandlet couldn't find any source files matching (%s) in the specified directories:\n%s"), *SourceFileSearchFiltersString, *SpecifiedDirectoriesString);
+		UE_LOG(LogGatherTextFromSourceCommandlet, Display, TEXT("The GatherTextFromSource commandlet couldn't find any source files matching (%s) in the specified directories:\n%s"), *SourceFileSearchFiltersString, *SpecifiedDirectoriesString);
 		return 0;
 	}
 
@@ -217,7 +247,7 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 		FText OutError;
 		if (!GatherManifestHelper->AddDependency(ManifestDependency, &OutError))
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Error, TEXT("The GatherTextFromSource commandlet couldn't load the specified manifest dependency: '%'. %s"), *ManifestDependency, *OutError.ToString());
+			UE_LOG(LogGatherTextFromSourceCommandlet, Error, TEXT("The GatherTextFromSource commandlet couldn't load the specified manifest dependency: '%s'. %s"), *ManifestDependency, *OutError.ToString());
 			return -1;
 		}
 	}
@@ -243,6 +273,8 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 
 	Parsables.Add(new FUICommandExtMacroDescriptor());
 
+	Parsables.Add(new FMetasoundParamMacroDescriptor());
+	
 	// New Localization System with Namespace as literal argument.
 	Parsables.Add(new FStringMacroDescriptor( FString(TEXT("NSLOCTEXT")),
 		FStringMacroDescriptor::FMacroArg(FStringMacroDescriptor::MAS_Namespace, true),
@@ -264,12 +296,17 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 
 	Parsables.Add(new FStringTableEntryMetaDataMacroDescriptor());
 
+	Parsables.Add(new FStructuredLogMacroDescriptor(TEXT("UE_LOGFMT_LOC"), FStructuredLogMacroDescriptor::EFlags::None));
+	Parsables.Add(new FStructuredLogMacroDescriptor(TEXT("UE_LOGFMT_LOC_EX"), FStructuredLogMacroDescriptor::EFlags::None));
+	Parsables.Add(new FStructuredLogMacroDescriptor(TEXT("UE_LOGFMT_NSLOC"), FStructuredLogMacroDescriptor::EFlags::Namespace));
+	Parsables.Add(new FStructuredLogMacroDescriptor(TEXT("UE_LOGFMT_NSLOC_EX"), FStructuredLogMacroDescriptor::EFlags::Namespace));
+
 	Parsables.Add(new FIniNamespaceDescriptor());
 
 	// Init a parse context to track the state of the file parsing 
 	FSourceFileParseContext ParseCtxt(this);
 
-	// Get whether we should gather editor-only data. Typically only useful for the localization of UE4 itself.
+	// Get whether we should gather editor-only data. Typically only useful for the localization of UE itself.
 	if (!GetBoolFromConfig(*SectionName, TEXT("ShouldGatherFromEditorOnlyData"), ParseCtxt.ShouldGatherFromEditorOnlyData, GatherTextConfigPath))
 	{
 		ParseCtxt.ShouldGatherFromEditorOnlyData = false;
@@ -278,19 +315,9 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	// Parse all source files for macros and add entries to SourceParsedEntries
 	for ( FString& SourceFile : FilesToProcess)
 	{
-		FString ProjectBasePath;
-		if (!FPaths::ProjectDir().IsEmpty())
-		{
-			ProjectBasePath = FPaths::ProjectDir();
-		}
-		else
-		{
-			ProjectBasePath = FPaths::EngineDir();
-		}
-
 		ParseCtxt.Filename = SourceFile;
 		ParseCtxt.FileTypes = ParseCtxt.Filename.EndsWith(TEXT(".ini")) ? EGatherTextSourceFileTypes::Ini : EGatherTextSourceFileTypes::Cpp;
-		FPaths::MakePathRelativeTo(ParseCtxt.Filename, *ProjectBasePath);
+		FPaths::MakePathRelativeTo(ParseCtxt.Filename, *GatheredSourceBasePath);
 		ParseCtxt.LineNumber = 0;
 		ParseCtxt.FilePlatformName = GetSplitPlatformNameFromPath(ParseCtxt.Filename);
 		ParseCtxt.LineText.Reset();
@@ -302,24 +329,25 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 		ParseCtxt.WithinStringLiteral = false;
 		ParseCtxt.WithinNamespaceDefineLineNumber = INDEX_NONE;
 		ParseCtxt.WithinStartingLine = nullptr;
+		ParseCtxt.TextLines.Reset();
 		ParseCtxt.FlushMacroStack();
 
 		FString SourceFileText;
 		if (!FFileHelper::LoadFileToString(SourceFileText, *SourceFile))
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Error, TEXT("GatherTextSource failed to open file %s"), *ParseCtxt.Filename);
+			UE_LOG(LogGatherTextFromSourceCommandlet, Error, TEXT("%s: GatherTextSource failed to open file"), *ParseCtxt.Filename);
 		}
 		else
 		{
 			if (!ParseSourceText(SourceFileText, Parsables, ParseCtxt))
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("GatherTextSource error(s) parsing source file %s"), *ParseCtxt.Filename);
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: GatherTextSource error(s) parsing source file"), *ParseCtxt.Filename);
 			}
 			else
 			{
 				if (ParseCtxt.WithinNamespaceDefineLineNumber != INDEX_NONE)
 				{
-					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Missing '#undef LOCTEXT_NAMESPACE' for '#define LOCTEXT_NAMESPACE' at %s:%d"), *ParseCtxt.Filename, ParseCtxt.WithinNamespaceDefineLineNumber);
+					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Missing '#undef LOCTEXT_NAMESPACE' for '#define LOCTEXT_NAMESPACE'"), *ParseCtxt.Filename, ParseCtxt.WithinNamespaceDefineLineNumber);
 				}
 			}
 		}
@@ -330,7 +358,7 @@ int32 UGatherTextFromSourceCommandlet::Main( const FString& Params )
 	{
 		if (ParsedStringTablePair.Value.SourceLocation.Line == INDEX_NONE)
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("String table with ID '%s' had %s entries parsed for it, but the table was never registered. Skipping for gather."), *ParsedStringTablePair.Key.ToString(), ParsedStringTablePair.Value.TableEntries.Num());
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("String table with ID '%s' had %d entries parsed for it, but the table was never registered. Skipping for gather."), *ParsedStringTablePair.Key.ToString(), ParsedStringTablePair.Value.TableEntries.Num());
 		}
 		else
 		{
@@ -388,9 +416,15 @@ FString UGatherTextFromSourceCommandlet::UnescapeLiteralCharacterEscapeSequences
 
 	EParseState ParseState = EParseState::Idle;
 	FString EscapedLiteralCharacter;
-	for (const TCHAR* CharPtr = *InString; *CharPtr; ++CharPtr)
+	for (const TCHAR* CharPtr = *InString; ; ++CharPtr)
 	{
 		const TCHAR CurChar = *CharPtr;
+
+		if (ParseState == EParseState::Idle && CurChar == 0)
+		{
+			// End of string
+			break;
+		}
 
 		switch (ParseState)
 		{
@@ -451,9 +485,12 @@ FString UGatherTextFromSourceCommandlet::UnescapeLiteralCharacterEscapeSequences
 				}
 				else
 				{
-					RetString.AppendChar((TCHAR)FCString::Strtoi(*EscapedLiteralCharacter, nullptr, 8));
+					if (EscapedLiteralCharacter.Len() > 0)
+					{
+						RetString.AppendChar((TCHAR)FCString::Strtoi(*EscapedLiteralCharacter, nullptr, 8));
+					}
 					ParseState = EParseState::Idle;
-					RetString.AppendChar(CurChar);
+					--CharPtr; // Walk backwards as we need to consider whether the current character is the start of a new escape sequence
 				}
 			}
 			break;
@@ -466,9 +503,12 @@ FString UGatherTextFromSourceCommandlet::UnescapeLiteralCharacterEscapeSequences
 				}
 				else
 				{
-					RetString.AppendChar((TCHAR)FCString::Strtoi(*EscapedLiteralCharacter, nullptr, 16));
+					if (EscapedLiteralCharacter.Len() > 0)
+					{
+						RetString.AppendChar((TCHAR)FCString::Strtoi(*EscapedLiteralCharacter, nullptr, 16));
+					}
 					ParseState = EParseState::Idle;
-					RetString.AppendChar(CurChar);
+					--CharPtr; // Walk backwards as we need to consider whether the current character is the start of a new escape sequence
 				}
 			}
 			break;
@@ -497,16 +537,19 @@ FString UGatherTextFromSourceCommandlet::UnescapeLiteralCharacterEscapeSequences
 				}
 				else
 				{
-					const uint32 UnicodeCodepoint = (uint32)FCString::Strtoi(*EscapedLiteralCharacter, nullptr, 16);
-
-					FString UnicodeString;
-					if (FUnicodeChar::CodepointToString(UnicodeCodepoint, UnicodeString))
+					if (EscapedLiteralCharacter.Len() > 0)
 					{
-						RetString.Append(MoveTemp(UnicodeString));
+						const uint32 UnicodeCodepoint = (uint32)FCString::Strtoi(*EscapedLiteralCharacter, nullptr, 16);
+
+						FString UnicodeString;
+						if (FUnicodeChar::CodepointToString(UnicodeCodepoint, UnicodeString))
+						{
+							RetString.Append(MoveTemp(UnicodeString));
+						}
 					}
 
 					ParseState = EParseState::Idle;
-					RetString.AppendChar(CurChar);
+					--CharPtr; // Walk backwards as we need to consider whether the current character is the start of a new escape sequence
 				}
 			}
 			break;
@@ -535,16 +578,19 @@ FString UGatherTextFromSourceCommandlet::UnescapeLiteralCharacterEscapeSequences
 				}
 				else
 				{
-					const uint32 UnicodeCodepoint = (uint32)FCString::Strtoui64(*EscapedLiteralCharacter, nullptr, 16);
-
-					FString UnicodeString;
-					if (FUnicodeChar::CodepointToString(UnicodeCodepoint, UnicodeString))
+					if (EscapedLiteralCharacter.Len() > 0)
 					{
-						RetString.Append(MoveTemp(UnicodeString));
+						const uint32 UnicodeCodepoint = (uint32)FCString::Strtoui64(*EscapedLiteralCharacter, nullptr, 16);
+
+						FString UnicodeString;
+						if (FUnicodeChar::CodepointToString(UnicodeCodepoint, UnicodeString))
+						{
+							RetString.Append(MoveTemp(UnicodeString));
+						}
 					}
 
 					ParseState = EParseState::Idle;
-					RetString.AppendChar(CurChar);
+					--CharPtr; // Walk backwards as we need to consider whether the current character is the start of a new escape sequence
 				}
 			}
 			break;
@@ -600,7 +646,6 @@ FString UGatherTextFromSourceCommandlet::RemoveStringFromTextMacro(const FString
 
 FString UGatherTextFromSourceCommandlet::StripCommentsFromToken(const FString& InToken, FSourceFileParseContext& Context)
 {
-	check(!Context.WithinBlockComment);
 	check(!Context.WithinLineComment);
 	check(!Context.WithinStringLiteral);
 
@@ -727,16 +772,17 @@ bool UGatherTextFromSourceCommandlet::ParseSourceText(const FString& Text, const
 	const int32 BlockCommentEndLen = BlockCommentEnd ? FCString::Strlen(BlockCommentEnd) : 0;
 	checkf((BlockCommentStartLen == 0 && BlockCommentEndLen == 0) || (BlockCommentStartLen > 0 && BlockCommentEndLen > 0), TEXT("Block comments require both a start and an end marker!"));
 
-	// Split the file into lines 
-	TArray<FString> TextLines;
+	// Split the file into lines
+	TArray<FString>& TextLines = ParseCtxt.TextLines;
 	Text.ParseIntoArrayLines(TextLines, false);
 
-	// Move through the text lines looking for the tokens that denote the items in the Parsables list
+	// Move through the text lines looking for the tokens that denote the items in the Parsables list 
 	for (int32 LineIdx = 0; LineIdx < TextLines.Num(); LineIdx++)
 	{
+		// Remove spaces at the end of the line.
 		TextLines[LineIdx].TrimEndInline();
 		const FString& Line = TextLines[LineIdx];
-		if( Line.IsEmpty() )
+		if ( Line.IsEmpty() )
 			continue;
 
 		// Use these pending vars to defer parsing a token hit until longer tokens can't hit too
@@ -758,6 +804,7 @@ bool UGatherTextFromSourceCommandlet::ParseSourceText(const FString& Text, const
 
 			if (!ParseCtxt.WithinLineComment && !ParseCtxt.WithinBlockComment && !ParseCtxt.WithinStringLiteral)
 			{
+				// Detect that the line starts with a Line comment.
 				if (LineCommentLen > 0 && FCString::Strncmp(Cursor, LineComment, LineCommentLen) == 0)
 				{
 					ParseCtxt.WithinLineComment = true;
@@ -775,6 +822,7 @@ bool UGatherTextFromSourceCommandlet::ParseSourceText(const FString& Text, const
 				}
 			}
 
+			// We are not in a comment (line or block) and we are not parsing a string.
 			if (!ParseCtxt.WithinLineComment && !ParseCtxt.WithinBlockComment && !ParseCtxt.WithinStringLiteral)
 			{
 				if (*Cursor == TEXT('\"'))
@@ -807,7 +855,8 @@ bool UGatherTextFromSourceCommandlet::ParseSourceText(const FString& Text, const
 									{
 										break;
 									}
-									if (DelimChar == 0 || !FChar::IsAlnum(DelimChar))
+									// We also permit '_' to support the use of _JSON as a delimiter for the raw strings 
+									if (DelimChar == 0 || !(FChar::IsAlnum(DelimChar) || DelimChar == TCHAR('_')))
 									{
 										bIsValid = false;
 										break;
@@ -946,6 +995,7 @@ bool UGatherTextFromSourceCommandlet::ParseSourceText(const FString& Text, const
 				continue;
 			}
 
+			// Go through all the Parserables to find matches
 			for (int32 ParIdx = 0; ParIdx < ParsablesForFile.Num(); ++ParIdx)
 			{
 				FParsableDescriptor* Parsable = ParsablesForFile[ParIdx];
@@ -1036,10 +1086,70 @@ bool UGatherTextFromSourceCommandlet::ParseSourceText(const FString& Text, const
 	// Handle a string C++11 raw string literal that was never closed as this is likely a false positive that needs to be fixed in the parser
 	if (ParseCtxt.WithinStringLiteral && !ParseCtxt.RawStringLiteralClosingDelim.IsEmpty())
 	{
-		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("A C++11 raw string literal was not correctly terminated. File %s, starting line: %s"), *ParseCtxt.Filename, ParseCtxt.WithinStartingLine);
+		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%s): A C++11 raw string literal was not correctly terminated."), *ParseCtxt.Filename, ParseCtxt.WithinStartingLine);
 	}
 
 	return true;
+}
+
+int32 UGatherTextFromSourceCommandlet::FMacroArgumentGatherer::GetNumberOfArguments() const 
+{
+	return Args.Num();
+}
+
+
+bool UGatherTextFromSourceCommandlet::FMacroArgumentGatherer::EndArgument()
+{
+	if (CurrentArgument.IsEmpty() || IsInDoubleQuotes())
+	{
+		return false;
+	}
+	Args.Push(CurrentArgument);
+	CurrentArgument.Empty();
+	return true;
+}
+
+bool UGatherTextFromSourceCommandlet::FMacroArgumentGatherer::Gather(const TCHAR* Arg, int32 Count)
+{
+	if(Arg == nullptr || Count == 0)
+	{
+		return false;
+	}
+	FString NewArgument = FString(Count, Arg);
+	NewArgument.TrimEndInline();
+
+	int32 CurrentArgLen = CurrentArgument.Len();
+	if (CurrentArgLen == 0)
+	{
+		CurrentArgument = NewArgument;
+		return true;
+	}
+	
+	// If the last argument is a string that ends with " and the new argument too we append it
+	// This is to support this and remove duplicate double quotes.
+	// MYMACRO("Very long string\n"
+	//         "Next part of the very long string\n");
+	// And
+	// MYMACRO("Very long string\n" \
+	//         "Next part of the very long string\n");
+	if (NewArgument[0] == '\"' && CurrentArgument[CurrentArgLen - 1] == '\"')
+	{
+		Arg++;
+		CurrentArgLen--;
+		CurrentArgument.RemoveAt(CurrentArgLen);
+		Count--;
+	}
+
+	CurrentArgument.Append(Arg, Count);
+	CurrentArgument.TrimEndInline();
+	return true;
+}
+	
+
+void UGatherTextFromSourceCommandlet::FMacroArgumentGatherer::ExtractArguments(TArray<FString>& Arguments)
+{
+	Arguments = Args;
+	Args.Empty();
 }
 
 bool UGatherTextFromSourceCommandlet::FSourceFileParseContext::AddManifestText( const FString& Token, const FString& InNamespace, const FString& SourceText, const FManifestContext& Context )
@@ -1065,7 +1175,7 @@ void UGatherTextFromSourceCommandlet::FSourceFileParseContext::PopMacroBlock()
 {
 	if (MacroBlockStack.Num() > 0)
 	{
-		MacroBlockStack.Pop(/*bAllowShrinking*/false);
+		MacroBlockStack.Pop(EAllowShrinking::No);
 		CachedEditorOnlyDefineState.Reset();
 	}
 }
@@ -1109,7 +1219,7 @@ void UGatherTextFromSourceCommandlet::FSourceFileParseContext::SetDefine(const F
 		// #define LOC_DEFINE_REGION
 		if (ExcludedRegion)
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Found a '#define LOC_DEFINE_REGION' within another '#define LOC_DEFINE_REGION' while parsing %s:%d"), *Filename, LineNumber);
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Found a '#define LOC_DEFINE_REGION' within another '#define LOC_DEFINE_REGION'"), *Filename, LineNumber);
 		}
 		else
 		{
@@ -1124,7 +1234,7 @@ void UGatherTextFromSourceCommandlet::FSourceFileParseContext::SetDefine(const F
 			// #define LOCTEXT_NAMESPACE <namespace>
 			if (WithinNamespaceDefineLineNumber != INDEX_NONE)
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Found a '#define LOCTEXT_NAMESPACE' within another '#define LOCTEXT_NAMESPACE' while parsing %s:%d"), *Filename, LineNumber);
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Found a '#define LOCTEXT_NAMESPACE' within another '#define LOCTEXT_NAMESPACE'"), *Filename, LineNumber);
 			}
 			else
 			{
@@ -1155,7 +1265,7 @@ void UGatherTextFromSourceCommandlet::FSourceFileParseContext::RemoveDefine(cons
 		// #undef LOC_DEFINE_REGION
 		if (!ExcludedRegion)
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Found an '#undef LOC_DEFINE_REGION' without a corresponding '#define LOC_DEFINE_REGION' while parsing %s:%d"), *Filename, LineNumber);
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Found an '#undef LOC_DEFINE_REGION' without a corresponding '#define LOC_DEFINE_REGION'"), *Filename, LineNumber);
 		}
 		else
 		{
@@ -1170,7 +1280,7 @@ void UGatherTextFromSourceCommandlet::FSourceFileParseContext::RemoveDefine(cons
 			// #undef LOCTEXT_NAMESPACE
 			if (WithinNamespaceDefineLineNumber == INDEX_NONE)
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Found an '#undef LOCTEXT_NAMESPACE' without a corresponding '#define LOCTEXT_NAMESPACE' while parsing %s:%d"), *Filename, LineNumber);
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Found an '#undef LOCTEXT_NAMESPACE' without a corresponding '#define LOCTEXT_NAMESPACE'"), *Filename, LineNumber);
 			}
 			else
 			{
@@ -1188,7 +1298,7 @@ bool UGatherTextFromSourceCommandlet::FSourceFileParseContext::AddStringTableImp
 	FParsedStringTable& ParsedStringTable = ParsedStringTables.FindOrAdd(InTableId);
 	if (ParsedStringTable.SourceLocation.Line != INDEX_NONE)
 	{
-		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("String table with ID \"%s\" at \"%s\" was already parsed at \"%s\". Ignoring additional definition."), *InTableId.ToString(), *FSourceLocation(Filename, LineNumber).ToString(), *ParsedStringTable.SourceLocation.ToString());
+		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: String table with ID \"%s\" was already parsed at \"%s\". Ignoring additional definition."), *FSourceLocation(Filename, LineNumber).ToString(), *InTableId.ToString(), *ParsedStringTable.SourceLocation.ToString());
 		return false;
 	}
 
@@ -1214,7 +1324,7 @@ bool UGatherTextFromSourceCommandlet::FSourceFileParseContext::AddStringTableEnt
 		}
 		else
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("String table entry with ID \"%s\" and key \"%s\" at \"%s\" was already parsed at \"%s\". Ignoring additional definition."), *InTableId.ToString(), *InKey, *FSourceLocation(Filename, LineNumber).ToString(), *ExistingEntry->SourceLocation.ToString());
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: String table entry with ID \"%s\" and key \"%s\" was already parsed at \"%s\". Ignoring additional definition."), *FSourceLocation(Filename, LineNumber).ToString(), *InTableId.ToString(), *InKey, *ExistingEntry->SourceLocation.ToString());
 			return false;
 		}
 	}
@@ -1247,7 +1357,7 @@ bool UGatherTextFromSourceCommandlet::FSourceFileParseContext::AddStringTableEnt
 		}
 		else
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("String table entry meta-data with ID \"%s\" and key \"%s\" at \"%s\" was already parsed at \"%s\". Ignoring additional definition."), *InTableId.ToString(), *InKey, *FSourceLocation(Filename, LineNumber).ToString(), *ExistingMetaData->SourceLocation.ToString());
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: String table entry meta-data with ID \"%s\" and key \"%s\" was already parsed at \"%s\". Ignoring additional definition."), *FSourceLocation(Filename, LineNumber).ToString(), *InTableId.ToString(), *InKey, *ExistingMetaData->SourceLocation.ToString());
 			return false;
 		}
 	}
@@ -1293,7 +1403,7 @@ void UGatherTextFromSourceCommandlet::FSourceFileParseContext::AddStringTableFro
 		}
 		else
 		{
-			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("String table with ID \"%s\" at \"%s\" failed to import strings from \"%s\"."), *InTableId.ToString(), *FSourceLocation(Filename, LineNumber).ToString(), *FullImportPath);
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: String table with ID \"%s\" failed to import strings from \"%s\"."), *FSourceLocation(Filename, LineNumber).ToString(), *InTableId.ToString(), *FullImportPath);
 		}
 	}
 }
@@ -1353,7 +1463,7 @@ void UGatherTextFromSourceCommandlet::FIfDescriptor::TryParse(const FString& Tex
 		// Handle "#if defined <defname>"
 		if (RemainingText.StartsWith(DefinedString, ESearchCase::CaseSensitive))
 		{
-			RemainingText.RightChopInline(DefinedString.Len(), false);
+			RemainingText.RightChopInline(DefinedString.Len(), EAllowShrinking::No);
 			RemainingText.TrimStartInline();
 		}
 
@@ -1390,7 +1500,7 @@ void UGatherTextFromSourceCommandlet::FElIfDescriptor::TryParse(const FString& T
 		// Handle "#elif defined <defname>"
 		if (RemainingText.StartsWith(DefinedString, ESearchCase::CaseSensitive))
 		{
-			RemainingText.RightChopInline(DefinedString.Len(), false);
+			RemainingText.RightChopInline(DefinedString.Len(), EAllowShrinking::No);
 			RemainingText.TrimStartInline();
 		}
 
@@ -1425,107 +1535,259 @@ void UGatherTextFromSourceCommandlet::FEndIfDescriptor::TryParse(const FString& 
 	}
 }
 
+bool UGatherTextFromSourceCommandlet::FMacroDescriptor::ParseArgumentString(const FString& Text, const int32 CursorOffset, int32& BracketStack, const FSourceFileParseContext& Context, FMacroArgumentGatherer& ArgsGatherer) const
+{
+	bool bEscapeNextChar = false;
+
+	const TCHAR* ArgStart = *Text + CursorOffset;
+	const TCHAR* Cursor = ArgStart;
+	for (; 0 < BracketStack; ++Cursor)
+	{
+		// First: check is we are at end of line.
+		if ('\0' == *Cursor)
+		{
+			if (Cursor - ArgStart > 0)
+			{
+				// Here, we found the end of the line, but we don't know if it's the end of the argument.
+				if (!ArgsGatherer.Gather(ArgStart, UE_PTRDIFF_TO_INT32(Cursor - ArgStart)))
+				{
+					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+					return false;
+				}
+			}
+			break;
+		}
+		// Skip this character
+		else if (bEscapeNextChar)
+		{
+			bEscapeNextChar = false;
+		}
+		else if ((ArgsGatherer.IsInDoubleQuotes() || ArgsGatherer.IsInSingleQuotes()) && !bEscapeNextChar && '\\' == *Cursor)
+		{
+			bEscapeNextChar = true;
+
+			// If we hit the escape character, we must verify if we are at end of line
+			if ('\0' == *(Cursor + 1))
+			{
+				if (Cursor - ArgStart - 1 > 0)
+				{
+					if (!ArgsGatherer.Gather(ArgStart, UE_PTRDIFF_TO_INT32(Cursor - ArgStart) - 1))
+					{
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+						return false;
+					}
+				}
+				break;
+			}
+		}
+		// We are closing "
+		else if (ArgsGatherer.IsInDoubleQuotes())
+		{
+			if ('\"' == *Cursor)
+			{
+				ArgsGatherer.CloseDoubleQuotes();
+			}
+		}
+		// We are closing a '
+		else if (ArgsGatherer.IsInSingleQuotes())
+		{
+			if ('\'' == *Cursor)
+			{
+				ArgsGatherer.CloseSingleQuotes();
+			}
+		}
+		// We are opening a "
+		else if ('\"' == *Cursor)
+		{
+			ArgsGatherer.OpenDoubleQuotes();
+		}
+		// We are opening a '
+		else if ('\'' == *Cursor)
+		{
+			ArgsGatherer.OpenSingleQuotes();
+		}
+		// We found an opening bracket '(', increment the stack
+		else if ('(' == *Cursor)
+		{
+			++BracketStack;
+		}
+		// We found the closing bracket ')' decrement the stack
+		else if (')' == *Cursor)
+		{
+			--BracketStack;
+
+			if (0 > BracketStack)
+			{
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Unexpected bracket ')' in %s macro while parsing. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return false;
+			}
+		}		
+		else if (',' == *Cursor)
+		{
+			if (1 == BracketStack)
+			{
+				if (Cursor - ArgStart > 0)
+				{
+					// We have a single bracket open and we found a ',' this is the end of the argument. If Bracket stack is > 1 it means that we are in a function call in one of the parameters.
+					if (!ArgsGatherer.Gather(ArgStart, UE_PTRDIFF_TO_INT32(Cursor - ArgStart)))
+					{
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+						return false;
+					}
+					if (!ArgsGatherer.EndArgument())
+					{
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+						return false;
+					}
+
+					ArgStart = Cursor + 1;
+				}
+				else
+				{
+					// The ',' character is the first thing in the line. We need to close out the previous argument 
+					// E.g MYMACRO(Param1, "Param2"
+					//	    , "Param3")
+					if (!ArgsGatherer.EndArgument())
+					{
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+						return false;
+					}
+					ArgStart = Cursor + 1;
+				}
+			}
+		}
+		else if ('\\' == *Cursor)
+		{
+			ensure(!ArgsGatherer.IsInDoubleQuotes());
+			// We hit a escape character outside a double quote, if the next character is end of line, we are done for this line and the next one must start with a double quote
+			if ('\0' == *(Cursor + 1))
+			{
+				if (Cursor - ArgStart - 1 > 0)
+				{
+					if (!ArgsGatherer.Gather(ArgStart, UE_PTRDIFF_TO_INT32(Cursor - ArgStart) - 1))
+					{
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+						return false;
+					}
+				}
+				break;
+			}
+		}
+
+		// We just closed the last ')' this is the end of all args for this macro 
+		if (0 == BracketStack)
+		{
+			// If the arg is empty it means we found a closing braket after a ',' or at the begining of a line			
+			if (Cursor - ArgStart > 0)
+			{
+				if (!ArgsGatherer.Gather(ArgStart, UE_PTRDIFF_TO_INT32(Cursor - ArgStart)))
+				{
+					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+					return false;
+				}
+			}
+			if (!ArgsGatherer.EndArgument())
+			{
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Parsing Arguments failed in %s macro. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return false;
+			}
+			break;
+		}
+	}
+	return true;
+}
+
 bool UGatherTextFromSourceCommandlet::FMacroDescriptor::ParseArgsFromMacro(const FString& Text, TArray<FString>& Args, FSourceFileParseContext& Context) const
 {
 	// Attempt to parse something of the format
 	// NAME(param0, param1, param2, etc)
 
-	bool Success = false;
-
 	// Step over the token name and any whitespace after it
 	FString RemainingText = Text.RightChop(GetToken().Len());
+
+	//RemainingText could be empty if the bracket is at the begining of the next line
 	RemainingText.TrimStartInline();
 
+	// Find the Opening bracket.
 	const int32 OpenBracketIdx = RemainingText.Find(TEXT("("), ESearchCase::CaseSensitive);
-	if (OpenBracketIdx == INDEX_NONE)
-	{
-		// No opening bracket; warn about this, but don't consider it an error as we're likely parsing something we shouldn't be
-		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Missing bracket '(' in %s macro at %s:%d. %s"), *GetToken(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
-		return false;
-	}
-	else if (OpenBracketIdx > 0)
+
+	// If we find a bracket it must be the first character of the remaining text
+	if (OpenBracketIdx > 0)
 	{
 		// We stepped over the whitespace when building RemainingText, so if the bracket isn't the first character in the text then it means we only partially matched a longer token and shouldn't parse it
 		return false;
 	}
-	else
+
+	Args.Empty();
+
+	FMacroArgumentGatherer ArgumentGatherer;
+	int32 BracketStack = OpenBracketIdx == INDEX_NONE ? 0:1;
+
+	// If we found a bracket, we can start parsing argument on this line
+	if (BracketStack > 0)
 	{
-		Args.Empty();
-
-		bool bInDblQuotes = false;
-		bool bInSglQuotes = false;
-		int32 BracketStack = 1;
-		bool bEscapeNextChar = false;
-
-		const TCHAR* ArgStart = *RemainingText + OpenBracketIdx + 1;
-		const TCHAR* Cursor = ArgStart;
-		for (; 0 < BracketStack && '\0' != *Cursor; ++Cursor)
+		// Parse the argument that are on the same line as the macro.
+		if (!ParseArgumentString(RemainingText, OpenBracketIdx + 1, BracketStack, Context, ArgumentGatherer))
 		{
-			if (bEscapeNextChar)
-			{
-				bEscapeNextChar = false;
-			}
-			else if ((bInDblQuotes || bInSglQuotes) && !bEscapeNextChar && '\\' == *Cursor)
-			{
-				bEscapeNextChar = true;
-			}
-			else if (bInDblQuotes)
-			{
-				if ('\"' == *Cursor)
-				{
-					bInDblQuotes = false;
-				}
-			}
-			else if (bInSglQuotes)
-			{
-				if ('\'' == *Cursor)
-				{
-					bInSglQuotes = false;
-				}
-			}
-			else if ('\"' == *Cursor)
-			{
-				bInDblQuotes = true;
-			}
-			else if ('\'' == *Cursor)
-			{
-				bInSglQuotes = true;
-			}
-			else if ('(' == *Cursor)
-			{
-				++BracketStack;
-			}
-			else if (')' == *Cursor)
-			{
-				--BracketStack;
-
-				if (0 > BracketStack)
-				{
-					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Unexpected bracket ')' in %s macro while parsing %s:%d. %s"), *GetToken(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
-					return false;
-				}
-			}
-			else if (1 == BracketStack && ',' == *Cursor)
-			{
-				// create argument from ArgStart to Cursor and set Start next char
-				Args.Add(FString(Cursor - ArgStart, ArgStart));
-				ArgStart = Cursor + 1;
-			}
+			return false;
 		}
-
-		if (0 == BracketStack)
-		{
-			Args.Add(FString(Cursor - ArgStart - 1, ArgStart));
-		}
-		//else
-		//{
-		//	Args.Add(FString(ArgStart));
-		//}
-
-		Success = 0 < Args.Num() ? true : false;	
 	}
 
-	return Success;
+	// We didn't find the end bracket, we must continue.
+	if (BracketStack > 0)
+	{
+		if (!ParseArgsFromNextLines(ArgumentGatherer, BracketStack, Context))
+		{
+			return false;
+		}
+	}
+
+	ArgumentGatherer.ExtractArguments(Args);
+
+	return 0 < Args.Num() ? true : false;
+}
+
+bool UGatherTextFromSourceCommandlet::FMacroDescriptor::ParseArgsFromNextLines(FMacroArgumentGatherer& ArgsGatherer, int32& BracketStack, FSourceFileParseContext& Context) const
+{
+	// Loop until we have all arguments and the closing bracket.
+	for (int32 i = Context.LineNumber; ArgsGatherer.GetNumberOfArguments() < GetMinNumberOfArgument() || BracketStack > 0; i++)
+	{
+		if(i >= Context.TextLines.Num())
+		{
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): We reached end of file while parsing specified %s macro for arguments. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+			return false;
+		}
+
+		FString LineText = StripCommentsFromToken(Context.TextLines[i], Context);
+		// Ignore empty lines.
+		if (LineText.IsEmpty())
+		{
+			continue;
+		}
+
+		int32 ParsingOffset = 0;
+
+		// We are not in an opening bracket yet, look at the beginning of the line.
+		if (BracketStack == 0)
+		{
+			int32 OpenBracketIdx = LineText.Find(TEXT("("), ESearchCase::CaseSensitive);
+			// We did not find the opening bracket on the first line and on the second non empty line, we give up
+			if (OpenBracketIdx == INDEX_NONE)
+			{
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Opening bracket '(' not found while parsing specified %s macro for arguments. %s"), *Context.Filename, Context.LineNumber, *GetToken(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return false;
+			}
+			BracketStack = 1;
+			// Start parsing right after the bracket
+			ParsingOffset = OpenBracketIdx + 1;
+		}
+		
+		if (!ParseArgumentString(LineText, ParsingOffset, BracketStack, Context, ArgsGatherer))
+		{
+			return false;
+		}	
+	}
+	return true;
 }
 
 bool UGatherTextFromSourceCommandlet::FMacroDescriptor::PrepareArgument(FString& Argument, bool IsAutoText, const FString& IdentForLogging, bool& OutHasQuotes)
@@ -1547,7 +1809,7 @@ bool UGatherTextFromSourceCommandlet::FMacroDescriptor::PrepareArgument(FString&
 void UGatherTextFromSourceCommandlet::FUICommandMacroDescriptor::TryParseArgs(const FString& Text, FSourceFileParseContext& Context, const TArray<FString>& Arguments, const int32 ArgIndexOffset) const
 {
 	FString Identifier = Arguments[ArgIndexOffset];
-	Identifier.TrimStartInline();
+	Identifier.TrimStartInline(); // Remove whitespaces at the start of the line.
 
 	// Identifier may optionally be in quotes, as it's sometimes a string literal (in UE_COMMAND_EXT), and sometimes stringified by the macro (in UI_COMMAND)
 	// Because this is optional, we don't care if this processing fails
@@ -1558,7 +1820,7 @@ void UGatherTextFromSourceCommandlet::FUICommandMacroDescriptor::TryParseArgs(co
 	if (Identifier.IsEmpty())
 	{
 		//The command doesn't have an identifier so we can't gather it
-		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s has an empty identifier and cannot be gathered."), *GetToken(), *SourceLocation);
+		UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has an empty identifier and cannot be gathered."), *SourceLocation , *GetToken());
 		return;
 	}
 
@@ -1569,7 +1831,7 @@ void UGatherTextFromSourceCommandlet::FUICommandMacroDescriptor::TryParseArgs(co
 	FString Namespace = Context.WithinNamespaceDefineLineNumber != INDEX_NONE && !Context.Namespace.IsEmpty() ? FString::Printf(TEXT("%s.%s"), *UICommandRootNamespace, *Context.Namespace) : UICommandRootNamespace;
 
 	// parse DefaultLangString argument - this arg will be in quotes without TEXT macro
-	FString MacroDesc = FString::Printf(TEXT("\"FriendlyName\" argument in %s macro at %s:%d."), *GetToken(), *Context.Filename, Context.LineNumber);
+	FString MacroDesc = FString::Printf(TEXT("%s(%d): \"FriendlyName\" argument in %s macro."), *Context.Filename, Context.LineNumber, *GetToken());
 	if (PrepareArgument(SourceText, true, MacroDesc, HasQuotes))
 	{
 		if (HasQuotes && !Identifier.IsEmpty() && !SourceText.IsEmpty())
@@ -1585,7 +1847,7 @@ void UGatherTextFromSourceCommandlet::FUICommandMacroDescriptor::TryParseArgs(co
 			// parse DefaultLangTooltipString argument - this arg will be in quotes without TEXT macro
 			FString TooltipSourceText = Arguments[ArgIndexOffset + 2];
 			TooltipSourceText.TrimStartInline();
-			MacroDesc = FString::Printf(TEXT("\"InDescription\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
+			MacroDesc = FString::Printf(TEXT("%s(%d): \"InDescription\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
 			if (PrepareArgument(TooltipSourceText, true, MacroDesc, HasQuotes))
 			{
 				if (HasQuotes && !TooltipSourceText.IsEmpty())
@@ -1613,15 +1875,15 @@ void UGatherTextFromSourceCommandlet::FUICommandMacroDescriptor::TryParse(const 
 		TArray<FString> Arguments;
 		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
 		{
-			// Need at least 3 arguments
-			if (Arguments.Num() < 3)
+			// Validate that we got the rightnumber of Arguments
+			if (Arguments.Num() < GetMinNumberOfArgument())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected at least 3 arguments for %s macro, but got %d while parsing %s:%d. %s"), *GetToken(), Arguments.Num(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected at least %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return;
 			}
-			else
-			{
-				TryParseArgs(Text, Context, Arguments, 0);
-			}
+			
+			// Parse all arguments found
+			TryParseArgs(Text, Context, Arguments, 0);
 		}
 	}
 }
@@ -1637,14 +1899,121 @@ void UGatherTextFromSourceCommandlet::FUICommandExtMacroDescriptor::TryParse(con
 		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
 		{
 			// Need at least 5 arguments
-			if (Arguments.Num() < 5)
+			if (Arguments.Num() < GetMinNumberOfArgument())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected at least 5 arguments for %s macro, but got %d while parsing %s:%d. %s"), *GetToken(), Arguments.Num(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected at least %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return;
 			}
-			else
+			TryParseArgs(Text, Context, Arguments, 2);
+		}
+	}
+}
+
+void UGatherTextFromSourceCommandlet::FMetasoundParamMacroDescriptor::TryParseArgs(const FString& Text, FSourceFileParseContext& Context, const TArray<FString>& Arguments, const int32 ArgIndexOffset) const
+{
+	FString NameArgument = Arguments[ArgIndexOffset];
+	// Remove whitespace at the start of the line.
+	NameArgument.TrimStartInline();
+
+	// NAME should neverbe be in quotes 
+	bool HasQuotes = false;
+	FString MacroDesc = FString::Printf(TEXT("%s(%d): \"InDescription\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+	FString SourceLocation = FSourceLocation(Context.Filename, Context.LineNumber).ToString();
+	if (PrepareArgument(NameArgument, true, MacroDesc, HasQuotes))
+	{
+		if (HasQuotes)
+		{
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has NAME argument enclosed in double quotes and cannot be gathered. Please make sure the argument is not enclosed in double quotes."), *SourceLocation, *GetToken());
+			return;
+		}
+		else if (NameArgument.IsEmpty())
+		{
+			//The metasound param does not have a NAME so we cannot gather it 
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has an empty NAME argument and cannot be gathered."), *SourceLocation, *GetToken());
+			return;
+		}
+	}
+
+	FString NameText= Arguments[ArgIndexOffset + 1];
+	// Remove whitespace at the start of the line.
+	NameText.TrimStartInline();
+
+	// NAME_TEXT should always be in quotes 
+	HasQuotes = false;
+	if (PrepareArgument(NameText, true, MacroDesc, HasQuotes))
+	{
+		if (!HasQuotes)
+		{
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has NAME_TEXT argument not enclosed in double quotes and cannot be gathered. Please make sure the argument is enclosed in double quotes."), *SourceLocation, *GetToken());
+			return;
+		}
+		else if (NameText.IsEmpty())
+		{
+			//The metasound param does not have a NAME_TEXT so we cannot gather it 
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has an empty NAME_TEXT argumentand cannot be gathered."), *SourceLocation, *GetToken());
+			return;
+		}
+	}
+
+	// parse TOOLTIP_TEXT argument- this arg will be in quotes without TEXT macro
+	FString TooltipSourceText = Arguments[ArgIndexOffset + 2];
+	TooltipSourceText.TrimStartInline();
+	MacroDesc = FString::Printf(TEXT("%s(%d): \"InDescription\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+	if (PrepareArgument(TooltipSourceText, true, MacroDesc, HasQuotes))
+	{
+		if (!HasQuotes)
+		{
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has a TOOLTIP_TEXT argument not enclosed in double quotes and cannot be gathered. Please ensure the argument is enclosed in double quotes."), *SourceLocation, *GetToken());
+			return;
+		}
+		else if (TooltipSourceText.IsEmpty())
+		{
+			UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has an empty TOOLTIP_TEXT and cannot be gathered."), *SourceLocation, *GetToken());
+			return;
+		}
+		else
+		{
+			// All Metasound loc data is editor only 
+			static const FString WithEditorString = TEXT("WITH_EDITOR");
+
+			// Create the tooltip entry first 
+			FManifestContext MetasoundArgumentContext;
+			MetasoundArgumentContext.Key = NameArgument + TEXT("ToolTip");
+			MetasoundArgumentContext.SourceLocation = SourceLocation;
+			MetasoundArgumentContext.PlatformName = Context.FilePlatformName;
+
+			// We manually append to the macro stack  for editor only due to the nature of METASOUND_PARAM
+			Context.PushMacroBlock(WithEditorString);
+			Context.AddManifestText(GetToken(), Context.Namespace, TooltipSourceText, MetasoundArgumentContext);
+
+			// now add the display name entry. We can recycle a lot of the values used for tooltips  
+			MetasoundArgumentContext.Key = NameArgument + TEXT("DisplayName");
+			Context.AddManifestText(GetToken(), Context.Namespace, NameText, MetasoundArgumentContext);
+
+			// Now we pop the editor only macro 
+			Context.PopMacroBlock();
+		}
+	}
+}
+
+void UGatherTextFromSourceCommandlet::FMetasoundParamMacroDescriptor::TryParse(const FString& Text, FSourceFileParseContext& Context) const
+{
+	// Attempt to parse something of the format
+	// METASOUND_PARAM(NAME, NAME_TEXT, TOOLTIP_TEXT)
+
+	if (!Context.ExcludedRegion && !Context.WithinBlockComment && !Context.WithinLineComment && !Context.WithinStringLiteral)
+	{
+		TArray<FString> Arguments;
+		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
+		{
+			// Validate that we got the rightnumber of Arguments
+			if (Arguments.Num() < GetMinNumberOfArgument())
 			{
-				TryParseArgs(Text, Context, Arguments, 2);
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected at least %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return;
 			}
+
+			TryParseArgs(Text, Context, Arguments, 0);
 		}
 	}
 }
@@ -1663,7 +2032,7 @@ void UGatherTextFromSourceCommandlet::FStringMacroDescriptor::TryParse(const FSt
 
 			if (NumArgs != Arguments.Num())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected %d arguments for %s macro, but got %d while parsing %s:%d. %s"), Arguments.Num(), *GetToken(), NumArgs, *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, Arguments.Num(), *GetToken(), NumArgs, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
 			}
 			else
 			{
@@ -1685,7 +2054,7 @@ void UGatherTextFromSourceCommandlet::FStringMacroDescriptor::TryParse(const FSt
 					FString ArgText = ArgArray[ArgIdx];
 
 					bool HasQuotes;
-					FString MacroDesc = FString::Printf(TEXT("argument %d of %d in %s macro at %s:%d"), ArgIdx+1, Arguments.Num(), *GetToken(), *Context.Filename, Context.LineNumber);
+					FString MacroDesc = FString::Printf(TEXT("%s(%d): argument %d of %d in %s macro"), *Context.Filename, Context.LineNumber, ArgIdx+1, Arguments.Num(), *GetToken());
 					if (!PrepareArgument(ArgText, Arg.IsAutoText, MacroDesc, HasQuotes))
 					{
 						ArgParseError = true;
@@ -1715,7 +2084,7 @@ void UGatherTextFromSourceCommandlet::FStringMacroDescriptor::TryParse(const FSt
 				if ( Identifier.IsEmpty() )
 				{
 					//The command doesn't have an identifier so we can't gather it
-					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s has an empty identifier and cannot be gathered."), *GetToken(), *SourceLocation );
+					UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro has an empty identifier and cannot be gathered."), *SourceLocation, *GetToken() );
 					return;
 				}
 
@@ -1723,7 +2092,7 @@ void UGatherTextFromSourceCommandlet::FStringMacroDescriptor::TryParse(const FSt
 				{
 					if (!Namespace.IsSet())
 					{
-						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s doesn't define a namespace and no external namespace was set. An empty namspace will be used."), *GetToken(), *SourceLocation );
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro doesn't define a namespace and no external namespace was set. An empty namspace will be used."), *SourceLocation, *GetToken() );
 						Namespace = FString();
 					}
 
@@ -1755,9 +2124,9 @@ void UGatherTextFromSourceCommandlet::FStringTableMacroDescriptor::TryParse(cons
 		TArray<FString> Arguments;
 		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
 		{
-			if (Arguments.Num() != 2)
+			if (Arguments.Num() != GetMinNumberOfArgument())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected 2 arguments for %s macro, but got %d while parsing %s:%d. %s"), *GetToken(), Arguments.Num(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
 			}
 			else
 			{
@@ -1766,8 +2135,8 @@ void UGatherTextFromSourceCommandlet::FStringTableMacroDescriptor::TryParse(cons
 				Arguments[1].TrimStartInline();
 				FString TableNamespace = Arguments[1];
 
-				const FString TableIdMacroDesc = FString::Printf(TEXT("\"Id\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString TableNamespaceMacroDesc = FString::Printf(TEXT("\"Namespace\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
+				const FString TableIdMacroDesc = FString::Printf(TEXT("%s(%d): \"Id\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString TableNamespaceMacroDesc = FString::Printf(TEXT("%s(%d): \"Namespace\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
 
 				bool HasQuotes;
 				if (PrepareArgument(TableId, true, TableIdMacroDesc, HasQuotes) && PrepareArgument(TableNamespace, true, TableNamespaceMacroDesc, HasQuotes))
@@ -1776,7 +2145,7 @@ void UGatherTextFromSourceCommandlet::FStringTableMacroDescriptor::TryParse(cons
 
 					if (TableIdName.IsNone())
 					{
-						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s:%d has an empty identifier and cannot be gathered."), *GetToken(), *Context.Filename, Context.LineNumber);
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): %s macro has an empty identifier and cannot be gathered."), *Context.Filename, Context.LineNumber, *GetToken());
 					}
 					else
 					{
@@ -1798,9 +2167,9 @@ void UGatherTextFromSourceCommandlet::FStringTableFromFileMacroDescriptor::TryPa
 		TArray<FString> Arguments;
 		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
 		{
-			if (Arguments.Num() != 3)
+			if (Arguments.Num() != GetMinNumberOfArgument())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected 3 arguments for %s macro, but got %d while parsing %s:%d. %s"), *GetToken(), Arguments.Num(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
 			}
 			else
 			{
@@ -1811,9 +2180,9 @@ void UGatherTextFromSourceCommandlet::FStringTableFromFileMacroDescriptor::TryPa
 				Arguments[2].TrimStartInline();
 				FString TableFilename = Arguments[2];
 
-				const FString TableIdMacroDesc = FString::Printf(TEXT("\"Id\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString TableNamespaceMacroDesc = FString::Printf(TEXT("\"Namespace\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString TableFilenameMacroDesc = FString::Printf(TEXT("\"FilePath\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
+				const FString TableIdMacroDesc = FString::Printf(TEXT("%s(%d): \"Id\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString TableNamespaceMacroDesc = FString::Printf(TEXT("%s(%d): \"Namespace\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString TableFilenameMacroDesc = FString::Printf(TEXT("%s(%d): \"FilePath\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
 
 				bool HasQuotes;
 				if (PrepareArgument(TableId, true, TableIdMacroDesc, HasQuotes) && PrepareArgument(TableNamespace, true, TableNamespaceMacroDesc, HasQuotes) && PrepareArgument(TableFilename, true, TableFilenameMacroDesc, HasQuotes))
@@ -1822,7 +2191,7 @@ void UGatherTextFromSourceCommandlet::FStringTableFromFileMacroDescriptor::TryPa
 
 					if (TableIdName.IsNone())
 					{
-						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s:%d has an empty identifier and cannot be gathered."), *GetToken(), *Context.Filename, Context.LineNumber);
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): %s macro has an empty identifier and cannot be gathered."), *Context.Filename, Context.LineNumber, *GetToken());
 					}
 					else
 					{
@@ -1844,9 +2213,9 @@ void UGatherTextFromSourceCommandlet::FStringTableEntryMacroDescriptor::TryParse
 		TArray<FString> Arguments;
 		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
 		{
-			if (Arguments.Num() != 3)
+			if (Arguments.Num() != GetMinNumberOfArgument())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected 3 arguments for %s macro, but got %d while parsing %s:%d. %s"), *GetToken(), Arguments.Num(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
 			}
 			else
 			{
@@ -1857,9 +2226,9 @@ void UGatherTextFromSourceCommandlet::FStringTableEntryMacroDescriptor::TryParse
 				Arguments[2].TrimStartInline();
 				FString SourceString = Arguments[2];
 
-				const FString TableIdMacroDesc = FString::Printf(TEXT("\"Id\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString KeyMacroDesc = FString::Printf(TEXT("\"Key\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString SourceStringMacroDesc = FString::Printf(TEXT("\"SourceString\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
+				const FString TableIdMacroDesc = FString::Printf(TEXT("%s(%d): \"Id\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString KeyMacroDesc = FString::Printf(TEXT("%s(%d): \"Key\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString SourceStringMacroDesc = FString::Printf(TEXT("%s(%d): \"SourceString\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
 
 				bool HasQuotes;
 				if (PrepareArgument(TableId, true, TableIdMacroDesc, HasQuotes) && PrepareArgument(Key, true, KeyMacroDesc, HasQuotes) && PrepareArgument(SourceString, true, SourceStringMacroDesc, HasQuotes))
@@ -1868,7 +2237,7 @@ void UGatherTextFromSourceCommandlet::FStringTableEntryMacroDescriptor::TryParse
 
 					if (TableIdName.IsNone() || Key.IsEmpty())
 					{
-						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s:%d has an empty identifier and cannot be gathered."), *GetToken(), *Context.Filename, Context.LineNumber);
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): %s macro has an empty identifier and cannot be gathered."), *Context.Filename, Context.LineNumber, *GetToken());
 					}
 					else if (!SourceString.IsEmpty())
 					{
@@ -1890,9 +2259,9 @@ void UGatherTextFromSourceCommandlet::FStringTableEntryMetaDataMacroDescriptor::
 		TArray<FString> Arguments;
 		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
 		{
-			if (Arguments.Num() != 4)
+			if (Arguments.Num() != GetMinNumberOfArgument())
 			{
-				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("Expected 4 arguments for %s macro, but got %d while parsing %s:%d. %s"), *GetToken(), Arguments.Num(), *Context.Filename, Context.LineNumber, *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): Expected %d arguments for %s macro, but got %d. %s"), *Context.Filename, Context.LineNumber, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
 			}
 			else
 			{
@@ -1905,10 +2274,10 @@ void UGatherTextFromSourceCommandlet::FStringTableEntryMetaDataMacroDescriptor::
 				Arguments[3].TrimStartInline();
 				FString MetaData = Arguments[3];
 
-				const FString TableIdMacroDesc = FString::Printf(TEXT("\"Id\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString KeyMacroDesc = FString::Printf(TEXT("\"Key\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString MetaDataIdMacroDesc = FString::Printf(TEXT("\"MetaDataId\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
-				const FString MetaDataMacroDesc = FString::Printf(TEXT("\"MetaData\" argument in %s macro at %s:%d"), *GetToken(), *Context.Filename, Context.LineNumber);
+				const FString TableIdMacroDesc = FString::Printf(TEXT("%s(%d): \"Id\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString KeyMacroDesc = FString::Printf(TEXT("%s(%d): \"Key\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString MetaDataIdMacroDesc = FString::Printf(TEXT("%s(%d): \"MetaDataId\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
+				const FString MetaDataMacroDesc = FString::Printf(TEXT("%s(%d): \"MetaData\" argument in %s macro"), *Context.Filename, Context.LineNumber, *GetToken());
 
 				bool HasQuotes;
 				if (PrepareArgument(TableId, true, TableIdMacroDesc, HasQuotes) && PrepareArgument(Key, true, KeyMacroDesc, HasQuotes) && PrepareArgument(MetaDataId, true, MetaDataIdMacroDesc, HasQuotes) && PrepareArgument(MetaData, true, MetaDataMacroDesc, HasQuotes))
@@ -1918,13 +2287,81 @@ void UGatherTextFromSourceCommandlet::FStringTableEntryMetaDataMacroDescriptor::
 
 					if (TableIdName.IsNone() || Key.IsEmpty() || MetaDataIdName.IsNone())
 					{
-						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s macro at %s:%d has an empty identifier and cannot be gathered."), *GetToken(), *Context.Filename, Context.LineNumber);
+						UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s(%d): %s macro has an empty identifier and cannot be gathered."), *Context.Filename, Context.LineNumber, *GetToken());
 					}
 					else if (!MetaData.IsEmpty())
 					{
 						Context.AddStringTableEntryMetaData(TableIdName, Key, MetaDataIdName, MetaData);
 					}
 				}
+			}
+		}
+	}
+}
+
+UGatherTextFromSourceCommandlet::FStructuredLogMacroDescriptor::FStructuredLogMacroDescriptor(const TCHAR* InName, EFlags InFlags)
+	: FMacroDescriptor(InName, ((int32)InFlags & (int32)EFlags::Namespace) ? 5 : 4)
+	, Flags(InFlags)
+{
+}
+
+void UGatherTextFromSourceCommandlet::FStructuredLogMacroDescriptor::TryParse(const FString& Text, FSourceFileParseContext& Context) const
+{
+	// Attempt to parse something of the format
+	// UE_LOGFMT_LOC[_EX](CategoryName, Verbosity, Key, Format, ...)
+	// UE_LOGFMT_NSLOC[_EX](CategoryName, Verbosity, Namespace, Key, Format, ...)
+	int32 NextArg = 2;
+
+	if (!Context.ExcludedRegion && !Context.WithinBlockComment && !Context.WithinLineComment && !Context.WithinStringLiteral)
+	{
+		TArray<FString> Arguments;
+		if (ParseArgsFromMacro(StripCommentsFromToken(Text, Context), Arguments, Context))
+		{
+			const FString SourceLocation = FSourceLocation(Context.Filename, Context.LineNumber).ToString();
+
+			if (Arguments.Num() < GetMinNumberOfArgument())
+			{
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: Expected at least %d arguments for %s macro, but got %d. %s"), *SourceLocation, GetMinNumberOfArgument(), *GetToken(), Arguments.Num(), *FLocTextHelper::SanitizeLogOutput(Context.LineText.TrimStartAndEnd()));
+				return;
+			}
+
+			bool bParseOk = true;
+			const auto ParseArg = [this, &SourceLocation, &bParseOk](FString&& Arg, const TCHAR* ArgName) -> FString
+			{
+				FString Out = MoveTemp(Arg).TrimStart();
+				constexpr bool bIsAutoText = true;
+				const FString Desc = FString::Printf(TEXT("%s: \"%s\" argument in %s macro"), *SourceLocation, ArgName, *GetToken());
+				bool bHasQuotes = false;
+				bParseOk &= PrepareArgument(Out, bIsAutoText, Desc, bHasQuotes);
+				return Out;
+			};
+
+			FString Namespace;
+			if (const bool bHasNamespace = ((int32)Flags & (int32)EFlags::Namespace) != 0)
+			{
+				Namespace = ParseArg(MoveTemp(Arguments[NextArg++]), TEXT("Namespace"));
+			}
+			else
+			{
+				Namespace = Context.Namespace;
+			}
+
+			if (Namespace.IsEmpty())
+			{
+				UE_LOG(LogGatherTextFromSourceCommandlet, Warning, TEXT("%s: %s macro doesn't define a namespace and no external namespace was set. An empty namspace will be used."), *SourceLocation, *GetToken());
+			}
+
+			FString Key = ParseArg(MoveTemp(Arguments[NextArg++]), TEXT("Key"));
+			FString Format = ParseArg(MoveTemp(Arguments[NextArg++]), TEXT("Format"));
+
+			if (bParseOk && !Key.IsEmpty())
+			{
+				FManifestContext MacroContext;
+				MacroContext.Key = Key;
+				MacroContext.SourceLocation = SourceLocation;
+				MacroContext.PlatformName = Context.FilePlatformName;
+
+				Context.AddManifestText(GetToken(), Namespace, Format, MacroContext);
 			}
 		}
 	}

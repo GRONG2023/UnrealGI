@@ -1,20 +1,37 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MovieSceneObjectBindingIDCustomization.h"
-#include "IPropertyUtilities.h"
-#include "MovieSceneBindingOwnerInterface.h"
-#include "MovieSceneSequence.h"
-#include "MovieScene.h"
-#include "PropertyHandle.h"
-#include "PropertyHandle.h"
+
+#include "Containers/Array.h"
+#include "Delegates/Delegate.h"
 #include "DetailWidgetRow.h"
-#include "IDetailChildrenBuilder.h"
-#include "SDropTarget.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailsView.h"
 #include "ISequencer.h"
-#include "Widgets/Input/SComboButton.h"
-#include "Widgets/Text/STextBlock.h"
+#include "Input/DragAndDrop.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "MovieSceneBindingOwnerInterface.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyHandle.h"
+#include "SDropTarget.h"
 #include "ScopedTransaction.h"
 #include "SequencerObjectBindingDragDropOp.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "Templates/TypeHash.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SComboButton.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "MovieSceneObjectBindingIDCustomization"
 
@@ -40,13 +57,22 @@ void FMovieSceneObjectBindingIDCustomization::BindTo(TSharedRef<ISequencer> Oute
 
 void FMovieSceneObjectBindingIDCustomization::CustomizeHeader(TSharedRef<IPropertyHandle> PropertyHandle, FDetailWidgetRow& HeaderRow, IPropertyTypeCustomizationUtils& CustomizationUtils)
 {
+	using namespace UE::Sequencer;
+
 	StructProperty = PropertyHandle;
 
 	Initialize();
 
 	auto IsAcceptable = [](TSharedPtr<FDragDropOperation> Operation)
 	{
-		return Operation->IsOfType<FSequencerObjectBindingDragDropOp>() && static_cast<FSequencerObjectBindingDragDropOp*>(Operation.Get())->GetDraggedBindings().Num() == 1;
+		using namespace UE::Sequencer;
+		if (!Operation->IsOfType<FSequencerObjectBindingDragDropOp>())
+		{
+			return false;
+		}
+
+		FSequencerObjectBindingDragDropOp* DragDropOp = static_cast<FSequencerObjectBindingDragDropOp*>(Operation.Get());
+		return DragDropOp->GetDraggedRebindableBindings().Num() == 1;
 	};
 
 	HeaderRow
@@ -61,7 +87,7 @@ void FMovieSceneObjectBindingIDCustomization::CustomizeHeader(TSharedRef<IProper
 		+ SHorizontalBox::Slot()
 		[
 			SNew(SDropTarget)
-			.OnDrop(this, &FMovieSceneObjectBindingIDCustomization::OnDrop)
+			.OnDropped(this, &FMovieSceneObjectBindingIDCustomization::OnDrop)
 			.OnAllowDrop_Static(IsAcceptable)
 			.OnIsRecognized_Static(IsAcceptable)
 			[
@@ -88,12 +114,14 @@ void FMovieSceneObjectBindingIDCustomization::CustomizeHeader(TSharedRef<IProper
 	];
 }
 
-FReply FMovieSceneObjectBindingIDCustomization::OnDrop(TSharedPtr<FDragDropOperation> InOperation)
+FReply FMovieSceneObjectBindingIDCustomization::OnDrop(const FGeometry& InGeometry, const FDragDropEvent& InDragDropEvent)
 {
-	FSequencerObjectBindingDragDropOp* SequencerOp = InOperation->IsOfType<FSequencerObjectBindingDragDropOp>() ? static_cast<FSequencerObjectBindingDragDropOp*>(InOperation.Get()) : nullptr;
+	using namespace UE::Sequencer;
+
+	TSharedPtr<FSequencerObjectBindingDragDropOp> SequencerOp = InDragDropEvent.GetOperationAs<FSequencerObjectBindingDragDropOp>();
 	if (SequencerOp)
 	{
-		TArray<UE::MovieScene::FFixedObjectBindingID> Bindings = SequencerOp->GetDraggedBindings();
+		TArray<UE::MovieScene::FFixedObjectBindingID> Bindings = SequencerOp->GetDraggedRebindableBindings();
 		if (Bindings.Num() == 1)
 		{
 			SetBindingId(Bindings[0]);
@@ -136,12 +164,17 @@ FMovieSceneObjectBindingID FMovieSceneObjectBindingIDCustomization::GetCurrentVa
 	TArray<void*> Ptrs;
 	StructProperty->AccessRawData(Ptrs);
 
-	FMovieSceneObjectBindingID Value = Ptrs.Num() > 0 ? *static_cast<FMovieSceneObjectBindingID*>(Ptrs[0]) : FMovieSceneObjectBindingID();
+	if (Ptrs.Num() == 0 || Ptrs[0] == nullptr)
+	{
+		return FMovieSceneObjectBindingID();
+	}
+
+	FMovieSceneObjectBindingID Value = *static_cast<FMovieSceneObjectBindingID*>(Ptrs[0]);
 
 	// If more than one value and not all equal, return empty
 	for (int32 Index = 1; Index < Ptrs.Num(); ++Index)
 	{
-		if (*static_cast<FMovieSceneObjectBindingID*>(Ptrs[Index]) != Value)
+		if (Ptrs[Index] != nullptr && *static_cast<FMovieSceneObjectBindingID*>(Ptrs[Index]) != Value)
 		{
 			return FMovieSceneObjectBindingID();
 		}
@@ -171,7 +204,7 @@ void FMovieSceneObjectBindingIDCustomization::SetCurrentValue(const FMovieSceneO
 		*static_cast<FMovieSceneObjectBindingID*>(Ptrs[Index]) = InObjectBinding;
 	}
 	
-	StructProperty->NotifyPostChange();
+	StructProperty->NotifyPostChange(EPropertyChangeType::ValueSet);
 	StructProperty->NotifyFinishedChangingProperties();
 }
 

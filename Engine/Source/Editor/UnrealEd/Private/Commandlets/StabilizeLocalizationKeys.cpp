@@ -4,6 +4,7 @@
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/Guid.h"
+#include "UObject/Package.h"
 #include "UObject/UObjectHash.h"
 #include "Serialization/ArchiveUObject.h"
 #include "Internationalization/TextNamespaceUtil.h"
@@ -80,7 +81,7 @@ public:
 		this->SetIsSaving(true);
 
 		TArray<UObject*> AllObjectsInPackage;
-		GetObjectsWithOuter(InPackage, AllObjectsInPackage, true, RF_Transient, EInternalObjectFlags::PendingKill);
+		GetObjectsWithOuter(InPackage, AllObjectsInPackage, true, RF_Transient, EInternalObjectFlags::Garbage);
 
 		for (UObject* Obj : AllObjectsInPackage)
 		{
@@ -120,13 +121,14 @@ public:
 			return false;
 		}
 
-		FString Namespace;
-		FString Key;
-		const bool bFoundNamespaceAndKey = FTextLocalizationManager::Get().FindNamespaceAndKeyFromDisplayString(FTextInspector::GetSharedDisplayString(InOutText), Namespace, Key);
-		if (!bFoundNamespaceAndKey)
+		const FTextId TextId = FTextInspector::GetTextId(InOutText);
+		if (TextId.IsEmpty())
 		{
 			return false;
 		}
+
+		const FString Namespace = TextId.GetNamespace().GetChars();
+		const FString Key = TextId.GetKey().GetChars();
 
 		const FString CurrentPackageNamespace = TextNamespaceUtil::ExtractPackageNamespace(Namespace);
 		if (CurrentPackageNamespace.Equals(PackageNamespace, ESearchCase::CaseSensitive))
@@ -208,7 +210,7 @@ int32 UStabilizeLocalizationKeysCommandlet::Main(const FString& Params)
 		FText SCCErrorStr;
 		if (!SourceControlInfo->IsReady(SCCErrorStr))
 		{
-			UE_LOG(LogStabilizeLocalizationKeys, Error, TEXT("Source Control error: %s"), *SCCErrorStr.ToString());
+			UE_LOG(LogStabilizeLocalizationKeys, Error, TEXT("Revision Control error: %s"), *SCCErrorStr.ToString());
 			return -1;
 		}
 	}
@@ -254,7 +256,7 @@ int32 UStabilizeLocalizationKeysCommandlet::Main(const FString& Params)
 			FPackageFileSummary PackageFileSummary;
 			(*FileReader) << PackageFileSummary;
 
-			const bool bRequiresKeyStabilization = !!(PackageFileSummary.PackageFlags & PKG_RequiresLocalizationGather);
+			const bool bRequiresKeyStabilization = !!(PackageFileSummary.GetPackageFlags() & PKG_RequiresLocalizationGather);
 			if (bRequiresKeyStabilization)
 			{
 				UnstablePackages.Add(PackageFilename);

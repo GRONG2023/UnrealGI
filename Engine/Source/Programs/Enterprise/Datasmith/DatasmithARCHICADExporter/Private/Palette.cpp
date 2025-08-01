@@ -2,16 +2,13 @@
 
 #include "Palette.h"
 #include "Synchronizer.h"
+#include "Utils/APIEnvir.h"
 #include "Utils/TAssValueName.h"
 #include "ResourcesIDs.h"
 #include "Utils/Error.h"
 //#include "CSynchronizer.hpp"
 #include "Commander.h"
 #include "Menus.h"
-
-DISABLE_SDK_WARNINGS_START
-#include "DGModule.hpp"
-DISABLE_SDK_WARNINGS_END
 
 #define PALETTE_4_ALL_VIEW 1
 #define TRACE_PALETTE 0
@@ -81,6 +78,13 @@ class FPaletteWindow : public DG::Palette,
 		DetachFromAllItems(*this);
 	}
 
+#if PLATFORM_MAC & AC_VERSION > 25
+	virtual void ItemMouseExited(const DG::ItemMouseMoveEvent& /*ev*/) override {}
+	virtual void ItemMouseEntered(const DG::ItemMouseMoveEvent& /*ev*/) override {}
+	virtual short SpecMouseExited(const DG::ItemMouseMoveEvent& /*ev*/) override { return 0; }
+	virtual short SpecMouseEntered(const DG::ItemMouseMoveEvent& /*ev*/) override { return 0; }
+#endif
+
   private:
 	virtual void PanelOpened(const DG::PanelOpenEvent& /*ev*/) override
 	{
@@ -112,7 +116,7 @@ class FPaletteWindow : public DG::Palette,
 			if (--Count == 0)
 			{
 				Count = Delay;
-				TryFunctionCatchAndAlert("AutoSync - Check View State", []() -> GSErrCode {
+				TryFunctionCatchAndLog("AutoSync - Check View State", []() -> GSErrCode {
 					FSynchronizer* Synchronizer = FSynchronizer::GetCurrent();
 					if (Synchronizer != nullptr)
 					{
@@ -264,6 +268,7 @@ void FPalette::WindowChanged()
 	if (CurrentPalette != nullptr)
 	{
 		CurrentPalette->Window->IconSnapshot.SetStatus(bIs3DView);
+		CurrentPalette->Window->IconAutoSync.SetStatus(bIs3DView);
 	}
 #endif
 }

@@ -2,8 +2,14 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ContainersFwd.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
 #include "GenericPlatform/GenericPlatformFile.h"
+#include "HAL/Platform.h"
+#include "HAL/UnrealMemory.h"
+#include "Misc/DateTime.h"
 
 #if WITH_ENGINE
 
@@ -39,8 +45,11 @@ class FILEUTILITIES_API FZipArchiveWriter
 	inline void Write(uint64 V) { Write((void*)&V, sizeof(V)); }
 	inline void Write(void* Src, uint64 Size)
 	{
-		void* Dst = &Buffer[Buffer.AddUninitialized(Size)];
-		FMemory::Memcpy(Dst, Src, Size);
+		if (Size)
+		{
+			void* Dst = &Buffer[Buffer.AddUninitialized(Size)];
+			FMemory::Memcpy(Dst, Src, Size);
+		}
 	}
 	inline uint64 Tell() { return (File ? File->Tell() : 0) + Buffer.Num(); }
 	void Flush();
@@ -49,6 +58,7 @@ public:
 	FZipArchiveWriter(IFileHandle* InFile);
 	~FZipArchiveWriter();
 
+	void AddFile(const FString& Filename, TConstArrayView<uint8> Data, const FDateTime& Timestamp);
 	void AddFile(const FString& Filename, const TArray<uint8>& Data, const FDateTime& Timestamp);
 };
 

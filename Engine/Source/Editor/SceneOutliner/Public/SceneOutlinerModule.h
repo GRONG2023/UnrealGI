@@ -6,10 +6,18 @@
 #include "Modules/ModuleInterface.h"
 #include "ISceneOutliner.h"
 #include "SceneOutlinerPublicTypes.h"
+#include "Misc/NamePermissionList.h"
 
 class ICustomSceneOutliner;
 class ISceneOutlinerColumn;
-class FOutlinerFilter;
+struct FSceneOutlinerInitializationOptions;
+
+/** Delegate used with the Scene Outliner in 'actor picking' mode.  You'll bind a delegate when the
+	outliner widget is created, which will be fired off when an actor is selected in the list */
+DECLARE_DELEGATE_OneParam(FOnActorPicked, AActor*);
+/** Delegate used with the Scene Outliner in 'component picking' mode.  You'll bind a delegate when the
+	outliner widget is created, which will be fired off when an actor is selected in the list */
+DECLARE_DELEGATE_OneParam(FOnComponentPicked, UActorComponent*);
 
 /**
  * Implements the Scene Outliner module.
@@ -19,41 +27,62 @@ class FSceneOutlinerModule
 {
 public:
 
-	/**
-	 * Creates a scene outliner widget
-	 *
-	 * @param	InitOptions						Programmer-driven configuration for this widget instance
-	 * @param	MakeContentMenuWidgetDelegate	Optional delegate to execute to build a context menu when right clicking on actors
-	 * @param	OnActorPickedDelegate			Optional callback when an actor is selected in 'actor picking' mode
-	 *
-	 * @return	New scene outliner widget
-	 */
-	virtual TSharedRef< ISceneOutliner > CreateSceneOutliner(
-		const SceneOutliner::FInitializationOptions& InitOptions,
-		const FOnActorPicked& OnActorPickedDelegate ) const;
+	FSceneOutlinerModule();
 
 	/**
 	 * Creates a scene outliner widget
 	 *
 	 * @param	InitOptions						Programmer-driven configuration for this widget instance
-	 * @param	MakeContentMenuWidgetDelegate	Optional delegate to execute to build a context menu when right clicking on actors
-	 * @param	OnItemPickedDelegate			Optional callback when an item is selected in 'picking' mode
+	 * @param	OutlinerModeFactory				Factory delegate used to create the outliner mode
 	 *
 	 * @return	New scene outliner widget
 	 */
-	virtual TSharedRef< ISceneOutliner > CreateSceneOutliner(
-		const SceneOutliner::FInitializationOptions& InitOptions,
-		const FOnSceneOutlinerItemPicked& OnItemPickedDelegate ) const;
+	virtual TSharedRef<ISceneOutliner> CreateSceneOutliner(
+		const FSceneOutlinerInitializationOptions& InitOptions) const;
 
-	/**
-	 * Creates a custom scene outliner widget
-	 *
-	 * @param	InitOptions						Programmer-driven configuration for this widget instance. Know that the mode will always be converted to custom.
-	 *
-	 * @return	New custom scene outliner widget
+	/* Some common scene outliners */
+
+	/** Creates an actor picker widget. Calls the OnActorPickedDelegate when an item is selected. */
+	virtual TSharedRef<ISceneOutliner> CreateActorPicker(
+		const FSceneOutlinerInitializationOptions& InInitOptions,
+		const FOnActorPicked& OnActorPickedDelegate,
+		TWeakObjectPtr<UWorld> SpecifiedWorld = nullptr, bool bHideLevelInstanceHierarchy = true) const;
+
+	/** Creates a component picker widget. Calls the OnComponentPickedDelegate when an item is selected. */
+	virtual TSharedRef<ISceneOutliner> CreateComponentPicker(
+		const FSceneOutlinerInitializationOptions& InInitOptions,
+		const FOnComponentPicked& OnComponentPickedDelegate,
+		TWeakObjectPtr<UWorld> SpecifiedWorld = nullptr) const;
+
+	/** Creates an actor browser widget (also known as a World Outliner). */
+	virtual TSharedRef<ISceneOutliner> CreateActorBrowser(
+		const FSceneOutlinerInitializationOptions& InInitOptions,
+		TWeakObjectPtr<UWorld> SpecifiedWorld = nullptr) const;
+
+
+	/** Register a factory to create a custom Scene Outliner */
+	virtual void RegisterCustomSceneOutlinerFactory(FName ID, FSceneOutlinerFactory InOutlinerFactory);
+
+	/** Unregister a factory to create a custom Scene Outliner */
+	virtual void UnregisterCustomSceneOutlinerFactory(FName ID);
+
+	/** Try to create a custom scene outliner using a registered factory (nullptr if ID was not registered) */
+	virtual TSharedPtr<ISceneOutliner> CreateCustomRegisteredOutliner(FName ID, FSceneOutlinerInitializationOptions InInitOptions);
+
+	/** Check if a custom scene outliner factory is registered with the given ID */
+	virtual bool IsCustomSceneOutlinerFactoryRegistered(FName ID);
+
+	/** Add the columns present in the level editor's Outliner (Actor Browser) to the given init options
+	 *  @param InWorld The world the Outliner initialized by InInitOptions will look it, defaults to the level editor's world if nullptr
 	 */
-	virtual TSharedRef< ICustomSceneOutliner > CreateCustomSceneOutliner(
-		SceneOutliner::FInitializationOptions& InitOptions ) const;
+	virtual void CreateActorBrowserColumns(FSceneOutlinerInitializationOptions& InInitOptions, UWorld* InWorld = nullptr) const;
+	
+	/** Column permission list */
+	TSharedRef<FNamePermissionList>& GetColumnPermissionList() { return ColumnPermissionList; }
+
+	/** Delegate that broadcasts when column permission list changes. */
+	DECLARE_MULTICAST_DELEGATE(FOnColumnPermissionListChanged);
+	FOnColumnPermissionListChanged& OnColumnPermissionListChanged() { return ColumnPermissionListChanged; }
 
 public:
 	/** Register a new type of column available to all scene outliners */
@@ -73,7 +102,7 @@ public:
 
 	/** Register a new type of default column available to all scene outliners */
 	template< typename T >
-	void RegisterDefaultColumnType(SceneOutliner::FDefaultColumnInfo InDefaultColumnInfo)
+	void RegisterDefaultColumnType(FSceneOutlinerColumnInfo InColumnInfo)
 	{
 		auto ID = T::GetID();
 		if ( !ColumnMap.Contains( ID ) )
@@ -83,7 +112,7 @@ public:
 			};
 
 			ColumnMap.Add( ID, FCreateSceneOutlinerColumn::CreateStatic( CreateColumn ) );
-			DefaultColumnMap.Add( ID, InDefaultColumnInfo );
+			DefaultColumnMap.Add( ID, InColumnInfo);
 		}
 	}
 
@@ -106,17 +135,24 @@ public:
 		return nullptr;
 	}
 
+	void CreateActorInfoColumns(FSceneOutlinerInitializationOptions& InInitOptions, UWorld* WorldPtr = nullptr) const;
+	void CreateWorldPartitionColumns(FSceneOutlinerInitializationOptions& InInitOptions, UWorld* WorldPtr = nullptr) const;
+	
 	/** Map of column type name -> default column info */
-	TMap< FName, SceneOutliner::FDefaultColumnInfo> DefaultColumnMap;
-
-
-	/** Additional outliner filters */
-	TMap< FName, SceneOutliner::FOutlinerFilterInfo > OutlinerFilterInfoMap;
+	TMap< FName, FSceneOutlinerColumnInfo> DefaultColumnMap;
 
 private:
 
 	/** Map of column type name -> factory delegate */
 	TMap< FName, FCreateSceneOutlinerColumn > ColumnMap;
+
+	/** Column permission list used to filter scene ouliner columns. */
+	TSharedRef<FNamePermissionList> ColumnPermissionList;
+
+	/** Delegate that broadcasts when column permission list changes. */
+	FOnColumnPermissionListChanged ColumnPermissionListChanged;
+	
+	TMap< FName, FSceneOutlinerFactory> CustomOutlinerFactories;
 
 public:
 

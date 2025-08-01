@@ -9,15 +9,15 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Input/Reply.h"
 #include "Widgets/SWidget.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Framework/MarqueeRect.h"
 #include "SAnimTrackPanel.h"
 #include "SAnimEditorBase.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Framework/Commands/Commands.h"
 #include "SAnimTimingPanel.h"
 #include "EditorUndoClient.h"
-#include "AnimModel.h"
+#include "AnimTimeline/AnimModel.h"
 #include "Containers/ArrayView.h"
 
 class FSlateWindowElementList;
@@ -36,6 +36,7 @@ DECLARE_DELEGATE( FDeleteNotify )
 DECLARE_DELEGATE_RetVal( bool, FOnGetIsAnimNotifySelectionValidForReplacement )
 DECLARE_DELEGATE_TwoParams( FReplaceWithNotify, FString, UClass* )
 DECLARE_DELEGATE_TwoParams( FReplaceWithBlueprintNotify, FString, FString )
+DECLARE_DELEGATE_OneParam( FReplaceWithSyncMarker, FString )
 DECLARE_DELEGATE( FDeselectAllNotifies )
 DECLARE_DELEGATE_OneParam( FOnGetBlueprintNotifyData, TArray<FAssetData>& )
 DECLARE_DELEGATE_OneParam( FOnGetNativeNotifyClasses, TArray<UClass*>&)
@@ -138,6 +139,9 @@ public:
 	TArray<TSharedPtr<SAnimNotifyNode>> OriginalSelection;
 };
 
+DECLARE_DELEGATE_FourParams(FOnNotifyStateHandleBeingDragged, TSharedPtr<SAnimNotifyNode> /*NotifyNode*/, const FPointerEvent& /*PointerEvent*/, ENotifyStateHandleHit::Type /*Handle*/, float /*Time*/)
+DECLARE_DELEGATE_FourParams(FOnNotifyNodesBeingDragged, const TArray<TSharedPtr<SAnimNotifyNode>>& /*NotifyNodes*/, const class FDragDropEvent& /*DragDropEvent*/, float /*XPosition*/, float /*Time*/)
+
 //////////////////////////////////////////////////////////////////////////
 // SAnimNotifyPanel
 
@@ -145,7 +149,7 @@ class FAnimNotifyPanelCommands : public TCommands<FAnimNotifyPanelCommands>
 {
 public:
 	FAnimNotifyPanelCommands()
-		: TCommands<FAnimNotifyPanelCommands>("AnimNotifyPanel", NSLOCTEXT("Contexts", "AnimNotifyPanel", "Anim Notify Panel"), NAME_None, FEditorStyle::GetStyleSetName())
+		: TCommands<FAnimNotifyPanelCommands>("AnimNotifyPanel", NSLOCTEXT("Contexts", "AnimNotifyPanel", "Anim Notify Panel"), NAME_None, FAppStyle::GetAppStyleSetName())
 	{
 
 	}
@@ -192,6 +196,8 @@ public:
 	SLATE_EVENT( FOnInvokeTab, OnInvokeTab )
 	SLATE_EVENT( FSimpleDelegate, OnNotifiesChanged )
 	SLATE_EVENT( FOnSnapPosition, OnSnapPosition )
+	SLATE_EVENT( FOnNotifyStateHandleBeingDragged, OnNotifyStateHandleBeingDragged)
+	SLATE_EVENT( FOnNotifyNodesBeingDragged, OnNotifyNodesBeingDragged)
 
 	SLATE_END_ARGS()
 
@@ -211,6 +217,9 @@ public:
 	// Handler function for renaming a notify track
 	void OnCommitTrackName(const FText& InText, ETextCommit::Type CommitInfo, int32 TrackIndexToName);
 
+	// Request a deferred Update call
+	void RequestUpdate();
+	
 	void Update();
 
 	/** Returns the position of the notify node currently being dragged. Returns -1 if no node is being dragged */
@@ -219,7 +228,7 @@ public:
 	/**Handler for when a notify node drag has been initiated */
 	FReply OnNotifyNodeDragStarted(TArray<TSharedPtr<SAnimNotifyNode>> NotifyNodes, TSharedRef<SWidget> Decorator, const FVector2D& ScreenCursorPos, const FVector2D& ScreenNodePosition, const bool bDragOnMarker);
 
-	virtual float GetSequenceLength() const override {return Sequence->SequenceLength;}
+	virtual float GetSequenceLength() const override;
 
 	void CopySelectedNodesToClipboard() const;
 	void OnPasteNodes(SAnimNotifyTrack* RequestTrack, float ClickTime, ENotifyPasteMode::Type PasteMode, ENotifyPasteMultipleMode::Type MultiplePasteType);
@@ -236,6 +245,7 @@ public:
 	virtual FReply OnDragDetected(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual void OnFocusLost(const FFocusEvent& InFocusEvent) override;
 	virtual int32 OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const override;
+	virtual void Tick( const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime ) override;
 	/** End SWidget Interface */
 
 	void RefreshMarqueeSelectedNodes(const FGeometry& PanelGeo);
@@ -251,9 +261,12 @@ public:
 	/** Handler for replacing with notify blueprint */
 	void OnReplaceSelectedWithNotifyBlueprint(FString NewBlueprintNotifyName, FString NewBlueprintNotifyClass);
 
+	/** Handler for replacing with sync marker */
+	void OnReplaceSelectedWithSyncMarker(FString NewBlueprintNotifyName);
+
 	void HandleObjectsSelected(const TArray<UObject*>& InObjects);
 
-	TSharedRef<FUICommandList> GetCommandList() const { return WeakCommandList.Pin().ToSharedRef(); }
+	TSharedRef<FUICommandList> GetCommandList() const { return CommandList.ToSharedRef(); }
 
 private:
 	friend struct FScopedSavedNotifySelection;
@@ -282,6 +295,9 @@ private:
 
 	/** Cached list of Notify editor tracks */
 	TArray<TSharedPtr<SNotifyEdTrack>> NotifyEditorTracks;
+
+	// Request a deferred RefreshNotifyTracks call
+	void RequestRefresh();
 
 	// this just refresh notify tracks - UI purpose only
 	// do not call this from here. This gets called by asset. 
@@ -340,8 +356,8 @@ private:
 	FOnSnapPosition OnSnapPosition;
 
 	/** UI commands for this widget */
-	TWeakPtr<FUICommandList> WeakCommandList;
-
+	TSharedPtr<FUICommandList> CommandList;
+	
 	/** Classes that are known to be derived from blueprint notifies */
 	TArray<FString> NotifyClassNames;
 
@@ -357,9 +373,19 @@ private:
 	/** Delegate used to inform others that notifies have changed (for timing) */
 	FSimpleDelegate OnNotifiesChanged;
 
+	/** Delegate used to inform others that a notify state handle is being dragged */
+	FOnNotifyStateHandleBeingDragged OnNotifyStateHandleBeingDragged;
+	
+	/** Delegate used to inform others that one or more notifies nodes are being dragged */
+	FOnNotifyNodesBeingDragged OnNotifyNodesBeingDragged;
+
 	/** Recursion guard for selection */
 	bool bIsSelecting;
 
 	/** Recursion guard for updating */
 	bool bIsUpdating;
+
+	/** Flags to handle deferred updates */
+	bool bUpdateRequested;
+	bool bRefreshRequested;
 };

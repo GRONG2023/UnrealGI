@@ -4,6 +4,8 @@
 #include "Containers/StringConv.h"
 #include "Logging/LogMacros.h"
 #include "CoreGlobals.h"
+#include "Memory/MemoryView.h"
+#include "Memory/SharedBuffer.h"
 #include "Misc/ByteSwap.h"
 #include "Misc/CoreMisc.h"
 #include "Misc/Paths.h"
@@ -42,7 +44,16 @@ bool FFileHelper::LoadFileToArray( TArray<uint8>& Result, const TCHAR* Filename,
 		}
 		return false;
 	}
-	int32 TotalSize = (int32)Reader->TotalSize();
+	int64 TotalSize64 = Reader->TotalSize();
+	if ( TotalSize64+2 > MAX_int32 )
+	{
+		if (!(Flags & FILEREAD_Silent))
+		{
+			UE_LOG(LogStreaming,Error,TEXT("File '%s' is too large for 32-bit reader (%lld), use TArray64."),Filename,TotalSize64);
+		}
+		return false;
+	}
+	int32 TotalSize = (int32)TotalSize64;
 	// Allocate slightly larger than file size to avoid re-allocation when caller null terminates file buffer
 	Result.Reset( TotalSize + 2 );
 	Result.AddUninitialized( TotalSize );
@@ -85,7 +96,7 @@ bool FFileHelper::LoadFileToArray(TArray64<uint8>& Result, const TCHAR* Filename
  */
 void FFileHelper::BufferToString( FString& Result, const uint8* Buffer, int32 Size )
 {
-	TArray<TCHAR>& ResultArray = Result.GetCharArray();
+	TArray<TCHAR, FString::AllocatorType>& ResultArray = Result.GetCharArray();
 	ResultArray.Empty();
 
 	bool bIsUnicode = false;
@@ -132,7 +143,7 @@ void FFileHelper::BufferToString( FString& Result, const uint8* Buffer, int32 Si
 	else
 	{
 		// Else ensure null terminator is present
-		ResultArray.Last() = 0;
+		ResultArray.Last() = TCHAR('\0');
 
 		if (bIsUnicode)
 		{
@@ -198,7 +209,7 @@ bool FFileHelper::LoadFileToString( FString& Result, const TCHAR* Filename, EHas
 	return LoadFileToString(Result, *Reader.Get(), VerifyFlags);
 }
 
-bool FFileHelper::LoadFileToString(FString& Result, IPlatformFile* PlatformFile, const TCHAR* Filename, EHashOptions VerifyFlags /*= EHashOptions::None*/)
+bool FFileHelper::LoadFileToString(FString& Result, IPlatformFile* PlatformFile, const TCHAR* Filename, EHashOptions VerifyFlags /*= EHashOptions::None*/, uint32 ReadFlags /*= 0*/)
 {
 	if (!PlatformFile)
 	{
@@ -208,7 +219,16 @@ bool FFileHelper::LoadFileToString(FString& Result, IPlatformFile* PlatformFile,
 	IFileHandle* File = PlatformFile->OpenRead(Filename);
 	if (!File)
 	{
-		UE_LOG(LogStreaming, Warning, TEXT("Failed to read file '%s' error."), Filename);
+		if (ReadFlags & FILEREAD_NoFail)
+		{
+			UE_LOG(LogStreaming, Fatal, TEXT("Failed to read file: %s"), Filename);
+		}
+
+		if (!(ReadFlags & FILEREAD_Silent))
+		{
+			UE_LOG(LogStreaming, Warning, TEXT("Failed to read file '%s' error."), Filename);
+		}
+
 		return false;
 	}
 
@@ -266,7 +286,7 @@ bool FFileHelper::LoadFileToStringArrayWithPredicate(TArray<FString>& Result, co
 				Pos++;
 			}
 
-			FString Line(UE_PTRDIFF_TO_INT32(Pos - LineStart), LineStart);
+			FString Line = FString::ConstructFromPtrSize(LineStart, UE_PTRDIFF_TO_INT32(Pos - LineStart));
 			if (Invoke(Predicate, Line))
 			{
 				Result.Add(MoveTemp(Line));
@@ -331,6 +351,223 @@ bool FFileHelper::LoadFileToStringArrayWithPredicate(TArray<FString>& Result, co
 	return LoadFileToStringArrayWithPredicate(Result, Filename, Predicate);
 }
 
+namespace UE::FileHelper::Private
+{
+
+enum class EEncoding
+{
+	Unknown,
+	UTF8,
+	UTF16BE,
+	UTF16LE,
+};
+
+static EEncoding ParseEncoding(FMutableMemoryView& Buffer, const uint64 TotalSize)
+{
+	const uint64 Size = Buffer.GetSize();
+	const uint8* const Bytes = static_cast<const uint8*>(Buffer.GetData());
+	if (!(TotalSize & 1) && Size >= 2 && Bytes[0] == 0xff && Bytes[1] == 0xfe)
+	{
+		Buffer += 2;
+		return EEncoding::UTF16LE;
+	}
+	if (!(TotalSize & 1) && Size >= 2 && Bytes[0] == 0xfe && Bytes[1] == 0xff)
+	{
+		Buffer += 2;
+		return EEncoding::UTF16BE;
+	}
+	if (Size >= 3 && Bytes[0] == 0xef && Bytes[1] == 0xbb && Bytes[2] == 0xbf)
+	{
+		Buffer += 3;
+	}
+	return EEncoding::UTF8;
+}
+
+static FMutableMemoryView ParseLinesUTF8(FMutableMemoryView Buffer, TFunctionRef<void(FStringView Line)> Visitor, bool bLastBuffer)
+{
+	const uint8* Pos = static_cast<const uint8*>(Buffer.GetData());
+	const uint8* const End = static_cast<const uint8*>(Buffer.GetDataEnd());
+	while (Pos < End)
+	{
+		const uint8* const Line = Pos;
+
+		while (Pos < End && *Pos != '\r' && *Pos != '\n')
+		{
+			++Pos;
+		}
+
+		if (!bLastBuffer && (Pos == End || (Pos + 1 == End && *Pos == '\r')))
+		{
+			return Buffer.Right(static_cast<uint64>(End - Line));
+		}
+
+		Visitor(FUTF8ToTCHAR(reinterpret_cast<const UTF8CHAR*>(Line), UE_PTRDIFF_TO_INT32(Pos - Line)));
+
+		if (Pos < End && *Pos == '\r')
+		{
+			++Pos;
+		}
+		if (Pos < End && *Pos == '\n')
+		{
+			++Pos;
+		}
+	}
+	return Buffer.Right(0);
+}
+
+static FMutableMemoryView ParseLinesUTF16BE(FMutableMemoryView Buffer, TFunctionRef<void(FStringView Line)> Visitor, bool bLastBuffer)
+{
+	uint16* Pos = static_cast<uint16*>(Buffer.GetData());
+	uint16* const End = static_cast<uint16*>(Buffer.GetDataEnd());
+	while (Pos < End)
+	{
+		uint16* const Line = Pos;
+
+		while (Pos < End)
+		{
+			if (const uint16 CodeUnit = NETWORK_ORDER16(*Pos); CodeUnit == '\r' || CodeUnit == '\n')
+			{
+				break;
+			}
+			++Pos;
+		}
+
+		if (!bLastBuffer && (Pos == End || (Pos + 1 == End && NETWORK_ORDER16(*Pos) == '\r')))
+		{
+			return Buffer.Right(static_cast<uint64>(End - Line) * sizeof(uint16));
+		}
+
+		if constexpr (PLATFORM_LITTLE_ENDIAN)
+		{
+			for (uint16* SwapPos = Line; SwapPos < Pos; ++SwapPos)
+			{
+				*SwapPos = NETWORK_ORDER16(*SwapPos);
+			}
+		}
+
+		Visitor(FUTF16ToTCHAR(reinterpret_cast<const UTF16CHAR*>(Line), UE_PTRDIFF_TO_INT32(Pos - Line)));
+
+		if (Pos < End && NETWORK_ORDER16(*Pos) == '\r')
+		{
+			++Pos;
+		}
+		if (Pos < End && NETWORK_ORDER16(*Pos) == '\n')
+		{
+			++Pos;
+		}
+	}
+	return Buffer.Right(0);
+}
+
+static FMutableMemoryView ParseLinesUTF16LE(FMutableMemoryView Buffer, TFunctionRef<void(FStringView Line)> Visitor, bool bLastBuffer)
+{
+	uint16* Pos = static_cast<uint16*>(Buffer.GetData());
+	uint16* const End = static_cast<uint16*>(Buffer.GetDataEnd());
+	while (Pos < End)
+	{
+		uint16* const Line = Pos;
+
+		while (Pos < End)
+		{
+			if (const uint16 CodeUnit = INTEL_ORDER16(*Pos); CodeUnit == '\r' || CodeUnit == '\n')
+			{
+				break;
+			}
+			++Pos;
+		}
+
+		if (!bLastBuffer && (Pos == End || (Pos + 1 == End && INTEL_ORDER16(*Pos) == '\r')))
+		{
+			return Buffer.Right(static_cast<uint64>(End - Line) * sizeof(uint16));
+		}
+
+		if constexpr (!PLATFORM_LITTLE_ENDIAN)
+		{
+			for (uint16* SwapPos = Line; SwapPos < Pos; ++SwapPos)
+			{
+				*SwapPos = INTEL_ORDER16(*SwapPos);
+			}
+		}
+
+		Visitor(FUTF16ToTCHAR(reinterpret_cast<const UTF16CHAR*>(Line), UE_PTRDIFF_TO_INT32(Pos - Line)));
+
+		if (Pos < End && INTEL_ORDER16(*Pos) == '\r')
+		{
+			++Pos;
+		}
+		if (Pos < End && INTEL_ORDER16(*Pos) == '\n')
+		{
+			++Pos;
+		}
+	}
+	return Buffer.Right(0);
+}
+
+} // UE::FileHelper::Private
+
+bool FFileHelper::LoadFileToStringWithLineVisitor(const TCHAR* Filename, TFunctionRef<void(FStringView Line)> Visitor)
+{
+	using namespace UE::FileHelper::Private;
+
+	FScopedLoadingState ScopedLoadingState(Filename);
+	TUniquePtr<FArchive> Ar(IFileManager::Get().CreateFileReader(Filename, FILEREAD_Silent));
+	if (!Ar)
+	{
+		return false;
+	}
+
+	const int64 TotalSize = Ar->TotalSize();
+	FUniqueBuffer Buffer = FUniqueBuffer::Alloc(FMath::Min<int64>(TotalSize, 1024 * 1024));
+
+	EEncoding Encoding = EEncoding::Unknown;
+	FMutableMemoryView BufferTail = Buffer;
+	for (int64 RemainingSize = TotalSize; RemainingSize > 0;)
+	{
+		const FMutableMemoryView SerializeBuffer = BufferTail.Left(RemainingSize);
+		Ar->Serialize(SerializeBuffer.GetData(), static_cast<int64>(SerializeBuffer.GetSize()));
+		RemainingSize -= SerializeBuffer.GetSize();
+
+		FMutableMemoryView ParseBuffer = Buffer.GetView().LeftChop(BufferTail.GetSize() - SerializeBuffer.GetSize());
+
+		if (Encoding == EEncoding::Unknown)
+		{
+			Encoding = ParseEncoding(ParseBuffer, TotalSize);
+		}
+
+		switch (Encoding)
+		{
+		case EEncoding::UTF8:
+			ParseBuffer = ParseLinesUTF8(ParseBuffer, Visitor, RemainingSize == 0);
+			break;
+		case EEncoding::UTF16BE:
+			ParseBuffer = ParseLinesUTF16BE(ParseBuffer, Visitor, RemainingSize == 0);
+			break;
+		case EEncoding::UTF16LE:
+			ParseBuffer = ParseLinesUTF16LE(ParseBuffer, Visitor, RemainingSize == 0);
+			break;
+		default:
+			checkNoEntry();
+			return false;
+		}
+
+		if (Buffer.GetSize() == ParseBuffer.GetSize())
+		{
+			// No line endings were found. Double the buffer size and try again.
+			FUniqueBuffer NewBuffer = FUniqueBuffer::Alloc(2 * Buffer.GetSize());
+			BufferTail = NewBuffer.GetView().CopyFrom(ParseBuffer);
+			Buffer = MoveTemp(NewBuffer);
+		}
+		else
+		{
+			// At least one line ending was found. Move any partial line to the front of the buffer and continue.
+			FMemory::Memmove(Buffer.GetData(), ParseBuffer.GetData(), ParseBuffer.GetSize());
+			BufferTail = Buffer.GetView() + ParseBuffer.GetSize();
+		}
+	}
+
+	return Ar->Close();
+}
+
 /**
  * Save a binary array to a file.
  */
@@ -375,44 +612,55 @@ bool FFileHelper::SaveStringToFile( FStringView String, const TCHAR* Filename,  
 {
 	// max size of the string is a UCS2CHAR for each character and some UNICODE magic 
 	TUniquePtr<FArchive> Ar = TUniquePtr<FArchive>( FileManager->CreateFileWriter( Filename, WriteFlags ) );
-	if( !Ar )
+	if (!Ar)
+	{
+		//UE_LOG(LogStreaming, Warning, TEXT("SaveStringToFile: Failed to open writer. File:%s"), Filename);
 		return false;
-
-	if( String.IsEmpty() )
-		return true;
-
-	bool SaveAsUnicode = EncodingOptions == EEncodingOptions::ForceUnicode || ( EncodingOptions == EEncodingOptions::AutoDetect && !FCString::IsPureAnsi(String.GetData(), String.Len()) );
-	if( EncodingOptions == EEncodingOptions::ForceUTF8 )
-	{
-		UTF8CHAR UTF8BOM[] = { 0xEF, 0xBB, 0xBF };
-		Ar->Serialize( &UTF8BOM, UE_ARRAY_COUNT(UTF8BOM) * sizeof(UTF8CHAR) );
-
-		FTCHARToUTF8 UTF8String(String.GetData(), String.Len());
-		Ar->Serialize( (UTF8CHAR*)UTF8String.Get(), UTF8String.Length() * sizeof(UTF8CHAR) );
 	}
-	else if ( EncodingOptions == EEncodingOptions::ForceUTF8WithoutBOM )
-	{
-		FTCHARToUTF8 UTF8String(String.GetData(), String.Len());
-		Ar->Serialize((UTF8CHAR*)UTF8String.Get(), UTF8String.Length() * sizeof(UTF8CHAR));
-	}
-	else if (SaveAsUnicode)
-	{
-		UTF16CHAR BOM = UNICODE_BOM;
-		Ar->Serialize( &BOM, sizeof(UTF16CHAR) );
 
-		// Note: This is a no-op on platforms that are using a 16-bit TCHAR
-		FTCHARToUTF16 UTF16String(String.GetData(), String.Len());
-		Ar->Serialize((UTF16CHAR*)UTF16String.Get(), UTF16String.Length() * sizeof(UTF16CHAR));
-	}
-	else
+	if (!String.IsEmpty())
 	{
-		auto Src = StringCast<ANSICHAR>(String.GetData(), String.Len());
-		Ar->Serialize( (ANSICHAR*)Src.Get(), Src.Length() * sizeof(ANSICHAR) );
+		bool SaveAsUnicode = EncodingOptions == EEncodingOptions::ForceUnicode || (EncodingOptions == EEncodingOptions::AutoDetect && !FCString::IsPureAnsi(String.GetData(), String.Len()));
+		if (EncodingOptions == EEncodingOptions::ForceUTF8)
+		{
+			UTF8CHAR UTF8BOM[] = { (UTF8CHAR)0xEF, (UTF8CHAR)0xBB, (UTF8CHAR)0xBF };
+			Ar->Serialize(&UTF8BOM, UE_ARRAY_COUNT(UTF8BOM) * sizeof(UTF8CHAR));
+
+			FTCHARToUTF8 UTF8String(String.GetData(), String.Len());
+			Ar->Serialize((UTF8CHAR*)UTF8String.Get(), UTF8String.Length() * sizeof(UTF8CHAR));
+		}
+		else if (EncodingOptions == EEncodingOptions::ForceUTF8WithoutBOM)
+		{
+			FTCHARToUTF8 UTF8String(String.GetData(), String.Len());
+			Ar->Serialize((UTF8CHAR*)UTF8String.Get(), UTF8String.Length() * sizeof(UTF8CHAR));
+		}
+		else if (SaveAsUnicode)
+		{
+			UTF16CHAR BOM = UNICODE_BOM;
+			Ar->Serialize(&BOM, sizeof(UTF16CHAR));
+
+			// Note: This is a no-op on platforms that are using a 16-bit TCHAR
+			FTCHARToUTF16 UTF16String(String.GetData(), String.Len());
+			Ar->Serialize((UTF16CHAR*)UTF16String.Get(), UTF16String.Length() * sizeof(UTF16CHAR));
+		}
+		else
+		{
+			auto Src = StringCast<ANSICHAR>(String.GetData(), String.Len());
+			Ar->Serialize((ANSICHAR*)Src.Get(), Src.Length() * sizeof(ANSICHAR));
+		}
 	}
 
 	// Always explicitly close to catch errors from flush/close
 	Ar->Close();
 
+	if (Ar->IsError())
+	{
+		UE_LOG(LogStreaming, Warning, TEXT("SaveStringToFile: Ar->IsError() == true. File:%s"), Filename);
+	}
+	if (Ar->IsCriticalError())
+	{
+		UE_LOG(LogStreaming, Warning, TEXT("SaveStringToFile: Ar->IsCriticalError() == true. File:%s"), Filename);
+	}
 	return !Ar->IsError() && !Ar->IsCriticalError();
 }
 
@@ -519,7 +767,26 @@ void FFileHelper::GenerateDateTimeBasedBitmapFilename(const FString& Pattern, co
  *
  * @return true if success
  */
-bool FFileHelper::CreateBitmap( const TCHAR* Pattern, int32 SourceWidth, int32 SourceHeight, const FColor* Data, struct FIntRect* SubRectangle, IFileManager* FileManager /*= &IFileManager::Get()*/, FString* OutFilename /*= NULL*/, bool bInWriteAlpha /*= false*/, EChannelMask ChannelMask /*= All */ )
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+bool FFileHelper::CreateBitmap(const TCHAR* Pattern, int32 SourceWidth, int32 SourceHeight, const FColor* Data, FIntRect* SubRectangle, IFileManager* FileManager /*= &IFileManager::Get()*/, FString* OutFilename /*= NULL*/, bool bInWriteAlpha /*= false*/, EChannelMask ChannelMask /*= All */)
+{
+	EColorChannel ColorChannel = EColorChannel::All;
+	if (ChannelMask != EChannelMask::All)
+	{
+		switch (ChannelMask)
+		{
+		case EChannelMask::R:	ColorChannel = EColorChannel::R;	break;
+		case EChannelMask::G:	ColorChannel = EColorChannel::G;	break;
+		case EChannelMask::B:	ColorChannel = EColorChannel::B;	break;
+		case EChannelMask::A:	ColorChannel = EColorChannel::A;	break;
+		}
+	}
+
+	return CreateBitmap(Pattern, SourceWidth, SourceHeight, Data, SubRectangle, FileManager, OutFilename, bInWriteAlpha, ColorChannel);
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+bool FFileHelper::CreateBitmap( const TCHAR* Pattern, int32 SourceWidth, int32 SourceHeight, const FColor* Data, FIntRect* SubRectangle, IFileManager* FileManager, FString* OutFilename, bool bInWriteAlpha, EColorChannel ColorChannel)
 {
 	FIntRect Src(0, 0, SourceWidth, SourceHeight);
 	if (SubRectangle == NULL || SubRectangle->Area() == 0)
@@ -646,11 +913,13 @@ bool FFileHelper::CreateBitmap( const TCHAR* Pattern, int32 SourceWidth, int32 S
 		}
 
 		// Colors.
+		// @todo fix me : calling Serialize per byte = insanely slow
+		//	BmpImageWrapper now has a good writer, prefer that ; use FImageUtils::SaveImage
 		for( int32 i = SubRectangle->Max.Y - 1; i >= SubRectangle->Min.Y; i-- )
 		{
 			for( int32 j = SubRectangle->Min.X; j < SubRectangle->Max.X; j++ )
 			{
-				if (ChannelMask == EChannelMask::All)
+				if (ColorChannel == EColorChannel::All)
 				{
 					Ar->Serialize((void*)&Data[i * SourceWidth + j].B, 1);
 					Ar->Serialize((void*)&Data[i * SourceWidth + j].G, 1);
@@ -666,18 +935,18 @@ bool FFileHelper::CreateBitmap( const TCHAR* Pattern, int32 SourceWidth, int32 S
 					const uint8 Max = 255;
 					uint8 ChannelValue = 0;
 					// When using Channel mask write the masked channel to all channels (except alpha).
-					switch (ChannelMask)
+					switch (ColorChannel)
 					{
-					case EChannelMask::B:
+					case EColorChannel::B:
 						ChannelValue = Data[i * SourceWidth + j].B;
 						break;
-					case EChannelMask::G:
+					case EColorChannel::G:
 						ChannelValue = Data[i * SourceWidth + j].G;
 						break;
-					case EChannelMask::R:
+					case EColorChannel::R:
 						ChannelValue = Data[i * SourceWidth + j].R;
 						break;
-					case EChannelMask::A:
+					case EColorChannel::A:
 						ChannelValue = Data[i * SourceWidth + j].A;
 						break;
 					}
@@ -959,10 +1228,11 @@ void FMaintenance::DeleteOldLogs()
 		}
 	}
 
-	// Remove all legacy UE4 crash contexts (regardless of age and purge settings, these are deprecated)
+	// Remove all legacy crash contexts (regardless of age and purge settings, these are deprecated)
 	TArray<FString> Directories;
 	IFileManager::Get().FindFiles(Directories, *FString::Printf(TEXT("%s/UE4CC*"), *FPaths::ProjectLogDir()), false, true);
-
+	IFileManager::Get().FindFiles(Directories, *FString::Printf(TEXT("%s/UECC*"), *FPaths::ProjectLogDir()), false, true);
+	
 	for (const FString& Dir : Directories)
 	{
 		const FString CrashConfigDirectory = FPaths::ProjectLogDir() / Dir;

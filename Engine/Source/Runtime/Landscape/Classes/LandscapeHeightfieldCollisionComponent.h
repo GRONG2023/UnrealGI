@@ -1,6 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-
 #pragma once
 
 #include "CoreMinimal.h"
@@ -26,20 +25,22 @@ struct FNavigableGeometryExport;
 
 namespace Chaos
 {
-class FHeightField;
+	class FHeightField;
 }
 
-#if WITH_PHYSX
-namespace physx
+enum class EHeightfieldSource
 {
-	class PxMaterial;
-	class PxHeightField;
-}
-#endif // WITH_PHYSX
+	None,
+	Simple,
+	Complex,
+	Editor
+};
 
 UCLASS(MinimalAPI, Within=LandscapeProxy)
 class ULandscapeHeightfieldCollisionComponent : public UPrimitiveComponent
 {
+	friend class FLandscapeHeightfieldCollisionComponentSceneProxy;
+
 	GENERATED_UCLASS_BODY()
 
 	ULandscapeHeightfieldCollisionComponent(FVTableHelper& Helper);
@@ -47,7 +48,7 @@ class ULandscapeHeightfieldCollisionComponent : public UPrimitiveComponent
 
 	/** List of layers painted on this component. Matches the WeightmapLayerAllocations array in the LandscapeComponent. */
 	UPROPERTY()
-	TArray<ULandscapeLayerInfoObject*> ComponentLayerInfos;
+	TArray<TObjectPtr<ULandscapeLayerInfoObject>> ComponentLayerInfos;
 
 	/** Offset of component in landscape quads */
 	UPROPERTY()
@@ -72,7 +73,7 @@ class ULandscapeHeightfieldCollisionComponent : public UPrimitiveComponent
 	UPROPERTY()
 	TArray<uint8> CollisionQuadFlags;
 
-	/** Guid used to share PhysX heightfield objects in the editor */
+	/** Guid used to share Physics heightfield objects in the editor */
 	UPROPERTY()
 	FGuid HeightfieldGuid;
 
@@ -80,45 +81,53 @@ class ULandscapeHeightfieldCollisionComponent : public UPrimitiveComponent
 	UPROPERTY()
 	FBox CachedLocalBox;
 
+#if WITH_EDITORONLY_DATA
 	/** Reference to render component */
 	UPROPERTY()
-	TLazyObjectPtr<ULandscapeComponent> RenderComponent;
+	TLazyObjectPtr<ULandscapeComponent> RenderComponent_DEPRECATED;
+#endif // !WITH_EDITORONLY_DATA
 
+private:
+	/** Reference to render component */
+	UPROPERTY()
+	TObjectPtr<ULandscapeComponent> RenderComponentRef;
+
+public:
 	/** Returns associated landscape component */
 	UFUNCTION(BlueprintCallable, Category = "Landscape")
-	ULandscapeComponent* GetRenderComponent() const;
+	LANDSCAPE_API ULandscapeComponent* GetRenderComponent() const;
 
 	struct FHeightfieldGeometryRef : public FRefCountedObject
 	{
 		FGuid Guid;
 
-#if WITH_PHYSX
-		/** List of PxMaterials used on this landscape */
-		TArray<physx::PxMaterial*> UsedPhysicalMaterialArray;
-		physx::PxHeightField* RBHeightfield = nullptr;
-		physx::PxHeightField* RBHeightfieldSimple = nullptr;
-#if WITH_EDITOR
-		physx::PxHeightField* RBHeightfieldEd = nullptr; // Used only by landscape editor, does not have holes in it
-#endif	//WITH_EDITOR
-#endif	//WITH_PHYSX
-
-#if WITH_CHAOS
 		TArray<Chaos::FMaterialHandle> UsedChaosMaterials;
+		Chaos::FHeightFieldPtr HeightfieldGeometry;
+	    Chaos::FHeightFieldPtr HeightfieldSimpleGeometry;
+
+		UE_DEPRECATED(5.4, "Please use HeightfieldGeometry instead")
 		TUniquePtr<Chaos::FHeightField> Heightfield;
-	    TUniquePtr<Chaos::FHeightField> HeightfieldSimple;
-#if WITH_EDITOR
+		
+		UE_DEPRECATED(5.4, "Please use HeightfieldSimpleGeometry instead")
+		TUniquePtr<Chaos::FHeightField> HeightfieldSimple;
+
+#if WITH_EDITORONLY_DATA
+		Chaos::FHeightFieldPtr EditorHeightfieldGeometry;
+
+		UE_DEPRECATED(5.4, "Please use HeightfieldSimpleGeometry instead")
 		TUniquePtr<Chaos::FHeightField> EditorHeightfield;
-#endif
-#endif
+#endif // WITH_EDITORONLY_DATA
 
 		FHeightfieldGeometryRef(FGuid& InGuid);
-
 		virtual ~FHeightfieldGeometryRef();
+		
+		void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize);
 	};
 	
 #if WITH_EDITORONLY_DATA
 	friend struct FEnableCollisionHashOptimScope;
 	
+	UPROPERTY()
 	uint32										CollisionHash = 0;
 
 	/** The collision height values. Stripped from cooked content */
@@ -132,7 +141,7 @@ class ULandscapeHeightfieldCollisionComponent : public UPrimitiveComponent
 
 	/** Physical materials objects referenced by the indices in PhysicalMaterialRenderData. Stripped from cooked content */
 	UPROPERTY()
-	TArray<UPhysicalMaterial*>					PhysicalMaterialRenderObjects;
+	TArray<TObjectPtr<UPhysicalMaterial>>					PhysicalMaterialRenderObjects;
 
 	/*  Cooked editor specific heightfield data, never serialized  */
 	TArray<uint8>								CookedCollisionDataEd;
@@ -156,15 +165,21 @@ class ULandscapeHeightfieldCollisionComponent : public UPrimitiveComponent
 	 *	Cooked HeightField data. Serialized only with cooked content 
 	 *	Stored as array instead of BulkData to take advantage of precaching during async loading
 	 */
+	bool bCookedCollisionDataWasDeleted = false;
 	TArray<uint8>								CookedCollisionData;
 	
 	/** This is a list of physical materials that is actually used by a cooked HeightField */
 	UPROPERTY()
-	TArray<UPhysicalMaterial*>					CookedPhysicalMaterials;
+	TArray<TObjectPtr<UPhysicalMaterial>>					CookedPhysicalMaterials;
 	
 	/** Physics engine version of heightfield data. */
 	TRefCountPtr<FHeightfieldGeometryRef>	HeightfieldRef;
 	
+	// local non-serialized ref counted pointers to keep the chaos heightfields alive between Unregister() and actual destruction of the component.
+	// this allows us to re-use them if the component gets a call to Register() again
+	Chaos::FHeightFieldPtr LocalHeightfieldGeometryRef;
+	Chaos::FHeightFieldPtr LocalHeightfieldSimpleGeometryRef;
+
 	/** Cached PxHeightFieldSamples values for navmesh generation. Note that it's being used only if navigation octree is set up for lazy geometry exporting */
 	int32 HeightfieldRowsCount;
 	int32 HeightfieldColumnsCount;
@@ -205,10 +220,7 @@ public:
 
 	//~ Begin UPrimitiveComponent Interface
 	virtual bool DoCustomNavigableGeometryExport(FNavigableGeometryExport& GeomExport) const override;
-#if WITH_EDITOR
-	virtual bool ComponentIsTouchingSelectionBox(const FBox& InSelBBox, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const override;
-	virtual bool ComponentIsTouchingSelectionFrustum(const FConvexVolume& InFrustum, const FEngineShowFlags& ShowFlags, const bool bConsiderOnlyBSP, const bool bMustEncompassEntireComponent) const override;
-#endif
+	virtual bool IsShown(const FEngineShowFlags& ShowFlags) const override;
 	//End UPrimitiveComponent interface
 
 	//~ Begin INavRelevantInterface Interface
@@ -221,9 +233,12 @@ public:
 	//~ Begin UObject Interface.
 	virtual void Serialize(FArchive& Ar) override;
 	virtual void BeginDestroy() override;
+	virtual void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) override;
 	virtual void PostLoad() override;
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 #if WITH_EDITOR
+	virtual bool NeedsLoadForClient() const override;
+	virtual bool NeedsLoadForServer() const override;
 	virtual void ExportCustomProperties(FOutputDevice& Out, uint32 Indent) override;
 	virtual void ImportCustomProperties(const TCHAR* SourceText, FFeedbackContext* Warn) override;
 	virtual void PostEditImport() override;
@@ -236,19 +251,53 @@ public:
 	/** 
 	 * Cooks raw height data into collision object binary stream
 	 */
-	virtual bool CookCollisionData(const FName& Format, bool bUseOnlyDefMaterial, bool bCheckDDC, TArray<uint8>& OutCookedData, TArray<UPhysicalMaterial*>& InOutMaterials) const;
+	virtual bool CookCollisionData(const FName& Format, bool bUseDefaultMaterialOnly, bool bCheckDDC, TArray<uint8>& OutCookedData, TArray<UPhysicalMaterial*>& InOutMaterials) const;
 
-	/** Modify a sub-region of the PhysX heightfield. Note that this does not update the physical material */
+	/** Modify a sub-region of the physics heightfield. Note that this does not update the physical material */
 	void UpdateHeightfieldRegion(int32 ComponentX1, int32 ComponentY1, int32 ComponentX2, int32 ComponentY2);
 
 	/** Computes a hash of all the data that will impact final collision */
 	virtual uint32 ComputeCollisionHash() const;
 #endif
+
+	struct FWriteRuntimeDataParams
+	{
+		bool bUseDefaultMaterialOnly = false;
+		bool bProcessRenderIndices = true;
+		bool bProcessVisibilityLayer = true;
+		TArrayView<const uint16> Heights;
+		TArrayView<const uint16> SimpleHeights;
+		TArrayView<const uint8> DominantLayers;
+		TArrayView<const uint8> SimpleDominantLayers;
+		TArrayView<const uint8> RenderPhysicalMaterialIds;
+		TArrayView<const uint8> SimpleRenderPhysicalMaterialIds;
+		TArrayView<const TObjectPtr<UPhysicalMaterial>> PhysicalMaterialRenderObjects;
+		TArrayView<const TObjectPtr<ULandscapeLayerInfoObject>> ComponentLayerInfos;
+		int32 VisibilityLayerIndex = INDEX_NONE;
+	};
+
+	void GetCollisionSampleInfo(int32& OutCollisionSizeVerts, int32& OutSimpleCollisionSizeVerts, int32& OutNumSamples, int32& OutNumSimpleSamples) const;
+
+	// Writes to a cooked data buffer using raw heightfield data
+	LANDSCAPE_API bool WriteRuntimeData(const FWriteRuntimeDataParams& Params, TArray<uint8>& OutHeightfieldData, TArray<UPhysicalMaterial*>& InOutMaterials) const;
+
 	/** Gets the landscape info object for this landscape */
 	ULandscapeInfo* GetLandscapeInfo() const;
 
+#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && WITH_EDITORONLY_DATA
+	// The scene proxy is only for debug purposes :
+	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && WITH_EDITORONLY_DATA
+
 	/** Creates collision object from a cooked collision data */
 	virtual void CreateCollisionObject();
+
+	/** Creates collision object from raw runtime data.  Data is assumed at this point to contain valid physical material indices with visiblility layer set to 0xFF*/
+	LANDSCAPE_API void CreateCollisionObject(
+		bool bUseDefaultMaterialOnly,
+		TArrayView<const uint16> Heights, TArrayView<const uint16> SimpleHeights,
+		TArrayView<const uint8> PhysicalMaterialIds, TArrayView<const uint8> SimplePhysicalMaterialIds,
+		TArrayView<const TObjectPtr<UPhysicalMaterial>> PhysicalMaterialObjects);
 
 	/** Return the landscape actor associated with this component. */
 	LANDSCAPE_API ALandscapeProxy* GetLandscapeProxy() const;
@@ -262,6 +311,11 @@ public:
 	/** Recreate heightfield and restart physics */
 	LANDSCAPE_API virtual bool RecreateCollision();
 
+private:
+	// @todo(chaos): remove when implicit objects are ref counted
+	void DeferredDestroyCollision(const TRefCountPtr<FHeightfieldGeometryRef>& HeightfieldRefLifetimeExtender);
+public:
+
 #if WITH_EDITORONLY_DATA
 	// Called from editor code to manage foliage instances on landscape.
 	LANDSCAPE_API void SnapFoliageInstances(const FBox& InInstanceBox);
@@ -269,8 +323,11 @@ public:
 	LANDSCAPE_API void SnapFoliageInstances();
 #endif
 
+	void SetRenderComponent(ULandscapeComponent* InRenderComponent) { RenderComponentRef = InRenderComponent; }
+
 public:
-	TOptional<float> GetHeight(float X, float Y);
+	LANDSCAPE_API TOptional<float> GetHeight(float X, float Y, EHeightfieldSource HeightFieldSource);
+	LANDSCAPE_API UPhysicalMaterial* GetPhysicalMaterial(float X, float Y, EHeightfieldSource HeightFieldSource);
 
 	/**
 	 * Populates a supplied array with the heights from the heightfield.  Samples are placed

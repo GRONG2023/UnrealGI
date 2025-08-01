@@ -7,7 +7,7 @@
 #include "BodySetupEnums.generated.h"
 
 UENUM(BlueprintType)
-enum ECollisionTraceFlag
+enum ECollisionTraceFlag : int
 {
 	/** Use project physics settings (DefaultShapeComplexity) */
 	CTF_UseDefault UMETA(DisplayName="Project Default"),
@@ -21,7 +21,7 @@ enum ECollisionTraceFlag
 };
 
 UENUM()
-enum EPhysicsType
+enum EPhysicsType : int
 {
 	/** Follow owner. */
 	PhysType_Default UMETA(DisplayName="Default"),	
@@ -34,7 +34,7 @@ enum EPhysicsType
 UENUM()
 namespace EBodyCollisionResponse
 {
-	enum Type
+	enum Type : int
 	{
 		BodyCollision_Enabled UMETA(DisplayName="Enabled"), 
 		BodyCollision_Disabled UMETA(DisplayName="Disabled")//, 

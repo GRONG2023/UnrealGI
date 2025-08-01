@@ -7,7 +7,7 @@
 #include "Model/MonotonicTimeline.h"
 #include "Model/Tables.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 class FAnalysisSessionLock;
@@ -16,16 +16,15 @@ class FStringStore;
 class FTimingProfilerProvider
 	: public ITimingProfilerProvider
 	, public ITimingProfilerTimerReader
+	, public IEditableTimingProfilerProvider
 {
 public:
-	typedef TMonotonicTimeline<FTimingProfilerEvent> TimelineInternal;
+	typedef TMonotonicTimeline<FTimingProfilerEvent> 	TimelineInternal;
 
-	FTimingProfilerProvider(IAnalysisSession& InSession);
+	explicit FTimingProfilerProvider(IAnalysisSession& InSession);
 	virtual ~FTimingProfilerProvider();
-	uint32 AddCpuTimer(const TCHAR* Name);
-	uint32 AddGpuTimer(const TCHAR* Name);
-	void SetTimerName(uint32 TimerId, const TCHAR* Name);
-	uint32 AddMetadata(uint32 MasterTimerId, TArray<uint8>&& Metadata);
+	uint32 AddGpuTimer(FStringView Name, const TCHAR* File = nullptr, uint32 Line = 0);
+	void SetTimerName(uint32 TimerId, FStringView Name);
 	TimelineInternal& EditCpuThreadTimeline(uint32 ThreadId);
 	TimelineInternal& EditGpuTimeline();
 	TimelineInternal& EditGpu2Timeline();
@@ -36,14 +35,20 @@ public:
 	virtual uint32 GetTimelineCount() const override { return Timelines.Num(); }
 	virtual void EnumerateTimelines(TFunctionRef<void(const Timeline&)> Callback) const override;
 	virtual void ReadTimers(TFunctionRef<void(const ITimingProfilerTimerReader&)> Callback) const override;
-	virtual ITable<FTimingProfilerAggregatedStats>* CreateAggregation(double IntervalStart, double IntervalEnd, TFunctionRef<bool(uint32)> CpuThreadFilter, bool IncludeGpu) const override;
+	virtual ITable<FTimingProfilerAggregatedStats>* CreateAggregation(const FCreateAggreationParams& Params) const override;
 	virtual ITimingProfilerButterfly* CreateButterfly(double IntervalStart, double IntervalEnd, TFunctionRef<bool(uint32)> CpuThreadFilter, bool IncludeGpu) const override;
 	virtual const FTimingProfilerTimer* GetTimer(uint32 TimerId) const override;
 	virtual uint32 GetTimerCount() const override;
+
+	// implementing IEditableTimingProfilerProvider
+	virtual uint32 AddCpuTimer(FStringView Name, const TCHAR* File = nullptr, uint32 Line = 0) override;
+	virtual void SetTimerNameAndLocation(uint32 TimerId, FStringView Name, const TCHAR* File, uint32 Line) override;
+	virtual uint32 AddMetadata(uint32 OriginalTimerId, TArray<uint8>&& Metadata) override;
 	virtual TArrayView<const uint8> GetMetadata(uint32 TimerId) const override;
+	virtual IEditableTimeline<FTimingProfilerEvent>& GetCpuThreadEditableTimeline(uint32 ThreadId) override;
 
 private:
-	FTimingProfilerTimer& AddTimerInternal(const TCHAR* Name, bool IsGpuEvent);
+	FTimingProfilerTimer& AddTimerInternal(FStringView Name, const TCHAR* File, uint32 Line, bool IsGpuEvent);
 
 	struct FMetadata 
 	{
@@ -61,4 +66,4 @@ private:
 	TTableLayout<FTimingProfilerAggregatedStats> AggregatedStatsTableLayout;
 };
 
-}
+} // namespace TraceServices

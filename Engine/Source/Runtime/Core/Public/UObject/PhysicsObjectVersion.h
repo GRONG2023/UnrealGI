@@ -6,7 +6,7 @@
 
 // Custom serialization version for changes made in Release-4.26-Chaos 
 // Previously used for Dev-Physics stream
-struct CORE_API FPhysicsObjectVersion
+struct FPhysicsObjectVersion
 {
 	enum Type
 	{
@@ -51,13 +51,31 @@ struct CORE_API FPhysicsObjectVersion
 		// Convex structure data has a list of unique edges (half of the half edges)
 		ChaosConvexHasUniqueEdgeSet,
 
+		// Chaos FGeometryCollectionObject user defined collision shapes support
+		GeometryCollectionUserDefinedCollisionShapes,
+
+		// Chaos Remove scale from TKinematicTarget object
+		ChaosKinematicTargetRemoveScale,
+
+		// Chaos Added support for per-object collision constraint flag.
+		AddCollisionConstraintFlag,
+
+		// Expose particle Disabled flag to the game thread
+		AddDisabledFlag,
+
+		// Added max linear and angular speed to Chaos bodies
+		AddChaosMaxLinearAngularSpeed,
+
+		// add convex geometry to older collections that did not have any
+		GeometryCollectionConvexDefaults,
+
 		// -----<new versions can be added above this line>-------------------------------------------------
 		VersionPlusOne,
 		LatestVersion = VersionPlusOne - 1
 	};
 
 	// The GUID for this custom version number
-	const static FGuid GUID;
+	CORE_API const static FGuid GUID;
 
 private:
 	FPhysicsObjectVersion() {}

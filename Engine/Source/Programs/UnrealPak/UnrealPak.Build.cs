@@ -6,15 +6,26 @@ public class UnrealPak : ModuleRules
 {
 	public UnrealPak(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PublicIncludePaths.Add("Runtime/Launch/Public");
+		PublicIncludePathModuleNames.Add("Launch");
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "Core", "PakFile", "Json", "Projects", "PakFileUtilities", "RSA" });
+		PrivateDependencyModuleNames.AddRange(new string[] {
+			"ApplicationCore",
+			"AssetRegistry",
+			"Core", 
+			"CoreUObject",
+			"Json",
+			"PakFile",
+			"PakFileUtilities",
+			"Projects", 
+			"RSA", 
+			"TargetPlatform",
+		});
 
-		PrivateIncludePaths.Add("Runtime/Launch/Private");      // For LaunchEngineLoop.cpp include
-
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-                "Json"
-        });
-    }
+		if (Target.bBuildWithEditorOnlyData)
+		{
+			DynamicallyLoadedModuleNames.AddRange(new string[] {
+				"PerforceSourceControl"
+			});
+		}
+	}
 }

@@ -54,10 +54,10 @@
 #include <malloc/malloc.h>
 
 // SIMD intrinsics
-#if WITH_SIMULATOR
-#include <xmmintrin.h>
-#else
+#if PLATFORM_CPU_ARM_FAMILY
 #include <arm_neon.h>
+#else
+#include <xmmintrin.h>
 #endif
 
 struct tagRECT
@@ -68,9 +68,6 @@ struct tagRECT
 	int32 bottom;
 };
 typedef struct tagRECT RECT;
-
-#define OUT
-#define IN
 
 /*----------------------------------------------------------------------------
  Memory. On Mac OS X malloc allocates memory aligned to 16 bytes.

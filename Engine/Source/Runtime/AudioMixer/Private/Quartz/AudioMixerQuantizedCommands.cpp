@@ -24,6 +24,7 @@ namespace Audio
 	{
 		OwningClockPtr = InCommandInitInfo.OwningClockPointer;
 		SourceID = InCommandInitInfo.SourceID;
+		bIsCanceled = false;
 
 		// access source manager through owning clock (via clock manager)
 		FMixerSourceManager* SourceManager = OwningClockPtr->GetSourceManager();
@@ -49,6 +50,14 @@ namespace Audio
 		// Access source manager through owning clock (via clock manager)
 		check(OwningClockPtr && OwningClockPtr->GetSourceManager());
 
+		// This was canceled before the active sound hit the source manager.
+		// Calling CancelCustom() make sure we stop the associated sound.
+		if (bIsCanceled)
+		{
+			CancelCustom();
+			return;
+		}
+
 		// access source manager through owning clock (via clock manager)
 		// Owning Clock Ptr may be nullptr if this command was canceled.
 		if (OwningClockPtr)
@@ -70,10 +79,19 @@ namespace Audio
 
 	void FQuantizedPlayCommand::CancelCustom()
 	{
-		if (OwningClockPtr && OwningClockPtr->GetSourceManager())
+		bIsCanceled = true;
+
+		if (OwningClockPtr)
 		{
-			// release hold on pending source
-			OnFinalCallbackCustom(0);
+			FMixerSourceManager* SourceManager = OwningClockPtr->GetSourceManager();
+			FMixerDevice* MixerDevice = OwningClockPtr->GetMixerDevice();
+
+			if (MixerDevice && SourceManager && MixerDevice->IsAudioRenderingThread())
+			{
+				// if we don't UnPause first, this function will be called by FMixerSourceManager::StopInternal()
+				SourceManager->UnPauseSoundForQuantizationCommand(SourceID); // (avoid infinite recursion)
+				SourceManager->CancelQuantizedSound(SourceID);
+			}
 		}
 	}
 
@@ -83,6 +101,52 @@ namespace Audio
 		return PlayCommandName;
 	}
 
+	void FQuantizedQueueCommand::SetQueueCommand(const FAudioComponentCommandInfo& InAudioComponentData)
+	{
+		AudioComponentData = InAudioComponentData;
+	}
+
+	TSharedPtr<IQuartzQuantizedCommand> FQuantizedQueueCommand::GetDeepCopyOfDerivedObject() const
+	{
+		return MakeShared<FQuantizedQueueCommand>(*this);
+	}
+
+	void FQuantizedQueueCommand::OnQueuedCustom(const FQuartzQuantizedCommandInitInfo& InCommandInitInfo)
+	{
+		OwningClockPtr = InCommandInitInfo.OwningClockPointer;
+	}
+
+	int32 FQuantizedQueueCommand::OverrideFramesUntilExec(int32 NumFramesUntilExec)
+	{
+		// Calculate the amount of time before taking up a voice slot
+		int32 NumFramesBeforeVoiceSlot = NumFramesUntilExec - static_cast<int32>(OwningClockPtr->GetTickRate().GetFramesPerDuration(AudioComponentData.AnticapatoryBoundary.Quantization));
+
+		//If NumFramesBeforeVoiceSlot is less than 0, change the boundary back to the original, and mark this command as having 0 frames till exec
+		if (NumFramesBeforeVoiceSlot < 0)
+		{
+			return 0;
+		}
+	
+		return NumFramesBeforeVoiceSlot;
+	}
+
+	void FQuantizedQueueCommand::OnFinalCallbackCustom(int32 InNumFramesLeft)
+	{
+		if (OwningClockPtr)
+		{
+			FName ClockName = OwningClockPtr->GetName();
+			Audio::FQuartzQueueCommandData CommandData(AudioComponentData, ClockName);
+
+			AudioComponentData.Subscriber.PushEvent(CommandData);
+		}
+	}
+
+	static const FName QueueCommandName("Queue Command");
+	FName FQuantizedQueueCommand::GetCommandName() const
+	{
+		return QueueCommandName;
+	}
+	
 	TSharedPtr<IQuartzQuantizedCommand> FQuantizedTickRateChange::GetDeepCopyOfDerivedObject() const
 	{
 		TSharedPtr<FQuantizedTickRateChange> NewCopy = MakeShared<FQuantizedTickRateChange>();
@@ -125,7 +189,10 @@ namespace Audio
 
 	void FQuantizedTransportReset::OnFinalCallbackCustom(int32 InNumFramesLeft)
 	{
-		OwningClockPtr->ResetTransport();
+		// todo: guard against multiple reset commands executing in the same clock tick
+		// OwningClockPtr->ResetTransport(InNumFramesLeft - 1); // - 1 to triggering events w/o double trigger of events on the last frame
+		OwningClockPtr->ResetTransport(0);
+		OwningClockPtr->AddToTickDelay(InNumFramesLeft); // next metronome tick will be less by InNumFramesLeft
 	}
 
 	static const FName TransportResetCommandName("Transport Reset Command");
@@ -181,6 +248,33 @@ namespace Audio
 	FName FQuantizedOtherClockStart::GetCommandName() const
 	{
 		return StartOtherClockName;
+	}
+
+
+	FQuantizedNotify::FQuantizedNotify(float InMsOffset)  : OffsetInMs(InMsOffset)
+	{
+	}
+
+	int32 FQuantizedNotify::OverrideFramesUntilExec(int32 NumFramesUntilExec)
+	{
+		constexpr float MsToSec = 1000.f;
+		return FMath::Max(0, NumFramesUntilExec + (OffsetInMs / MsToSec) * SampleRate);
+	}
+
+	void FQuantizedNotify::OnQueuedCustom(const FQuartzQuantizedCommandInitInfo& InCommandInitInfo)
+	{
+		SampleRate = InCommandInitInfo.SampleRate;
+	}
+
+	TSharedPtr<IQuartzQuantizedCommand> FQuantizedNotify::GetDeepCopyOfDerivedObject() const
+	{
+		return MakeShared<FQuantizedNotify>();
+	}
+
+	static const FName FQuantizedNotifyName("Notify Command");
+	FName FQuantizedNotify::GetCommandName() const
+	{
+		return FQuantizedNotifyName;
 	}
 
 } // namespace Audio

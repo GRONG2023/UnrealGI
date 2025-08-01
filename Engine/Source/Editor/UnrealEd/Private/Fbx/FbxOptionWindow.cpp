@@ -1,16 +1,34 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "FbxOptionWindow.h"
+
+#include "Containers/EnumAsByte.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailsViewArgs.h"
+#include "Factories/FbxAnimSequenceImportData.h"
+#include "Framework/Application/SlateApplication.h"
+#include "IDetailsView.h"
+#include "IDocumentation.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Math/Interval.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
 #include "Modules/ModuleManager.h"
+#include "PropertyEditorModule.h"
+#include "SPrimaryButton.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Types/SlateStructs.h"
+#include "Types/WidgetActiveTimerDelegate.h"
+#include "UObject/ObjectPtr.h"
+#include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBorder.h"
-#include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SUniformGridPanel.h"
-#include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
-#include "Factories/FbxAnimSequenceImportData.h"
-#include "IDocumentation.h"
-#include "PropertyEditorModule.h"
-#include "IDetailsView.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "FBXOption"
 
@@ -34,24 +52,23 @@ void SFbxOptionWindow::Construct(const FArguments& InArgs)
 			SNew(SVerticalBox)
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SAssignNew(ImportTypeDisplay, SBox)
 			]
 			+SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SNew(SBorder)
 				.Padding(FMargin(3))
-				.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+				.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 				[
 					SNew(SHorizontalBox)
 					+SHorizontalBox::Slot()
 					.AutoWidth()
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("CurveEd.LabelFont"))
 						.Text(LOCTEXT("Import_CurrentFileTitle", "Current Asset: "))
 					]
 					+SHorizontalBox::Slot()
@@ -60,7 +77,6 @@ void SFbxOptionWindow::Construct(const FArguments& InArgs)
 					.VAlign(VAlign_Center)
 					[
 						SNew(STextBlock)
-						.Font(FEditorStyle::GetFontStyle("CurveEd.InfoFont"))
 						.Text(InArgs._FullPath)
 						.ToolTipText(InArgs._FullPath)
 					]
@@ -68,7 +84,7 @@ void SFbxOptionWindow::Construct(const FArguments& InArgs)
 			]
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SAssignNew(InspectorBox, SBox)
 				.MaxDesiredHeight(650.0f)
@@ -76,19 +92,13 @@ void SFbxOptionWindow::Construct(const FArguments& InArgs)
 			]
 			+ SVerticalBox::Slot()
 			.AutoHeight()
-			.HAlign(HAlign_Right)
-			.Padding(2)
+			.Padding(2.0f)
 			[
 				SNew(SUniformGridPanel)
-				.SlotPadding(2)
-				+ SUniformGridPanel::Slot(0, 0)
-				[
-					IDocumentation::Get()->CreateAnchor(FString("Engine/Content/FBX/ImportOptions"))
-				]
+				.SlotPadding(2.0f)
 				+ SUniformGridPanel::Slot(1, 0)
 				[
-					SNew(SButton)
-					.HAlign(HAlign_Center)
+					SAssignNew(ImportAllButton, SPrimaryButton)
 					.Text(LOCTEXT("FbxOptionWindow_ImportAll", "Import All"))
 					.ToolTipText(LOCTEXT("FbxOptionWindow_ImportAll_ToolTip", "Import all files with these same settings"))
 					.IsEnabled(this, &SFbxOptionWindow::CanImport)
@@ -96,7 +106,7 @@ void SFbxOptionWindow::Construct(const FArguments& InArgs)
 				]
 				+ SUniformGridPanel::Slot(2, 0)
 				[
-					SAssignNew(ImportButton, SButton)
+					SNew(SButton)
 					.HAlign(HAlign_Center)
 					.Text(LOCTEXT("FbxOptionWindow_Import", "Import"))
 					.IsEnabled(this, &SFbxOptionWindow::CanImport)
@@ -125,37 +135,54 @@ void SFbxOptionWindow::Construct(const FArguments& InArgs)
 	ImportTypeDisplay->SetContent(
 		SNew(SBorder)
 		.Padding(FMargin(3))
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 		[
 			SNew(SHorizontalBox)
 			+ SHorizontalBox::Slot()
+			.AutoWidth()
 			.VAlign(VAlign_Center)
 			[
 				SNew(STextBlock)
 				.Text(this, &SFbxOptionWindow::GetImportTypeDisplayText)
 			]
-			+ SHorizontalBox::Slot()
+			+SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.AutoWidth()
 			[
-				SNew(SBox)
-				.HAlign(HAlign_Right)
+				IDocumentation::Get()->CreateAnchor(FString("fbx-import-options-reference-in-unreal-engine"))
+			]
+			+ SHorizontalBox::Slot()
+			.HAlign(HAlign_Right)
+			[
+				SAssignNew(FbxHeaderButtons, SHorizontalBox)
+				+ SHorizontalBox::Slot()
+				.AutoWidth()
+				.Padding(FMargin(2.0f, 0.0f))
 				[
-					SAssignNew(FbxHeaderButtons, SHorizontalBox)
-					+ SHorizontalBox::Slot()
-					.AutoWidth()
-					.Padding(FMargin(2.0f, 0.0f))
-					[
-						SNew(SButton)
-						.Text(LOCTEXT("FbxOptionWindow_ResetOptions", "Reset to Default"))
-						.OnClicked(this, &SFbxOptionWindow::OnResetToDefaultClick)
-					]
+					SNew(SButton)
+					.Text(LOCTEXT("FbxOptionWindow_ResetOptions", "Reset to Default"))
+					.OnClicked(this, &SFbxOptionWindow::OnResetToDefaultClick)
 				]
 			]
 		]
 	);
 
 	DetailsView->SetObject(ImportUI);
+
+	RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateSP(this, &SFbxOptionWindow::SetFocusPostConstruct));
+
 }
 
+EActiveTimerReturnType SFbxOptionWindow::SetFocusPostConstruct(double InCurrentTime, float InDeltaTime)
+{
+	if (ImportAllButton.IsValid())
+	{
+		FSlateApplication::Get().SetKeyboardFocus(ImportAllButton, EFocusCause::SetDirectly);
+	}
+
+	return EActiveTimerReturnType::Stop;
+
+}
 FReply SFbxOptionWindow::OnResetToDefaultClick() const
 {
 	ImportUI->ResetToDefault();

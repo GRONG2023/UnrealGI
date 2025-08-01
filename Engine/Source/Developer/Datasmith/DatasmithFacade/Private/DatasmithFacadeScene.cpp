@@ -10,6 +10,7 @@
 #include "DatasmithFacadeMetaData.h"
 #include "DatasmithFacadeTexture.h"
 #include "DatasmithFacadeVariant.h"
+#include "DatasmithFacadeAnimation.h"
 
 // Datasmith SDK.
 #include "DatasmithExporterManager.h"
@@ -222,6 +223,40 @@ void FDatasmithFacadeScene::RemoveTexture(
 	SceneRef->RemoveTexture(InTexturePtr->GetDatasmithTextureElement());
 }
 
+void FDatasmithFacadeScene::AddLevelSequence(
+	FDatasmithFacadeLevelSequence* InLevelSequence
+)
+{
+	if (InLevelSequence)
+	{
+		SceneRef->AddLevelSequence(InLevelSequence->GetDatasmithLevelSequence());
+	}
+}
+
+int32 FDatasmithFacadeScene::GetLevelSequencesCount() const
+{
+	return SceneRef->GetLevelSequencesCount();
+}
+
+FDatasmithFacadeLevelSequence* FDatasmithFacadeScene::GetNewLevelSequence(
+	int32 LevelSequenceIndex
+)
+{
+	if (TSharedPtr<IDatasmithLevelSequenceElement> LevelSequenceElement = SceneRef->GetLevelSequence(LevelSequenceIndex))
+	{
+		return new FDatasmithFacadeLevelSequence(LevelSequenceElement.ToSharedRef());
+	}
+
+	return nullptr;
+}
+
+void FDatasmithFacadeScene::RemoveLevelSequence(
+	FDatasmithFacadeLevelSequence* InLevelSequence
+)
+{
+	SceneRef->RemoveLevelSequence(InLevelSequence->GetDatasmithLevelSequence());
+}
+
 void FDatasmithFacadeScene::AddLevelVariantSets(
 	FDatasmithFacadeLevelVariantSets* InLevelVariantSetsPtr
 )
@@ -417,9 +452,6 @@ void FDatasmithFacadeScene::PreExport()
 	// Initialize the Datasmith exporter module.
 	FDatasmithExporterManager::Initialize();
 
-	// Create a Datasmith scene exporter.
-	SceneExporterRef->Reset();
-
 	// Start measuring the time taken to export the scene.
 	SceneExporterRef->PreExport();
 }
@@ -449,6 +481,29 @@ const TCHAR* FDatasmithFacadeScene::GetOutputPath() const
 const TCHAR* FDatasmithFacadeScene::GetAssetsOutputPath() const
 {
 	return SceneExporterRef->GetAssetsOutputPath();
+}
+
+void FDatasmithFacadeScene::SetGeolocationLatitude(double Latitude)
+{
+	SceneRef->SetGeolocationLatitude(Latitude);
+}
+
+void FDatasmithFacadeScene::SetGeolocationLongitude(double Longitude)
+{
+	SceneRef->SetGeolocationLongitude(Longitude);
+}
+
+void FDatasmithFacadeScene::SetGeolocationElevation(double Elevation)
+{
+	SceneRef->SetGeolocationElevation(Elevation);
+}
+
+void FDatasmithFacadeScene::GetGeolocation(double& OutLatitude, double& OutLongitude, double& OutElevation) const
+{
+	FVector Geolocation = SceneRef->GetGeolocation();
+	OutLatitude = Geolocation.X;
+	OutLongitude = Geolocation.Y;
+	OutElevation = Geolocation.Z;
 }
 
 void FDatasmithFacadeScene::Shutdown()

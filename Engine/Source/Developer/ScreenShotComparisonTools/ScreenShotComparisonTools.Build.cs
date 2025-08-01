@@ -16,12 +16,10 @@ public class ScreenShotComparisonTools : ModuleRules
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"AutomationMessages",
-				"EditorStyle",
+				
 				"ImageWrapper",
 				"Json",
 				"JsonUtilities",
-				"Slate",
-				"UnrealEdMessages",
 				"DesktopPlatform"
 			}
 		);
@@ -29,12 +27,7 @@ public class ScreenShotComparisonTools : ModuleRules
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"MessagingCommon",
-			}
-		);
-
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				"Developer/ScreenShotComparisonTools/Private"
+				"LauncherServices"
 			}
 		);
 

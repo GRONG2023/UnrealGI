@@ -12,15 +12,13 @@
 #include "ProfilingDebugging/CsvProfiler.h"
 
 #include "HAL/PlatformTime.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/Thread.h"
 #include "UnrealEngine.h"
 #include "VideoRecordingSystem.h"
 
 DEFINE_LOG_CATEGORY(WMF);
 DEFINE_LOG_CATEGORY(HighlightRecorder);
-
-WINDOWSPLATFORMFEATURES_START
 
 //////////////////////////////////////////////////////////////////////////
 // console commands for testing
@@ -68,7 +66,9 @@ bool FHighlightRecorder::Start(double RingBufferDurationSecs)
 	TotalPausedDuration = 0;
 	NumPushedFrames = 0;
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	if (!FGameplayMediaEncoder::Get()->RegisterListener(this))
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	{
 		return false;
 	}
@@ -90,14 +90,14 @@ bool FHighlightRecorder::Pause(bool bPause)
 		return false;
 	}
 
-	if (bPause && PauseTimestamp == 0.0)
+	if (bPause && PauseTimestamp == 0)
 	{
 		PauseTimestamp = GetRecordingTime();
 		State = EState::Paused;
 		UE_LOG(HighlightRecorder, Log, TEXT("paused"));
 	}
 	//allow unpause to occur if we are actually paused or if we happened to pause on the same frame as recording start
-	else if (!bPause && (PauseTimestamp != 0.0 || PauseTimestamp == GetRecordingTime()))
+	else if (!bPause && (PauseTimestamp != 0 || PauseTimestamp == GetRecordingTime()))
 	{
 		FTimespan LastPausedDuration = GetRecordingTime() - PauseTimestamp;
 		TotalPausedDuration += LastPausedDuration;
@@ -114,7 +114,9 @@ void FHighlightRecorder::Stop()
 {
 	CSV_SCOPED_TIMING_STAT(WindowsVideoRecordingSystem, HighlightRecorder_Stop);
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	FGameplayMediaEncoder::Get()->UnregisterListener(this);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	State = EState::Stopped;
 
 	if (BackgroundSaving)
@@ -131,6 +133,7 @@ FTimespan FHighlightRecorder::GetRecordingTime() const
 	return FTimespan::FromSeconds(FPlatformTime::Seconds()) - RecordingStartTime - TotalPausedDuration;
 }
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 void FHighlightRecorder::OnMediaSample(const AVEncoder::FMediaPacket& InSample)
 {
 	// We might be paused, so don't do anything
@@ -167,6 +170,7 @@ void FHighlightRecorder::OnMediaSample(const AVEncoder::FMediaPacket& InSample)
 
 	RingBuffer.Push(MoveTemp(SampleCopy));
 }
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 bool FHighlightRecorder::SaveHighlight(const TCHAR* Filename, FDoneCallback InDoneCallback, double MaxDurationSecs)
 {
@@ -228,9 +232,13 @@ bool FHighlightRecorder::SaveHighlightInBackground(const FString& Filename, doub
 	return bRes;
 }
 
+
 bool FHighlightRecorder::SaveHighlightInBackgroundImpl(const FString& Filename, double MaxDurationSecs)
 {
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TArray<AVEncoder::FMediaPacket> Samples = RingBuffer.GetCopy();
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	
 
 	if (Samples.Num()==0)
 	{
@@ -249,7 +257,9 @@ bool FHighlightRecorder::SaveHighlightInBackgroundImpl(const FString& Filename, 
 	bool bHasAudio = false;
 	for (int Idx = FirstSampleIndex; Idx != Samples.Num(); ++Idx)
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		if (Samples[Idx].Type == AVEncoder::EPacketType::Audio)
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		{
 			bHasAudio = true;
 			break;
@@ -261,7 +271,9 @@ bool FHighlightRecorder::SaveHighlightInBackgroundImpl(const FString& Filename, 
 		return false;
 	}
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	checkf(Samples[FirstSampleIndex].IsVideoKeyFrame(), TEXT("t %.3f d %.3f"), Samples[FirstSampleIndex].Timestamp.GetTotalSeconds(), Samples[FirstSampleIndex].Duration.GetTotalSeconds());
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	if (FirstSampleIndex == Samples.Num())
 	{
@@ -269,18 +281,22 @@ bool FHighlightRecorder::SaveHighlightInBackgroundImpl(const FString& Filename, 
 		return false;
 	}
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	UE_LOG(HighlightRecorder, Verbose, TEXT("writting %d samples to .mp4, %.3f s, starting from %.3f s, index %d"),
 		Samples.Num() - FirstSampleIndex,
 		(Samples.Last().Timestamp - StartTime + Samples.Last().Duration).GetTotalSeconds(),
 		StartTime.GetTotalSeconds(),
 		FirstSampleIndex);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	// get samples starting from `StartTime` and push them into Mp4Writer
 	for (int Idx = FirstSampleIndex; Idx != Samples.Num(); ++Idx)
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		AVEncoder::FMediaPacket& Sample = Samples[Idx];
 		Sample.Timestamp = Sample.Timestamp - StartTime;
 		if (!Mp4Writer->Write(Sample, (Sample.Type==AVEncoder::EPacketType::Audio) ? AudioStreamIndex : VideoStreamIndex))
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		{
 			return false;
 		}
@@ -293,6 +309,7 @@ bool FHighlightRecorder::SaveHighlightInBackgroundImpl(const FString& Filename, 
 
 	return true;
 }
+
 
 bool FHighlightRecorder::InitialiseMp4Writer(const FString& FullFilename, bool bHasAudio)
 {
@@ -318,7 +335,9 @@ bool FHighlightRecorder::InitialiseMp4Writer(const FString& FullFilename, bool b
 
 	if (bHasAudio)
 	{
+		PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		TPair<FString, AVEncoder::FAudioConfig> AudioConfig = TPair<FString, AVEncoder::FAudioConfig>( FGameplayMediaEncoder::Get()->GetAudioConfig().Codec, FGameplayMediaEncoder::Get()->GetAudioConfig());		
+		PRAGMA_ENABLE_DEPRECATION_WARNINGS
 		if (AudioConfig.Key == "")
 		{
 			UE_LOG(HighlightRecorder, Error, TEXT("Could not get audio config"));
@@ -336,7 +355,9 @@ bool FHighlightRecorder::InitialiseMp4Writer(const FString& FullFilename, bool b
 		}
 	}
 
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TPair<FString, AVEncoder::FVideoConfig> VideoConfig = TPair<FString, AVEncoder::FVideoConfig>( FGameplayMediaEncoder::Get()->GetVideoConfig().Codec, FGameplayMediaEncoder::Get()->GetVideoConfig());
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	if (VideoConfig.Key == "")
 	{
 		UE_LOG(HighlightRecorder, Error, TEXT("Could not get video config"));
@@ -362,6 +383,7 @@ bool FHighlightRecorder::InitialiseMp4Writer(const FString& FullFilename, bool b
 }
 
 // finds index and timestamp of the first sample that should be written to .mp4
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 bool FHighlightRecorder::GetSavingStart(const TArray<AVEncoder::FMediaPacket>& Samples, FTimespan MaxDuration, int& StartIndex, FTimespan& StartTime) const
 // the first sample in .mp4 file should have timestamp 0 and all other timestamps should be relative to the
 // first one
@@ -413,6 +435,4 @@ bool FHighlightRecorder::GetSavingStart(const TArray<AVEncoder::FMediaPacket>& S
 
 	return true;
 }
-
-WINDOWSPLATFORMFEATURES_END
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS

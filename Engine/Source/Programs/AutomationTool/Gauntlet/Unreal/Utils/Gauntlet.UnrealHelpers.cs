@@ -3,14 +3,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Threading;
 using AutomationTool;
 using UnrealBuildTool;
 using System.Linq;
 using System.Net.NetworkInformation;
 using System.Text.RegularExpressions;
 using System.Net;
-using Newtonsoft.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Gauntlet
 {
@@ -27,6 +27,7 @@ namespace Gauntlet
 		EditorServer,
 		Client,
 		Server,
+		CookedEditor,
 	};
 
     /// <summary>
@@ -62,6 +63,10 @@ namespace Gauntlet
 	{
 		public static bool UsesEditor(this UnrealTargetRole Type)
 		{
+			if (Globals.Params.ParseParam("cookededitor"))
+			{
+				return Type == UnrealTargetRole.EditorGame || Type == UnrealTargetRole.EditorServer;
+			}
 			return Type == UnrealTargetRole.Editor || Type == UnrealTargetRole.EditorGame || Type == UnrealTargetRole.EditorServer;
 		}
 
@@ -77,12 +82,16 @@ namespace Gauntlet
 
 		public static bool IsEditor(this UnrealTargetRole Type)
 		{
-			return Type == UnrealTargetRole.Editor;
+			return Type == UnrealTargetRole.Editor || Type == UnrealTargetRole.CookedEditor;
+		}
+		public static bool IsCookedEditor(this UnrealTargetRole Type)
+		{
+			return Type == UnrealTargetRole.CookedEditor;
 		}
 
 		public static bool RunsLocally(this UnrealTargetRole Type)
 		{
-			return UsesEditor(Type) || IsServer(Type);
+			return UsesEditor(Type) || IsServer(Type) || Type == UnrealTargetRole.CookedEditor;
 		}
 	}
 
@@ -117,26 +126,18 @@ namespace Gauntlet
 			// These platforms can be built as either game, server or client
 			if (IsDesktop)
 			{
-				Platform = (TargetPlatform == UnrealTargetPlatform.Win32 || TargetPlatform == UnrealTargetPlatform.Win64) ? "Windows" : TargetPlatform.ToString();
+				Platform = (TargetPlatform == UnrealTargetPlatform.Win64) ? "Windows" : TargetPlatform.ToString();
 
 				if (ProcessType == UnrealTargetRole.Client)
 				{
-					if (UsesSharedBuildType)
-					{
-						Platform += "NoEditor";
-					}
-					else
+					if (!UsesSharedBuildType)
 					{
 						Platform += "Client";
 					}
 				}
 				else if (ProcessType == UnrealTargetRole.Server)
 				{
-					if (UsesSharedBuildType)
-					{
-						Platform += "NoEditor";
-					}
-					else
+					if (!UsesSharedBuildType)
 					{
 						Platform += "Server";
 					}
@@ -164,18 +165,62 @@ namespace Gauntlet
 		}
 
 		/// <summary>
+		/// Fallback to use when GetHostEntry throws an exception.
+		/// </summary>
+		/// <returns>
+		/// An array of IP addresses associated with the network interface Type.
+		/// </returns>
+		public static System.Net.IPAddress[] GetAllLocalIPv4(NetworkInterfaceType Type)
+		{
+			List<System.Net.IPAddress> IpAddrList = new List<System.Net.IPAddress>();
+
+			foreach (NetworkInterface Item in NetworkInterface.GetAllNetworkInterfaces())
+			{
+				if (Item.NetworkInterfaceType == Type && Item.OperationalStatus == OperationalStatus.Up)
+				{
+					foreach (UnicastIPAddressInformation IpAddr in Item.GetIPProperties().UnicastAddresses)
+					{
+						if (IpAddr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+						{
+							IpAddrList.Add(IpAddr.Address);
+						}
+					}
+				}
+			}
+
+			return IpAddrList.ToArray();
+		}
+
+		/// <summary>
 		/// Gets the filehost IP to provide to devkits by examining our local adapters and
 		/// returning the one that's active and on the local LAN (based on DNS assignment)
-		/// AG-TODO: PreferredDomain should be in the master config
 		/// </summary>
 		/// <returns></returns>
 		public static string GetHostIpAddress(string PreferredDomain="epicgames.net")
 		{
-			// Default to the first address with a valid prefix
-			var LocalAddress = Dns.GetHostEntry(Dns.GetHostName()).AddressList
-				.Where(o => o.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
-					&& o.GetAddressBytes()[0] != 169)
-				.FirstOrDefault();
+			System.Net.IPAddress LocalAddress;
+
+			try
+			{
+				// Default to the first address with a valid prefix
+				LocalAddress = Dns.GetHostEntry(Dns.GetHostName()).AddressList
+					.Where(o => o.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+						&& o.GetAddressBytes()[0] != 169)
+					.FirstOrDefault();
+			}
+			catch
+			{
+				//
+				// When the above fails, attempt to extract the eth IP manually.
+				//
+				// TODO: Fallback to the wireless adapter if/when no device is
+				//       available/active.
+				//
+				LocalAddress = GetAllLocalIPv4(NetworkInterfaceType.Ethernet)
+					.Where(o => o.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+						&& o.GetAddressBytes()[0] != 169)
+					.FirstOrDefault();
+			}
 
 			var ActiveInterfaces = NetworkInterface.GetAllNetworkInterfaces()
 				.Where(I => I.OperationalStatus == OperationalStatus.Up);
@@ -242,10 +287,11 @@ namespace Gauntlet
 
 		internal class ConfigInfo
 		{
-			public UnrealTargetRole 				RoleType;
+			public UnrealTargetRole 			RoleType;
 			public UnrealTargetPlatform? 		Platform;
 			public UnrealTargetConfiguration 	Configuration;
 			public bool							SharedBuild;
+			public string						Flavor;
 
 			public ConfigInfo()
 			{
@@ -254,15 +300,30 @@ namespace Gauntlet
 			}
 		}
 
+		public static Dictionary<string, UnrealTargetRole> CustomModuleToRoles = new Dictionary<string, UnrealTargetRole>();
+
+		/// <summary>
+		/// Adds an additional module name to search for when determining if an application path has a guantlet usable role.
+		/// Traditionally all application paths must be in the form ProjectName(Game|Server).exe
+		/// This method allows for applications with nontraditional names to have the role of Game, Server, Editor etc.
+		/// 
+		/// </summary>
+		/// <param name="InModuleName"> The ModuleName to look for in the application path</param>
+		/// <param name="InRole"> When applications are discovered applications with matching module name will have this role</param>
+		public static void AddCustomModuleName(string InModuleName, UnrealTargetRole InRole)
+		{
+			CustomModuleToRoles.Add(InModuleName, InRole);
+		}
+		
 		static ConfigInfo GetUnrealConfigFromFileName(string InProjectName, string InName)
 		{
 			ConfigInfo Config = new ConfigInfo();
 
 			string ShortName = Regex.Replace(InProjectName, "Game", "", RegexOptions.IgnoreCase);
 
-			if (InName.StartsWith("UE4Game", StringComparison.OrdinalIgnoreCase))
+			if (InName.StartsWith("UnrealGame", StringComparison.OrdinalIgnoreCase))
 			{
-				ShortName = "UE4";
+				ShortName = "Unreal";
 			}
 
 			string AppName = Path.GetFileNameWithoutExtension(InName);
@@ -273,7 +334,14 @@ namespace Gauntlet
 			// FortniteGame, FortniteClient, FortniteServer
 			// Or EngineTest-WIn64-Shipping, FortniteClient-Win64-Shipping etc
 			// So we need to search for the project name minus 'Game', with the form, build-type, and platform all optional :(
-			string RegExMatch = string.Format(@"{0}(Game|Client|Server|)(?:-(.+?)-(Debug|Test|Shipping))?", ShortName);
+			// FortniteClient and EngineTest should match
+			// FortniteCustomName should not match.
+			string ProjectNameRegEx = string.Format("|{0}", InProjectName);
+			foreach (KeyValuePair<string, UnrealTargetRole> ModuleAndRole in CustomModuleToRoles)
+			{
+				ProjectNameRegEx += string.Format("|{0}", ModuleAndRole.Key);
+			}
+			string RegExMatch = string.Format(@"^(?:.+[_-])?(({0}(Game|Client|Server|CookedEditor)){1})(?:-(.+?)-(Debug|Test|Shipping))?(?:[_-](.+))?$", ShortName, ProjectNameRegEx);
 
 			// Format should be something like
 			// FortniteClient
@@ -283,11 +351,20 @@ namespace Gauntlet
 
 			if (NameMatch.Success)
 			{
-				string ModuleType = NameMatch.Groups[1].ToString().ToLower();
-				string PlatformName = NameMatch.Groups[2].ToString();
-				string ConfigType = NameMatch.Groups[3].ToString();
-
-				if (ModuleType.Length == 0 || ModuleType == "game")
+				string ModuleName = NameMatch.Groups[1].ToString();
+				string ModuleType = NameMatch.Groups[3].ToString().ToLower();
+				string PlatformName = NameMatch.Groups[4].ToString();
+				string ConfigType = NameMatch.Groups[5].ToString();
+				string BuildFlavor= NameMatch.Groups[6].ToString().ToLower();
+				if (CustomModuleToRoles.ContainsKey(ModuleName))
+				{
+					Config.RoleType = CustomModuleToRoles[ModuleName];
+				}
+				else if (ModuleType == "cookededitor" || (ModuleType.Length == 0 && Globals.Params.ParseParam("cookededitor")))
+				{
+					Config.RoleType = UnrealTargetRole.CookedEditor;
+				}
+				else if (ModuleType.Length == 0 || ModuleType == "game")
 				{
 					// how to express client&server?
 					Config.RoleType = UnrealTargetRole.Client;
@@ -310,6 +387,7 @@ namespace Gauntlet
 				{
 					Config.Configuration = UnrealTargetConfiguration.Development;   // Development has no string
 				}
+				Config.Flavor = BuildFlavor;
 
 				UnrealTargetPlatform Platform;
 				if (PlatformName.Length > 0 && UnrealTargetPlatform.TryParse(PlatformName, out Platform))
@@ -329,6 +407,10 @@ namespace Gauntlet
 		static public UnrealTargetRole GetRoleFromExecutableName(string InProjectName, string InName)
 		{
 			return GetUnrealConfigFromFileName(InProjectName, InName).RoleType;
+		}
+		static public string GetBuildFlavorFromExecutableName(string InProjectName, string InName)
+		{
+			return GetUnrealConfigFromFileName(InProjectName, InName).Flavor;
 		}
 	}
 
@@ -375,29 +457,33 @@ namespace Gauntlet
 	/// <summary>
 	///  Converts between json and UnrealTargetPlatform
 	/// </summary>
-	public class UnrealTargetPlatformConvertor : JsonConverter
+	public class UnrealTargetPlatformConvertor : JsonConverter<UnrealTargetPlatform>
 	{
 		public override bool CanConvert(Type ObjectType)
 		{
-			return ObjectType == typeof(string) || ObjectType == typeof(UnrealTargetPlatform);
+			return ObjectType == typeof(UnrealTargetPlatform);
 		}
 
-		public override object ReadJson(JsonReader Reader, Type ObjectType, object ExistingValue, JsonSerializer Serializer)
+		public override UnrealTargetPlatform Read(ref Utf8JsonReader Reader, Type TypeToConvert, JsonSerializerOptions Options)
 		{
-			UnrealTargetPlatform Platform;
-			if (!UnrealTargetPlatform.TryParse((string)Reader.Value, out Platform))
+			if(Reader.TokenType == JsonTokenType.Null)
 			{
-				return null;
+				return BuildHostPlatform.Current.Platform;
 			}
-			return Platform;
+
+			UnrealTargetPlatform StructValue;
+			if (UnrealTargetPlatform.TryParse(Reader.GetString(), out StructValue))
+			{
+				return StructValue;
+			}
+			throw new JsonException();
 		}
 
-		public override void WriteJson(JsonWriter Writer, object Value, JsonSerializer Serializer)
+		public override void Write(Utf8JsonWriter Writer, UnrealTargetPlatform StructValue, JsonSerializerOptions Options)
 		{
-			UnrealTargetPlatform? Platform = (UnrealTargetPlatform)Value;
-			Writer.WriteValue(Platform);
+			var Value = StructValue.ToString();
+			Writer.WriteStringValue(Options.PropertyNamingPolicy?.ConvertName(Value) ?? Value);
 		}
-
 	}
 
 

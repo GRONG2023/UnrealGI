@@ -55,6 +55,7 @@ class UMaterialExpressionFunctionOutput : public UMaterialExpression
 	//~ Begin UMaterialExpression Interface
 #if WITH_EDITOR
 	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	virtual int32 CompilePreview(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
 	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
 	virtual FName GetInputName(int32 InputIndex) const override
 	{
@@ -63,6 +64,10 @@ class UMaterialExpressionFunctionOutput : public UMaterialExpression
 	virtual void GetExpressionToolTip(TArray<FString>& OutToolTip) override;
 	virtual uint32 GetInputType(int32 InputIndex) override;
 	virtual bool IsResultMaterialAttributes(int32 OutputIndex) override;
+	virtual bool IsResultSubstrateMaterial(int32 OutputIndex) override;
+	virtual void GatherSubstrateMaterialInfo(FSubstrateMaterialInfo& SubstrateMaterialInfo, int32 OutputIndex) override;
+	virtual FSubstrateOperator* SubstrateGenerateMaterialTopologyTree(class FMaterialCompiler* Compiler, class UMaterialExpression* Parent, int32 OutputIndex) override;
+	bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const;
 #endif // WITH_EDITOR
 	//~ End UMaterialExpression Interface
 
@@ -73,6 +78,12 @@ class UMaterialExpressionFunctionOutput : public UMaterialExpression
 #if WITH_EDITOR
 	/** Validate OutputName.  Must be called after OutputName is changed to prevent duplicate outputs. */
 	ENGINE_API void ValidateName();
+#endif // WITH_EDITOR
+
+private:
+#if WITH_EDITOR
+	/** Stashed data between a Pre/PostEditChange event */
+	FName OutputNameBackup;
 #endif // WITH_EDITOR
 };
 

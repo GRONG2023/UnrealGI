@@ -4,6 +4,10 @@
 
 #include "CoreTypes.h"
 
+class FArchive;
+class FCbObject;
+class FCbWriter;
+
 // Prevents incorrect files from being loaded.
 
 #define PACKAGE_FILE_TAG			0x9E2A83C1
@@ -13,6 +17,79 @@
 // This is useful as enum vales cannot be seen by the preprocessor.
 #define PREPROCESSOR_ENUM_PROTECT(a) ((unsigned int)(a))
 
+/**
+ * Versioning
+ *
+ * We now have two enums for global versioning, EUnrealEngineObjectUE5Version and EUnrealEngineObjectUE4Version
+ * which can be updated independently of each other. This allows us to potentially make version changed in the UE4
+ * code base in the future and still have packages saved with those changes to be compatible with the UE5 code base.
+ * 
+ * The struct FPackageFileVersion should be used to contain the version number rather than storing the UE4/UE5 specific
+ * version numbers. It provides overloads for testing against both version enum types for convenience.
+ *
+ * Note that when reporting versioning problems we often use FPackageFileVersion::ToValue which returns the highest
+ * version valid in the structure. This allows us to keep reporting code simple and hide the fact that there are two
+ * version numbers from end users. However this does mean that if a version mismatch is encountered due to a future
+ * extension of EUnrealEngineObjectUE4Version, then the error message given might look odd. Although given that we are
+ * unlikely to be changing EUnrealEngineObjectUE4Version in the future the risk is deemed worth it.
+ */
+
+
+/** This enum is the version for UE5 and should ONLY be edited in UE5Main branch! */
+enum class EUnrealEngineObjectUE5Version : uint32
+{
+	// Note that currently the oldest loadable package version is EUnrealEngineObjectUEVersion::VER_UE4_OLDEST_LOADABLE_PACKAGE
+	// this can be enabled should we ever deprecate UE4 versions entirely
+	//OLDEST_LOADABLE_PACKAGE = ???,
+
+	// The original UE5 version, at the time this was added the UE4 version was 522, so UE5 will start from 1000 to show a clear difference
+	INITIAL_VERSION = 1000,
+
+	// Support stripping names that are not referenced from export data
+	NAMES_REFERENCED_FROM_EXPORT_DATA,
+
+	// Added a payload table of contents to the package summary
+	PAYLOAD_TOC,
+
+	// Added data to identify references from and to optional package
+	OPTIONAL_RESOURCES,
+
+	// Large world coordinates converts a number of core types to double components by default.
+	LARGE_WORLD_COORDINATES,
+
+	// Remove package GUID from FObjectExport
+	REMOVE_OBJECT_EXPORT_PACKAGE_GUID,
+
+	// Add IsInherited to the FObjectExport entry
+	TRACK_OBJECT_EXPORT_IS_INHERITED,
+
+	// Replace FName asset path in FSoftObjectPath with (package name, asset name) pair FTopLevelAssetPath
+	FSOFTOBJECTPATH_REMOVE_ASSET_PATH_FNAMES,
+
+	// Add a soft object path list to the package summary for fast remap
+	ADD_SOFTOBJECTPATH_LIST,
+
+	// Added bulk/data resource table
+	DATA_RESOURCES,
+
+	// Added script property serialization offset to export table entries for saved, versioned packages
+	SCRIPT_SERIALIZATION_OFFSET,
+
+	// Adding property tag extension,
+	// Support for overridable serialization on UObject,
+	// Support for overridable logic in containers
+	PROPERTY_TAG_EXTENSION_AND_OVERRIDABLE_SERIALIZATION,
+
+	// Added property tag complete type name and serialization type
+	PROPERTY_TAG_COMPLETE_TYPE_NAME,
+
+	// -----<new versions can be added before this line>-------------------------------------------------
+	// - this needs to be the last line (see note below)
+	AUTOMATIC_VERSION_PLUS_ONE,
+	AUTOMATIC_VERSION = AUTOMATIC_VERSION_PLUS_ONE - 1
+};
+
+/** This enum is the version for UE4 and should ONLY be edited in UE4 Main branch! */
 enum EUnrealEngineObjectUE4Version
 {
 	VER_UE4_OLDEST_LOADABLE_PACKAGE = 214,
@@ -92,7 +169,7 @@ enum EUnrealEngineObjectUE4Version
 	// Remove LevelBodySetup from ULevel
 	VER_UE4_REMOVE_LEVELBODYSETUP,
 	// Refactor character crouching
-	VER_UE4_REFACTOR_CHARACTER_CROUCH,	
+	VER_UE4_REFACTOR_CHARACTER_CROUCH,
 	// Trimmed down material shader debug information.
 	VER_UE4_SMALLER_DEBUG_MATERIALSHADER_UNIFORM_EXPRESSIONS,
 	// APEX Clothing
@@ -648,7 +725,7 @@ enum EUnrealEngineObjectUE4Version
 	VER_UE4_AUTOMATIC_VERSION = VER_UE4_AUTOMATIC_VERSION_PLUS_ONE - 1
 };
 
-enum EUnrealEngineObjectLicenseeUE4Version
+enum EUnrealEngineObjectLicenseeUEVersion
 {
 	VER_LIC_NONE = 0,
 	// - this needs to be the last line (see note below)
@@ -656,7 +733,117 @@ enum EUnrealEngineObjectLicenseeUE4Version
 	VER_LIC_AUTOMATIC_VERSION = VER_LIC_AUTOMATIC_VERSION_PLUS_ONE - 1
 };
 
+static_assert(EUnrealEngineObjectUE4Version::VER_UE4_AUTOMATIC_VERSION < (int32)EUnrealEngineObjectUE5Version::INITIAL_VERSION, "UE4 versioning must be lower than the start of UE5 versioning");
+
+/**
+ * This object combines all of our version enums into a single easy to use structure
+ * which allows us to update older version numbers independently of the newer version numbers.
+ */
+struct FPackageFileVersion
+{
+	FPackageFileVersion() = default;
+	FPackageFileVersion(int32 UE4Version, EUnrealEngineObjectUE5Version UE5Version)
+		: FileVersionUE4(UE4Version)
+		, FileVersionUE5((int32)UE5Version)
+	{
+
+	}
+
+	/** Set all versions to the default state */
+	void Reset()
+	{
+		FileVersionUE4 = 0;
+		FileVersionUE5 = 0;
+	}
+
+	/** Creates and returns a FPackageFileVersion based on a single EUnrealEngineObjectUEVersion and no other versions. */
+	CORE_API static FPackageFileVersion CreateUE4Version(int32 Version);
+	CORE_API static FPackageFileVersion CreateUE4Version(EUnrealEngineObjectUE4Version Version);
+
+	/** Returns the highest valid version number which is considered to be the 'true' version number */
+	int32 ToValue() const
+	{
+		if (FileVersionUE5 >= (int32)EUnrealEngineObjectUE5Version::INITIAL_VERSION)
+		{
+			return FileVersionUE5;
+		}
+		else
+		{
+			return FileVersionUE4;
+		}
+	}
+
+	/** UE4 version comparisons */
+	bool operator !=(EUnrealEngineObjectUE4Version Version) const
+	{
+		return FileVersionUE4 != Version;
+	}
+
+	/** UE4 version comparisons */
+	bool operator <(EUnrealEngineObjectUE4Version Version) const
+	{
+		return FileVersionUE4 < Version;
+	}
+
+	/** UE4 version comparisons */
+	bool operator >=(EUnrealEngineObjectUE4Version Version) const
+	{
+		return FileVersionUE4 >= Version;
+	}
+
+	/** UE5 version comparisons */
+	bool operator !=(EUnrealEngineObjectUE5Version Version) const
+	{
+		return FileVersionUE5 != (int32)Version;
+	}
+
+	/** UE5 version comparisons  */
+	bool operator <(EUnrealEngineObjectUE5Version Version) const
+	{
+		return FileVersionUE5 < (int32)Version;
+	}
+
+	/** UE5 version comparisons */
+	bool operator >=(EUnrealEngineObjectUE5Version Version) const
+	{
+		return FileVersionUE5 >= (int32)Version;
+	}
+
+	/**
+	 * Returns true if this object is compatible with the FPackageFileVersion passed in as the parameter.
+	 * This means that  all version numbers for the current object are equal or greater than the
+	 * corresponding version numbers of the other structure.
+	 */
+	bool IsCompatible(const FPackageFileVersion& Other) const
+	{
+		return FileVersionUE4 >= Other.FileVersionUE4 && FileVersionUE5 >= Other.FileVersionUE5;
+	}
+
+	/** FPackageFileVersion comparisons */
+	bool operator==(const FPackageFileVersion& Other) const
+	{
+		return FileVersionUE4 == Other.FileVersionUE4 && FileVersionUE5 == Other.FileVersionUE5;
+	}
+
+	/** FPackageFileVersion comparisons */
+	bool operator!=(const FPackageFileVersion& Other) const
+	{
+		return !(*this == Other);
+	}
+
+	/** Serialization members */
+	CORE_API friend FArchive& operator<<(FArchive& Ar, FPackageFileVersion& Version);
+	CORE_API friend FCbWriter& operator<<(FCbWriter& Writer, const FPackageFileVersion& Version);
+	CORE_API static FPackageFileVersion FromCbObject(const FCbObject& Obj);
+
+	/* UE4 file version*/
+	int32		FileVersionUE4 = 0;
+	/* UE5 file version */
+	int32		FileVersionUE5 = 0;
+};
+
 #define VER_LATEST_ENGINE_UE4           PREPROCESSOR_ENUM_PROTECT(VER_UE4_AUTOMATIC_VERSION)
+#define VER_LATEST_ENGINE_UE5           PREPROCESSOR_ENUM_PROTECT(EUnrealEngineObjectUE5Version::AUTOMATIC_VERSION)
 #define VER_UE4_DEPRECATED_PACKAGE      PREPROCESSOR_ENUM_PROTECT(VER_UE4_OLDEST_LOADABLE_PACKAGE)
 #define VER_LATEST_ENGINE_LICENSEEUE4   PREPROCESSOR_ENUM_PROTECT(VER_LIC_AUTOMATIC_VERSION)
 
@@ -666,5 +853,12 @@ enum EUnrealEngineObjectLicenseeUE4Version
 
 // Version access.
 
-extern const CORE_API int32			GPackageFileUE4Version;			// UE4 Version Number.
-extern const CORE_API int32			GPackageFileLicenseeUE4Version;	// Licensee Version Number.
+UE_DEPRECATED(5.0, "Use GPackageFileUEVersion instead. See the @FPackageFileVersion documentation for further details")
+extern const CORE_API int32					GPackageFileUE4Version;				// Unreal4 Version Number.
+
+UE_DEPRECATED(5.0, "Use GPackageFileLicenseeUEVersion instead")
+extern const CORE_API int32					GPackageFileLicenseeUE4Version;		// Licensee Version Number.
+
+extern const CORE_API FPackageFileVersion	GPackageFileUEVersion;				// Unreal Version Number.
+extern const CORE_API FPackageFileVersion	GOldestLoadablePackageFileUEVersion;// The oldest Unreal Version number that we can load.
+extern const CORE_API int32					GPackageFileLicenseeUEVersion;		// Licensee Version Number.

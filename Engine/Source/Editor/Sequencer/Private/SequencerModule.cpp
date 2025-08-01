@@ -15,20 +15,61 @@
 #include "SequencerEdMode.h"
 #include "SequencerObjectChangeListener.h"
 #include "IDetailKeyframeHandler.h"
+#include "IDetailTreeNode.h"
+#include "IDetailsView.h"
 #include "Tree/CurveEditorTreeFilter.h"
 #include "AnimatedPropertyKey.h"
+#include "MovieSceneSignedObject.h"
+
+#include "MVVM/CurveEditorExtension.h"
+#include "MVVM/CurveEditorIntegrationExtension.h"
+#include "MVVM/FolderModelStorageExtension.h"
+#include "MVVM/ObjectBindingModelStorageExtension.h"
+#include "MVVM/SectionModelStorageExtension.h"
+#include "MVVM/TrackModelStorageExtension.h"
+#include "MVVM/TrackRowModelStorageExtension.h"
+#include "MVVM/ViewModels/SequenceModel.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
+
+#include "MVVM/ViewModels/OutlinerColumns/LockOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/MuteOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/PinOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/SoloOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/LabelOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/EditOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/AddOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/NavOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/KeyFrameOutlinerColumn.h"
+#include "MVVM/ViewModels/OutlinerColumns/ColorPickerOutlinerColumn.h"
 
 #include "ToolMenus.h"
 #include "ContentBrowserMenuContexts.h"
 #include "SequencerUtilities.h"
 #include "FileHelpers.h"
 #include "LevelSequence.h"
+#include "ActorObjectSchema.h"
+#include "SkeletalMeshComponentSchema.h"
 
+#include "Misc/CoreDelegates.h"
+#include "UnrealEdGlobals.h"
+#include "Editor/UnrealEdEngine.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
 
 #if !IS_MONOLITHIC
 	UE::MovieScene::FEntityManager*& GEntityManagerForDebugging = UE::MovieScene::GEntityManagerForDebuggingVisualizers;
 #endif
 
+namespace UE::Sequencer::Private
+{
+	static const TMap<EPropertyKeyedStatus, FName> KeyedStatusStyleNames =
+		{
+			{ EPropertyKeyedStatus::NotKeyed, "Sequencer.KeyedStatus.NotKeyed" },
+			{ EPropertyKeyedStatus::KeyedInOtherFrame, "Sequencer.KeyedStatus.Animated" },
+			{ EPropertyKeyedStatus::KeyedInFrame, "Sequencer.KeyedStatus.Keyed" },
+			{ EPropertyKeyedStatus::PartiallyKeyed, "Sequencer.KeyedStatus.PartialKey" },
+		};
+}
 
 
 #define LOCTEXT_NAMESPACE "SequencerEditor"
@@ -44,6 +85,103 @@ ECurveEditorTreeFilterType ISequencerModule::GetSequencerSelectionFilterType()
 	return FilterType;
 }
 
+static TSharedPtr<IDetailKeyframeHandler> GetKeyframeHandler(TWeakPtr<IDetailTreeNode> OwnerTreeNode)
+{
+	TSharedPtr<IDetailTreeNode> OwnerTreeNodePtr = OwnerTreeNode.Pin();
+	if (!OwnerTreeNodePtr.IsValid())
+	{
+		return TSharedPtr<IDetailKeyframeHandler>();
+	}
+
+	IDetailsView* DetailsView = OwnerTreeNodePtr->GetNodeDetailsView();
+	if (DetailsView == nullptr)
+	{
+		return TSharedPtr<IDetailKeyframeHandler>();
+	}
+
+	return DetailsView->GetKeyframeHandler();
+}
+
+static FSlateIcon GetKeyframeIcon(TWeakPtr<IDetailTreeNode> OwnerTreeNode, TSharedPtr<IPropertyHandle> PropertyHandle)
+{
+	if (!PropertyHandle.IsValid())
+	{
+		return FSlateIcon();
+	}
+
+	EPropertyKeyedStatus KeyedStatus = EPropertyKeyedStatus::NotKeyed;
+
+	if (TSharedPtr<IDetailKeyframeHandler> KeyframeHandler = GetKeyframeHandler(OwnerTreeNode))
+	{
+		KeyedStatus = KeyframeHandler->GetPropertyKeyedStatus(*PropertyHandle);
+	}
+
+	return FSlateIcon(FAppStyle::GetAppStyleSetName(), UE::Sequencer::Private::KeyedStatusStyleNames[KeyedStatus]);
+}
+
+static bool IsKeyframeButtonVisible(TWeakPtr<IDetailTreeNode> OwnerTreeNode, TSharedPtr<IPropertyHandle> PropertyHandle)
+{
+	TSharedPtr<IDetailKeyframeHandler> KeyframeHandler = GetKeyframeHandler(OwnerTreeNode);
+	if (!KeyframeHandler.IsValid() || !PropertyHandle.IsValid())
+	{
+		return false;
+	}
+
+	const UClass* ObjectClass = PropertyHandle->GetOuterBaseClass();
+	if (ObjectClass == nullptr)
+	{
+		return false;
+	}
+
+	return KeyframeHandler->IsPropertyKeyable(ObjectClass, *PropertyHandle);
+}
+
+static bool IsKeyframeButtonEnabled(TWeakPtr<IDetailTreeNode> OwnerTreeNode)
+{
+	TSharedPtr<IDetailKeyframeHandler> KeyframeHandler = GetKeyframeHandler(OwnerTreeNode);
+	if (!KeyframeHandler.IsValid())
+	{
+		return false;
+	}
+
+	return KeyframeHandler->IsPropertyKeyingEnabled();
+}
+
+static void OnAddKeyframeClicked(TWeakPtr<IDetailTreeNode> OwnerTreeNode, TSharedPtr<IPropertyHandle> PropertyHandle)
+{
+	TSharedPtr<IDetailKeyframeHandler> KeyframeHandler = GetKeyframeHandler(OwnerTreeNode);
+	if (!KeyframeHandler.IsValid() || !PropertyHandle.IsValid())
+	{
+		return;
+	}
+
+	KeyframeHandler->OnKeyPropertyClicked(*PropertyHandle);
+}
+
+static void RegisterKeyframeExtensionHandler(const FOnGenerateGlobalRowExtensionArgs& Args, TArray<FPropertyRowExtensionButton>& OutExtensionButtons)
+{
+	// local copy for capturing in handlers below
+	TSharedPtr<IPropertyHandle> PropertyHandle = Args.PropertyHandle;
+	if (!PropertyHandle.IsValid())
+	{
+		return;
+	}
+
+	TWeakPtr<IDetailTreeNode> OwnerTreeNode = Args.OwnerTreeNode;
+
+	FPropertyRowExtensionButton& CreateKey = OutExtensionButtons.AddDefaulted_GetRef();
+
+	CreateKey.Icon = TAttribute<FSlateIcon>::Create(TAttribute<FSlateIcon>::FGetter::CreateStatic(&GetKeyframeIcon, OwnerTreeNode, PropertyHandle));
+	CreateKey.Label = NSLOCTEXT("PropertyEditor", "CreateKey", "Create Key");
+	CreateKey.ToolTip = NSLOCTEXT("PropertyEditor", "CreateKeyToolTip", "Add a keyframe for this property.");
+	CreateKey.UIAction = FUIAction(
+		FExecuteAction::CreateStatic(&OnAddKeyframeClicked, OwnerTreeNode, PropertyHandle),
+		FCanExecuteAction::CreateStatic(&IsKeyframeButtonEnabled, OwnerTreeNode),
+		FGetActionCheckState(),
+		FIsActionButtonVisible::CreateStatic(&IsKeyframeButtonVisible, OwnerTreeNode, PropertyHandle)
+	);
+}
+
 /**
  * SequencerModule implementation (private)
  */
@@ -56,12 +194,14 @@ public:
 
 	virtual TSharedRef<ISequencer> CreateSequencer(const FSequencerInitParams& InitParams) override
 	{
+		using namespace UE::Sequencer;
+
 		TSharedRef<FSequencer> Sequencer = MakeShared<FSequencer>();
 		TSharedRef<ISequencerObjectChangeListener> ObjectChangeListener = MakeShared<FSequencerObjectChangeListener>(Sequencer);
 
 		OnPreSequencerInit.Broadcast(Sequencer, ObjectChangeListener, InitParams);
 
-		Sequencer->InitSequencer(InitParams, ObjectChangeListener, TrackEditorDelegates, EditorObjectBindingDelegates);
+		Sequencer->InitSequencer(InitParams, ObjectChangeListener, TrackEditorDelegates, EditorObjectBindingDelegates, OutlinerColumnDelegates);
 
 		OnSequencerCreated.Broadcast(Sequencer);
 
@@ -102,6 +242,26 @@ public:
 			}
 			AnimatedTypeCache.RemoveAtSwap(CacheIndex);
 		}
+	}
+
+	virtual FDelegateHandle RegisterTrackModel(FOnCreateTrackModel InCreator) override
+	{
+		TrackModelDelegates.Add(InCreator);
+		return TrackModelDelegates.Last().GetHandle();
+	}
+
+	virtual void UnregisterTrackModel(FDelegateHandle InHandle) override
+	{
+		TrackModelDelegates.RemoveAll([=](const FOnCreateTrackModel& Delegate) { return Delegate.GetHandle() == InHandle; });
+	}
+
+	virtual FDelegateHandle RegisterOutlinerColumn(FOnCreateOutlinerColumn InCreator) override {
+		OutlinerColumnDelegates.Add(InCreator);
+		return OutlinerColumnDelegates.Last().GetHandle();
+	}
+
+	virtual void UnregisterOutlinerColumn(FDelegateHandle InHandle) override {
+		OutlinerColumnDelegates.RemoveAll([=](const FOnCreateOutlinerColumn& Delegate) { return Delegate.GetHandle() == InHandle; });
 	}
 
 	virtual FDelegateHandle RegisterOnSequencerCreated(FOnSequencerCreated::FDelegate InOnSequencerCreated) override
@@ -153,13 +313,14 @@ public:
 				return;
 			}
 
-			ULevelSequence* LevelSequence = Context->SelectedObjects.Num() == 1 ? Cast<ULevelSequence>(Context->SelectedObjects[0]) : nullptr;
-			if (LevelSequence)
+			if (Context->SelectedAssets.Num() == 1 && Context->SelectedAssets[0].IsInstanceOf(ULevelSequence::StaticClass()))
 			{
+				const FAssetData LevelSequenceAsset = Context->SelectedAssets[0];
+			
 				// if this LevelSequence has associated maps, offer to load them
-				TArray<FString> AssociatedMaps = FSequencerUtilities::GetAssociatedMapPackages(LevelSequence);
+				TArray<FString> AssociatedMaps = FSequencerUtilities::GetAssociatedLevelSequenceMapPackages(LevelSequenceAsset.PackageName);
 
-				if(AssociatedMaps.Num()>0)
+				if (AssociatedMaps.Num() > 0)
 				{
 					InSection.AddSubMenu(
 						"SequencerOpenMap_Label",
@@ -173,7 +334,7 @@ public:
 									SubMenuBuilder.AddMenuEntry(
 										FText::FromString(FPaths::GetBaseFilename(AssociatedMap)),
 										FText(),
-										FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Levels"),
+										FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Levels"),
 										FExecuteAction::CreateLambda(
 											[AssociatedMap]
 											{
@@ -185,21 +346,26 @@ public:
 							}
 						),
 						false,
-						FSlateIcon(FEditorStyle::GetStyleSetName(), "LevelEditor.Tabs.Levels")
+						FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.Levels")
 					);
 				}
 			}
 		}));
 	}
 
+	void RegisterObjectSchemas()
+	{
+		RegisterObjectSchema(MakeShared<UE::Sequencer::FActorSchema>());
+		RegisterObjectSchema(MakeShared<UE::Sequencer::FSkeletalMeshComponentSchema>());
+	}
+
 	virtual void StartupModule() override
 	{
+		using namespace UE::Sequencer;
+		using namespace UE::MovieScene;
+
 		if (GIsEditor)
 		{
-			// EditorStyle must be initialized by now
-			FModuleManager::Get().LoadModule("EditorStyle");
-			FSequencerCommands::Register();
-
 			FEditorModeRegistry::Get().RegisterMode<FSequencerEdMode>(
 				FSequencerEdMode::EM_SequencerMode,
 				NSLOCTEXT("Sequencer", "SequencerEditMode", "Sequencer Mode"),
@@ -208,17 +374,59 @@ public:
 
 			if (UToolMenus::TryGet())
 			{
+				FSequencerCommands::Register();
 				RegisterMenus();
 			}
 			else
 			{
+				FCoreDelegates::OnPostEngineInit.AddStatic(&FSequencerCommands::Register);
 				FCoreDelegates::OnPostEngineInit.AddRaw(this, &FSequencerModule::RegisterMenus);
 			}
+
+			FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+			OnGetGlobalRowExtensionHandle = EditModule.GetGlobalRowExtensionDelegate().AddStatic(&RegisterKeyframeExtensionHandler);
+
+			// Register left gutter columns
+			PinOutlinerColumnHandle  = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FPinOutlinerColumn>()); }));
+			MuteOutlinerColumnHandle = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FMuteOutlinerColumn>()); }));
+			LockOutlinerColumnHandle = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FLockOutlinerColumn>()); }));
+			SoloOutlinerColumnHandle = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FSoloOutlinerColumn>()); }));
+
+			// Register center columns
+			LabelOutlinerColumnHandle = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FLabelOutlinerColumn>()); }));
+			EditOutlinerColumnHandle  = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FEditOutlinerColumn>()); }));
+			AddOutlinerColumnHandle   = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FAddOutlinerColumn>()); }));
+
+			// Register right gutter columns
+			KeyFrameOutlinerColumnHandle     = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FKeyFrameOutlinerColumn>()); }));
+			NavOutlinerColumnHandle          = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FNavOutlinerColumn>()); }));
+			ColorPickerOutlinerColumnHandle  = RegisterOutlinerColumn(FOnCreateOutlinerColumn::CreateStatic([]{ return TSharedRef<IOutlinerColumn>(MakeShared<FColorPickerOutlinerColumn>()); }));
+
+			RegisterObjectSchemas();
 		}
+
+		FSequenceModel::CreateExtensionsEvent.AddLambda(
+			[&](TSharedPtr<FEditorViewModel> InEditor, TSharedPtr<FSequenceModel> InModel)
+			{
+				InModel->AddDynamicExtension(FFolderModelStorageExtension::ID);
+				InModel->AddDynamicExtension(FObjectBindingModelStorageExtension::ID);
+				InModel->AddDynamicExtension(FTrackModelStorageExtension::ID, TrackModelDelegates);
+				InModel->AddDynamicExtension(FTrackRowModelStorageExtension::ID);
+				InModel->AddDynamicExtension(FSectionModelStorageExtension::ID);
+
+				// If the editor supports a curve editor, add an integration extension to
+				// sync view-model hierarchies between the outliner and curve editor.
+				if (InEditor->CastDynamic<FCurveEditorExtension>())
+				{
+					InModel->AddDynamicExtension(FCurveEditorIntegrationExtension::ID);
+				}
+			}
+		);
 
 		ObjectBindingContextMenuExtensibilityManager = MakeShareable( new FExtensibilityManager );
 		AddTrackMenuExtensibilityManager = MakeShareable( new FExtensibilityManager );
 		ToolBarExtensibilityManager = MakeShareable(new FExtensibilityManager);
+		ActionsMenuExtensibilityManager = MakeShareable(new FExtensibilityManager);
 
 		SequencerCustomizationManager = MakeShareable(new FSequencerCustomizationManager);
 	}
@@ -227,9 +435,28 @@ public:
 	{
 		if (GIsEditor)
 		{
+			UMovieSceneSignedObject::SetDeferredHandler(nullptr);
+
 			FSequencerCommands::Unregister();
 
+			if (FPropertyEditorModule* EditModulePtr = FModuleManager::Get().GetModulePtr<FPropertyEditorModule>("PropertyEditor"))
+			{
+				EditModulePtr->GetGlobalRowExtensionDelegate().Remove(OnGetGlobalRowExtensionHandle);
+			}
+
 			FEditorModeRegistry::Get().UnregisterMode(FSequencerEdMode::EM_SequencerMode);
+
+			// unregister outliner columns
+			UnregisterOutlinerColumn(PinOutlinerColumnHandle);
+			UnregisterOutlinerColumn(MuteOutlinerColumnHandle);
+			UnregisterOutlinerColumn(LockOutlinerColumnHandle);
+			UnregisterOutlinerColumn(SoloOutlinerColumnHandle);
+			UnregisterOutlinerColumn(LabelOutlinerColumnHandle);
+			UnregisterOutlinerColumn(EditOutlinerColumnHandle);
+			UnregisterOutlinerColumn(AddOutlinerColumnHandle);
+			UnregisterOutlinerColumn(KeyFrameOutlinerColumnHandle);
+			UnregisterOutlinerColumn(NavOutlinerColumnHandle);
+			UnregisterOutlinerColumn(ColorPickerOutlinerColumnHandle);
 		}
 	}
 
@@ -286,9 +513,38 @@ public:
 	virtual TSharedPtr<FExtensibilityManager> GetObjectBindingContextMenuExtensibilityManager() const override { return ObjectBindingContextMenuExtensibilityManager; }
 	virtual TSharedPtr<FExtensibilityManager> GetAddTrackMenuExtensibilityManager() const override { return AddTrackMenuExtensibilityManager; }
 	virtual TSharedPtr<FExtensibilityManager> GetToolBarExtensibilityManager() const override { return ToolBarExtensibilityManager; }
+	virtual TSharedPtr<FExtensibilityManager> GetActionsMenuExtensibilityManager() const override { return ActionsMenuExtensibilityManager; }
 
 	virtual TSharedPtr<FSequencerCustomizationManager> GetSequencerCustomizationManager() const override { return SequencerCustomizationManager; }
 
+	virtual void RegisterObjectSchema(TSharedPtr<UE::Sequencer::IObjectSchema> InSchema) override
+	{
+		ObjectSchemas.Add(InSchema);
+	}
+
+	virtual void UnregisterObjectSchema(TSharedPtr<UE::Sequencer::IObjectSchema> InSchema) override
+	{
+		ObjectSchemas.Remove(InSchema);
+	}
+
+	virtual TSharedPtr<UE::Sequencer::IObjectSchema> FindObjectSchema(const UObject* Object) const override
+	{
+		using namespace UE::Sequencer;
+
+		FObjectSchemaRelevancy Relevancy;
+		TSharedPtr<IObjectSchema> RelevantSchema;
+
+		for (const TSharedPtr<IObjectSchema>& Schema : ObjectSchemas)
+		{
+			FObjectSchemaRelevancy ThisRelevancy = Schema->GetRelevancy(Object);
+			if (ThisRelevancy > Relevancy)
+			{
+				Relevancy = ThisRelevancy;
+				RelevantSchema = Schema;
+			}
+		}
+		return RelevantSchema;
+	}
 
 	virtual FDelegateHandle RegisterMovieRenderer(TUniquePtr<IMovieRendererInterface>&& InMovieRenderer) override
 	{
@@ -325,6 +581,11 @@ public:
 		return MovieRendererNames;
 	}
 
+	TArrayView<const TSharedPtr<UE::Sequencer::IObjectSchema>> GetObjectSchemas() const override
+	{
+		return ObjectSchemas;
+	}
+
 private:
 
 	TSet<FAnimatedPropertyKey> PropertyAnimators;
@@ -334,6 +595,17 @@ private:
 
 	/** List of object binding handler delegates sequencers will execute when they are created */
 	TArray< FOnCreateEditorObjectBinding > EditorObjectBindingDelegates;
+
+	/** List of track model creators */
+	TArray<FOnCreateTrackModel> TrackModelDelegates;
+
+	/** List of outliner column creators */
+	TArray<FOnCreateOutlinerColumn> OutlinerColumnDelegates;
+
+	TArray<TSharedPtr<UE::Sequencer::IObjectSchema>> ObjectSchemas;
+
+	/** Global details row extension delegate; */
+	FDelegateHandle OnGetGlobalRowExtensionHandle;
 
 	/** Multicast delegate used to notify others of sequencer initialization params and allow modification. */
 	FOnPreSequencerInit OnPreSequencerInit;
@@ -353,6 +625,7 @@ private:
 	TSharedPtr<FExtensibilityManager> ObjectBindingContextMenuExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> AddTrackMenuExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> ToolBarExtensibilityManager;
+	TSharedPtr<FExtensibilityManager> ActionsMenuExtensibilityManager;
 
 	TSharedPtr<FSequencerCustomizationManager> SequencerCustomizationManager;
 
@@ -364,6 +637,18 @@ private:
 
 	/** Array of movie renderers */
 	TArray<FMovieRendererEntry> MovieRenderers;
+
+	// Outliner Column Delegate Handles
+	FDelegateHandle PinOutlinerColumnHandle;
+	FDelegateHandle MuteOutlinerColumnHandle;
+	FDelegateHandle LockOutlinerColumnHandle;
+	FDelegateHandle SoloOutlinerColumnHandle;
+	FDelegateHandle LabelOutlinerColumnHandle;
+	FDelegateHandle EditOutlinerColumnHandle;
+	FDelegateHandle AddOutlinerColumnHandle;
+	FDelegateHandle KeyFrameOutlinerColumnHandle;
+	FDelegateHandle NavOutlinerColumnHandle;
+	FDelegateHandle ColorPickerOutlinerColumnHandle;
 };
 
 IMPLEMENT_MODULE(FSequencerModule, Sequencer);

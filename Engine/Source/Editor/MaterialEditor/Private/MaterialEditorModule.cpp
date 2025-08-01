@@ -6,23 +6,23 @@
 #include "MaterialEditor.h"
 #include "MaterialEditorUtilities.h"
 #include "MaterialInstanceEditor.h"
+#include "Materials/MaterialFunction.h"
 #include "Materials/MaterialInstance.h"
 #include "Materials/MaterialFunctionInstance.h"
 #include "Settings/EditorExperimentalSettings.h"
 #include "ContentBrowserModule.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "ContentBrowserDelegates.h"
 #include "Interfaces/IPluginManager.h"
-#include "IIntroTutorials.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "EditorTutorial.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Images/SImage.h"
 #include "Misc/EngineBuildSettings.h"
 #include "MaterialEditorSettings.h"
-
+#include "EdGraphUtilities.h"
 #include "ISettingsModule.h"
 #include "Interfaces/IMainFrameModule.h"
+#include "MaterialEditorGraphPanelPinFactory.h"
 
 const FName MaterialEditorAppIdentifier = FName(TEXT("MaterialEditorApp"));
 const FName MaterialInstanceEditorAppIdentifier = FName(TEXT("MaterialInstanceEditorApp"));
@@ -64,6 +64,9 @@ public:
 				NSLOCTEXT("MaterialEditorModule", "SettingsDesc", "Settings related to the material editor."),
 				GetMutableDefault<UMaterialEditorSettings>());
 		}
+
+		GraphPanelPinFactory = MakeShared<FMaterialEditorGraphPanelPinFactory>();
+		FEdGraphUtilities::RegisterVisualPinFactory(GraphPanelPinFactory);
 	}
 
 	/**
@@ -71,6 +74,8 @@ public:
 	 */
 	virtual void ShutdownModule() override
 	{
+		FEdGraphUtilities::UnregisterVisualPinFactory(GraphPanelPinFactory);
+
 		MenuExtensibilityManager.Reset();
 		ToolBarExtensibilityManager.Reset();
 	}
@@ -127,6 +132,7 @@ private:
 	TSharedPtr<FExtensibilityManager> MenuExtensibilityManager;
 	TSharedPtr<FExtensibilityManager> ToolBarExtensibilityManager;
 	FDelegateHandle ContentBrowserAssetExtenderDelegateHandle;
+	TSharedPtr<FMaterialEditorGraphPanelPinFactory> GraphPanelPinFactory;
 };
 
 IMPLEMENT_MODULE( FMaterialEditorModule, MaterialEditor );

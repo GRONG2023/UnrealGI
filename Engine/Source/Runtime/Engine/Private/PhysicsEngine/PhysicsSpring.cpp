@@ -1,9 +1,5 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "Engine/EngineTypes.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
 #include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
 #include "PhysicsEngine/PhysicsSpringComponent.h"
@@ -64,7 +60,7 @@ UPrimitiveComponent* UPhysicsSpringComponent::GetSpringCollision(const FVector& 
 	
 	const FVector Delta = End - Start;
 	const float DeltaSizeSqr = Delta.SizeSquared();
-	if (DeltaSizeSqr > FMath::Square(SMALL_NUMBER))
+	if (DeltaSizeSqr > FMath::Square(UE_SMALL_NUMBER))
 	{
 		if (bool bBlockingHit = World->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, SpringChannel, FCollisionShape::MakeSphere(SpringRadius), QueryParams))
 		{

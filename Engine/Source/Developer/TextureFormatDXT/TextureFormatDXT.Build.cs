@@ -6,21 +6,20 @@ public class TextureFormatDXT : ModuleRules
 {
 	public TextureFormatDXT(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePathModuleNames.AddRange(
-			new string[] {
-				"TargetPlatform",
-				"TextureCompressor",
-				"Engine"
-			}
-			);
+		PrivateIncludePathModuleNames.AddRange(new string[]
+		{
+			"DerivedDataCache",
+			"Engine",
+			"TextureCompressor",
+		});
 
-		PrivateDependencyModuleNames.AddRange(
-			new string[] {
-				"Core",
-				"ImageCore",
-				"ImageWrapper"
-			}
-			);
+		PrivateDependencyModuleNames.AddRange(new string[]
+		{
+			"Core",
+			"ImageCore",
+			"ImageWrapper",
+			"TextureBuild",
+		});
 
 		AddEngineThirdPartyPrivateStaticDependencies(Target, "nvTextureTools");
 	}

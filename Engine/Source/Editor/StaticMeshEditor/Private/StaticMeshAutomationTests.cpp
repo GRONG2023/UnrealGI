@@ -13,6 +13,8 @@
 #include "StaticMeshEditorViewportClient.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 
+#if WITH_AUTOMATION_TESTS
+
 namespace EditorViewButtonHelper
 {
 	/**
@@ -158,7 +160,7 @@ namespace EditorViewButtonHelper
 /**
  * Static mesh editor test
  */
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStaticMeshEditorTest, "System.Editor.Content.Static Mesh Editor Test", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStaticMeshEditorTest, "System.Editor.Content.Static Mesh Editor Test", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter | EAutomationTestFlags::NonNullRHI)
 
 /**
  * Take screenshots of the SME window with each of the toolbar buttons toggled separately
@@ -229,3 +231,5 @@ bool FStaticMeshEditorTest::RunTest(const FString& Parameters)
 
 	return true;
 }
+
+#endif // WITH_AUTOMATION_TESTS

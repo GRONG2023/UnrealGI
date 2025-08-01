@@ -4,15 +4,21 @@
 
 #include "CoreMinimal.h"
 #include "HAL/ThreadSafeCounter.h"
+#include "ImageCoreBP.h"
 #include "UObject/ObjectMacros.h"
 #include "UObject/ScriptMacros.h"
 #include "Engine/Texture.h"
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
 #include "TextureResource.h"
-#include "Serialization/BulkData2.h"
+#endif
+#include "Engine/TextureAllMipDataProviderFactory.h"
+#include "Serialization/BulkData.h"
 #include "Texture2D.generated.h"
 
 class FTexture2DResourceMem;
 class FTexture2DResource;
+struct FTexture2DMipMap;
+struct FUpdateTextureRegion2D;
 
 UCLASS(hidecategories=Object, MinimalAPI, BlueprintType)
 class UTexture2D : public UTexture
@@ -20,17 +26,6 @@ class UTexture2D : public UTexture
 	GENERATED_UCLASS_BODY()
 
 public:
-
-	/*
-	 * Level scope index of this texture. It is used to reduce the amount of lookup to map a texture to its level index.
-	 * Useful when building texture streaming data, as well as when filling the texture streamer with precomputed data.
-     * It relates to FStreamingTextureBuildInfo::TextureLevelIndex and also the index in ULevel::StreamingTextureGuids. 
-	 * Default value of -1, indicates that the texture has an unknown index (not yet processed). At level load time, 
-	 * -2 is also used to indicate that the texture has been processed but no entry were found in the level table.
-	 * After any of these processes, the LevelIndex is reset to INDEX_NONE. Making it ready for the next level task.
-	 */
-	UPROPERTY(transient, duplicatetransient, NonTransactional)
-	int32 LevelIndex;
 
 	/** keep track of first mip level used for ResourceMem creation */
 	UPROPERTY()
@@ -40,14 +35,14 @@ public:
 	/**
 	 * Retrieves the size of the source image from which the texture was created.
 	 */
+#if WITH_EDITOR
+	ENGINE_API FIntPoint GetImportedSize() const;
+#else // #if WITH_EDITOR
 	FORCEINLINE FIntPoint GetImportedSize() const
 	{
-#if WITH_EDITOR
-		return Source.GetLogicalSize();
-#else // #if WITH_EDITOR
 		return ImportedSize;
-#endif // #if WITH_EDITOR
 	}
+#endif // #if WITH_EDITOR
 
 private:
 	/** True if streaming is temporarily disabled so we can update subregions of this texture's resource 
@@ -78,9 +73,23 @@ private:
 	UPROPERTY()
 	FIntPoint ImportedSize;
 
-public:
 	/** The derived data for this texture on this platform. */
-	FTexturePlatformData *PlatformData;
+	FTexturePlatformData* PrivatePlatformData;
+
+public:
+
+	/** Set the derived data for this texture on this platform. */
+	ENGINE_API void SetPlatformData(FTexturePlatformData* PlatformData);
+	/** Get the derived data for this texture on this platform. */
+	ENGINE_API FTexturePlatformData* GetPlatformData();
+	/** Get the const derived data for this texture on this platform. */
+	ENGINE_API const FTexturePlatformData* GetPlatformData() const;
+
+	UTextureAllMipDataProviderFactory* GetAllMipProvider() const
+	{
+		return const_cast<UTexture2D*>(this)->GetAssetUserData<UTextureAllMipDataProviderFactory>();
+	}
+
 #if WITH_EDITOR
 	/* cooked platform data for this texture */
 	TMap<FString, FTexturePlatformData*> CookedPlatformData;
@@ -101,23 +110,35 @@ public:
 #if WITH_EDITOR
 	virtual void PostLinkerChange() override;
 	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	virtual bool IsDefaultTexture() const override;
 #endif // WITH_EDITOR
 	virtual void BeginDestroy() override;
 	virtual bool IsReadyForAsyncPostLoad() const override;
 	virtual void PostLoad() override;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
 	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
+	virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 	virtual FString GetDesc() override;
 	//~ End UObject Interface.
 
 	//~ Begin UTexture Interface.
-	virtual float GetSurfaceWidth() const override { return GetSizeX(); }
-	virtual float GetSurfaceHeight() const override { return GetSizeY(); }
+	virtual ETextureClass GetTextureClass() const override { return ETextureClass::TwoD; }
+	virtual float GetSurfaceWidth() const override { return static_cast<float>(GetSizeX()); }
+	virtual float GetSurfaceHeight() const override { return static_cast<float>(GetSizeY()); }
+	virtual float GetSurfaceDepth() const override { return 0.0f; }
+	virtual uint32 GetSurfaceArraySize() const override { return 0; }
+	virtual TextureAddress GetTextureAddressX() const override { return AddressX; }
+	virtual TextureAddress GetTextureAddressY() const override { return AddressY; }
 	virtual FTextureResource* CreateResource() override;
 	virtual EMaterialValueType GetMaterialType() const override;
 	virtual void UpdateResource() override;
 	virtual float GetAverageBrightness(bool bIgnoreTrueBlack, bool bUseGrayscale) override;
-	virtual FTexturePlatformData** GetRunningPlatformData() final override { return &PlatformData; }
+	virtual FTexturePlatformData** GetRunningPlatformData() final override;
 #if WITH_EDITOR
 	virtual TMap<FString,FTexturePlatformData*>* GetCookedPlatformData() override { return &CookedPlatformData; }
 #endif
@@ -126,66 +147,26 @@ public:
 	//~ Begin UStreamableRenderAsset Interface
 	virtual int32 CalcCumulativeLODSize(int32 NumLODs) const final override { return CalcTextureMemorySize(NumLODs); }
 	ENGINE_API int32 GetNumResidentMips() const;
-	virtual bool StreamOut(int32 NewMipCount) final override;
-	virtual bool StreamIn(int32 NewMipCount, bool bHighPrio) final override;
+	ENGINE_API virtual bool StreamOut(int32 NewMipCount) final override;
+	ENGINE_API virtual bool StreamIn(int32 NewMipCount, bool bHighPrio) final override;
 	//~ End UStreamableRenderAsset Interface
 
 	/** Trivial accessors. */
-	FORCEINLINE int32 GetSizeX() const
-	{
-		if (PlatformData)
-		{
-			return PlatformData->SizeX;
-		}
-		return 0;
-	}
-	FORCEINLINE int32 GetSizeY() const
-	{
-		if (PlatformData)
-		{
-			return PlatformData->SizeY;
-		}
-		return 0;
-	}
-	FORCEINLINE int32 GetNumMips() const
-	{
-		if (PlatformData)
-		{
-			if (IsCurrentlyVirtualTextured())
-			{
-				return PlatformData->GetNumVTMips();
-			}
-			return PlatformData->Mips.Num();
-		}
-		return 0;
-	}
+	ENGINE_API int32 GetSizeX() const;
+	ENGINE_API int32 GetSizeY() const;
+	ENGINE_API int32 GetNumMips() const;
+	ENGINE_API EPixelFormat GetPixelFormat(uint32 LayerIndex = 0u) const;
+	ENGINE_API int32 GetMipTailBaseIndex() const;
+	ENGINE_API const TIndirectArray<FTexture2DMipMap>& GetPlatformMips() const;
+	ENGINE_API int32 GetExtData() const;
 
-	FORCEINLINE EPixelFormat GetPixelFormat(uint32 LayerIndex = 0u) const
-	{
-		if (PlatformData)
-		{
-			return PlatformData->GetLayerPixelFormat(LayerIndex);
-		}
-		return PF_Unknown;
-	}
 
-	FORCEINLINE const TIndirectArray<FTexture2DMipMap>& GetPlatformMips() const
-	{
-		check(PlatformData);
-		return PlatformData->Mips;
-	}
-
-	FORCEINLINE int32 GetExtData() const
-	{
-		if (PlatformData)
-		{
-			return PlatformData->GetExtData();
-		}
-		return 0;
-	}
 
 	/**
-	 * Calculates the maximum number of mips the engine allows to be loaded for this texture. 
+	 * Calculates the maximum number of mips that will be in this texture after cooking
+	 *   (eg. after the "drop mip" lod bias is applied).
+	 * This function is not correct and should not be used. 
+	 *
 	 * The cinematic mips will be considered as loadable, streaming enabled or not.
 	 * Note that in the cooking process, mips smaller than the min residency count
 	 * can be stripped out by the cooker.
@@ -196,20 +177,47 @@ public:
 	ENGINE_API int32 GetNumMipsAllowed(bool bIgnoreMinResidency) const;
 
 public:
-	/** Returns the minimum number of mips that must be resident in memory (cannot be streamed). */
+	/** Returns the minimum number of mips that must be resident in memory (cannot be streamed). 
+	This does not correctly account for NonStreaming mips and other constraints.
+	This function is not correct and should not be used. */
 	FORCEINLINE int32 GetMinTextureResidentMipCount() const
 	{
-		return FMath::Max(GMinTextureResidentMipCount, PlatformData ? (int32)PlatformData->GetNumMipsInTail() : 0);
+		return FMath::Max(GMinTextureResidentMipCount, GetPlatformData() ? (int32)GetPlatformData()->GetNumMipsInTail() : 0);
 	}
 
 	/**
-	 * Get mip data starting with the specified mip index.
+	 * Get the PlatformData mip data starting with the specified mip index.
+	 *
 	 * @param FirstMipToLoad - The first mip index to cache.
 	 * @param OutMipData -	Must point to an array of pointers with at least
 	 *						Mips.Num() - FirstMipToLoad + 1 entries. Upon
 	 *						return those pointers will contain mip data.
+	 *
+	 * prefer TryLoadMipsWithSizes
+	 *
+	 * todo: deprecate this API when possible
+	 * this API is also duplicated in Texture2DArray and TextureCube
+	 * unify and fix them all
+	 * also don't use "GetMipData" as that is the name used for TextureSource
 	 */
 	ENGINE_API void GetMipData(int32 FirstMipToLoad, void** OutMipData);
+
+	/**
+	 * Retrieve initial texel data for mips, starting from FirstMipToLoad, up to the last mip in the texture.
+	 *    This function will only return mips that are currently loaded, or available via derived data.
+	 *    THIS FUNCTION WILL FAIL if you include in the requested range a streaming mip that is NOT currently loaded.
+	 *    Also note that ALL mip bulk data buffers are discarded (either returned or freed).
+	 *    So... in short, this function should only ever be called once.
+	 *
+	 * @param FirstMipToLoad - The first mip index to load.
+	 * @param OutMipData -	A pre-allocated array of pointers, that correspond to [FirstMipToLoad, .... LastMip]
+	 *						Upon successful return, each of those pointers will point to allocated memory containing the corresponding mip's data.
+	 *						Caller takes responsibility to free that memory.
+	 * @param OutMipSize -  A pre-allocated array of int64, that should be the same size as OutMipData (or zero size if caller does not require the sizes to be returned)
+	 *						Upon successful return, each element contains the size of the corresponding mip's data buffer.
+	 * @returns true if the requested mip data has been successfully returned.
+	 */
+	virtual bool GetInitialMipData(int32 InFirstMipToLoad, TArrayView<void*> OutMipData, TArrayView<int64> OutMipSize);
 
 	/**
 	 * Calculates the size of this texture in bytes if it had MipCount miplevels streamed in.
@@ -258,13 +266,6 @@ public:
 	virtual void GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize) override;
 
 	/**
-	 * Cancels any pending texture streaming actions if possible.
-	 * Returns when no more async loading requests are in flight.
-	 */
-	ENGINE_API static void CancelPendingTextureStreaming();
-
-
-	/**
 	 * Returns the global mip map bias applied as an offset for 2d textures.
 	 */
 	ENGINE_API static float GetGlobalMipMapLODBias();
@@ -306,11 +307,49 @@ public:
 
 #endif // WITH_EDITOR
 
+#if WITH_EDITORONLY_DATA
+	/** If we ever show the CPU accessible image in the editor we'll need a transient texture with
+	* those bits in it. If we don't have a CPU copy, then this is null. Use the GetCPUCopyTexture to
+	* access as it's created on demand.
+	*/
+	UPROPERTY();
+	TObjectPtr<UTexture2D> CPUCopyTexture;
+
+	/**
+	* Creates and returns a 2d texture that holds the CPU copy. This is just so that we have something to show
+	* in the editor for the cpu texture and should never be used at runtime or for game data. This function
+	* stalls while the texture is encoding due to GetPlatformData, and will return nullptr if the texture
+	* is not cpu accessible.
+	* 
+	* For game code access to the cpu copy image, use GetCPUCopy().
+	*/
+	ENGINE_API UTexture2D* GetCPUCopyTexture();
+
+	/**
+	 * Returns true if the Downscale and DownscaleOptions properties should be editable in the UI.
+	 * Currently downscaling is only supported for 2d textures without mipmaps.
+	 */
+	virtual bool AreDownscalePropertiesEditable() const override { return MipGenSettings == TMGS_NoMipmaps || MipGenSettings == TMGS_FromTextureGroup; }
+#endif
+
 	friend struct FRenderAssetStreamingManager;
 	friend struct FStreamingRenderAsset;
 	
-	/** creates and initializes a new Texture2D with the requested settings */
-	ENGINE_API static class UTexture2D* CreateTransient(int32 InSizeX, int32 InSizeY, EPixelFormat InFormat = PF_B8G8R8A8, const FName InName = NAME_None);
+	/** creates and initializes a new Texture2D with the requested settings. The texture will have 1 mip level of the given size, optionally filled with the provided data. */
+	ENGINE_API static class UTexture2D* CreateTransient(int32 InSizeX, int32 InSizeY, EPixelFormat InFormat = PF_B8G8R8A8, const FName InName = NAME_None, TConstArrayView64<uint8> InImageData = TConstArrayView64<uint8>());
+
+	/** creates a new texture2d from the first slice of the given image. If the image format isn't supported a texture isn't created. */
+	ENGINE_API static class UTexture2D* CreateTransientFromImage(const FImage* InImage, const FName InName = NAME_None);
+
+	/**
+	* If the texture has a cpu accessible copy, this returns that copy. It will wait for encoding in the editor,
+	* but otherwise may return an invalid reference if the texture is not ready or doesn't have a cpu copy.
+	*/
+	ENGINE_API FSharedImageConstRef GetCPUCopy() const;
+
+	UFUNCTION(BlueprintCallable, meta=(DisplayName = "GetCPUCopy"), Category = "Rendering|Texture")
+	FSharedImageConstRefBlueprint Blueprint_GetCPUCopy() const;
+
 
 	/**
 	 * Gets the X size of the texture, in pixels
@@ -336,14 +375,7 @@ public:
 	 * this reflects the actual current state on the renderer depending on the platform, VT
 	 * data being built, project settings, ....
 	 */
-	virtual bool IsCurrentlyVirtualTextured() const override
-	{
-		if (VirtualTextureStreaming && PlatformData && PlatformData->VTData)
-		{
-			return true;
-		}
-		return false;
-	}
+	virtual bool IsCurrentlyVirtualTextured() const override;
 
 	/**
 	 * Returns true if this virtual texture requests round-robin updates of the virtual texture pages. 
@@ -355,4 +387,5 @@ public:
 	 * This can reduce page table overhead but potentially increase the number of physical pools allocated.
 	 */
 	virtual bool IsVirtualTexturedWithSinglePhysicalSpace() const { return false;  }
+
 };

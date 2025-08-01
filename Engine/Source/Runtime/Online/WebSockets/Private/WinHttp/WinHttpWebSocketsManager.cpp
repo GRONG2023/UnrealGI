@@ -4,6 +4,8 @@
 
 #include "WinHttp/WinHttpWebSocketsManager.h"
 #include "WinHttp/WinHttpWebSocket.h"
+#include "WinHttp/WinHttpHttpManager.h"
+#include "Http.h"
 #include "Modules/ModuleManager.h"
 #include "HttpModule.h"
 #include "Containers/BackgroundableTicker.h"
@@ -11,16 +13,31 @@
 
 void FWinHttpWebSocketsManager::InitWebSockets(TArrayView<const FString> Protocols)
 {
-	(void)FModuleManager::LoadModuleChecked<FHttpModule>(TEXT("Http"));
+	if (FWinHttpHttpManager::GetManager() == nullptr)
+	{
+		InitHttpManager();
+	}
 
 	if (ensure(!TickHandle.IsValid()))
 	{
-		TickHandle = FBackgroundableTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FWinHttpWebSocketsManager::GameThreadTick), 0.0f);
+		TickHandle = FTSBackgroundableTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateRaw(this, &FWinHttpWebSocketsManager::GameThreadTick), 0.0f);
 	}
+}
+
+void FWinHttpWebSocketsManager::InitHttpManager()
+{
+	WinHttpHttpManager = FPlatformHttp::CreateWinHttpHttpManager();
+	check(WinHttpHttpManager);
 }
 
 void FWinHttpWebSocketsManager::ShutdownWebSockets()
 {
+	if (WinHttpHttpManager)
+	{
+		delete WinHttpHttpManager;
+		WinHttpHttpManager = nullptr;
+	}
+
 	for (TWeakPtr<FWinHttpWebSocket>& WeakWebSocket : ActiveWebSockets)
 	{
 		if (TSharedPtr<FWinHttpWebSocket> StrongWebSocket = WeakWebSocket.Pin())
@@ -32,7 +49,7 @@ void FWinHttpWebSocketsManager::ShutdownWebSockets()
 
 	if (ensure(TickHandle.IsValid()))
 	{
-		FBackgroundableTicker::GetCoreTicker().RemoveTicker(TickHandle);
+		FTSBackgroundableTicker::GetCoreTicker().RemoveTicker(TickHandle);
 		TickHandle.Reset();
 	}
 }

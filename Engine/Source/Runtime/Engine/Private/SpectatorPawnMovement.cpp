@@ -6,8 +6,9 @@
 =============================================================================*/
 
 #include "GameFramework/SpectatorPawnMovement.h"
-#include "GameFramework/Pawn.h"
 #include "Misc/App.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SpectatorPawnMovement)
 
 USpectatorPawnMovement::USpectatorPawnMovement(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -34,4 +35,5 @@ void USpectatorPawnMovement::TickComponent(float DeltaTime, enum ELevelTick Tick
 
 	Super::TickComponent(AdjustedDeltaTime, TickType, ThisTickFunction);
 };
+
 

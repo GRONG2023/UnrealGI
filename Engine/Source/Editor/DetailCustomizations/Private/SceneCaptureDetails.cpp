@@ -1,28 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SceneCaptureDetails.h"
-#include "ShowFlags.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
+
 #include "Components/SceneCaptureComponent.h"
-#include "Styling/SlateTypes.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "Widgets/Input/SButton.h"
-#include "Engine/SceneCapture2D.h"
-#include "Engine/SceneCaptureCube.h"
-#include "PropertyHandle.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailWidgetRow.h"
-#include "IDetailGroup.h"
-#include "DetailCategoryBuilder.h"
-#include "IDetailsView.h"
-#include "Engine/PlanarReflection.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SceneCaptureComponentCube.h"
-#include "Components/PlanarReflectionComponent.h"
-#include "Kismet2/ComponentEditorUtils.h"
+#include "Containers/Array.h"
+#include "CoreTypes.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailGroup.h"
 #include "IRenderCaptureProvider.h"
+#include "Input/Reply.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "PropertyHandle.h"
 #include "RenderCaptureInterface.h"
+#include "ShowFlags.h"
+#include "SlotBase.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SceneCaptureDetails"
 
@@ -67,6 +82,7 @@ void FSceneCaptureDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout 
 	TArray<FEngineShowFlags::EShowFlag> ShowFlagsToAllowForCaptures;
 
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Atmosphere);
+	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Cloud);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_BSP);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Decals);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Fog);
@@ -77,6 +93,7 @@ void FSceneCaptureDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout 
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Translucency);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Lighting);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_DeferredLighting);
+	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_NaniteMeshes);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_InstancedStaticMeshes);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_InstancedFoliage);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_InstancedGrass);
@@ -98,9 +115,11 @@ void FSceneCaptureDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout 
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_TemporalAA);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_MotionBlur);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Bloom);
+	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_LocalExposure);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_EyeAdaptation);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_Game);
 	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_ToneCurve); 
+	ShowFlagsToAllowForCaptures.Add(FEngineShowFlags::EShowFlag::SF_PathTracing);
 
 	// Create array of flag name strings for each group
 	TArray< TArray<FString> > ShowFlagsByGroup;
@@ -160,6 +179,12 @@ void FSceneCaptureDetails::CustomizeDetails( IDetailLayoutBuilder& DetailLayout 
 				break;
 			case SFG_LightingFeatures:
 				GroupName = LOCTEXT("LightingFeaturesShowFlagsMenu", "Lighting Features Show Flags");
+				break;
+			case SFG_Lumen:
+				GroupName = LOCTEXT("LumenFeaturesShowFlagsMenu", "Lumen Show Flags");
+				break;
+			case SFG_Nanite:
+				GroupName = LOCTEXT("NaniteFeaturesShowFlagsMenu", "Nanite Show Flags");
 				break;
 			case SFG_CollisionModes:
 				GroupName = LOCTEXT("CollisionModesShowFlagsMenu", "Collision Modes Show Flags");
@@ -389,7 +414,7 @@ void FSceneCaptureDetails::OnShowFlagCheckStateChanged(ECheckBoxState InNewRadio
 		}
 	}
 
-	ShowFlagSettingsProperty->NotifyPostChange();
+	ShowFlagSettingsProperty->NotifyPostChange(EPropertyChangeType::ValueSet);
 	ShowFlagSettingsProperty->NotifyFinishedChangingProperties();
 }
 

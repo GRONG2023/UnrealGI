@@ -9,7 +9,7 @@
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Framework/MultiBox/MultiBoxDefs.h"
 #include "Widgets/SCompoundWidget.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "MovieSceneFwd.h"
 #include "CommonFrameRates.h"
 
@@ -22,9 +22,9 @@ class SSequencerPlayRateCombo : public SCompoundWidget
 public:
 
 	SLATE_BEGIN_ARGS(SSequencerPlayRateCombo)
-		: _StyleSet(&FEditorStyle::Get())
+		: _StyleSet(&FAppStyle::Get())
 		, _BlockLocation(EMultiBlockLocation::None)
-		, _StyleName("Toolbar")
+		, _StyleName("SlimToolBar")
 	{}
 
 		SLATE_ARGUMENT(const ISlateStyle*, StyleSet)
@@ -68,6 +68,8 @@ private:
 
 	EVisibility GetClockSourceVisibility() const;
 	const FSlateBrush* GetClockSourceImage() const;
+
+	bool GetIsSequenceReadOnly() const;
 
 	/** Sequencer pointer */
 	TWeakPtr<FSequencer> WeakSequencer;

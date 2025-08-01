@@ -2,7 +2,9 @@
 
 #pragma once
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
 #include "CoreMinimal.h"
+#endif
 #include "UObject/ObjectMacros.h"
 #include "GameFramework/Actor.h"
 #include "AI/NavigationSystemBase.h"
@@ -14,26 +16,26 @@ class UNavigationSystemConfig;
 UENUM()
 enum class ENavSystemOverridePolicy : uint8
 {
-	Override, // the pre-exising nav system instance will be destroyed.
+	Override, // the pre-existing nav system instance will be destroyed.
 	Append, // config information will be added to pre-existing nav system instance
 	Skip	// if there's already a NavigationSystem in the world then the overriding config will be ignored
 };
 
 
-UCLASS(hidecategories = (Input, Rendering, Actor, LOD, Cooking))
-class NAVIGATIONSYSTEM_API ANavSystemConfigOverride : public AActor
+UCLASS(hidecategories = (Input, Rendering, Actor, LOD, Cooking), MinimalAPI)
+class ANavSystemConfigOverride : public AActor
 {
 	GENERATED_BODY()
 
 #if WITH_EDITORONLY_DATA
 private:
 	UPROPERTY()
-	class UBillboardComponent* SpriteComponent;
+	TObjectPtr<class UBillboardComponent> SpriteComponent;
 #endif // WITH_EDITORONLY_DATA
 
 protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Navigation, Instanced,  meta = (NoResetToDefault))
-	UNavigationSystemConfig* NavigationSystemConfig;
+	TObjectPtr<UNavigationSystemConfig> NavigationSystemConfig;
 
 	/** If there's already a NavigationSystem instance in the world how should this nav override behave */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Navigation)
@@ -43,43 +45,43 @@ protected:
 	uint8 bLoadOnClient : 1;
 
 public:
-	ANavSystemConfigOverride(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
+	NAVIGATIONSYSTEM_API ANavSystemConfigOverride(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	//~ Begin UObject Interface
-	virtual void PostInitProperties() override;
+	NAVIGATIONSYSTEM_API virtual void PostInitProperties() override;
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+	NAVIGATIONSYSTEM_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif // WITH_EDITOR
 	//~ End UObject Interface
 
 	//~ Begin AActor Interface
-	virtual void BeginPlay() override;
+	NAVIGATIONSYSTEM_API virtual void BeginPlay() override;
 #if WITH_EDITOR
-	virtual void PostRegisterAllComponents() override;
-	virtual void PostUnregisterAllComponents() override;
+	NAVIGATIONSYSTEM_API virtual void PostRegisterAllComponents() override;
+	NAVIGATIONSYSTEM_API virtual void PostUnregisterAllComponents() override;
 #endif
 	//~ End AActor Interface
 
 #if WITH_EDITOR
 	/** made an explicit function since rebuilding navigation system can be expensive */
 	UFUNCTION(Category = Navigation, meta = (CallInEditor = "true"))
-	void ApplyChanges();
+	NAVIGATIONSYSTEM_API void ApplyChanges();
 	//virtual void CheckForErrors() override;
 #endif
 
 protected:
 	/** Creates a new navigation system and plugs it into the world. If there's a
 	 *	nav system instance already in place it gets destroyed. */
-	virtual void OverrideNavSystem();
+	NAVIGATIONSYSTEM_API virtual void OverrideNavSystem();
 
 	/** Appends non-conflicting information (like supported agents) to a pre-existing 
 	 *	nav system instance */
-	virtual void AppendToNavSystem(UNavigationSystemBase& PrevNavSys);
+	NAVIGATIONSYSTEM_API virtual void AppendToNavSystem(UNavigationSystemBase& PrevNavSys);
 
 #if WITH_EDITOR
 	/** Called only in the editor mode*/
-	void InitializeForWorld(UNavigationSystemBase* NewNavSys, UWorld* World, const FNavigationSystemRunMode RunMode);
+	NAVIGATIONSYSTEM_API void InitializeForWorld(UNavigationSystemBase* NewNavSys, UWorld* World, const FNavigationSystemRunMode RunMode);
 #endif // WITH_EDITOR
 
-	void ApplyConfig();
+	NAVIGATIONSYSTEM_API void ApplyConfig();
 };

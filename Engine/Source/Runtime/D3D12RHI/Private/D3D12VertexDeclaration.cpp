@@ -16,6 +16,9 @@ struct FD3D12VertexDeclarationKey
 	/** Hash of the vertex elements. */
 	uint32 Hash;
 
+	/** Hash of the vertex elements, without strides. */
+	uint32 HashNoStrides;
+
 	uint16 StreamStrides[MaxVertexElementCount];
 
 	/** Initialization constructor. */
@@ -81,13 +84,23 @@ struct FD3D12VertexDeclarationKey
 		{
 			FORCEINLINE bool operator()(const D3D12_INPUT_ELEMENT_DESC& A, const D3D12_INPUT_ELEMENT_DESC &B) const
 			{
-				return ((int32)A.AlignedByteOffset + A.InputSlot * MAX_uint16) < ((int32)B.AlignedByteOffset + B.InputSlot * MAX_uint16);
+				if (A.InputSlot != B.InputSlot)
+				{
+					return A.InputSlot < B.InputSlot;
+				}
+				if (A.AlignedByteOffset != B.AlignedByteOffset)
+				{
+					return A.AlignedByteOffset < B.AlignedByteOffset;
+				}
+				return A.SemanticIndex < B.SemanticIndex;
 			}
 		};
-		Sort(VertexElements.GetData(), VertexElements.Num(), FCompareDesc());
+		Algo::Sort(VertexElements, FCompareDesc());
 
 		// Hash once.
 		Hash = FCrc::MemCrc_DEPRECATED(VertexElements.GetData(), VertexElements.Num()*sizeof(D3D12_INPUT_ELEMENT_DESC));
+		HashNoStrides = Hash;
+
 		Hash = FCrc::MemCrc_DEPRECATED(StreamStrides, sizeof(StreamStrides), Hash);
 
 		// Assign all the SemanticName after hashing. It's a constant string, always the same, so no need to hash the data.
@@ -133,7 +146,7 @@ struct FVertexDeclarationCache
 		FVertexDeclarationRHIRef* VertexDeclarationRefPtr = Cache.Find(InKey);
 		if (VertexDeclarationRefPtr == nullptr)
 		{
-			VertexDeclarationRefPtr = &Cache.Add(InKey, new FD3D12VertexDeclaration(InKey.VertexElements, InKey.StreamStrides, InKey.Hash));
+			VertexDeclarationRefPtr = &Cache.Add(InKey, new FD3D12VertexDeclaration(InKey.VertexElements, InKey.StreamStrides, InKey.Hash, InKey.HashNoStrides));
 		}
 
 		return VertexDeclarationRefPtr;

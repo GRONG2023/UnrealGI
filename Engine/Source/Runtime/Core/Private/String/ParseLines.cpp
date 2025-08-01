@@ -2,42 +2,52 @@
 
 #include "String/ParseLines.h"
 
-#include "Containers/StringView.h"
+#include "Templates/Function.h"
 
-namespace UE
+namespace UE::String
 {
-namespace String
+
+void ParseLines(
+	const FStringView View,
+	const TFunctionRef<void (FStringView)> Visitor,
+	const EParseLinesOptions Options)
 {
-	void ParseLines(const FStringView& View, const TFunctionRef<void(FStringView)>& Visitor)
+	const TCHAR* ViewIt = View.GetData();
+	const TCHAR* ViewEnd = ViewIt + View.Len();
+	do
 	{
-		const TCHAR* ViewIt = View.GetData();
-		const TCHAR* ViewEnd = ViewIt + View.Len();
-		do
+		const TCHAR* LineStart = ViewIt;
+		const TCHAR* LineEnd = ViewEnd;
+		for (; ViewIt != ViewEnd; ++ViewIt)
 		{
-			const TCHAR* LineStart = ViewIt;
-			const TCHAR* LineEnd = ViewEnd;
-			for (; ViewIt != ViewEnd; ++ViewIt)
+			const TCHAR CurrentChar = *ViewIt;
+			if (CurrentChar == TEXT('\n'))
 			{
-				const TCHAR CurrentChar = *ViewIt;
-				if (CurrentChar == TEXT('\n'))
-				{
-					LineEnd = ViewIt++;
-					break;
-				}
-				if (CurrentChar == TEXT('\r'))
-				{
-					LineEnd = ViewIt++;
-					if (ViewIt != ViewEnd && *ViewIt == TEXT('\n'))
-					{
-						++ViewIt;
-					}
-					break;
-				}
+				LineEnd = ViewIt++;
+				break;
 			}
-
-			Visitor(FStringView(LineStart, static_cast<FStringView::SizeType>(LineEnd - LineStart)));
+			if (CurrentChar == TEXT('\r'))
+			{
+				LineEnd = ViewIt++;
+				if (ViewIt != ViewEnd && *ViewIt == TEXT('\n'))
+				{
+					++ViewIt;
+				}
+				break;
+			}
 		}
-		while (ViewIt != ViewEnd);
+
+		FStringView Line(LineStart, UE_PTRDIFF_TO_INT32(LineEnd - LineStart));
+		if (EnumHasAnyFlags(Options, EParseLinesOptions::Trim))
+		{
+			Line = Line.TrimStartAndEnd();
+		}
+		if (!EnumHasAnyFlags(Options, EParseLinesOptions::SkipEmpty) || !Line.IsEmpty())
+		{
+			Visitor(Line);
+		}
 	}
+	while (ViewIt != ViewEnd);
 }
-}
+
+} // UE::String

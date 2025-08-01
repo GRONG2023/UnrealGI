@@ -2,22 +2,31 @@
 
 // Core includes.
 #include "Misc/Paths.h"
-#include "UObject/NameTypes.h"
-#include "Logging/LogMacros.h"
+
+#include "Containers/StringView.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformFile.h"
-#include "Misc/Parse.h"
-#include "Misc/ScopeLock.h"
-#include "Misc/CommandLine.h"
-#include "Internationalization/Text.h"
 #include "Internationalization/Internationalization.h"
-#include "Misc/Guid.h"
-#include "Misc/ConfigCacheIni.h"
+#include "Internationalization/Text.h"
+#include "Logging/LogMacros.h"
 #include "Misc/App.h"
+#include "Misc/CommandLine.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/DataDrivenPlatformInfoRegistry.h"
 #include "Misc/EngineVersion.h"
+#include "Misc/Guid.h"
 #include "Misc/LazySingleton.h"
-#include "Containers/StringView.h"
+#include "Misc/Parse.h"
+#include "Misc/ScopeLock.h"
+#include "Misc/PathViews.h"
+#include "String/ParseTokens.h"
+#include "UObject/NameTypes.h"
+
+#if PLATFORM_WINDOWS
+#include "Windows/AllowWindowsPlatformTypes.h"
+#include <fileapi.h>
+#include "Windows/HideWindowsPlatformTypes.h"
+#endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogPaths, Log, All);
 
@@ -37,6 +46,7 @@ struct FPaths::FStaticData
 	FString         UserFolder;
 	TArray<FString> EngineLocalizationPaths;
 	TArray<FString> EditorLocalizationPaths;
+	TArray<FString> CookedEditorLocalizationPaths;
 	TArray<FString> PropertyNameLocalizationPaths;
 	TArray<FString> ToolTipLocalizationPaths;
 	TArray<FString> GameLocalizationPaths;
@@ -51,6 +61,7 @@ struct FPaths::FStaticData
 	bool bUserFolderInitialized                    = false;
 	bool bEngineLocalizationPathsInitialized       = false;
 	bool bEditorLocalizationPathsInitialized       = false;
+	bool bCookedEditorLocalizationPathsInitialized = false;
 	bool bPropertyNameLocalizationPathsInitialized = false;
 	bool bToolTipLocalizationPathsInitialized      = false;
 	bool bGameLocalizationPathsInitialized         = false;
@@ -79,7 +90,7 @@ namespace UE4Paths_Private
 			{
 				if (!FCString::Strchr(VALID_SAVEDDIRSUFFIX_CHARACTERS, NonDefaultSavedDirSuffix[CharIdx]))
 				{
-					NonDefaultSavedDirSuffix.RemoveAt(CharIdx, 1, false);
+					NonDefaultSavedDirSuffix.RemoveAt(CharIdx, 1, EAllowShrinking::No);
 					--CharIdx;
 				}
 			}
@@ -190,7 +201,12 @@ FString FPaths::EngineConfigDir()
 
 FString FPaths::EngineEditorSettingsDir()
 {
+#if IS_MONOLITHIC
+	// monolithic editors don't want/need to share settings with the non-monolithic editors
+	return FPaths::GeneratedConfigDir();
+#else
 	return FPaths::GameAgnosticSavedDir() + TEXT("Config/");
+#endif
 }
 
 FString FPaths::EngineIntermediateDir()
@@ -255,6 +271,84 @@ FString FPaths::ProjectPlatformExtensionsDir()
 }
 
 
+FString FPaths::ConvertPath(const FString& Path, EPathConversion Method, const TCHAR* ExtraData, const TCHAR* OverrideProjectDir)
+{
+	// Basic idea here is: 
+	//   We have a path coming in that we want to get the correct corresponding extension/restricted location 
+	//   So, depending on parameters, and if it's a program path or not (programs are special locations), we split
+	//   up the path into a Prefix and Suffix, and insert the correct folders into the middle that matches the Conversion method
+	// Note that ExtraData is currently only for PlatformExtensions, and contains the Platform name
+
+	// NOTE: We can't test that a Project_ type starts with ProjectDir, because of this case of a Program:
+	//   Path0 = ProjectDir() + "Config";
+	//   Path1 = ConvertPath(Path0, Project_NoRedist);
+	//   Path2 = ConvertPath(Path1, Project_PlatformExtension, "Mac");
+	// This is valid, and will generate the correct output, but note that Path1 does _not_ start with ProjectDir (which is ../../../Engine/Programs/Foo):
+	//   Path0 = ../../../Engine/Programs/Foo/Config
+	//   Path1 = ../../../Engine/Restricted/NoRedist/Programs/Foo/Config
+	//   Path2 = ../../../Engine/Restricted/NoRedist/Platforms/Mac/Programs/Foo/Config
+	// Aren't Programs fun??
+		
+	const bool bIsProgram = OverrideProjectDir == nullptr ? IS_PROGRAM : FCString::Strstr(OverrideProjectDir, TEXT("/Programs/")) != nullptr;
+	const bool bIsProjectConversion = (int)Method >= (int)EPathConversion::Project_First;
+	const bool bIsEngineConversion = !bIsProjectConversion;
+	
+	FString Prefix, Suffix;
+	// programs need special love for project types, where we need to split on whatever is before the Programs, NOT ProjectDir
+	if (bIsProgram && bIsProjectConversion)
+	{
+		int ProgramsLoc = Path.Replace(TEXT("\\"), TEXT("/")).Find(TEXT("/Programs/"));
+		Prefix = Path.Mid(0, ProgramsLoc + 1);
+		Suffix = Path.Mid(ProgramsLoc + 1);
+	}
+	// handle the override case, simply
+	else if (OverrideProjectDir != nullptr && (int)Method >= (int)EPathConversion::Project_First)
+	{
+		// skip over engine or project directory
+		Prefix = OverrideProjectDir;
+		// grab what's left
+		Suffix = Path.Mid(Prefix.Len());
+	}
+	else
+	{
+		// removing these temporarily until we handle an absolute path to Engine/Project - the GetUnrealBuildToolExecutableFilename() function is passing
+		// in an absolute path to Engine which causes Config path conversion to fail here
+//		checkfSlow(!(bIsProjectConversion && !Path.StartsWith(FPaths::ProjectDir().TrimChar('/'))), TEXT("Called ConvertPath with a Platform_ method, but Path [%s] didn't start with FPaths::ProjectDir() [%s]. This is not supported"), *Path, *FPaths::ProjectDir());
+//		checkfSlow(!(bIsEngineConversion && !Path.StartsWith(FPaths::EngineDir().TrimChar('/'))), TEXT("Called ConvertPath with a Engine_ method, but Path [%s] didn't start with FPaths::EngineDir() [%s]. This is not supported"), *Path, *FPaths::EngineDir());
+
+		// skip over engine or project directory
+		Prefix = (int)Method < (int)EPathConversion::Project_First ? FPaths::EngineDir() : FPaths::ProjectDir();
+		// grab what's left
+		Suffix = Path.Mid(Prefix.Len());
+	}
+	
+	// we check we can skip appending Suffix if it's empty, otherwise, we will end up with an extra trailing /
+	// but we do need to make sure we end with a / if the incoming path did
+	if (!Suffix.EndsWith(TEXT("/")) && Path.EndsWith(TEXT("/")))
+	{
+		Suffix += TEXT("/");
+	}
+	bool bAppendSuffix = Suffix.Len() > 0;
+	
+	switch (Method)
+	{
+		case EPathConversion::Engine_PlatformExtension:
+		case EPathConversion::Project_PlatformExtension:
+			return bAppendSuffix ? FPaths::Combine(Prefix, TEXT("Platforms"), ExtraData, Suffix) : FPaths::Combine(Prefix, TEXT("Platforms"), ExtraData);
+			
+		case EPathConversion::Engine_NotForLicensees:
+		case EPathConversion::Project_NotForLicensees:
+			return bAppendSuffix ? FPaths::Combine(Prefix, TEXT("Restricted/NotForLicensees"), Suffix) : FPaths::Combine(Prefix, TEXT("Restricted/NotForLicensees"));
+			
+		case EPathConversion::Engine_NoRedist:
+		case EPathConversion::Project_NoRedist:
+			return bAppendSuffix ? FPaths::Combine(Prefix, TEXT("Restricted/NoRedist"), Suffix) : FPaths::Combine(Prefix, TEXT("Restricted/NoRedist"));
+	}
+	
+	return TEXT("");
+}
+
+
 static void AddIfDirectoryExists(TArray<FString>& ExtensionDirs, FString&& Dir)
 {
 	if (FPaths::DirectoryExists(Dir))
@@ -263,31 +357,31 @@ static void AddIfDirectoryExists(TArray<FString>& ExtensionDirs, FString&& Dir)
 	}
 }
 
-static void GetExtensionDirsInternal(TArray<FString>& ExtensionDirs, const FString& BaseDir, const FString& SubDir)
+static void GetExtensionDirsInternal(TArray<FString>& ExtensionDirs, const FString& BaseDir, const FString& SubDir, bool bCheckValid)
 {
 	AddIfDirectoryExists(ExtensionDirs, FPaths::Combine(BaseDir, SubDir));
 
 	FString PlatformExtensionBaseDir = FPaths::Combine(BaseDir, TEXT("Platforms"));
-	for (const FString& PlatformName : FDataDrivenPlatformInfoRegistry::GetValidPlatformDirectoryNames())
+	for (const FString& PlatformName : FDataDrivenPlatformInfoRegistry::GetPlatformDirectoryNames(bCheckValid))
 	{
 		AddIfDirectoryExists(ExtensionDirs, FPaths::Combine(PlatformExtensionBaseDir, PlatformName, SubDir));
 	}
 
 	FString RestrictedBaseDir = FPaths::Combine(BaseDir, TEXT("Restricted"));
-	IFileManager::Get().IterateDirectory(*RestrictedBaseDir, [&ExtensionDirs, SubDir](const TCHAR* FilenameOrDirectory, bool bIsDirectory)  -> bool
+	IFileManager::Get().IterateDirectory(*RestrictedBaseDir, [&ExtensionDirs, SubDir, bCheckValid](const TCHAR* FilenameOrDirectory, bool bIsDirectory)  -> bool
 	{
 		if (bIsDirectory)
 		{
-			GetExtensionDirsInternal(ExtensionDirs, FilenameOrDirectory, SubDir);
+			GetExtensionDirsInternal(ExtensionDirs, FilenameOrDirectory, SubDir, bCheckValid);
 		}
 		return true;
 	});
 }
 
-TArray<FString> FPaths::GetExtensionDirs(const FString& BaseDir, const FString& SubDir)
+TArray<FString> FPaths::GetExtensionDirs(const FString& BaseDir, const FString& SubDir, bool bCheckValid)
 {
 	TArray<FString> ExtensionDirs;
-	GetExtensionDirsInternal(ExtensionDirs, BaseDir, SubDir);
+	GetExtensionDirsInternal(ExtensionDirs, BaseDir, SubDir, bCheckValid);
 	return ExtensionDirs;
 }
 
@@ -312,7 +406,12 @@ FString FPaths::ProjectUserDir()
 
 	if (ShouldSaveToUserDir())
 	{
+		// if defined, this will override both saveddirsuffix and enginesaveddirsuffix
+#ifdef UE_SAVED_DIR_OVERRIDE
+		return FPaths::Combine(FPlatformProcess::UserSettingsDir(), TEXT(PREPROCESSOR_TO_STRING(UE_SAVED_DIR_OVERRIDE))) + TEXT("/");
+#else
 		return FPaths::Combine(FPlatformProcess::UserSettingsDir(), FApp::GetProjectName()) + TEXT("/");
+#endif
 	}
 	else
 	{
@@ -385,11 +484,7 @@ FString FPaths::SourceConfigDir()
 
 FString FPaths::GeneratedConfigDir()
 {
-#if PLATFORM_MAC // @todo, move this to Mac FPlatformMisc.
-	return FPlatformProcess::UserPreferencesDir();
-#else
 	return FPlatformMisc::GeneratedConfigDir();
-#endif
 }
 
 FString FPaths::SandboxesDir()
@@ -417,16 +512,15 @@ FString FPaths::VideoCaptureDir()
 	return FPaths::ProjectSavedDir() + TEXT("VideoCaptures/");
 }
 
+FString FPaths::AudioCaptureDir()
+{
+	return FPaths::ProjectSavedDir() + TEXT("AudioCaptures/");
+}
+
 FString FPaths::ProjectLogDir()
 {
-#if PLATFORM_PS4
-	const FString* OverrideDir = FPS4PlatformFile::GetOverrideLogDirectory();
-	if (OverrideDir != nullptr)
-	{
-		return *OverrideDir;
-	}
-#elif PLATFORM_SWITCH
-	const FString* OverrideDir = FSwitchPlatformFile::GetOverrideLogDirectory();
+#if defined(OVERRIDE_LOG_DIRECTORY_PLATFORM)
+	const FString* OverrideDir = OVERRIDE_LOG_DIRECTORY_PLATFORM::GetOverrideLogDirectory();
 	if (OverrideDir != nullptr)
 	{
 		return *OverrideDir;
@@ -474,7 +568,15 @@ FString FPaths::CloudDir()
 
 FString FPaths::GameDevelopersDir()
 {
-	return FPaths::ProjectContentDir() + TEXT("Developers/");
+	FString ContentDir = FPaths::ProjectContentDir();
+	FStringView DevelopersFolder = DevelopersFolderName();
+	return FString::Printf(TEXT("%.*s%.*s/"), ContentDir.Len(), *ContentDir,
+		DevelopersFolder.Len(), DevelopersFolder.GetData());
+}
+
+FStringView FPaths::DevelopersFolderName()
+{
+	return TEXTVIEW("Developers");
 }
 
 FString FPaths::GameUserDeveloperFolderName()
@@ -557,6 +659,22 @@ const TArray<FString>& FPaths::GetEditorLocalizationPaths()
 	}
 
 	return StaticData.EditorLocalizationPaths;
+}
+
+const TArray<FString>& FPaths::GetCookedEditorLocalizationPaths()
+{
+	FStaticData& StaticData = TLazySingleton<FStaticData>::Get();
+
+	if (!StaticData.bCookedEditorLocalizationPathsInitialized)
+	{
+		if (GConfig && GConfig->IsReadyForUse())
+		{
+			GConfig->GetArray(TEXT("Internationalization"), TEXT("CookedLocalizationPaths"), StaticData.CookedEditorLocalizationPaths, GEditorIni);
+			StaticData.bCookedEditorLocalizationPathsInitialized = true;
+		}
+	}
+
+	return StaticData.CookedEditorLocalizationPaths;
 }
 
 const TArray<FString>& FPaths::GetPropertyNameLocalizationPaths()
@@ -646,9 +764,9 @@ const TArray<FString>& FPaths::GetRestrictedFolderNames()
 		StaticData.RestrictedFolderNames.Add(TEXT("EpicInternal"));
 
 		// Add confidential platforms
-		for (const FString& PlatformStr : FDataDrivenPlatformInfoRegistry::GetConfidentialPlatforms())
+		for (FName PlatformStr : FDataDrivenPlatformInfoRegistry::GetConfidentialPlatforms())
 		{
-			StaticData.RestrictedFolderNames.Add(PlatformStr);
+			StaticData.RestrictedFolderNames.Add(PlatformStr.ToString());
 		}
 
 		StaticData.bRestrictedFolderNamesInitialized = true;
@@ -734,6 +852,58 @@ void FPaths::SetProjectFilePath( const FString& NewGameProjectFilePath )
 	FPaths::NormalizeFilename(StaticData.GameProjectFilePath);
 }
 
+FString FPaths::FindCorrectCase(const FString& Path)
+{
+#if PLATFORM_WINDOWS
+	// GetFilenameOnDisk on Windows will resolve directory junctions and resolving those here has negative consequences
+	// for workflows that use a junction at their root (eg: p4 gets confused about paths and operations fail).
+	// There is a way to get a case-accurate path on Windows without resolving directory junctions, but it is slow.
+	// We can use it here for this one-off situation without causing all uses of GetFilenameOnDisk to be slower.
+	FString ProjectFilePath = FPaths::GetProjectFilePath();
+	TStringBuilder<MAX_PATH> Builder;
+	FPathViews::IterateComponents(
+		ProjectFilePath,
+		[&Builder](FStringView CurrentPathComponent)
+		{
+			if (Builder.Len() != 0)
+			{
+				Builder.AppendChar(TEXT('/'));
+			}
+
+			// Any volume name should be upper case
+			const bool bIsVolumeSegment = CurrentPathComponent.EndsWith(TEXT(':'));
+			if (bIsVolumeSegment)
+			{
+				Builder.Append(FString(CurrentPathComponent).ToUpper());
+				return;
+			}
+
+			int32 LenBeforeCurrentComponent = Builder.Len();
+			Builder.Append(CurrentPathComponent);
+
+			// Skip over all segments that are either empty or contain relative transforms, they should remain as-is
+			const bool bIsIgnoredSegment = CurrentPathComponent.IsEmpty() || CurrentPathComponent.Equals(TEXTVIEW(".")) || CurrentPathComponent.Equals(TEXTVIEW(".."));
+			if (bIsIgnoredSegment)
+			{
+				return;
+			}
+
+			WIN32_FIND_DATAW Data;
+			HANDLE Handle = FindFirstFileW(StringCast<WIDECHAR>(*Builder, Builder.Len() + 1).Get(), &Data);
+			if (Handle != INVALID_HANDLE_VALUE)
+			{
+				Builder.RemoveSuffix(Builder.Len() - LenBeforeCurrentComponent);
+				Builder.Append(Data.cFileName);
+				FindClose(Handle);
+			}
+		}
+	);
+	return Builder.ToString();
+#else
+	return IFileManager::Get().GetFilenameOnDisk(*Path);
+#endif
+}
+
 FString FPaths::GetExtension( const FString& InPath, bool bIncludeDot )
 {
 	const FString Filename = GetCleanFilename(InPath);
@@ -766,8 +936,8 @@ FString FPaths::GetCleanFilename(FString&& InPath)
 
 	if (StartPos <= EndPos)
 	{
-		InPath.RemoveAt(EndPos, InPath.Len() - EndPos, false);
-		InPath.RemoveAt(0, StartPos, false);
+		InPath.RemoveAt(EndPos, InPath.Len() - EndPos, EAllowShrinking::No);
+		InPath.RemoveAt(0, StartPos, EAllowShrinking::No);
 	}
 	else
 	{
@@ -833,7 +1003,7 @@ FString FPaths::GetPath(FString&& InPath)
 	FString Result;
 	if (Pos != INDEX_NONE)
 	{
-		InPath.RemoveAt(Pos, InPath.Len() - Pos, false);
+		InPath.RemoveAt(Pos, InPath.Len() - Pos, EAllowShrinking::No);
 		Result = MoveTemp(InPath);
 	}
 
@@ -858,8 +1028,8 @@ FString FPaths::GetPathLeaf(FString&& InPath)
 	int32 EndPos   = InPath.FindLastCharByPredicate(UE4Paths_Private::IsNotSlashOrBackslash) + 1;
 	int32 StartPos = InPath.FindLastCharByPredicate(UE4Paths_Private::IsSlashOrBackslash, EndPos) + 1;
 
-	InPath.RemoveAt(EndPos, InPath.Len() - EndPos, false);
-	InPath.RemoveAt(0, StartPos, false);
+	InPath.RemoveAt(EndPos, InPath.Len() - EndPos, EAllowShrinking::No);
+	InPath.RemoveAt(0, StartPos, EAllowShrinking::No);
 
 	return MoveTemp(InPath);
 }
@@ -867,7 +1037,7 @@ FString FPaths::GetPathLeaf(FString&& InPath)
 FString FPaths::ChangeExtension(const FString& InPath, const FString& InNewExtension)
 {
 	int32 Pos = INDEX_NONE;
-	if (InPath.FindLastChar('.', Pos))
+	if (InPath.FindLastChar(TEXT('.'), Pos))
 	{
 		const int32 PathEndPos = InPath.FindLastCharByPredicate(UE4Paths_Private::IsSlashOrBackslash);
 		if (PathEndPos != INDEX_NONE && PathEndPos > Pos)
@@ -897,7 +1067,7 @@ FString FPaths::ChangeExtension(const FString& InPath, const FString& InNewExten
 FString FPaths::SetExtension(const FString& InPath, const FString& InNewExtension)
 {
 	int32 Pos = INDEX_NONE;
-	if (InPath.FindLastChar('.', Pos))
+	if (InPath.FindLastChar(TEXT('.'), Pos))
 	{
 		const int32 PathEndPos = InPath.FindLastCharByPredicate(UE4Paths_Private::IsSlashOrBackslash);
 		if (PathEndPos != INDEX_NONE && PathEndPos > Pos)
@@ -985,7 +1155,7 @@ bool FPaths::IsDrive(const FString& InPath)
 				int32 SlashIndex = CheckPath.Find(TEXT("\\"), ESearchCase::CaseSensitive);
 				if (SlashIndex != INDEX_NONE)
 				{
-					CheckPath.RightInline(CheckPath.Len() - SlashIndex  - 1, false);
+					CheckPath.RightInline(CheckPath.Len() - SlashIndex  - 1, EAllowShrinking::No);
 				}
 				else
 				{
@@ -1014,7 +1184,7 @@ bool FPaths::IsDrive(const FString& InPath)
 					// It's a real folder, so add one to the count
 					CheckCount++;
 				}
-				CheckPath.RightInline(CheckPath.Len() - SlashIndex  - 1, false);
+				CheckPath.RightInline(CheckPath.Len() - SlashIndex  - 1, EAllowShrinking::No);
 				SlashIndex = CheckPath.Find(TEXT("\\"), ESearchCase::CaseSensitive);
 			}
 
@@ -1030,12 +1200,15 @@ bool FPaths::IsDrive(const FString& InPath)
 	return false;
 }
 
+#if WITH_EDITOR
+const TCHAR* FPaths::GameFeatureRootPrefix()
+{
+	return TEXT("root:/");
+}
+#endif
+
 bool FPaths::IsRelative(const FString& InPath)
 {
-#if WITH_EDITOR
-	static const TCHAR RootPrefix[] = TEXT("root:/");
-#endif // WITH_EDITOR
-
 	// The previous implementation of this function seemed to handle normalized and unnormalized paths, so this one does too for legacy reasons.
 	const uint32 PathLen = InPath.Len();
 	const bool IsRooted = PathLen &&
@@ -1044,7 +1217,7 @@ bool FPaths::IsRelative(const FString& InPath)
 			((InPath[0] == '\\') && (InPath[1] == '\\'))					// Root of the current directory on Windows. Also covers "\\" for UNC or "network" paths.
 			|| (InPath[1] == ':' && FChar::IsAlpha(InPath[0]))				// Starts with "<DriveLetter>:"
 #if WITH_EDITOR
-			|| (InPath.StartsWith(RootPrefix, ESearchCase::IgnoreCase))		// Feature packs use this
+			|| (InPath.StartsWith(GameFeatureRootPrefix(), ESearchCase::IgnoreCase))
 #endif // WITH_EDITOR
 			))
 		);
@@ -1064,7 +1237,7 @@ void FPaths::NormalizeDirectoryName(FString& InPath)
 	if (InPath.EndsWith(TEXT("/"), ESearchCase::CaseSensitive) && !InPath.EndsWith(TEXT("//"), ESearchCase::CaseSensitive) && !InPath.EndsWith(TEXT(":/"), ESearchCase::CaseSensitive))
 	{
 		// overwrite trailing slash with terminator
-		InPath.GetCharArray()[InPath.Len() - 1] = 0;
+		InPath.GetCharArray()[InPath.Len() - 1] = TEXT('\0');
 		// shrink down
 		InPath.TrimToNullTerminator();
 	}
@@ -1074,7 +1247,7 @@ void FPaths::NormalizeDirectoryName(FString& InPath)
 
 bool FPaths::CollapseRelativeDirectories(FString& InPath)
 {
-	const TCHAR ParentDir[] = TEXT("/..");
+	const auto& ParentDir = TEXT("/..");
 	const int32 ParentDirLength = UE_ARRAY_COUNT( ParentDir ) - 1; // To avoid hardcoded values
 
 	for (;;)
@@ -1144,7 +1317,7 @@ bool FPaths::CollapseRelativeDirectories(FString& InPath)
 			return false;
 		}
 
-		InPath.RemoveAt(PreviousSeparatorIndex, Index - PreviousSeparatorIndex + ParentDirLength, false);
+		InPath.RemoveAt(PreviousSeparatorIndex, Index - PreviousSeparatorIndex + ParentDirLength, EAllowShrinking::No);
 	}
 
 	InPath.ReplaceInline(TEXT("./"), TEXT(""), ESearchCase::CaseSensitive);
@@ -1152,6 +1325,13 @@ bool FPaths::CollapseRelativeDirectories(FString& InPath)
 	InPath.TrimToNullTerminator();
 
 	return true;
+}
+
+FString FPaths::RemoveDuplicateSlashes(const FString& InPath)
+{
+	FString Result = InPath;
+	RemoveDuplicateSlashes(Result);
+	return MoveTemp(Result);
 }
 
 void FPaths::RemoveDuplicateSlashes(FString& InPath)
@@ -1254,10 +1434,14 @@ bool FPaths::MakePathRelativeTo( FString& InPath, const TCHAR* InRelativeTo )
 	Source.ReplaceInline(TEXT("\\"), TEXT("/"), ESearchCase::CaseSensitive);
 	Target.ReplaceInline(TEXT("\\"), TEXT("/"), ESearchCase::CaseSensitive);
 
-	TArray<FString> TargetArray;
-	Target.ParseIntoArray(TargetArray, TEXT("/"), true);
-	TArray<FString> SourceArray;
-	Source.ParseIntoArray(SourceArray, TEXT("/"), true);
+	const UE::String::EParseTokensOptions ParseOptions = UE::String::EParseTokensOptions::IgnoreCase |
+		UE::String::EParseTokensOptions::SkipEmpty;
+	TArray<FStringView, TInlineAllocator<16>> TargetArrayBuffer;
+	UE::String::ParseTokens(Target, TEXTVIEW("/"), TargetArrayBuffer, ParseOptions);
+	TArrayView<FStringView> TargetArray(TargetArrayBuffer);
+	TArray<FStringView, TInlineAllocator<16>> SourceArrayBuffer;
+	UE::String::ParseTokens(Source, TEXTVIEW("/"), SourceArrayBuffer, ParseOptions);
+	TArrayView<FStringView> SourceArray(SourceArrayBuffer);
 
 	if (TargetArray.Num() && SourceArray.Num())
 	{
@@ -1274,20 +1458,30 @@ bool FPaths::MakePathRelativeTo( FString& InPath, const TCHAR* InRelativeTo )
 
 	while (TargetArray.Num() && SourceArray.Num() && TargetArray[0] == SourceArray[0])
 	{
-		TargetArray.RemoveAt(0);
-		SourceArray.RemoveAt(0);
+		TargetArray.RightChopInline(1);
+		SourceArray.RightChopInline(1);
 	}
+
+	FStringView ParentDirSeparator = TEXTVIEW("../");
+	FStringView DirSeparator = TEXTVIEW("/");
+	int32 ResultsLen = SourceArray.Num() * ParentDirSeparator.Len() + (FMath::Max(TargetArray.Num(),1) - 1)*DirSeparator.Len();
+	for (const FStringView& TargetDir : TargetArray)
+	{
+		ResultsLen += TargetDir.Len();
+	}
+
 	FString Result;
+	Result.Reserve(ResultsLen);
 	for (int32 Index = 0; Index < SourceArray.Num(); Index++)
 	{
-		Result += TEXT("../");
+		Result += ParentDirSeparator;
 	}
 	for (int32 Index = 0; Index < TargetArray.Num(); Index++)
 	{
 		Result += TargetArray[Index];
 		if (Index + 1 < TargetArray.Num())
 		{
-			Result += TEXT("/");
+			Result += DirSeparator;
 		}
 	}
 	
@@ -1375,7 +1569,7 @@ FString FPaths::GetInvalidFileSystemChars()
 	// # isn't legal. Used for revision specifiers in P4/SVN, and also not allowed on Windows anyway
 	// @ isn't legal. Used for revision/label specifiers in P4/SVN
 	// ^ isn't legal. While the file-system won't complain about this character, Visual Studio will			
-	static const TCHAR RestrictedChars[] = TEXT("/?:&\\*\"<>|%#@^");
+	static const TCHAR* RestrictedChars = TEXT("/?:&\\*\"<>|%#@^");
 	return RestrictedChars;
 }
 
@@ -1402,7 +1596,7 @@ FString FPaths::MakeValidFileName(const FString& InString, const TCHAR InReplace
 		}
 	}
 
-	Output[InLen] = 0;
+	Output[InLen] = TEXT('\0');
 
 	if (InReplacementChar == 0)
 	{
@@ -1433,7 +1627,7 @@ FString FPaths::MakeValidFileName(const FString& InString, const TCHAR InReplace
 				{
 					// take this char and null it out
 					Output[iChar] = Output[iFill];
-					Output[iFill] = 0;
+					Output[iFill] = TEXT('\0');
 				}
 			}
 		}
@@ -1457,7 +1651,7 @@ bool FPaths::ValidatePath( const FString& InPath, FText* OutReason )
 	// The loop below requires that the path not end with a /
 	if(Standardized.EndsWith(TEXT("/"), ESearchCase::CaseSensitive))
 	{
-		Standardized.LeftChopInline(1, false);
+		Standardized.LeftChopInline(1, EAllowShrinking::No);
 	}
 
 	// Walk each part of the path looking for name errors
@@ -1479,7 +1673,7 @@ bool FPaths::ValidatePath( const FString& InPath, FText* OutReason )
 		}
 
 		// Check for invalid characters
-		TCHAR CharString[] = { '\0', '\0' };
+		TCHAR CharString[] = { TEXT('\0'), TEXT('\0') };
 		FString MatchedInvalidChars;
 		for(const TCHAR* InvalidCharacters = *RestrictedChars; *InvalidCharacters; ++InvalidCharacters)
 		{
@@ -1526,9 +1720,14 @@ bool FPaths::ValidatePath( const FString& InPath, FText* OutReason )
 
 void FPaths::Split( const FString& InPath, FString& PathPart, FString& FilenamePart, FString& ExtensionPart )
 {
-	PathPart = GetPath(InPath);
-	FilenamePart = GetBaseFilename(InPath);
-	ExtensionPart = GetExtension(InPath);
+	FStringView PathView;
+	FStringView FilenameView;
+	FStringView ExtensionView;
+
+	FPathViews::Split(InPath, PathView, FilenameView, ExtensionView);
+	PathPart = PathView;
+	FilenamePart = FilenameView;
+	ExtensionPart = ExtensionView;
 }
 
 const FString& FPaths::GetRelativePathToRoot()
@@ -1556,24 +1755,26 @@ const FString& FPaths::GetRelativePathToRoot()
 	return StaticData.RelativePathToRoot;
 }
 
-void FPaths::CombineInternal(FString& OutPath, const TCHAR** Pathes, int32 NumPathes)
+FString FPaths::CombineInternal(const FStringView* Paths, int32 NumPaths)
 {
-	check(Pathes != NULL && NumPathes > 0);
+	check(Paths && NumPaths > 0);
 
-	int32 OutStringSize = 0;
-
-	for (int32 i=0; i < NumPathes; ++i)
+	int32 CombinedPathLen = 0;
+	for (int32 i=0; i < NumPaths; ++i)
 	{
-		OutStringSize += FCString::Strlen(Pathes[i]) + 1;
+		CombinedPathLen += Paths[i].Len() + 1;
 	}
 
-	OutPath.Empty(OutStringSize);
-	OutPath += Pathes[0];
+	FString CombinedPath;
+	CombinedPath.Reserve(CombinedPathLen);
+	CombinedPath += Paths[0];
 	
-	for (int32 i=1; i < NumPathes; ++i)
+	for (int32 i=1; i < NumPaths; ++i)
 	{
-		OutPath /= Pathes[i];
+		CombinedPath /= Paths[i];
 	}
+
+	return CombinedPath;
 }
 
 bool FPaths::IsSamePath(const FString& PathA, const FString& PathB)
@@ -1607,7 +1808,7 @@ bool FPaths::IsUnderDirectory(const FString& InPath, const FString& InDirectory)
 	int Compare = FCString::Strncmp(*Path, *Directory, Directory.Len());
 #endif
 
-	return Compare == 0 && (Path.Len() == Directory.Len() || Path[Directory.Len()] == '/');
+	return Compare == 0 && (Path.Len() == Directory.Len() || Path[Directory.Len()] == TEXT('/'));
 }
 
 

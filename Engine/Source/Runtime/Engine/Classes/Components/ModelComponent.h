@@ -36,7 +36,7 @@ class UModelComponent : public UPrimitiveComponent, public IInterface_CollisionD
 
 private:
 	/** The BSP tree. */
-	class UModel* Model;
+	TObjectPtr<class UModel> Model;
 
 	/** The index of this component in the ULevel's ModelComponents array. */
 	int32 ComponentIndex;
@@ -45,7 +45,7 @@ public:
 
 	/** Description of collision */
 	UPROPERTY()
-	class UBodySetup* ModelBodySetup;
+	TObjectPtr<class UBodySetup> ModelBodySetup;
 
 private:
 	/** The nodes which this component renders. */
@@ -125,6 +125,7 @@ public:
 
 	//~ Begin Interface_CollisionDataProvider Interface
 	virtual bool GetPhysicsTriMeshData(struct FTriMeshCollisionData* CollisionData, bool InUseAllTriData) override;
+	virtual bool GetTriMeshSizeEstimates(struct FTriMeshCollisionDataEstimates& OutTriMeshEstimates, bool bInUseAllTriData) const override;
 	virtual bool ContainsPhysicsTriMeshData(bool InUseAllTriData) const override;
 	virtual bool WantsNegXTriMesh() override { return false; }
 	//~ End Interface_CollisionDataProvider Interface

@@ -3,8 +3,9 @@
 #include "AnimGraphNode_Root.h"
 #include "GraphEditorSettings.h"
 #include "AnimBlueprintCompiler.h"
-#include "AnimBlueprintCompilerHandler_Base.h"
 #include "IAnimBlueprintCompilationContext.h"
+#include "IAnimBlueprintCopyTermDefaultsContext.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
 
 /////////////////////////////////////////////////////
 // FPoseLinkMappingRecord
@@ -44,6 +45,22 @@ UAnimGraphNode_Root::UAnimGraphNode_Root(const FObjectInitializer& ObjectInitial
 {
 }
 
+void UAnimGraphNode_Root::Serialize(FArchive& Ar)
+{
+	Super::Serialize(Ar);
+
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+
+	const int32 CustomAnimVersion = Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID);
+
+	if (Ar.IsLoading() && CustomAnimVersion < FFortniteMainBranchObjectVersion::AnimNodeRootDefaultGroupChange)
+	{
+#if WITH_EDITORONLY_DATA
+		Node.LayerGroup = Node.Group_DEPRECATED;
+#endif
+	}
+}
+
 FLinearColor UAnimGraphNode_Root::GetNodeTitleColor() const
 {
 	return GetDefault<UGraphEditorSettings>()->ResultNodeTitleColor;
@@ -72,6 +89,11 @@ FText UAnimGraphNode_Root::GetTooltipText() const
 	return LOCTEXT("AnimGraphNodeRoot_Tooltip", "Wire the final animation pose for this graph into this node");
 }
 
+bool UAnimGraphNode_Root::IsPoseWatchable() const
+{
+	return false;
+}
+
 bool UAnimGraphNode_Root::IsSinkNode() const
 {
 	return true;
@@ -91,7 +113,15 @@ void UAnimGraphNode_Root::OnProcessDuringCompilation(IAnimBlueprintCompilationCo
 {
 	UAnimGraphNode_Root* TrueNode = InCompilationContext.GetMessageLog().FindSourceObjectTypeChecked<UAnimGraphNode_Root>(this);
 
-	Node.Name = TrueNode->GetGraph()->GetFName();
+	Node.SetName(TrueNode->GetGraph()->GetFName());
+}
+
+void UAnimGraphNode_Root::OnCopyTermDefaultsToDefaultObject(IAnimBlueprintCopyTermDefaultsContext& InCompilationContext, IAnimBlueprintNodeCopyTermDefaultsContext& InPerNodeContext, IAnimBlueprintGeneratedClassCompiledData& OutCompiledData)
+{
+	UAnimGraphNode_Root* TrueNode = InCompilationContext.GetMessageLog().FindSourceObjectTypeChecked<UAnimGraphNode_Root>(this);
+
+	FAnimNode_Root* DestinationNode = reinterpret_cast<FAnimNode_Root*>(InPerNodeContext.GetDestinationPtr());
+	DestinationNode->SetName(TrueNode->GetGraph()->GetFName());
 }
 
 #undef LOCTEXT_NAMESPACE

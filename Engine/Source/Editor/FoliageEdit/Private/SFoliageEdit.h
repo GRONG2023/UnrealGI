@@ -1,18 +1,22 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "HAL/Platform.h"
+#include "Internationalization/Text.h"
 #include "Layout/Visibility.h"
-#include "Input/Reply.h"
+#include "Misc/Optional.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
-#include "Widgets/SWidget.h"
 #include "Widgets/SCompoundWidget.h"
-#include "Framework/MultiBox/MultiBoxBuilder.h"
 
 class FEdModeFoliage;
-class SFoliagePalette;
+class FToolBarBuilder;
+class SWidget;
 class UFoliageType;
 struct FFoliageMeshUIInfo;
+template <typename FuncType> class TFunctionRef;
+
 enum class ECheckBoxState : uint8;
 namespace EFoliageSingleInstantiationPlacementMode {
 	enum class Type;
@@ -35,6 +39,9 @@ public:
 
 	/** Notifies the widget that the mesh assigned to a foliage type in the list has changed */
 	void NotifyFoliageTypeMeshChanged(UFoliageType* FoliageType);
+
+	/** Notifies the widget to reflect its selected foliage types based on the selected foliage instances */
+	void ReflectSelectionInPalette();
 
 	/** Gets FoliageEditMode. Used by the cluster details to notify changes */
 	class FEdModeFoliage* GetFoliageEditMode() const { return FoliageEditMode; }
@@ -171,6 +178,9 @@ public:	// BRUSH SETTINGS
 	/** Retrieves the tooltip text for the translucent filter */
 	FText GetTooltipText_Translucent() const;
 
+	/** Checks if the Data Layer should appear. */
+	EVisibility GetVisibility_DataLayer() const;
+
 	/** Checks if the radius spinbox should appear. Dependant on the current tool being used. */
 	EVisibility GetVisibility_Radius() const;
 
@@ -233,8 +243,8 @@ public:	// SELECTION
 	/** Handler for 'Deselect All' command  */
 	void OnDeselectAllInstances();
 
-	/** Handler for 'Move to Current Level' command*/
-	void OnMoveSelectedInstancesToCurrentLevel();
+	/** Handler for 'Move to Current Editor Context' command*/
+	void OnMoveSelectedInstancesToActorEditorContext();
 
 	/** Tooltip text for 'Instance Count" column */
 	FText GetTotalInstanceCountTooltipText() const;

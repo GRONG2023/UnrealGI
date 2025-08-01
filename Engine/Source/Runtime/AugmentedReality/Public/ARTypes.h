@@ -7,7 +7,6 @@
 #include "ARTypes.generated.h"
 
 class USceneComponent;
-class IXRTrackingSystem;
 class UARPin;
 class UARTrackedGeometry;
 class UARLightEstimate;
@@ -354,7 +353,7 @@ protected:
 	
 	/** The image to detect in scenes */
 	UPROPERTY(EditAnywhere, Category = "AR Candidate Image")
-	UTexture2D* CandidateTexture;
+	TObjectPtr<UTexture2D> CandidateTexture;
 
 	/** The friendly name to report back when the image is detected in scenes */
 	UPROPERTY(EditAnywhere, Category = "AR Candidate Image")

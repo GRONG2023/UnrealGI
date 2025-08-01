@@ -2,14 +2,21 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Not included directly
+
 #include <sal.h>
 
 #if defined(__clang__)
 	#include "Clang/ClangPlatform.h"
+#elif defined(__INTEL_LLVM_COMPILER)
+	#include "IntelICX/IntelICXPlatform.h"
 #else
 	#include "MSVC/MSVCPlatform.h"
 #endif
 
+#if WINVER <= 0x600
+	#error "Windows Vista and earlier are no longer supported"
+#endif
 
 /**
 * Windows specific types
@@ -22,6 +29,10 @@ struct FWindowsPlatformTypes : public FGenericPlatformTypes
 #else
 	typedef unsigned long		SIZE_T;
 	typedef long				SSIZE_T;
+#endif
+
+#if USE_UTF8_TCHARS
+	typedef UTF8CHAR TCHAR;
 #endif
 };
 
@@ -45,15 +56,14 @@ typedef FWindowsPlatformTypes FPlatformTypes;
 #define PLATFORM_SUPPORTS_UNALIGNED_LOADS					1
 
 #define PLATFORM_SUPPORTS_PRAGMA_PACK						1
-#define PLATFORM_ENABLE_VECTORINTRINSICS					1
-#ifndef PLATFORM_MAYBE_HAS_SSE4_1 // May be set from UnrealBuildTool
-	#define PLATFORM_MAYBE_HAS_SSE4_1						1
-#endif
-// Current unreal minspec is sse2, not sse4, so on windows any calling code must check _cpuid before calling SSE4 instructions;
-// If called on a platform for which _cpuid for SSE4 returns false, attempting to call SSE4 intrinsics will crash
-// If your title has raised the minspec to sse4, you can define PLATFORM_ALWAYS_HAS_SSE4_1 to 1
-#ifndef PLATFORM_ALWAYS_HAS_SSE4_1 // May be set from UnrealBuildTool
-	#define PLATFORM_ALWAYS_HAS_SSE4_1						0
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_M_ARM64EC)
+	#define PLATFORM_CPU_ARM_FAMILY							1
+	#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON			1
+	#define PLATFORM_ENABLE_VECTORINTRINSICS				1
+#elif (defined(_M_IX86) || defined(_M_X64))
+	#define PLATFORM_CPU_X86_FAMILY							1
+	#define PLATFORM_ENABLE_VECTORINTRINSICS				1
+
 #endif
 // FMA3 support was added starting from AMD Piledriver (excluding Jaguar) and Intel Haswell (excluding Pentium and Celeron)
 #ifndef PLATFORM_ALWAYS_HAS_FMA3
@@ -65,34 +75,44 @@ typedef FWindowsPlatformTypes FPlatformTypes;
 //#define PLATFORM_TCHAR_IS_4_BYTES							0
 #define PLATFORM_HAS_BSD_TIME								0
 #define PLATFORM_USE_PTHREADS								0
+#define PLATFORM_USES_UNFAIR_LOCKS							1
 #define PLATFORM_MAX_FILEPATH_LENGTH_DEPRECATED				WINDOWS_MAX_PATH
 #define PLATFORM_HAS_BSD_IPV6_SOCKETS						1
 #define PLATFORM_HAS_BSD_SOCKET_FEATURE_WINSOCKETS			1
 #define PLATFORM_USES_MICROSOFT_LIBC_FUNCTIONS				1
 #define PLATFORM_IS_ANSI_MALLOC_THREADSAFE					1
+#if PLATFORM_CPU_ARM_FAMILY
+#define PLATFORM_SUPPORTS_TBB								0
+#else
 #define PLATFORM_SUPPORTS_TBB								1
+#endif
 #define PLATFORM_SUPPORTS_MIMALLOC							PLATFORM_64BITS
 #define PLATFORM_SUPPORTS_NAMED_PIPES						1
 #define PLATFORM_COMPILER_HAS_TCHAR_WMAIN					1
 #define PLATFORM_SUPPORTS_EARLY_MOVIE_PLAYBACK				(!WITH_EDITOR) // movies will start before engine is initalized
-#define PLATFORM_RHITHREAD_DEFAULT_BYPASS					0
-#define PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION			0
+#define PLATFORM_USE_GENERIC_STRING_IMPLEMENTATION			0 // Can set this to 1 if you need to debug FGenericWidePlatformString::GetVarArgs on Windows
 #define PLATFORM_SUPPORTS_VIRTUAL_TEXTURE_STREAMING			1
 #define PLATFORM_SUPPORTS_VARIABLE_RATE_SHADING				1
+#define PLATFORM_SUPPORTS_MESH_SHADERS						1
+#define PLATFORM_SUPPORTS_BINDLESS_RENDERING				1
+#define PLATFORM_USES__ALIGNED_MALLOC						1
+
+#if WITH_EDITOR
+#define PLATFORM_FILE_READER_BUFFER_SIZE					(256*1024)
+#endif
 
 #define PLATFORM_SUPPORTS_STACK_SYMBOLS						1
-#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO					1
 
 #define PLATFORM_GLOBAL_LOG_CATEGORY						LogWindows
 
 #define PLATFORM_SUPPORTS_BORDERLESS_WINDOW					1
 
+#define PLATFORM_RETURN_ADDRESS_FOR_CALLSTACKTRACING		PLATFORM_RETURN_ADDRESS_POINTER
+
 #define WINDOWS_USE_FEATURE_APPLICATIONMISC_CLASS			1
-#define WINDOWS_USE_FEATURE_PLATFORMPROCESS_CLASS			1
 #define WINDOWS_USE_FEATURE_PLATFORMMISC_CLASS				1
 #define WINDOWS_USE_FEATURE_PLATFORMHTTP_CLASS				1
-#define WINDOWS_USE_FEATURE_LAUNCH							1
-#define WINDOWS_USE_FEATURE_DYNAMIC_RHI						1
+
 
 // Q: Why is there a __nop() before __debugbreak()?
 // A: VS' debug engine has a bug where it will silently swallow explicit
@@ -104,8 +124,11 @@ typedef FWindowsPlatformTypes FPlatformTypes;
 
 // Intrinsics for 128-bit atomics on Windows platform requires Windows 8 or higher (WINVER>=0x0602)
 // http://msdn.microsoft.com/en-us/library/windows/desktop/hh972640.aspx
-#define PLATFORM_HAS_128BIT_ATOMICS							(!HACK_HEADER_GENERATOR && PLATFORM_64BITS && (WINVER >= 0x602))
-#define PLATFORM_USES_ANSI_STRING_FOR_EXTERNAL_PROFILING	0
+#define PLATFORM_HAS_128BIT_ATOMICS							(PLATFORM_64BITS && (WINVER >= 0x602))
+
+#ifdef CDECL
+#undef CDECL
+#endif
 
 // Function type macros.
 #define VARARGS     __cdecl											/* Functions with variable arguments */
@@ -113,9 +136,6 @@ typedef FWindowsPlatformTypes FPlatformTypes;
 #define STDCALL		__stdcall										/* Standard calling convention */
 #define FORCEINLINE __forceinline									/* Force code to be inline */
 #define FORCENOINLINE __declspec(noinline)							/* Force code to NOT be inline */
-#define FUNCTION_NO_RETURN_START \
-	DEPRECATED_MACRO(4.26, "FUNCTION_NO_RETURN_START has been deprecated - please use UE_NORETURN") \
-	__declspec(noreturn)				/* Indicate that the function never returns. */
 #define FUNCTION_NON_NULL_RETURN_START _Ret_notnull_				/* Indicate that the function never returns nullptr. */
 
 #define DECLARE_UINT64(x)	x
@@ -143,11 +163,6 @@ typedef FWindowsPlatformTypes FPlatformTypes;
 
 #pragma warning(disable : 4481) // nonstandard extension used: override specifier 'override'
 
-#if defined(__clang__) || _MSC_VER >= 1900
-	#define CONSTEXPR constexpr
-#else
-	#define CONSTEXPR
-#endif
 #define ABSTRACT abstract
 
 // Strings.
@@ -182,26 +197,24 @@ typedef FWindowsPlatformTypes FPlatformTypes;
 
 
 // Include code analysis features
-#include "Windows/WindowsPlatformCodeAnalysis.h"
-
-#if USING_CODE_ANALYSIS && _MSC_VER == 1900
-	// Disable this warning as VC2015 Update 1 produces this warning erroneously when placed on variadic templates:
-	//
-	// warning C28216: The checkReturn annotation only applies to postconditions for function 'Func' _Param_(N).
-	#define FUNCTION_CHECK_RETURN_START	 \
-		DEPRECATED_MACRO(4.26, "FUNCTION_CHECK_RETURN_START has been deprecated - please use UE_NODISCARD") \
-		__pragma(warning(push)) __pragma(warning(disable: 28216)) __declspec("SAL_checkReturn")
-
-	#define FUNCTION_CHECK_RETURN_END	 \
-		DEPRECATED_MACRO(4.26, "FUNCTION_CHECK_RETURN_END has been deprecated - please use UE_NODISCARD") \
-		__pragma(warning(pop))
-#else
-	#define FUNCTION_CHECK_RETURN_START	 \
-		DEPRECATED_MACRO(4.26, "FUNCTION_CHECK_RETURN_START has been deprecated - please use UE_NODISCARD") \
-		__declspec("SAL_checkReturn")	/* Warn that callers should not ignore the return value. */
+#if PLATFORM_COMPILER_CLANG
+	#include "Clang/ClangPlatformCodeAnalysis.h"
+#elif PLATFORM_WINDOWS
+	#include "Windows/WindowsPlatformCodeAnalysis.h"
 #endif
 
 // Other macros
 #ifndef ENABLE_WIN_ALLOC_TRACKING
 #define ENABLE_WIN_ALLOC_TRACKING 0
+#endif
+
+// If set, ShouldExpectLowIntegrityLevel defaults to true. This affects paths for local settings and storage.
+#ifndef WINDOWS_LOWINTEGRITYLEVEL_EXPECT_DEFAULT
+#define WINDOWS_LOWINTEGRITYLEVEL_EXPECT_DEFAULT 0
+#endif
+
+// If set, the engine will attempt to automatically migrate user data like settings from the default medium integrity ProjectUserDir path to the low integrity one.
+// Migration is only attempted if the low integrity ProjectUserDir path is empty, e.g. first run after a game update that sets WINDOWS_LOWINTEGRITYLEVEL_EXPECT_DEFAULT = 1.
+#ifndef WINDOWS_LOWINTEGRITYLEVEL_AUTOMIGRATE_USERDATA
+#define WINDOWS_LOWINTEGRITYLEVEL_AUTOMIGRATE_USERDATA 0
 #endif

@@ -98,7 +98,7 @@ void SVisualLoggerView::Construct(const FArguments& InArgs, const TSharedRef<FUI
 	ChildSlot
 		[
 			SNew(SBorder)
-			.Padding(2)
+			.Padding(2.f)
 			.BorderImage(FLogVisualizerStyle::Get().GetBrush("ToolPanel.GroupBorder"))
 			[
 				SNew(SHorizontalBox)
@@ -136,7 +136,7 @@ void SVisualLoggerView::Construct(const FArguments& InArgs, const TSharedRef<FUI
 								.Visibility_Lambda([this]()->EVisibility{ return TimelinesContainer.IsValid() && (TimelinesContainer->GetAllNodes().Num() > 1 || FVisualLoggerFilters::Get().GetSelectedObjects().Num() > 0) ? EVisibility::Visible : EVisibility::Collapsed; })
 								.ComboButtonStyle(FLogVisualizerStyle::Get(), "Filters.Style")
 								.ForegroundColor(FLinearColor::White)
-								.ContentPadding(0)
+								.ContentPadding(0.f)
 								.OnGetMenuContent(this, &SVisualLoggerView::MakeClassesFilterMenu)
 								.ToolTipText(LOCTEXT("SetFilterByClasses", "Select classes to show"))
 								.HasDownArrow(true)
@@ -264,7 +264,7 @@ void SVisualLoggerView::Construct(const FArguments& InArgs, const TSharedRef<FUI
 			SSplitter::FSlot const& LeftSplitterSlot = SearchSplitter->SlotAt(0);
 			SSplitter::FSlot const& RightSplitterSlot = SearchSplitter->SlotAt(1);
 
-			return LeftSplitterSlot.SizeValue.Get() / RightSplitterSlot.SizeValue.Get();
+			return LeftSplitterSlot.GetSizeValue() / RightSplitterSlot.GetSizeValue();
 	});
 
 	OnSearchSplitterResized();
@@ -294,7 +294,7 @@ void SVisualLoggerView::OnSearchSplitterResized()
 	SSplitter::FSlot const& LeftSplitterSlot = SearchSplitter->SlotAt(0);
 	SSplitter::FSlot const& RightSplitterSlot = SearchSplitter->SlotAt(1);
 
-	const float NewAnimationOutlinerFillPercentage = LeftSplitterSlot.SizeValue.Get() / RightSplitterSlot.SizeValue.Get();
+	const float NewAnimationOutlinerFillPercentage = LeftSplitterSlot.GetSizeValue() / RightSplitterSlot.GetSizeValue();
 	SetAnimationOutlinerFillPercentage(NewAnimationOutlinerFillPercentage);
 
 	FLogVisualizer::Get().SetAnimationOutlinerFillPercentage(NewAnimationOutlinerFillPercentage);

@@ -2,11 +2,12 @@
 
 #pragma once
 
+#include "Math/MathFwd.h"
 #include "VehicleSystemTemplate.h"
 #include "VehicleUtility.h"
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_DISABLE_OPTIMIZATION
+UE_DISABLE_OPTIMIZATION
 #endif
 
 namespace Chaos
@@ -47,6 +48,18 @@ namespace Chaos
 			DensityOfMedium = DensityIn;
 		}
 
+		void SetDragCoefficient(float InCoeffient)
+		{
+			DragCoefficient = InCoeffient;
+			EffectiveDragConstant = 0.5f * Setup().AreaMetresSquared * DragCoefficient;
+		}
+
+		void SetDownforceCoefficient(float InCoeffient)
+		{
+			DownforceCoefficient = InCoeffient;
+			EffectiveLiftConstant = 0.5f * Setup().AreaMetresSquared * DownforceCoefficient;
+		}
+
 		/** get the drag force generated at the given velocity */
 		float GetDragForceFromVelocity(float VelocityIn)
 		{
@@ -63,6 +76,8 @@ namespace Chaos
 		FVector GetCombinedForces(float VelocityIn);
 
 	protected:
+		float DownforceCoefficient;
+		float DragCoefficient;
 		float DensityOfMedium;
 		float EffectiveDragConstant;
 		float EffectiveLiftConstant;
@@ -72,5 +87,5 @@ namespace Chaos
 } // namespace Chaos
 
 #if VEHICLE_DEBUGGING_ENABLED
-PRAGMA_ENABLE_OPTIMIZATION
+UE_ENABLE_OPTIMIZATION
 #endif

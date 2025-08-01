@@ -8,6 +8,8 @@
 #include "RHIStaticStates.h"
 #include "StaticBoundShaderState.h"
 #include "Engine/GameViewportClient.h"
+#include "ProfilingDebugging/MemoryTrace.h"
+#include "RHICoreStats.h"
 
 #if WITH_DX_PERF
 	// For perf events
@@ -16,10 +18,6 @@
 	#include "Windows/HideWindowsPlatformTypes.h"
 #endif	//WITH_DX_PERF
 #include "OneColorShader.h"
-
-#if !UE_BUILD_SHIPPING
-	#include "STaskGraph.h"
-#endif
 
 DEFINE_LOG_CATEGORY(LogD3D11RHI);
 
@@ -32,16 +30,8 @@ extern void UniformBufferBeginFrame();
 
 void FD3D11DynamicRHI::RHIBeginFrame()
 {
-	RHIPrivateBeginFrame();
 	UniformBufferBeginFrame();
 	GPUProfilingData.BeginFrame(this);
-
-#if INTEL_METRICSDISCOVERY
-	if (GDX11IntelMetricsDiscoveryEnabled)
-	{
-		IntelMetricsDicoveryBeginFrame();
-	}
-#endif // INTEL_METRICSDISCOVERY
 }
 
 template <int32 Frequency>
@@ -53,8 +43,6 @@ void ClearShaderResource(ID3D11DeviceContext* Direct3DDeviceIMContext, uint32 Re
 	case SF_Pixel:   Direct3DDeviceIMContext->PSSetShaderResources(ResourceIndex,1,&NullView); break;
 	case SF_Compute: Direct3DDeviceIMContext->CSSetShaderResources(ResourceIndex,1,&NullView); break;
 	case SF_Geometry:Direct3DDeviceIMContext->GSSetShaderResources(ResourceIndex,1,&NullView); break;
-	case SF_Domain:  Direct3DDeviceIMContext->DSSetShaderResources(ResourceIndex,1,&NullView); break;
-	case SF_Hull:    Direct3DDeviceIMContext->HSSetShaderResources(ResourceIndex,1,&NullView); break;
 	case SF_Vertex:  Direct3DDeviceIMContext->VSSetShaderResources(ResourceIndex,1,&NullView); break;
 	};
 }
@@ -139,7 +127,7 @@ void GetMipAndSliceInfoFromSRV(ID3D11ShaderResourceView* SRV, int32& MipLevel, i
 }
 
 template <EShaderFrequency ShaderFrequency>
-void FD3D11DynamicRHI::InternalSetShaderResourceView(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType)
+void FD3D11DynamicRHI::InternalSetShaderResourceView(FD3D11ViewableResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex)
 {
 	// Check either both are set, or both are null.
 	check((Resource && SRV) || (!Resource && !SRV));
@@ -151,7 +139,7 @@ void FD3D11DynamicRHI::InternalSetShaderResourceView(FD3D11BaseShaderResource* R
 		return;
 	}
 
-	FD3D11BaseShaderResource*& ResourceSlot = CurrentResourcesBoundAsSRVs[ShaderFrequency][ResourceIndex];
+	FD3D11ViewableResource*& ResourceSlot = CurrentResourcesBoundAsSRVs[ShaderFrequency][ResourceIndex];
 	int32& MaxResourceIndex = MaxBoundShaderResourcesIndex[ShaderFrequency];
 
 	if (Resource)
@@ -180,17 +168,15 @@ void FD3D11DynamicRHI::InternalSetShaderResourceView(FD3D11BaseShaderResource* R
 	}
 
 	// Set the SRV we have been given (or null).
-	StateCache.SetShaderResourceView<ShaderFrequency>(SRV, ResourceIndex, SrvType);
+	StateCache.SetShaderResourceView<ShaderFrequency>(SRV, ResourceIndex);
 }
 
-template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Vertex>(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType);
-template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Hull>(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType);
-template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Domain>(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType);
-template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Pixel>(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType);
-template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Geometry>(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType);
-template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Compute>(FD3D11BaseShaderResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex, FName SRVName, FD3D11StateCache::ESRV_Type SrvType);
+template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Vertex>  (FD3D11ViewableResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex);
+template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Pixel>   (FD3D11ViewableResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex);
+template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Geometry>(FD3D11ViewableResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex);
+template void FD3D11DynamicRHI::InternalSetShaderResourceView<SF_Compute> (FD3D11ViewableResource* Resource, ID3D11ShaderResourceView* SRV, int32 ResourceIndex);
 
-void FD3D11DynamicRHI::TrackResourceBoundAsVB(FD3D11BaseShaderResource* Resource, int32 StreamIndex)
+void FD3D11DynamicRHI::TrackResourceBoundAsVB(FD3D11ViewableResource* Resource, int32 StreamIndex)
 {
 	check(StreamIndex >= 0 && StreamIndex < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT);
 	if (Resource)
@@ -218,13 +204,13 @@ void FD3D11DynamicRHI::TrackResourceBoundAsVB(FD3D11BaseShaderResource* Resource
 	}
 }
 
-void FD3D11DynamicRHI::TrackResourceBoundAsIB(FD3D11BaseShaderResource* Resource)
+void FD3D11DynamicRHI::TrackResourceBoundAsIB(FD3D11ViewableResource* Resource)
 {
 	CurrentResourceBoundAsIB = Resource;
 }
 
 template <EShaderFrequency ShaderFrequency>
-void FD3D11DynamicRHI::ClearShaderResourceViews(FD3D11BaseShaderResource* Resource)
+void FD3D11DynamicRHI::ClearShaderResourceViews(FD3D11ViewableResource* Resource)
 {
 	int32 MaxIndex = MaxBoundShaderResourcesIndex[ShaderFrequency];
 	for (int32 ResourceIndex = MaxIndex; ResourceIndex >= 0; --ResourceIndex)
@@ -232,18 +218,16 @@ void FD3D11DynamicRHI::ClearShaderResourceViews(FD3D11BaseShaderResource* Resour
 		if (CurrentResourcesBoundAsSRVs[ShaderFrequency][ResourceIndex] == Resource)
 		{
 			// Unset the SRV from the device context
-			InternalSetShaderResourceView<ShaderFrequency>(nullptr, nullptr, ResourceIndex, NAME_None);
+			SetShaderResourceView<ShaderFrequency>(nullptr, nullptr, ResourceIndex);
 		}
 	}
 }
 
-void FD3D11DynamicRHI::ConditionalClearShaderResource(FD3D11BaseShaderResource* Resource, bool bCheckBoundInputAssembler)
+void FD3D11DynamicRHI::ConditionalClearShaderResource(FD3D11ViewableResource* Resource, bool bCheckBoundInputAssembler)
 {
 	SCOPE_CYCLE_COUNTER(STAT_D3D11ClearShaderResourceTime);
 	check(Resource);
 	ClearShaderResourceViews<SF_Vertex>(Resource);
-	ClearShaderResourceViews<SF_Hull>(Resource);
-	ClearShaderResourceViews<SF_Domain>(Resource);
 	ClearShaderResourceViews<SF_Pixel>(Resource);
 	ClearShaderResourceViews<SF_Geometry>(Resource);
 	ClearShaderResourceViews<SF_Compute>(Resource);
@@ -277,7 +261,7 @@ void FD3D11DynamicRHI::ClearAllShaderResourcesForFrequency()
 		if (CurrentResourcesBoundAsSRVs[ShaderFrequency][ResourceIndex] != nullptr)
 		{
 			// Unset the SRV from the device context
-			InternalSetShaderResourceView<ShaderFrequency>(nullptr, nullptr, ResourceIndex, NAME_None);
+			SetShaderResourceView<ShaderFrequency>(nullptr, nullptr, ResourceIndex);
 		}
 	}
 	StateCache.ClearConstantBuffers<ShaderFrequency>();
@@ -286,8 +270,6 @@ void FD3D11DynamicRHI::ClearAllShaderResourcesForFrequency()
 void FD3D11DynamicRHI::ClearAllShaderResources()
 {
 	ClearAllShaderResourcesForFrequency<SF_Vertex>();
-	ClearAllShaderResourcesForFrequency<SF_Hull>();
-	ClearAllShaderResourcesForFrequency<SF_Domain>();
 	ClearAllShaderResourcesForFrequency<SF_Geometry>();
 	ClearAllShaderResourcesForFrequency<SF_Pixel>();
 	ClearAllShaderResourcesForFrequency<SF_Compute>();
@@ -343,11 +325,7 @@ void FD3DGPUProfiler::BeginFrame(FD3D11DynamicRHI* InRHI)
 	}
 	bPreviousLatchedGProfilingGPUHitches = bLatchedGProfilingGPUHitches;
 
-	// Skip timing events when using SLI, they will not be accurate anyway
-	if (GNumAlternateFrameRenderingGroups == 1)
-	{
-		FrameTiming.StartTiming();
-	}
+	FrameTiming.StartTiming();
 
 	if (GetEmitDrawEvents())
 	{
@@ -357,13 +335,6 @@ void FD3DGPUProfiler::BeginFrame(FD3D11DynamicRHI* InRHI)
 
 void FD3D11DynamicRHI::RHIEndFrame()
 {
-#if INTEL_METRICSDISCOVERY
-	if (GDX11IntelMetricsDiscoveryEnabled)
-	{
-		IntelMetricsDicoveryEndFrame();
-	}
-#endif // INTEL_METRICSDISCOVERY
-
 	GPUProfilingData.EndFrame();
 	CurrentComputeShader = nullptr;
 }
@@ -375,15 +346,9 @@ void FD3DGPUProfiler::EndFrame()
 		PopEvent();
 	}
 
-	// Skip timing events when using SLI, they will not be accurate anyway
-	if (GNumAlternateFrameRenderingGroups == 1)
-	{
-		FrameTiming.EndTiming();
-	}
+	FrameTiming.EndTiming();
 
-	// Skip timing events when using SLI, as they will block the GPU and we want maximum throughput
-	// Stat unit GPU time is not accurate anyway with SLI
-	if (FrameTiming.IsSupported() && GNumAlternateFrameRenderingGroups == 1)
+	if (FrameTiming.IsSupported())
 	{
 		uint64 GPUTiming = FrameTiming.GetTiming();
 		uint64 GPUFreq = FrameTiming.GetTimingFrequency();
@@ -530,7 +495,7 @@ FD3DGPUProfiler::FD3DGPUProfiler(class FD3D11DynamicRHI* InD3DRHI) :
 	D3D11RHI(InD3DRHI)
 {
 	// Initialize Buffered timestamp queries 
-	FrameTiming.InitResource();
+	FrameTiming.InitResource(FRHICommandListImmediate::Get());
 	CachedStrings.Emplace(EventDeepCRC, EventDeepString);
 }
 
@@ -579,7 +544,7 @@ void FD3DGPUProfiler::PopEvent()
 #if NV_AFTERMATH
 	if (GDX11NVAfterMathEnabled && bTrackingGPUCrashData && GDX11NVAfterMathMarkers)
 	{
-		PushPopStack.Pop(false);
+		PushPopStack.Pop(EAllowShrinking::No);
 	}
 #endif
 
@@ -599,9 +564,11 @@ bool FD3DGPUProfiler::CheckGpuHeartbeat(bool bShowActiveStatus) const
 	if (GDX11NVAfterMathEnabled && bTrackingGPUCrashData)
 	{
 		GFSDK_Aftermath_Device_Status Status;
-		D3D11StallRHIThread();
-		GFSDK_Aftermath_Result Result = GFSDK_Aftermath_GetDeviceStatus(&Status);
-		D3D11UnstallRHIThread();
+		GFSDK_Aftermath_Result Result;
+		{
+			FScopedD3D11RHIThreadStaller StallRHIThread;
+			Result = GFSDK_Aftermath_GetDeviceStatus(&Status);
+		}
 		if (Result == GFSDK_Aftermath_Result_Success)
 		{
 			if (Status != GFSDK_Aftermath_Device_Status_Active || bShowActiveStatus)
@@ -621,9 +588,10 @@ bool FD3DGPUProfiler::CheckGpuHeartbeat(bool bShowActiveStatus) const
 				if (AftermathContext)
 				{
 					GFSDK_Aftermath_ContextData ContextDataOut;
-					D3D11StallRHIThread();
-					Result = GFSDK_Aftermath_GetData(1, &AftermathContext, &ContextDataOut);
-					D3D11UnstallRHIThread();
+					{
+						FScopedD3D11RHIThreadStaller StallRHIThread;
+						Result = GFSDK_Aftermath_GetData(1, &AftermathContext, &ContextDataOut);
+					}
 					if (Result == GFSDK_Aftermath_Result_Success)
 					{
 						UE_LOG(LogRHI, Error, TEXT("[Aftermath] GPU Stack Dump"));
@@ -650,7 +618,7 @@ bool FD3DGPUProfiler::CheckGpuHeartbeat(bool bShowActiveStatus) const
 					UE_LOG(LogRHI, Error, TEXT("[Aftermath] Invalid context handle"));
 					NVAFTERMATH_ON_ERROR();
 				}
-				GLog->PanicFlushThreadedLogs();
+				GLog->Flush();
 				return false;
 			}
 		}
@@ -702,80 +670,106 @@ void FD3D11EventNodeFrame::LogDisjointQuery()
 	}
 }
 
-void UpdateBufferStats(TRefCountPtr<ID3D11Buffer> Buffer, bool bAllocating)
+static void D3D11UpdateBufferStatsCommon(ID3D11Buffer* Buffer, int64 BufferSize, bool bAllocating)
 {
-	D3D11_BUFFER_DESC Desc;
-	Buffer->GetDesc(&Desc);
+	// this is a work-around on Windows. Due to the fact that there is no way
+	// to hook the actual d3d allocations we can't track the memory in the normal way.
+	// Instead we simply tell LLM the size of these resources.
 
-	const bool bUniformBuffer = !!(Desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER);
-	const bool bIndexBuffer = !!(Desc.BindFlags & D3D11_BIND_INDEX_BUFFER);
-	const bool bVertexBuffer = !!(Desc.BindFlags & D3D11_BIND_VERTEX_BUFFER);
+	LLM_SCOPED_PAUSE_TRACKING_WITH_ENUM_AND_AMOUNT(ELLMTag::GraphicsPlatform, bAllocating ? BufferSize : -BufferSize, ELLMTracker::Platform, ELLMAllocType::None);
 
+#if UE_MEMORY_TRACE_ENABLED
 	if (bAllocating)
 	{
-		if (bUniformBuffer)
-		{
-			INC_MEMORY_STAT_BY(STAT_UniformBufferMemory,Desc.ByteWidth);
-		}
-		else if (bIndexBuffer)
-		{
-			INC_MEMORY_STAT_BY(STAT_IndexBufferMemory,Desc.ByteWidth);
-		}
-		else if (bVertexBuffer)
-		{
-			INC_MEMORY_STAT_BY(STAT_VertexBufferMemory,Desc.ByteWidth);
-		}
-		else
-		{
-			INC_MEMORY_STAT_BY(STAT_StructuredBufferMemory,Desc.ByteWidth);
-		}
-
-#if PLATFORM_WINDOWS
-		// this is a work-around on Windows. Due to the fact that there is no way
-		// to hook the actual d3d allocations we can't track the memory in the normal way.
-		// Instead we simply tell LLM the size of these resources.
-		LLM_SCOPED_PAUSE_TRACKING_WITH_ENUM_AND_AMOUNT(ELLMTag::Meshes, Desc.ByteWidth, ELLMTracker::Default, ELLMAllocType::None);
-		LLM_SCOPED_PAUSE_TRACKING_WITH_ENUM_AND_AMOUNT(ELLMTag::GraphicsPlatform, Desc.ByteWidth, ELLMTracker::Platform, ELLMAllocType::None);
-#endif
+		MemoryTrace_Alloc((uint64)Buffer, BufferSize, 0, EMemoryTraceRootHeap::VideoMemory);
 	}
 	else
-	{ //-V523
-		if (bUniformBuffer)
-		{
-			DEC_MEMORY_STAT_BY(STAT_UniformBufferMemory,Desc.ByteWidth);
-		}
-		else if (bIndexBuffer)
-		{
-			DEC_MEMORY_STAT_BY(STAT_IndexBufferMemory,Desc.ByteWidth);
-		}
-		else if (bVertexBuffer)
-		{
-			DEC_MEMORY_STAT_BY(STAT_VertexBufferMemory,Desc.ByteWidth);
-		}
-		else
-		{
-			DEC_MEMORY_STAT_BY(STAT_StructuredBufferMemory,Desc.ByteWidth);
-		}
-
-#if PLATFORM_WINDOWS
-		// this is a work-around on Windows. Due to the fact that there is no way
-		// to hook the actual d3d allocations we can't track the memory in the normal way.
-		// Instead we simply tell LLM the size of these resources.
-		LLM_SCOPED_PAUSE_TRACKING_WITH_ENUM_AND_AMOUNT(ELLMTag::Meshes, -(int64)Desc.ByteWidth, ELLMTracker::Default, ELLMAllocType::None);
-		LLM_SCOPED_PAUSE_TRACKING_WITH_ENUM_AND_AMOUNT(ELLMTag::GraphicsPlatform, -(int64)Desc.ByteWidth, ELLMTracker::Platform, ELLMAllocType::None);
+	{
+		MemoryTrace_Free((uint64)Buffer, EMemoryTraceRootHeap::VideoMemory);
+	}
 #endif
+}
+
+void D3D11BufferStats::UpdateUniformBufferStats(ID3D11Buffer* Buffer, int64 BufferSize, bool bAllocating)
+{
+	UE::RHICore::UpdateGlobalUniformBufferStats(BufferSize, bAllocating);
+	D3D11UpdateBufferStatsCommon(Buffer, BufferSize, bAllocating);
+}
+
+void D3D11BufferStats::UpdateBufferStats(FD3D11Buffer& Buffer, bool bAllocating)
+{
+	if (ID3D11Buffer* Resource = Buffer.Resource)
+	{
+		const FRHIBufferDesc& BufferDesc = Buffer.GetDesc();
+
+		UE::RHICore::UpdateGlobalBufferStats(BufferDesc, BufferDesc.Size, bAllocating);
+		D3D11UpdateBufferStatsCommon(Resource, BufferDesc.Size, bAllocating);
 	}
 }
 
-#ifndef PLATFORM_IMPLEMENTS_FASTVRAMALLOCATOR
-	#define PLATFORM_IMPLEMENTS_FASTVRAMALLOCATOR		0
-#endif
-
-#if !PLATFORM_IMPLEMENTS_FASTVRAMALLOCATOR
-FFastVRAMAllocator* FFastVRAMAllocator::GetFastVRAMAllocator()
+ID3D11Device* FD3D11DynamicRHI::RHIGetDevice() const
 {
-	static FFastVRAMAllocator FastVRAMAllocatorSingleton;
-	return &FastVRAMAllocatorSingleton;
+	return GetDevice();
 }
-#endif
 
+ID3D11DeviceContext* FD3D11DynamicRHI::RHIGetDeviceContext() const
+{
+	return GetDeviceContext();
+}
+
+IDXGIAdapter* FD3D11DynamicRHI::RHIGetAdapter() const
+{
+	return GetAdapter().DXGIAdapter;
+}
+
+IDXGISwapChain* FD3D11DynamicRHI::RHIGetSwapChain(FRHIViewport* InViewport) const
+{
+	FD3D11Viewport* Viewport = static_cast<FD3D11Viewport*>(InViewport);
+	return Viewport->GetSwapChain();
+}
+
+DXGI_FORMAT FD3D11DynamicRHI::RHIGetSwapChainFormat(EPixelFormat InFormat) const
+{
+	const DXGI_FORMAT PlatformFormat = UE::DXGIUtilities::FindDepthStencilFormat(static_cast<DXGI_FORMAT>(GPixelFormats[InFormat].PlatformFormat));
+	return UE::DXGIUtilities::FindShaderResourceFormat(PlatformFormat, true);
+}
+
+ID3D11Buffer* FD3D11DynamicRHI::RHIGetResource(FRHIBuffer* InBuffer) const
+{
+	FD3D11Buffer* Buffer = ResourceCast(InBuffer);
+	return Buffer->Resource;
+}
+
+ID3D11Resource* FD3D11DynamicRHI::RHIGetResource(FRHITexture* InTexture) const
+{
+	FD3D11Texture* D3D11Texture = ResourceCast(InTexture);
+	return D3D11Texture->GetResource();
+}
+
+int64 FD3D11DynamicRHI::RHIGetResourceMemorySize(FRHITexture* InTexture) const
+{
+	FD3D11Texture* D3D11Texture = ResourceCast(InTexture);
+	return D3D11Texture->GetMemorySize();
+}
+
+ID3D11RenderTargetView* FD3D11DynamicRHI::RHIGetRenderTargetView(FRHITexture* InTexture, int32 InMipIndex, int32 InArraySliceIndex) const
+{
+	FD3D11Texture* D3D11Texture = ResourceCast(InTexture);
+	return D3D11Texture->GetRenderTargetView(InMipIndex, InArraySliceIndex);
+}
+
+ID3D11ShaderResourceView* FD3D11DynamicRHI::RHIGetShaderResourceView(FRHITexture* InTexture) const
+{
+	FD3D11Texture* D3D11Texture = ResourceCast(InTexture);
+	return D3D11Texture->GetShaderResourceView();
+}
+
+void FD3D11DynamicRHI::RHIRegisterWork(uint32 NumPrimitives)
+{
+	RegisterGPUWork(NumPrimitives);
+}
+
+void FD3D11DynamicRHI::RHIVerifyResult(ID3D11Device* Device, HRESULT Result, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line) const
+{
+	VerifyD3D11Result(Result, Code, Filename, Line, Device);
+}

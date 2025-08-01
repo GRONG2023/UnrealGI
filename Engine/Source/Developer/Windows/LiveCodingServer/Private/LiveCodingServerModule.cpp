@@ -2,6 +2,7 @@
 
 #include "LiveCodingServerModule.h"
 #include "LiveCodingServer.h"
+#include "Misc/ScopeLock.h"
 #include "Features/IModularFeatures.h"
 #include "Modules/ModuleManager.h"
 #include "External/LC_Logging.h"
@@ -10,44 +11,84 @@ IMPLEMENT_MODULE(FLiveCodingServerModule, LiveCodingServer)
 
 DEFINE_LOG_CATEGORY_STATIC(LogLiveCodingServer, Display, All);
 
-static void ServerOutputHandler(logging::Channel::Enum Channel, logging::Type::Enum Type, const wchar_t* const Text)
+static void ServerLogOutput(Logging::Channel::Enum Channel, Logging::Type::Enum Type, const wchar_t* const Text, int Count)
 {
-	FString TrimText = FString(Text).TrimEnd();
+#if !NO_LOGGING
+	ELogVerbosity::Type Verbosity = ELogVerbosity::Error;
+
 	switch (Type)
 	{
-	case logging::Type::LOG_ERROR:
-		UE_LOG(LogLiveCodingServer, Error, TEXT("%s"), *TrimText);
+	case Logging::Type::LOG_ERROR:
+		Verbosity = ELogVerbosity::Error;
 		break;
-	case logging::Type::LOG_WARNING:
+	case Logging::Type::LOG_WARNING:
 		// There are some warnings generated in the dev channel that aren't really actionable by the users.
 		// For example, warnings about symbols being eliminated by the linker.  It would be nice to just 
 		// filter that specific warning, but we can't.
-		if (Channel == logging::Channel::DEV)
-		{
-			UE_LOG(LogLiveCodingServer, Verbose, TEXT("%s"), *TrimText);
-		}
-		else
-		{
-			UE_LOG(LogLiveCodingServer, Warning, TEXT("%s"), *TrimText);
-		}
+		Verbosity = Channel == Logging::Channel::DEV ? ELogVerbosity::Verbose : ELogVerbosity::Warning;
 		break;
 	default:
-		UE_LOG(LogLiveCodingServer, Display, TEXT("%s"), *TrimText);
+		Verbosity = ELogVerbosity::Display;
 		break;
 	}
 
-	if (Channel == logging::Channel::USER)
+	if (LogLiveCodingServer.GetVerbosity() < Verbosity)
+	{
+		return;
+	}
+
+	if (Count == 1)
+	{
+		FMsg::Logf(__FILE__, __LINE__, LogLiveCodingServer.GetCategoryName(), Verbosity, TEXT("%s"), Text);
+	}
+	else
+	{
+		FMsg::Logf(__FILE__, __LINE__, LogLiveCodingServer.GetCategoryName(), Verbosity, TEXT("%s (repeated %d more times)"), Text, Count);
+	}
+#endif
+}
+
+static void ServerOutputHandler(Logging::Channel::Enum Channel, Logging::Type::Enum Type, const wchar_t* const Text)
+{
+	static FCriticalSection CriticalSection;
+	static Logging::Channel::Enum LastChannel = Logging::Channel::DEV;
+	static Logging::Type::Enum LastType = Logging::Type::LOG_ERROR;
+	static int LastCount = 0;
+	static FString LastText;
+
+	FString TrimText = FString(Text).TrimEnd();
+	{
+		FScopeLock Lock(&CriticalSection);
+		if (LastCount != 0 && LastType == Type && LastText.Equals(TrimText, ESearchCase::CaseSensitive))
+		{
+			++LastCount;
+		}
+		else
+		{
+			if (LastCount > 1)
+			{
+				ServerLogOutput(LastChannel, LastType, *LastText, LastCount);
+			}
+			LastCount = 1;
+			LastChannel = Channel;
+			LastType = Type;
+			LastText = TrimText;
+			ServerLogOutput(LastChannel, LastType, *LastText, LastCount);
+		}
+	}
+
+	if (Channel == Logging::Channel::USER)
 	{
 		ELiveCodingLogVerbosity Verbosity;
 		switch (Type)
 		{
-		case logging::Type::LOG_SUCCESS:
+		case Logging::Type::LOG_SUCCESS:
 			Verbosity = ELiveCodingLogVerbosity::Success;
 			break;
-		case logging::Type::LOG_ERROR:
+		case Logging::Type::LOG_ERROR:
 			Verbosity = ELiveCodingLogVerbosity::Failure;
 			break;
-		case logging::Type::LOG_WARNING:
+		case Logging::Type::LOG_WARNING:
 			Verbosity = ELiveCodingLogVerbosity::Warning;
 			break;
 		default:
@@ -60,7 +101,7 @@ static void ServerOutputHandler(logging::Channel::Enum Channel, logging::Type::E
 
 void FLiveCodingServerModule::StartupModule()
 {
-	logging::SetOutputHandler(&ServerOutputHandler);
+	Logging::SetOutputHandler(&ServerOutputHandler);
 
 	GLiveCodingServer = new FLiveCodingServer();
 
@@ -77,5 +118,5 @@ void FLiveCodingServerModule::ShutdownModule()
 		GLiveCodingServer = nullptr;
 	}
 
-	logging::SetOutputHandler(nullptr);
+	Logging::SetOutputHandler(nullptr);
 }

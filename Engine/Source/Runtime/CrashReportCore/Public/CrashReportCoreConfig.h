@@ -2,8 +2,9 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
 #include "Containers/UnrealString.h"
+#include "CoreMinimal.h"
 
 // FORCE_CRASH_REPORT_UNATTENDED can be added to target.cs or UBT commandline in order to set CRASH_REPORT_UNATTENDED_ONLY
 // It should not be defined in code other than when undefined to please IntelliSense.
@@ -18,8 +19,8 @@ class FConfigFile;
 /**
 *  Holds FullCrashDump properties from the config.
 *
-*	FullCrashDump_0_Branch=UE4
-*	FullCrashDump_0_Location=\\epicgames.net\root\Builds\UE4
+*	FullCrashDump_0_Branch=UE
+*	FullCrashDump_0_Location=\\epicgames.net\root\Builds\UE
 *	FullCrashDump_1_Branch=...
 *	...
 */
@@ -40,8 +41,8 @@ struct FFullCrashDumpEntry
 	const FString Location;
 
 	/**
-	*	Branch=UE4 means exact match
-	*	Branch=UE4* means contain match
+	*	Branch=UE means exact match
+	*	Branch=UE* means contain match
 	*/
 	const bool bExactMatch;
 };
@@ -79,25 +80,47 @@ struct FCrashReportCoreConfig
 		return DiagnosticsFilename;
 	}
 
-	const bool& GetAllowToBeContacted() const
+	bool GetAllowToBeContacted() const
 	{
 		return bAllowToBeContacted;
 	}
 
-	const bool& GetSendLogFile() const
+	bool GetSendLogFile() const
 	{
 		return bSendLogFile;
 	}
 
-	const bool& GetHideLogFilesOption() const
+	bool GetHideLogFilesOption() const
 	{
 		return bHideLogFilesOption;
 	}
 
-	const bool& IsAllowedToCloseWithoutSending() const
+	bool GetHideRestartOption() const
+	{
+		return bHideRestartOption;
+	}
+
+	bool IsAllowedToCloseWithoutSending() const
 	{
 		return bIsAllowedToCloseWithoutSending;
 	}
+
+	bool GetShowEndpointInTooltip() const
+	{
+		return bShowEndpointInTooltip;
+	}
+
+	const FString& GetCompanyName() const
+	{
+		return CompanyName;
+	}
+
+#if PLATFORM_WINDOWS
+	bool IsAllowedToCopyFilesToClipboard() const
+	{
+		return bIsAllowedToCopyFilesToClipboard;
+	}
+#endif
 
 	int GetUserCommentSizeLimit() const
 	{
@@ -107,18 +130,23 @@ struct FCrashReportCoreConfig
 	void SetAllowToBeContacted( bool bNewValue );
 	void SetSendLogFile( bool bNewValue );
 
+
+	void ApplyProjectOverrides(const FString& ConfigFilePath);
+
 	/** Set config values that are determined by the crashing application saving a config file to the crash folder */
 	void SetProjectConfigOverrides(const FConfigFile& InConfigFile);
 
 	/**
 	 * @return location for full crash dump for the specified branch.
 	 */
-	const FString GetFullCrashDumpLocationForBranch( const FString& BranchName ) const;
+	FString GetFullCrashDumpLocationForBranch(const FString& BranchName) const;
+
+	/**
+	 * Prints the current settings to the log. Call once all applicable overrides has been applied.
+	 */
+	void PrintSettingsToLog() const;
 
 protected:
-	/** Returns empty string if couldn't read */
-	FString GetKey( const FString& KeyName );
-
 	/** Reads FFullCrashDumpEntry config entries. */
 	void ReadFullCrashDumpConfigurations();
 
@@ -153,8 +181,22 @@ protected:
 	/** Whether the user is shown the option to enable/disable sending the log file. */
 	bool bHideLogFilesOption;
 
+	/** Whether the user is shown the option to restart the crashed application */
+	bool bHideRestartOption;
+
 	/** Whether the user is allowed to close the crash reporter without sending a report */
 	bool bIsAllowedToCloseWithoutSending;
+
+	/** Optional string displayed in the "allow to be contacted" text. */
+	FString CompanyName;
+
+	/** Whether to show the endpoint (reciever or datarouter url) */
+	bool bShowEndpointInTooltip;
+
+#if PLATFORM_WINDOWS
+	/** Whether the user is allowed to copy the report files to the clipboard */
+	bool bIsAllowedToCopyFilesToClipboard;
+#endif
 
 	/** Size limit for the description of multi-line text */
 	int UserCommentSizeLimit;

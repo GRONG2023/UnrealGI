@@ -2,12 +2,11 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "GameFramework/Actor.h"
-#include "VisualLogger/VisualLoggerTypes.h"
-#include "DebugRenderSceneProxy.h"
+#include "VisualLoggerRenderingActorBase.h"
 #include "VisualLoggerRenderingActor.generated.h"
+
+// enable adding some hard coded shapes to the VisualLoggerRenderingActor for testing
+#define VLOG_TEST_DEBUG_RENDERING 0
 
 class UPrimitiveComponent;
 struct FVisualLoggerDBRow;
@@ -18,54 +17,27 @@ struct FVisualLoggerDBRow;
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnSelectionChanged, class AActor*);
 
-UCLASS(config = Engine, NotBlueprintable, Transient)
-class LOGVISUALIZER_API AVisualLoggerRenderingActor : public AActor
+UCLASS(config = Engine, NotBlueprintable, Transient, notplaceable, AdvancedClassDisplay)
+class LOGVISUALIZER_API AVisualLoggerRenderingActor : public AVisualLoggerRenderingActorBase 
 {
-	struct FTimelineDebugShapes
-	{
-		TArray<FDebugRenderSceneProxy::FDebugLine> Lines;
-		TArray<FDebugRenderSceneProxy::FCone> Cones;
-		TArray<FDebugRenderSceneProxy::FDebugBox> Boxes;
-		TArray<FDebugRenderSceneProxy::FSphere> Points;
-		TArray<FDebugRenderSceneProxy::FMesh> Meshes;
-		TArray<FDebugRenderSceneProxy::FText3d> Texts;
-		TArray<FDebugRenderSceneProxy::FWireCylinder> Cylinders;
-		TArray<FDebugRenderSceneProxy::FCapsule> Capsules;
-		TArray<FDebugRenderSceneProxy::FArrowLine> Arrows;
-		TArray<FVector> LogEntriesPath;
-
-		void Reset()
-		{
-			Lines.Reset();
-			Cones.Reset();
-			Boxes.Reset();
-			Points.Reset();
-			Meshes.Reset();
-			Texts.Reset();
-			Cylinders.Reset();
-			Capsules.Reset();
-			Arrows.Reset();
-			LogEntriesPath.Reset();
-		}
-	};
-
 public:
 	GENERATED_UCLASS_BODY()
 	virtual ~AVisualLoggerRenderingActor();
 	void ResetRendering();
+	void ObjectVisibilityChanged(const FName& RowName);
 	void ObjectSelectionChanged(const TArray<FName>& Selection);
 	void OnItemSelectionChanged(const FVisualLoggerDBRow& BDRow, int32 ItemIndex);
 
+	virtual void IterateDebugShapes(TFunction<void(const FTimelineDebugShapes&) > Callback) override;
+	virtual bool MatchCategoryFilters(const FName& CategoryName, ELogVerbosity::Type Verbosity) const override;
 private:
-	void AddDebugRendering();
-	void GetDebugShapes(const FVisualLogDevice::FVisualLogEntryItem& EntryItem, FTimelineDebugShapes& DebugShapes);
 	void OnFiltersChanged();
-
-public:
-	UPrimitiveComponent* RenderingComponent;
-
-	FTimelineDebugShapes TestDebugShapes;
 
 	TArray<FName> CachedRowSelection;
 	TMap<FName, FTimelineDebugShapes> DebugShapesPerRow;
+
+#if VLOG_TEST_DEBUG_RENDERING
+	void AddDebugRendering();
+	FTimelineDebugShapes TestDebugShapes;
+#endif
 };

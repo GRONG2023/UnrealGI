@@ -2,14 +2,28 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
+#include "Framework/SlateDelegates.h"
+#include "ISkeletonTree.h"
+#include "ISkeletonTreeItem.h"
 #include "Input/Reply.h"
+#include "Misc/Attribute.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/SNullWidget.h"
 #include "Widgets/SWidget.h"
-#include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
-#include "ISkeletonTreeItem.h"
-#include "ISkeletonTree.h"
+#include "Widgets/Views/STableViewBase.h"
+
+class FDragDropEvent;
+class FText;
+class ITableRow;
+class STableViewBase;
+class SWidget;
+class UObject;
+struct FGeometry;
+struct FPointerEvent;
 
 /** Provides basic stub functionality for ISkeletonTreeItem-derived classes */
 class SKELETONEDITOR_API FSkeletonTreeItem : public ISkeletonTreeItem
@@ -26,7 +40,7 @@ public:
 
 	/** ISkeletonTreeItem interface */
 	virtual TSharedRef<ITableRow> MakeTreeRowWidget(const TSharedRef<STableViewBase>& InOwnerTable, const TAttribute<FText>& InFilterText) override;
-	virtual TSharedRef< SWidget > GenerateWidgetForDataColumn(const FName& DataColumnName) override { return SNullWidget::NullWidget; }
+	virtual TSharedRef< SWidget > GenerateWidgetForDataColumn(const FName& DataColumnName, FIsSelected InIsSelected) override { return SNullWidget::NullWidget; }
 	virtual TSharedRef< SWidget > GenerateInlineEditWidget(const TAttribute<FText>& FilterText, FIsSelected InIsSelected) override { return SNullWidget::NullWidget; }
 	virtual bool HasInlineEditor() const override { return false; }
 	virtual void ToggleInlineEditorExpansion() override {}

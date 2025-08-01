@@ -76,10 +76,7 @@ namespace IOSDisplayConstants
 		FScopeLock Lock(&HandlersMutex);
 		CADisplayLink* displayLink = (CADisplayLink*)param;
 		double OutputSeconds = displayLink.duration + displayLink.timestamp;
-		if (@available(iOS 10.0, tvOS 10.0, *))
-		{
-			OutputSeconds = displayLink.targetTimestamp;
-		}
+		OutputSeconds = displayLink.targetTimestamp;
 		double OutputDuration = displayLink.duration;
 		for (FIOSFramePacerHandler Handler in Handlers)
 		{
@@ -135,6 +132,9 @@ uint32 FIOSPlatformRHIFramePacer::Pace = 0;
 
 bool FIOSPlatformRHIFramePacer::IsEnabled()
 {
+#if PLATFORM_VISIONOS
+	return false; // XR does its own frame pacing.
+#else
     static bool bIsRHIFramePacerEnabled = false;
 	static bool bInitialized = false;
 
@@ -173,10 +173,14 @@ bool FIOSPlatformRHIFramePacer::IsEnabled()
 	}
 	
 	return bIsRHIFramePacerEnabled;
+#endif
 }
 
 uint32 FIOSPlatformRHIFramePacer::GetMaxRefreshRate()
 {
+#if PLATFORM_VISIONOS
+	return IOSDisplayConstants::MaxRefreshRate;
+#else
 	static bool bEnableDynamicMaxFPS = false;
 	static bool bInitialized = false;
 	
@@ -187,6 +191,7 @@ uint32 FIOSPlatformRHIFramePacer::GetMaxRefreshRate()
 	}
 	
 	return bEnableDynamicMaxFPS ? [UIScreen mainScreen].maximumFramesPerSecond : IOSDisplayConstants::MaxRefreshRate;
+#endif
 }
 
 bool FIOSPlatformRHIFramePacer::SupportsFramePace(int32 QueryFramePace)

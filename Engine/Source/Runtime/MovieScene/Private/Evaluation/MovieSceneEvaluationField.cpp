@@ -15,6 +15,8 @@
 
 #include "MovieSceneSequence.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneEvaluationField)
+
 
 FMovieSceneEntityComponentFieldBuilder::FMovieSceneEntityComponentFieldBuilder(FMovieSceneEntityComponentField* InField)
 	: Field(InField)
@@ -28,7 +30,7 @@ FMovieSceneEntityComponentFieldBuilder::~FMovieSceneEntityComponentFieldBuilder(
 	{
 		if (ensureMsgf(Field->SharedMetaData.Num() == SharedMetaDataIndex+1, TEXT("Additional shared meta-data has been added since this builder was constructed, recursive builders are not supported")))
 		{
-			Field->SharedMetaData.RemoveAt(SharedMetaDataIndex, 1, false);
+			Field->SharedMetaData.RemoveAt(SharedMetaDataIndex, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -36,6 +38,11 @@ FMovieSceneEntityComponentFieldBuilder::~FMovieSceneEntityComponentFieldBuilder(
 FMovieSceneEvaluationFieldSharedEntityMetaData& FMovieSceneEntityComponentFieldBuilder::GetSharedMetaData()
 {
 	return Field->SharedMetaData[SharedMetaDataIndex];
+}
+
+int32 FMovieSceneEntityComponentFieldBuilder::GetSharedMetaDataIndex() const
+{
+	return SharedMetaDataIndex;
 }
 
 int32 FMovieSceneEntityComponentFieldBuilder::FindOrAddEntity(UObject* EntityOwner, uint32 EntityID)
@@ -142,6 +149,26 @@ void FMovieSceneEntityComponentField::QueryPersistentEntities(FFrameNumber Query
 	}
 }
 
+void FMovieSceneEntityComponentField::QueryPersistentEntities(FFrameNumber QueryTime, TFunctionRef<bool(const FMovieSceneEvaluationFieldEntityQuery&)> QueryCallback, TRange<FFrameNumber>& OutRange) const
+{
+	FMovieSceneEvaluationTreeRangeIterator Iterator = PersistentEntityTree.SerializedData.IterateFromTime(QueryTime);
+	check(Iterator);
+
+	OutRange = Iterator.Range();
+	for (FMovieSceneEvaluationFieldEntityTree::FEntityAndMetaDataIndex Pair : PersistentEntityTree.SerializedData.GetAllData(Iterator.Node()))
+	{
+		FMovieSceneEvaluationFieldEntityQuery Query{
+			GetEntity(Pair.EntityIndex),
+			Pair.MetaDataIndex
+		};
+
+		if (!QueryCallback(Query))
+		{
+			return;
+		}
+	}
+}
+
 bool FMovieSceneEntityComponentField::HasAnyOneShotEntities() const
 {
 	return !OneShotEntityTree.SerializedData.IsEmpty();
@@ -223,9 +250,9 @@ void FMovieSceneEvaluationField::Invalidate(const TRange<FFrameNumber>& Range)
 	TRange<int32> OverlappingRange = OverlapRange(Range);
 	if (!OverlappingRange.IsEmpty())
 	{
-		Ranges.RemoveAt(OverlappingRange.GetLowerBoundValue(), OverlappingRange.Size<int32>(), false);
-		Groups.RemoveAt(OverlappingRange.GetLowerBoundValue(), OverlappingRange.Size<int32>(), false);
-		MetaData.RemoveAt(OverlappingRange.GetLowerBoundValue(), OverlappingRange.Size<int32>(), false);
+		Ranges.RemoveAt(OverlappingRange.GetLowerBoundValue(), OverlappingRange.Size<int32>(), EAllowShrinking::No);
+		Groups.RemoveAt(OverlappingRange.GetLowerBoundValue(), OverlappingRange.Size<int32>(), EAllowShrinking::No);
+		MetaData.RemoveAt(OverlappingRange.GetLowerBoundValue(), OverlappingRange.Size<int32>(), EAllowShrinking::No);
 
 #if WITH_EDITORONLY_DATA
 		Signature = FGuid::NewGuid();
@@ -398,3 +425,4 @@ void FMovieSceneEvaluationMetaData::DiffEntities(const FMovieSceneEvaluationMeta
 		Algo::SortBy(*NewKeys, &FMovieSceneOrderedEvaluationKey::SetupIndex);
 	}
 }
+

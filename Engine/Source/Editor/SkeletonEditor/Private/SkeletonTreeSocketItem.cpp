@@ -5,10 +5,11 @@
 #include "SSkeletonTreeRow.h"
 #include "Widgets/Text/SInlineEditableTextBlock.h"
 #include "Widgets/SOverlay.h"
+#include "Widgets/Views/SListView.h"
 #include "Animation/DebugSkelMeshComponent.h"
 #include "Widgets/Images/SImage.h"
 #include "Styling/CoreStyle.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SocketDragDropOp.h"
 #include "IPersonaPreviewScene.h"
 #include "IDetailsView.h"
@@ -20,12 +21,12 @@
 void FSkeletonTreeSocketItem::GenerateWidgetForNameColumn( TSharedPtr< SHorizontalBox > Box, const TAttribute<FText>& FilterText, FIsSelected InIsSelected )
 {
 	const FSlateBrush* SocketIcon = ( ParentType == ESocketParentType::Mesh ) ?
-		FEditorStyle::GetBrush( "SkeletonTree.MeshSocket" ) :
-		FEditorStyle::GetBrush( "SkeletonTree.SkeletonSocket" );
+		FAppStyle::GetBrush( "SkeletonTree.MeshSocket" ) :
+		FAppStyle::GetBrush( "SkeletonTree.SkeletonSocket" );
 
 	Box->AddSlot()
 	.AutoWidth()
-	.Padding(FMargin(0.0f, 1.0f))
+	.Padding(FMargin(0.0f, 2.0f))
 	[
 		SNew( SImage )
 		.ColorAndOpacity(FSlateColor::UseForeground())
@@ -79,7 +80,10 @@ TSharedRef< SWidget > FSkeletonTreeSocketItem::GenerateInlineEditWidget(const TA
 	if (GetDefault<UPersonaOptions>()->bUseInlineSocketEditor)
 	{
 		FPropertyEditorModule& EditModule = FModuleManager::Get().GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
-		FDetailsViewArgs DetailsViewArgs(/*bUpdateFromSelection=*/ false, /*bLockable=*/ false, /*bAllowSearch=*/ false, /*InNameAreaSettings=*/ FDetailsViewArgs::HideNameArea, /*bHideSelectionTip=*/ true);
+		FDetailsViewArgs DetailsViewArgs;
+		DetailsViewArgs.bAllowSearch = false;
+		DetailsViewArgs.NameAreaSettings = FDetailsViewArgs::HideNameArea;
+		DetailsViewArgs.bHideSelectionTip = true;
 		DetailsViewArgs.bAllowFavoriteSystem = false;
 		DetailsViewArgs.bShowScrollBar = false;
 		TSharedRef<IDetailsView> DetailsView = EditModule.CreateDetailView(DetailsViewArgs);
@@ -98,7 +102,7 @@ TSharedRef< SWidget > FSkeletonTreeSocketItem::GenerateInlineEditWidget(const TA
 			[
 				SNew(SImage)
 				.Visibility(EVisibility::HitTestInvisible)
-			.Image(FEditorStyle::GetBrush("SkeletonTree.InlineEditorShadowTop"))
+			.Image(FAppStyle::GetBrush("SkeletonTree.InlineEditorShadowTop"))
 			]
 		+ SOverlay::Slot()
 			.HAlign(HAlign_Fill)
@@ -106,7 +110,7 @@ TSharedRef< SWidget > FSkeletonTreeSocketItem::GenerateInlineEditWidget(const TA
 			[
 				SNew(SImage)
 				.Visibility(EVisibility::HitTestInvisible)
-			.Image(FEditorStyle::GetBrush("SkeletonTree.InlineEditorShadowBottom"))
+			.Image(FAppStyle::GetBrush("SkeletonTree.InlineEditorShadowBottom"))
 			];
 	}
 	else
@@ -127,7 +131,7 @@ FSlateColor FSkeletonTreeSocketItem::GetTextColor() const
 	}
 }
 
-TSharedRef< SWidget > FSkeletonTreeSocketItem::GenerateWidgetForDataColumn(const FName& DataColumnName)
+TSharedRef< SWidget > FSkeletonTreeSocketItem::GenerateWidgetForDataColumn(const FName& DataColumnName, FIsSelected InIsSelected)
 {
 	return SNullWidget::NullWidget;
 }
@@ -144,7 +148,7 @@ bool FSkeletonTreeSocketItem::CanCustomizeSocket() const
 	if (GetSkeletonTree()->GetPreviewScene().IsValid())
 	{
 		UDebugSkelMeshComponent* PreviewComponent = GetSkeletonTree()->GetPreviewScene()->GetPreviewMeshComponent();
-		return PreviewComponent && PreviewComponent->SkeletalMesh && !IsSocketCustomized();
+		return PreviewComponent && PreviewComponent->GetSkeletalMeshAsset() && !IsSocketCustomized();
 	}
 	return false;
 }
@@ -169,7 +173,7 @@ bool FSkeletonTreeSocketItem::OnVerifySocketNameChanged( const FText& InText, FT
 	}
 	else
 	{
-		USkeletalMesh* SkeletalMesh = GetSkeletonTree()->GetPreviewScene().IsValid() ? GetSkeletonTree()->GetPreviewScene()->GetPreviewMeshComponent()->SkeletalMesh : nullptr;
+		USkeletalMesh* SkeletalMesh = GetSkeletonTree()->GetPreviewScene().IsValid() ? ToRawPtr(GetSkeletonTree()->GetPreviewScene()->GetPreviewMeshComponent()->GetSkeletalMeshAsset()) : nullptr;
 		bVerifyName = !GetEditableSkeleton()->DoesSocketAlreadyExist( Socket, NewText, ParentType, SkeletalMesh );
 
 		// Needs to be checked on verify.
@@ -189,7 +193,7 @@ void FSkeletonTreeSocketItem::OnCommitSocketName( const FText& InText, ETextComm
 	FText NewText = FText::TrimPrecedingAndTrailing(InText);
 
 	// Notify skeleton tree of socket rename
-	USkeletalMesh* SkeletalMesh = GetSkeletonTree()->GetPreviewScene().IsValid() ? GetSkeletonTree()->GetPreviewScene()->GetPreviewMeshComponent()->SkeletalMesh : nullptr;
+	USkeletalMesh* SkeletalMesh = GetSkeletonTree()->GetPreviewScene().IsValid() ? ToRawPtr(GetSkeletonTree()->GetPreviewScene()->GetPreviewMeshComponent()->GetSkeletalMeshAsset()) : nullptr;
 	GetEditableSkeleton()->RenameSocket(Socket->SocketName, FName(*NewText.ToString()), SkeletalMesh);
 }
 

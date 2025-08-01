@@ -8,13 +8,14 @@
 #include "UObject/ObjectMacros.h"
 #include "Features/IModularFeature.h"
 #include "IXRInput.h"
-#include "XRGestureConfig.h"
 #include "StereoRendering.h"
 
 class IXRCamera;
 class UARPin;
 class FSceneViewFamily;
 struct FWorldContext;
+class FARSupportInterface;
+class IOpenXRHMD;
 
 /**
  * Struct representing the properties of an external tracking sensor.
@@ -43,7 +44,7 @@ struct FXRSensorProperties
 /**
  * Main access point to an XR tracking system. Use it to enumerate devices and query their poses.
  */
-class HEADMOUNTEDDISPLAY_API  IXRTrackingSystem : public IModularFeature, public IXRSystemIdentifier
+class  IXRTrackingSystem : public IModularFeature, public IXRSystemIdentifier
 {
 public:
 	static FName GetModularFeatureName()
@@ -67,7 +68,7 @@ public:
 	 * Other devices can have arbitrary ids defined by each system.
 	 * If a tracking system does not support tracking HMDs, device ID zero should be treated as invalid.
 	 */
-	static const int32 HMDDeviceId = 0;
+	static HEADMOUNTEDDISPLAY_API const int32 HMDDeviceId = 0;
 
 	/**
 	 * Whether or not the system supports positional tracking (either via sensor or other means)
@@ -82,13 +83,6 @@ public:
 	 * Note that for backwards compatibility with plugins written before 4.19, this method defaults to returning 'true'
 	 */
 	virtual bool DoesSupportLateUpdate() const { return true; }
-
-	/**
-	 * Return true if platform and HMD support late latching
-	 * Please override to enable it.
-	 */
-
-	virtual bool LateLatchingEnabled() const { return false; }
 
 	/**
 	 * Return true if the default camera implementation should query the current projection matrix at the start of the render frame and apply late update.
@@ -155,12 +149,12 @@ public:
 	 * If the device is does not represent a stereoscopic tracked camera, orientation and position should be identity and zero and the return value should be false.
 	 *
 	 * @param DeviceId the device to request the eye pose for.
-	 * @param Eye the eye the pose should be requested for, if passing in any other value than eSSP_LEFT_EYE or eSSP_RIGHT_EYE, the method should return a zero offset.
+	 * @param ViewIndex the view the pose should be requested for, if passing in INDEX_NONE, the method should return a zero offset.
 	 * @param OutOrientation The orientation of the eye relative to the device orientation.
 	 * @param OutPosition The position of the eye relative to the tracked device
 	 * @return true if the pose is valid or not. If the device is not a stereoscopic device, return false.
 	 */
-	virtual bool GetRelativeEyePose(int32 DeviceId, EStereoscopicPass Eye, FQuat& OutOrientation, FVector& OutPosition) = 0;
+	virtual bool GetRelativeEyePose(int32 DeviceId, int32 ViewIndex, FQuat& OutOrientation, FVector& OutPosition) = 0;
 
 	/** 
 	 * If the device id represents a tracking sensor, reports the frustum properties in game-world space of the sensor.
@@ -348,6 +342,13 @@ public:
 
 
 	/**
+	* Access optionsal ARCompositionComponent
+	**/
+	virtual TSharedPtr<FARSupportInterface, ESPMode::ThreadSafe> GetARCompositionComponent() { return nullptr; }
+	virtual const TSharedPtr<const FARSupportInterface, ESPMode::ThreadSafe> GetARCompositionComponent() const { return nullptr; }
+
+
+	/**
 	 * Access the loading screen interface associated with this tracking system, if any.
 	 *
 	 * @return an IXRLoadingScreen pointer or a nullptr if this tracking system does not support loading screens.
@@ -365,7 +366,7 @@ public:
 	/**
 	 * Same as IsHeadTrackingAllowed, but returns false if the World is not using VR (such as with the non-VR PIE instances when using VR Preview)
 	 **/
-	virtual bool IsHeadTrackingAllowedForWorld(UWorld & World) const;
+	HEADMOUNTEDDISPLAY_API virtual bool IsHeadTrackingAllowedForWorld(UWorld & World) const;
 
 	/** 
 	* Can be used to enforce tracking even when stereo rendering is disabled. 
@@ -423,14 +424,16 @@ public:
 	/**
 	 * Platform Agnostic Query about HMD details
 	 */
-	virtual void GetHMDData(UObject* WorldContext, FXRHMDData& HMDData);
+	HEADMOUNTEDDISPLAY_API virtual void GetHMDData(UObject* WorldContext, FXRHMDData& HMDData);
 
 	/**
 	 * Platform Agnostic Query about MotionControllers details
 	 */
 	virtual void GetMotionControllerData(UObject* WorldContext, const EControllerHand Hand, FXRMotionControllerData& MotionControllerData) = 0;
+	virtual bool GetCurrentInteractionProfile(const EControllerHand Hand, FString& InteractionProfile) = 0;
 
-	virtual bool ConfigureGestures(const FXRGestureConfig& GestureConfig) = 0;
+	UE_DEPRECATED(5.3, "The only implementation for this function was removed many UE releases ago.")
+	virtual bool ConfigureGestures(const struct FXRGestureConfig& GestureConfig) { return false; };
 
 	virtual EXRDeviceConnectionResult::Type ConnectRemoteXRDevice(const FString& IpAddress, const int32 BitRate)
 	{ 
@@ -442,4 +445,19 @@ public:
 	 * Get the bounds of the area where the user can freely move while remaining tracked centered around the specified origin
 	 */
 	virtual FVector2D GetPlayAreaBounds(EHMDTrackingOrigin::Type Origin) const { return FVector2D::ZeroVector; }
+
+	/**
+	 * Get the transform of the specified tracking origin, if available.
+	 */
+	virtual bool GetTrackingOriginTransform(TEnumAsByte<EHMDTrackingOrigin::Type> Origin, FTransform& OutTransform) const { return false; }
+
+	/**
+	 * Get the transform and dimensions of the area where the user can freely move while remaining tracked centered around the specified origin transform
+	 */
+	virtual bool GetPlayAreaRect(FTransform& OutTransform, FVector2D& OutRect) const { return false; }
+
+	/**
+	* Get the IOpenXRHMD interface, if there is one.
+	*/
+	virtual IOpenXRHMD* GetIOpenXRHMD() { return nullptr; }
 };

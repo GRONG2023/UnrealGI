@@ -4,12 +4,63 @@
 	MorphTools.cpp: Morph target creation helper classes.
 =============================================================================*/ 
 
-#include "CoreMinimal.h"
-#include "RawIndexBuffer.h"
 #include "Engine/SkeletalMesh.h"
-#include "Animation/MorphTarget.h"
-#include "Rendering/SkeletalMeshModel.h"
+#include "EngineLogs.h"
 #include "Rendering/SkeletalMeshLODModel.h"
+#include "Algo/AnyOf.h"
+#include "Interfaces/ITargetPlatform.h"
+#include "UObject/FortniteMainBranchObjectVersion.h"
+#include "UObject/UE5PrivateFrostyStreamObjectVersion.h"
+
+FArchive& operator<<(FArchive& Ar, FMorphTargetLODModel& M)
+{
+	Ar.UsingCustomVersion(FEditorObjectVersion::GUID);
+	Ar.UsingCustomVersion(FFortniteMainBranchObjectVersion::GUID);
+	Ar.UsingCustomVersion(FUE5PrivateFrostyStreamObjectVersion::GUID);
+
+	if (!Ar.IsObjectReferenceCollector())
+	{
+		if (Ar.IsLoading() && Ar.CustomVer(FEditorObjectVersion::GUID) < FEditorObjectVersion::AddedMorphTargetSectionIndices)
+		{
+			Ar << M.Vertices << M.NumBaseMeshVerts;
+			M.bGeneratedByEngine = false;
+		}
+		else if (Ar.IsLoading() && Ar.CustomVer(FFortniteMainBranchObjectVersion::GUID) < FFortniteMainBranchObjectVersion::SaveGeneratedMorphTargetByEngine)
+		{
+			Ar << M.Vertices << M.NumBaseMeshVerts << M.SectionIndices;
+			M.bGeneratedByEngine = false;
+		}
+		else
+		{
+			bool bVerticesAreStrippedForCookedBuilds = false;
+			if (Ar.IsPersistent() && (Ar.CustomVer(FUE5PrivateFrostyStreamObjectVersion::GUID) >= FUE5PrivateFrostyStreamObjectVersion::StripMorphTargetSourceDataForCookedBuilds))
+			{
+				// Strip source morph data for cooked build if targets don't include mobile. Mobile uses CPU morphing which needs the source morph data.
+				bVerticesAreStrippedForCookedBuilds = Ar.IsCooking() && (!Ar.CookingTarget()->SupportsFeature(ETargetPlatformFeatures::MobileRendering));
+				Ar << bVerticesAreStrippedForCookedBuilds;
+			}
+
+			if (bVerticesAreStrippedForCookedBuilds)
+			{
+				M.NumVertices = M.Vertices.Num();
+				Ar << M.NumVertices;
+			}
+			else
+			{
+				Ar << M.Vertices;
+
+				if (Ar.IsLoading())
+				{
+					M.NumVertices = M.Vertices.Num();
+				}
+			}
+
+			Ar << M.NumBaseMeshVerts << M.SectionIndices << M.bGeneratedByEngine;
+		}
+	}
+
+	return Ar;
+}
 
 /** compare based on base mesh source vertex indices */
 struct FCompareMorphTargetDeltas
@@ -20,11 +71,12 @@ struct FCompareMorphTargetDeltas
 	}
 };
 
-FMorphTargetDelta* UMorphTarget::GetMorphTargetDelta(int32 LODIndex, int32& OutNumDeltas)
+const FMorphTargetDelta* UMorphTarget::GetMorphTargetDelta(int32 LODIndex, int32& OutNumDeltas) const
 {
 	if(LODIndex < MorphLODModels.Num())
 	{
-		FMorphTargetLODModel& MorphModel = MorphLODModels[LODIndex];
+		// Calling GetMorphLODModels to potentially get from subclasses
+		const FMorphTargetLODModel& MorphModel = GetMorphLODModels()[LODIndex];
 		OutNumDeltas = MorphModel.Vertices.Num();
 		return MorphModel.Vertices.GetData();
 	}
@@ -33,10 +85,15 @@ FMorphTargetDelta* UMorphTarget::GetMorphTargetDelta(int32 LODIndex, int32& OutN
 	return NULL;
 }
 
-bool UMorphTarget::HasDataForLOD(int32 LODIndex) 
+bool UMorphTarget::HasDataForLOD(int32 LODIndex) const
 {
 	// If we have an entry for this LOD, and it has verts
+#if WITH_EDITOR
 	return (MorphLODModels.IsValidIndex(LODIndex) && MorphLODModels[LODIndex].Vertices.Num() > 0);
+#else
+	// Morph target's vertices array could have been emptied after render data is created, so check NumVertices instead
+	return (MorphLODModels.IsValidIndex(LODIndex) && MorphLODModels[LODIndex].NumVertices > 0);
+#endif
 }
 
 bool UMorphTarget::HasValidData() const
@@ -47,9 +104,34 @@ bool UMorphTarget::HasValidData() const
 		{
 			return true;
 		}
+#if !WITH_EDITOR
+		// In cooked builds, Model.Vertices is stripped but Model.NumVertices is valid
+		else if (Model.NumVertices > 0)
+		{
+			return true;
+		}
+#endif
 	}
 
 	return false;
+}
+
+bool UMorphTarget::HasDataForSection(int32 LODIndex, int32 SectionIndex) const
+{
+	return HasDataForLOD(LODIndex) && MorphLODModels[LODIndex].SectionIndices.Contains(SectionIndex);
+}
+
+void UMorphTarget::EmptyMorphLODModels()
+{
+	MorphLODModels.Empty();
+}
+
+void UMorphTarget::DiscardVertexData()
+{
+	for (FMorphTargetLODModel& Model : MorphLODModels)
+	{
+		Model.DiscardVertexData();
+	}
 }
 
 #if WITH_EDITOR
@@ -108,6 +190,7 @@ void UMorphTarget::PopulateDeltas(const TArray<FMorphTargetDelta>& Deltas, const
 
 	// remove array slack
 	MorphModel.Vertices.Shrink();
+	MorphModel.NumVertices = MorphModel.Vertices.Num();
 }
 
 void UMorphTarget::RemoveEmptyMorphTargets()
@@ -126,6 +209,134 @@ void UMorphTarget::RemoveEmptyMorphTargets()
 			// Once we found valid one, just get out
 			break;
 		}
+	}
+}
+
+TUniquePtr<FFinishBuildMorphTargetData> UMorphTarget::CreateFinishBuildMorphTargetData() const
+{
+	return MakeUnique<FFinishBuildMorphTargetData>();
+}
+
+void FFinishBuildMorphTargetData::ApplyEditorData(USkeletalMesh * SkeletalMesh, bool bIsSerializeSaving) const
+{
+	//Return if we do not need to apply data
+	if (!bApplyMorphTargetsData)
+	{
+		return;
+	}
+	
+	if (SkeletalMesh->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed))
+	{
+		//No need to apply the morph targets if the asset is being deleted.
+		//Also acquiring the GCScopeGuard when we are in the destruction process will create a deadlock, if there is code
+		//in the BeginDestroy function of the skeletalmesh that touch any property that is lock by the async build.
+		return;
+	}
+	//GC should not be active during the build since we force finish the skinned asset compilation during the pre garbage delegate
+	check(!IsGarbageCollectingAndLockingUObjectHashTables());
+
+	FSkeletalMeshModel * SkelMeshModel = SkeletalMesh->GetImportedModel();
+	check(SkelMeshModel);
+	
+	TMap<FName, UMorphTarget*> ExistingMorphTargets;
+	for (UMorphTarget* MorphTarget : SkeletalMesh->GetMorphTargets())
+	{
+		ExistingMorphTargets.Add(MorphTarget->GetFName(), MorphTarget);
+	}
+	
+	int32 MorphTargetNumber = MorphLODModelsPerTargetName.Num();
+	TArray<UMorphTarget*> ToDeleteMorphTargets;
+	ToDeleteMorphTargets.Append(SkeletalMesh->GetMorphTargets());
+	SkeletalMesh->GetMorphTargets().Empty();
+	//Rebuild the MorphTarget object
+	for (const TPair<FName, TArray<FMorphTargetLODModel>>& TargetNameAndMorphLODModels : MorphLODModelsPerTargetName)
+	{
+		FName MorphTargetName = TargetNameAndMorphLODModels.Key;
+		const TArray<FMorphTargetLODModel>& MorphTargetLODModels = TargetNameAndMorphLODModels.Value;
+		int32 MorphLODModelNumber = MorphTargetLODModels.Num();
+
+		UMorphTarget * MorphTarget = ExistingMorphTargets.FindRef(MorphTargetName);
+		if (!MorphTarget)
+		{
+			if (!Algo::AnyOf(MorphTargetLODModels, [](const FMorphTargetLODModel& Model) { return Model.Vertices.Num() > 0;}))
+			{
+				//Skip this empty morphtarget
+				continue;
+			}
+
+			//Reuse the morph target if it already exist and was not garbage collect (it can happen if we play with the morph target threshold build options)
+			MorphTarget = FindObjectSafe<UMorphTarget>(SkeletalMesh, *MorphTargetName.ToString(), true);
+			if (MorphTarget && MorphTarget->HasAnyFlags(RF_BeginDestroyed | RF_FinishDestroyed))
+			{
+				MorphTarget = nullptr;
+			}
+
+			if (!MorphTarget)
+			{
+				//When we save the cook result we should never have to build a new morph target
+				//When saving cook build, we call GetPlatformSkeletalMeshRenderData in USkeletalMesh::BeginCacheForCookedPlatformData
+				//which happen before the serialization of that cook skeletalmesh
+				if (!bIsSerializeSaving)
+				{
+				//Avoid recycling morphtarget with NewObject it cannot be done asynchronously
+				//Find the UMorphTarget and simply clear the data if it exist.
+				TArray<UObject*> SubObjects;
+				GetObjectsWithOuter(SkeletalMesh, SubObjects, true);
+				for (UObject* SubObject : SubObjects)
+				{
+					if (SubObject->GetFName() == MorphTargetName)
+					{
+						if (UMorphTarget* SubMorphTarget = Cast<UMorphTarget>(SubObject))
+						{
+							MorphTarget = SubMorphTarget;
+							MorphTarget->EmptyMorphLODModels();
+							MorphTarget->ClearGarbage();
+							break;
+						}
+					}
+				}
+				//Create a new morph target, if the object do not exist (creating a new uobject is ok to do asynchronously)
+				if (!MorphTarget)
+				{
+					MorphTarget = NewObject<UMorphTarget>(SkeletalMesh, MorphTargetName);
+				}
+					check(MorphTarget);
+				}
+				else
+				{
+					UE_ASSET_LOG(LogSkeletalMesh, Error, SkeletalMesh, TEXT("Cannot cache a skeletalmesh during a serialize if some morph targets need to be created. The solution is to Pre cache the skeletalmesh before the serialization so no morph target get created."));
+					continue;
+				}
+			}
+		}
+		else
+		{
+			ToDeleteMorphTargets.Remove(MorphTarget);
+		}
+		MorphTarget->EmptyMorphLODModels();
+		SkeletalMesh->GetMorphTargets().Add(MorphTarget);
+		
+		MorphTarget->GetMorphLODModels().AddDefaulted(MorphLODModelNumber);
+		for (int32 MorphDataIndex = 0; MorphDataIndex < MorphLODModelNumber; ++MorphDataIndex)
+		{
+			MorphTarget->GetMorphLODModels()[MorphDataIndex] = MorphTargetLODModels[MorphDataIndex];
+		}
+	}
+	//Rebuild the mapping and rehook the curve data
+	SkeletalMesh->InitMorphTargets();
+	
+	//Clear any async flags after the morphtargets have been set to the skeletalmesh
+	for (UMorphTarget* MorphTarget : SkeletalMesh->GetMorphTargets())
+	{
+		const EInternalObjectFlags AsyncFlags = EInternalObjectFlags::Async | EInternalObjectFlags::AsyncLoading;
+		MorphTarget->ClearInternalFlags(AsyncFlags);
+	}
+
+	for (UMorphTarget* ToDeleteMorphTarget : ToDeleteMorphTargets)
+	{
+		ToDeleteMorphTarget->BaseSkelMesh = nullptr;
+		ToDeleteMorphTarget->EmptyMorphLODModels();
+		ToDeleteMorphTarget->MarkAsGarbage();
 	}
 }
 

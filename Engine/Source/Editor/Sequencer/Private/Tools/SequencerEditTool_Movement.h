@@ -7,10 +7,16 @@
 #include "Input/CursorReply.h"
 #include "Input/Reply.h"
 #include "Tools/SequencerEditTool.h"
-#include "Framework/DelayedDrag.h"
 
 class SSequencer;
-struct ISequencerHotspot;
+
+namespace UE
+{
+namespace Sequencer
+{
+	class STrackAreaView;
+}
+}
 
 class FSequencerEditTool_Movement
 	: public FSequencerEditTool
@@ -21,7 +27,7 @@ public:
 	static const FName Identifier;
 
 	/** Create and initialize a new instance. */
-	FSequencerEditTool_Movement(FSequencer& InSequencer);
+	FSequencerEditTool_Movement(FSequencer& InSequencer, UE::Sequencer::STrackAreaView& InTrackArea);
 
 public:
 
@@ -35,7 +41,7 @@ public:
 	virtual FCursorReply OnCursorQuery(const FGeometry& MyGeometry, const FPointerEvent& CursorEvent) const override;
 	virtual FName GetIdentifier() const override;
 	virtual bool CanDeactivate() const override;
-	virtual const ISequencerHotspot* GetDragHotspot() const override;
+	virtual TSharedPtr<UE::Sequencer::ITrackAreaHotspot> GetDragHotspot() const override;
 
 protected:
 
@@ -43,35 +49,26 @@ protected:
 
 private:
 
-	TSharedPtr<ISequencerEditToolDragOperation> CreateDrag(const FPointerEvent& MouseEvent);
+	TSharedPtr<UE::Sequencer::ISequencerEditToolDragOperation> CreateDrag(const FPointerEvent& MouseEvent);
 
 	bool GetHotspotTime(FFrameTime& HotspotTime) const;
 	FFrameTime GetHotspotOffsetTime(FFrameTime CurrentTime) const;
 	void UpdateCursorDecorator(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent);
 
-	struct FDelayedDrag_Hotspot : FDelayedDrag
-	{
-		FDelayedDrag_Hotspot(FVector2D InInitialPosition, FKey InApplicableKey, TSharedPtr<ISequencerHotspot> InHotspot)
-			: FDelayedDrag(InInitialPosition, InApplicableKey)
-			, Hotspot(MoveTemp(InHotspot))
-		{
-			SetTriggerScaleFactor(0.1f);
-		}
-
-		TSharedPtr<ISequencerHotspot> Hotspot;
-	};
-
 	/** Helper class responsible for handling delayed dragging */
-	TOptional<FDelayedDrag_Hotspot> DelayedDrag;
+	TOptional<UE::Sequencer::FDelayedDrag_Hotspot> DelayedDrag;
 
 	/** Current drag operation if any */
-	TSharedPtr<ISequencerEditToolDragOperation> DragOperation;
+	TSharedPtr<UE::Sequencer::ISequencerEditToolDragOperation> DragOperation;
 
 	/** Current local position the mouse is dragged to. */
-	FVector2D DragPosition;
+	FVector2f DragPosition;
 
 	/** The hotspot's time before dragging started. */
 	FFrameTime OriginalHotspotTime;
+
+	/** TrackArea this object belongs to */
+	UE::Sequencer::STrackAreaView& TrackArea;
 
 	/** Software cursor decorator brush */
 	const FSlateBrush* CursorDecorator;

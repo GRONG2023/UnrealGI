@@ -4,10 +4,24 @@
 
 #include "Containers/Array.h"
 #include "Containers/BitArray.h"
+#include "Templates/Function.h"
+#include "Containers/StringFwd.h"
 
 #include "EntitySystem/MovieSceneEntitySystemTypes.h"
 
-struct MOVIESCENE_API FMovieSceneEntitySystemDirectedGraph
+namespace UE::MovieScene
+{
+
+struct FDirectedGraphStringParameters
+{
+	FStringView ClusterName;
+	FColor Color = FColor::Black;
+};
+
+/**
+ * Directed graph represented as a bitarray for allocated nodes, and edges defined by pairs of integers (from->to).
+ */
+struct FDirectedGraph
 {
 	struct FDirectionalEdge
 	{
@@ -42,13 +56,13 @@ struct MOVIESCENE_API FMovieSceneEntitySystemDirectedGraph
 
 public:
 
-	struct MOVIESCENE_API FDepthFirstSearch
+	struct FDepthFirstSearch
 	{
 		TArray<uint16> PostNodes;
 
-		explicit FDepthFirstSearch(const FMovieSceneEntitySystemDirectedGraph* InGraph);
+		MOVIESCENE_API explicit FDepthFirstSearch(const FDirectedGraph* InGraph);
 
-		void Search(uint16 Node);
+		MOVIESCENE_API void Search(uint16 Node);
 
 		const TBitArray<>& GetVisited() const
 		{
@@ -60,16 +74,16 @@ public:
 		TBitArray<> Visited;
 		TBitArray<> IsVisiting;
 
-		const FMovieSceneEntitySystemDirectedGraph* Graph;
+		const FDirectedGraph* Graph;
 	};
 
-	struct MOVIESCENE_API FBreadthFirstSearch
+	struct FBreadthFirstSearch
 	{
 		TArray<uint16> Nodes;
 
-		explicit FBreadthFirstSearch(const FMovieSceneEntitySystemDirectedGraph* InGraph);
+		MOVIESCENE_API explicit FBreadthFirstSearch(const FDirectedGraph* InGraph);
 
-		void Search(uint16 Node);
+		MOVIESCENE_API void Search(uint16 Node);
 
 		const TBitArray<>& GetVisited() const
 		{
@@ -79,15 +93,15 @@ public:
 	private:
 
 		TBitArray<> Visited;
-		const FMovieSceneEntitySystemDirectedGraph* Graph;
+		const FDirectedGraph* Graph;
 		int32 StackIndex;
 	};
 
-	struct MOVIESCENE_API FDiscoverCyclicEdges
+	struct FDiscoverCyclicEdges
 	{
-		explicit FDiscoverCyclicEdges(const FMovieSceneEntitySystemDirectedGraph* InGraph);
+		MOVIESCENE_API explicit FDiscoverCyclicEdges(const FDirectedGraph* InGraph);
 
-		void Search(uint16 Node);
+		MOVIESCENE_API void Search(uint16 Node);
 
 		bool IsCyclic(const uint16 EdgeIndex) const
 		{
@@ -99,64 +113,70 @@ public:
 			return CyclicEdges;
 		}
 
-		void Search();
-		void SearchFrom(uint16 NodeID);
+		MOVIESCENE_API void Search();
+		MOVIESCENE_API void SearchFrom(uint16 NodeID);
 
 	private:
 
-		void DiscoverCycles(uint16 NodeID, TBitArray<>& VisitedNodes);
-		void TagCyclicChain(uint16 CyclicNodeID);
+		MOVIESCENE_API void DiscoverCycles(uint16 NodeID, TBitArray<>& VisitedNodes);
+		MOVIESCENE_API void TagCyclicChain(uint16 CyclicNodeID);
 
 		TBitArray<> CyclicEdges;
 		TBitArray<> VisitedEdges;
 		TArray<uint16, TInlineAllocator<16>> EdgeChain;
-		const FMovieSceneEntitySystemDirectedGraph* Graph;
+		const FDirectedGraph* Graph;
 	};
 
 public:
 
-	FMovieSceneEntitySystemDirectedGraph()
+	FDirectedGraph()
 		: bHasDanglingEdges(false)
 	{}
 
-	void AllocateNode(uint16 NodeID);
+	MOVIESCENE_API void AllocateNode(uint16 NodeID);
 
-	bool IsNodeAllocated(uint16 NodeID) const;
+	MOVIESCENE_API bool IsNodeAllocated(uint16 NodeID) const;
 
-	void CleanUpDanglingEdges();
+	MOVIESCENE_API void CleanUpDanglingEdges();
 
-	void RemoveNode(uint16 NodeID);
+	MOVIESCENE_API void RemoveNode(uint16 NodeID);
 
 	const TBitArray<>& GetNodeMask() const
 	{
 		return Nodes;
 	}
 
-	bool IsCyclic() const;
+	MOVIESCENE_API bool IsCyclic() const;
 
-	void MakeEdge(uint16 FromNode, uint16 ToNode);
+	MOVIESCENE_API void MakeEdge(uint16 FromNode, uint16 ToNode);
 
-	void DestroyEdge(uint16 FromNode, uint16 ToNode);
+	MOVIESCENE_API void DestroyEdge(uint16 FromNode, uint16 ToNode);
 
-	TBitArray<> FindEdgeUpstreamNodes() const;
+	MOVIESCENE_API void DestroyAllEdges();
 
-	TArrayView<const FDirectionalEdge> GetEdges() const;
+	MOVIESCENE_API TBitArray<> FindEdgeUpstreamNodes() const;
 
-	TArrayView<const FDirectionalEdge> GetEdgesFrom(uint16 InNode) const;
+	MOVIESCENE_API TArrayView<const FDirectionalEdge> GetEdges() const;
 
-	bool HasEdgeFrom(uint16 InNode) const;
+	MOVIESCENE_API TArrayView<const FDirectionalEdge> GetEdgesFrom(uint16 InNode) const;
 
-	bool HasEdgeTo(uint16 InNode) const;
+	MOVIESCENE_API bool HasEdgeFrom(uint16 InNode) const;
+
+	MOVIESCENE_API bool HasEdgeTo(uint16 InNode) const;
+
+	MOVIESCENE_API FString ToString(const UE::MovieScene::FDirectedGraphStringParameters& Parameters) const;
+
+	MOVIESCENE_API FString ToString(const UE::MovieScene::FDirectedGraphStringParameters& Parameters, TFunctionRef<void(uint16, FStringBuilderBase&)> EmitLabel) const;
 
 private:
 
-	int32 FindEdgeStart(uint16 FromNode) const;
+	MOVIESCENE_API int32 FindEdgeStart(uint16 FromNode) const;
 
-	int32 FindEdgeIndex(const FDirectionalEdge& Edge) const;
+	MOVIESCENE_API int32 FindEdgeIndex(const FDirectionalEdge& Edge) const;
 
-	bool EdgeExists(const FDirectionalEdge& Edge) const;
+	MOVIESCENE_API bool EdgeExists(const FDirectionalEdge& Edge) const;
 
-	bool IsCyclicImpl(uint16 NodeID, TBitArray<>& Visiting) const;
+	MOVIESCENE_API bool IsCyclicImpl(uint16 NodeID, TBitArray<>& Visiting) const;
 
 private:
 
@@ -170,3 +190,4 @@ private:
 };
 
 
+} // namespace UE::MovieScene

@@ -1,21 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Utils.h"
+#include "TraceServices/Utils.h"
+#include "Common/FormatArgs.h"
 #include "TraceServices/Containers/Tables.h"
 #include "Templates/SharedPointer.h"
 #include "HAL/FileManager.h"
 
-namespace Trace
+DEFINE_LOG_CATEGORY(LogTraceServices);
+
+namespace TraceServices
 {
 
-void Table2Csv(const Trace::IUntypedTable& Table, const TCHAR* Filename)
+bool Table2Csv(const IUntypedTable& Table, const TCHAR* Filename)
 {
-	TSharedPtr<FArchive> OutputFile = MakeShareable(IFileManager::Get().CreateFileWriter(Filename));
-	check(OutputFile);
+	TUniquePtr<FArchive> OutputFile(IFileManager::Get().CreateFileWriter(Filename));
+	if (!OutputFile.IsValid())
+	{
+		return false;
+	}
+
 	FString Header;
-	const Trace::ITableLayout& Layout = Table.GetLayout();
-	int32 ColumnCount = Layout.GetColumnCount();
-	for (int32 ColumnIndex = 0; ColumnIndex < ColumnCount; ++ColumnIndex)
+	const ITableLayout& Layout = Table.GetLayout();
+	const uint64 ColumnCount = Layout.GetColumnCount();
+	for (uint64 ColumnIndex = 0; ColumnIndex < ColumnCount; ++ColumnIndex)
 	{
 		Header += Layout.GetColumnName(ColumnIndex);
 		if (ColumnIndex < ColumnCount - 1)
@@ -29,27 +37,27 @@ void Table2Csv(const Trace::IUntypedTable& Table, const TCHAR* Filename)
 	}
 	auto AnsiHeader = StringCast<ANSICHAR>(*Header);
 	OutputFile->Serialize((void*)AnsiHeader.Get(), AnsiHeader.Length());
-	TUniquePtr<Trace::IUntypedTableReader> TableReader(Table.CreateReader());
+	TUniquePtr<IUntypedTableReader> TableReader(Table.CreateReader());
 	for (; TableReader->IsValid(); TableReader->NextRow())
 	{
 		FString Line;
-		for (int32 ColumnIndex = 0; ColumnIndex < ColumnCount; ++ColumnIndex)
+		for (uint64 ColumnIndex = 0; ColumnIndex < ColumnCount; ++ColumnIndex)
 		{
 			switch (Layout.GetColumnType(ColumnIndex))
 			{
-			case Trace::TableColumnType_Bool:
+			case TableColumnType_Bool:
 				Line += TableReader->GetValueBool(ColumnIndex) ? "true" : "false";
 				break;
-			case Trace::TableColumnType_Int:
+			case TableColumnType_Int:
 				Line += FString::Printf(TEXT("%lld"), TableReader->GetValueInt(ColumnIndex));
 				break;
-			case Trace::TableColumnType_Float:
+			case TableColumnType_Float:
 				Line += FString::Printf(TEXT("%f"), TableReader->GetValueFloat(ColumnIndex));
 				break;
-			case Trace::TableColumnType_Double:
+			case TableColumnType_Double:
 				Line += FString::Printf(TEXT("%f"), TableReader->GetValueDouble(ColumnIndex));
 				break;
-			case Trace::TableColumnType_CString:
+			case TableColumnType_CString:
 				FString ValueString = TableReader->GetValueCString(ColumnIndex);
 				ValueString.ReplaceInline(TEXT(","), TEXT(" "));
 				Line += ValueString;
@@ -68,6 +76,13 @@ void Table2Csv(const Trace::IUntypedTable& Table, const TCHAR* Filename)
 		OutputFile->Serialize((void*)AnsiLine.Get(), AnsiLine.Length());
 	}
 	OutputFile->Close();
+
+	return true;
 }
 
+void StringFormat(TCHAR* Out, uint64 MaxOut, TCHAR* Temp, uint64 MaxTemp, const TCHAR* FormatString, const uint8* FormatArgs)
+{
+	FFormatArgsHelper::Format(Out, MaxOut, Temp, MaxTemp, FormatString, FormatArgs);
 }
+
+} // namespace TraceServices

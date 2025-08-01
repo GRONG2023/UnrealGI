@@ -11,12 +11,12 @@
 #include "EnvironmentQuery/EnvQueryGenerator.h"
 #include "EnvQueryGenerator_ActorsOfClass.generated.h"
 
-UCLASS(meta = (DisplayName = "Actors Of Class"))
-class AIMODULE_API UEnvQueryGenerator_ActorsOfClass : public UEnvQueryGenerator
+UCLASS(meta = (DisplayName = "Actors Of Class"), MinimalAPI)
+class UEnvQueryGenerator_ActorsOfClass : public UEnvQueryGenerator
 {
 	GENERATED_UCLASS_BODY()
 
-	UPROPERTY(EditDefaultsOnly, Category=Generator)
+	UPROPERTY(EditDefaultsOnly, Category=Generator, meta=(AllowAbstract))
 	TSubclassOf<AActor> SearchedActorClass;
 
 	/** If true, this will only returns actors of the specified class within the SearchRadius of the SearchCenter context.  If false, it will return ALL actors of the specified class in the world. */
@@ -33,9 +33,9 @@ class AIMODULE_API UEnvQueryGenerator_ActorsOfClass : public UEnvQueryGenerator
 	UPROPERTY(EditAnywhere, Category=Generator)
 	TSubclassOf<UEnvQueryContext> SearchCenter;
 
-	virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
+	AIMODULE_API virtual void GenerateItems(FEnvQueryInstance& QueryInstance) const override;
 	virtual void ProcessItems(FEnvQueryInstance& QueryInstance, TArray<AActor*>& MatchingActors) const {}
 
-	virtual FText GetDescriptionTitle() const override;
-	virtual FText GetDescriptionDetails() const override;
+	AIMODULE_API virtual FText GetDescriptionTitle() const override;
+	AIMODULE_API virtual FText GetDescriptionDetails() const override;
 };

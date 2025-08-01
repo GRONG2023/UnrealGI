@@ -11,11 +11,28 @@
 #include "UnrealEdMisc.h"
 #include "Frame/MainFrameHandler.h"
 #include "Misc/CompilationResult.h"
+#include "Interfaces/IEditorMainFrameProvider.h"
+
+/** 
+ * Utility class, which hooks into the editor's main window startup and 
+ * supplies a project dialog window if the project hasn't been set. 
+ */
+class FProjectDialogProvider : public IEditorMainFrameProvider
+{
+public:
+	void Register();
+	void UnRegister();
+
+	//~ Begin IEditorMainFrameProvider interface
+	virtual bool IsRequestingMainFrameControl() const override;
+	virtual FMainFrameWindowOverrides GetDesiredWindowConfiguration() const override;
+	virtual TSharedRef<SWidget> CreateMainFrameContentWidget() const override;
+	//~ End IEditorMainFrameProvider interface
+};
 
 /**
  * Editor main frame module
  */
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
 class FMainFrameModule
 	: public IMainFrameModule
 {
@@ -23,12 +40,20 @@ public:
 
 	// IMainFrameModule interface
 
-	virtual void CreateDefaultMainFrame( const bool bStartImmersive, const bool bStartPIE ) override;
+	virtual void CreateDefaultMainFrame(const bool bStartImmersive, const bool bStartPIE) override;
 	virtual void RecreateDefaultMainFrame(const bool bStartImmersive, const bool bStartPIE) override;
+private:
+	/**
+	 * Shared code between CreateDefaultMainFrame and RecreateDefaultMainFrame
+	 * @param bIsBeingRecreated False if it is being called by first time (CreateDefaultMainFrame), and true if it is being recreated (RecreateDefaultMainFrame). If recreated, it will also display 
+	 */
+	virtual void CreateDefaultMainFrameAuxiliary(const bool bStartImmersive, const bool bStartPIE, const bool bIsBeingRecreated);
+
+public:
+	virtual bool IsRecreatingDefaultMainFrame() const override;
 	virtual TSharedRef<SWidget> MakeMainMenu(const TSharedPtr<FTabManager>& TabManager, const FName MenuName, FToolMenuContext& ToolMenuContext) const override;
 	
-	// deprecated in 4.26
-	virtual TSharedRef<SWidget> MakeMainTabMenu(const TSharedPtr<FTabManager>& TabManager, const FName MenuName, FToolMenuContext& ToolMenuContext) const override;
+
 	virtual TSharedRef<SWidget> MakeDeveloperTools( const TArray<FMainFrameDeveloperTool>& AdditionalTools ) const override;
 
 	virtual bool IsWindowInitialized( ) const override
@@ -115,6 +140,16 @@ public:
 		return MainFrameSDKNotInstalled.Broadcast(PlatformName, DocLink);
 	}
 
+	DECLARE_DERIVED_EVENT(FMainFrameModule, IMainFrameModule::FMainFrameRequestResource, FMainFrameRequestResource);
+	virtual FMainFrameRequestResource& OnMainFrameRequestResource() override
+	{
+		return MainFrameRequestResource;
+	}
+	void BroadcastMainFrameRequestResource(const FString& Category, const FString& ResourceName) override
+	{
+		return MainFrameRequestResource.Broadcast(Category, ResourceName);
+	}
+
 	virtual void EnableDelayedShowMainFrame() override
 	{
 		bDelayedShowMainFrame = true;
@@ -154,6 +189,18 @@ public:
 		return true;
 	}
 
+	virtual void SetEditorSettingsDefaultSelectionOverride(FName CategoryName = FName(), FName SectionName = FName()) override
+	{
+		EditorSettingsDefaultCategoryOverride = CategoryName;
+		EditorSettingsDefaultSectionOverride = SectionName;
+	}
+
+	virtual void GetEditorSettingsDefaultSelectionOverride(FName& OutCategoryName, FName& OutSectionName) override
+	{
+		OutCategoryName = EditorSettingsDefaultCategoryOverride;
+		OutSectionName = EditorSettingsDefaultSectionOverride;
+	}
+
 public:
 
 	// IModuleInterface interface
@@ -166,21 +213,12 @@ public:
 		return true; // @todo: Eventually, this should probably not be allowed.
 	}
 
-protected:
-
-	/**
-	 * Checks whether the project dialog should be shown at startup.
-	 *
-	 * The project dialog should be shown if the Editor was started without a game specified.
-	 *
-	 * @return true if the project dialog should be shown, false otherwise.
-	 */
-	bool ShouldShowProjectDialogAtStartup( ) const;
+	static void HandleResizeMainFrameCommand(const TArray<FString>& Args);
 
 public:
 
 	/** Get the size of the project browser window */
-	static FVector2D GetProjectBrowserWindowSize() { return FVector2D(1100, 740); }
+	static FVector2D GetProjectBrowserWindowSize() { return FVector2D(1190, 822); }
 
 private:
 
@@ -193,8 +231,8 @@ private:
 	// Handles the level editor module finishing to recompile.
 	void HandleLevelEditorModuleCompileFinished( const FString& LogDump, ECompilationResult::Type CompilationResult, bool bShowLog );
 
-	/** Called when Hot Reload completes */
-	void HandleHotReloadFinished( bool bWasTriggeredAutomatically );
+	/** Called when Reload completes */
+	void HandleReloadFinished( EReloadCompleteReason Reason );
 
 	// Handles the code accessor having finished launching its editor
 	void HandleCodeAccessorLaunched( const bool WasSuccessful );
@@ -210,7 +248,6 @@ private:
 	{
 		DelayedShowMainFrameDelegate.Unbind();
 	}
-
 private:
 
 	// Weak pointer to the level editor's compile notification item.
@@ -222,11 +259,20 @@ private:
 	// Override window title, or empty to not override
 	FText OverriddenWindowTitle;
 
+	// Overrides the category that gets selected by default when opening editor settings
+	FName EditorSettingsDefaultCategoryOverride;
+
+	// Overrides the section that gets selected by default when editor settings
+	FName EditorSettingsDefaultSectionOverride;
+
 	/// Event to be called when the mainframe is fully created.
 	FMainFrameCreationFinishedEvent MainFrameCreationFinishedEvent;
 
 	/// Event to be called when the editor tried to use a platform, but it wasn't installed
 	FMainFrameSDKNotInstalled MainFrameSDKNotInstalled;
+
+	/// Event to be called to make an open-ended request for a resource from any registered listeners
+	FMainFrameRequestResource MainFrameRequestResource;
 
 	// Commands used by main frame in menus and key bindings.
 	TSharedPtr<class FMainFrameCommands> MainFrameActions;
@@ -251,6 +297,10 @@ private:
 
 	// Allow delaying when to show main frame's window
 	bool bDelayedShowMainFrame;
-};
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
+	// Is recreating Default Main Frame
+	bool bRecreatingDefaultMainFrame;
+
+	// Instantiation of the object responsible for spawning the editor's project dialog on startup
+	FProjectDialogProvider ProjectDialogProvider;
+};

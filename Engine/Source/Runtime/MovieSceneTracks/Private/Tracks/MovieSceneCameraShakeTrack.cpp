@@ -2,13 +2,11 @@
 
 #include "Tracks/MovieSceneCameraShakeTrack.h"
 #include "Sections/MovieSceneCameraShakeSection.h"
-#include "Evaluation/PersistentEvaluationData.h"
-#include "Evaluation/MovieSceneCameraAnimTemplate.h"
-#include "Evaluation/MovieSceneEvaluationTrack.h"
-#include "Evaluation/MovieSceneEvaluationTemplate.h"
 #include "Compilation/MovieSceneSegmentCompiler.h"
 #include "Compilation/MovieSceneCompilerRules.h"
 #include "MovieScene.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieSceneCameraShakeTrack)
 
 #define LOCTEXT_NAMESPACE "MovieSceneCameraShakeTrack"
 
@@ -37,15 +35,6 @@ FText UMovieSceneCameraShakeTrack::GetDisplayName() const
 }
 #endif
 
-FMovieSceneEvalTemplatePtr UMovieSceneCameraShakeTrack::CreateTemplateForSection(const UMovieSceneSection& InSection) const
-{
-	const UMovieSceneCameraShakeSection* CameraShakeSection = CastChecked<const UMovieSceneCameraShakeSection>(&InSection);
-	if (*CameraShakeSection->ShakeData.ShakeClass)
-	{
-		return FMovieSceneCameraShakeSectionTemplate(*CameraShakeSection);
-	}
-	return FMovieSceneEvalTemplatePtr();
-}
 
 /* UMovieSceneTrack interface
 *****************************************************************************/
@@ -105,3 +94,4 @@ bool UMovieSceneCameraShakeTrack::IsEmpty() const
 
 
 #undef LOCTEXT_NAMESPACE
+

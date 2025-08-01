@@ -11,27 +11,25 @@ namespace MovieScene
 
 TAutoRegisterPreAnimatedStorageID<FAnimTypePreAnimatedStateObjectStorage> FAnimTypePreAnimatedStateObjectStorage::StorageID;
 
-void FAnimTypePreAnimatedStateObjectStorage::Initialize(FPreAnimatedStorageID InStorageID, FPreAnimatedStateExtension* InParentExtension)
+FPreAnimatedStateEntry FAnimTypePreAnimatedStateObjectStorage::FindEntry(UObject* Object, FMovieSceneAnimTypeID AnimTypeID)
 {
-	TPreAnimatedStateStorage<FPreAnimatedObjectTokenTraits>::Initialize(InStorageID, InParentExtension);
+	FPreAnimatedObjectTokenTraits::KeyType Key{ Object, AnimTypeID };
 
-	ObjectGroupManager = InParentExtension->GetOrCreateGroupManager<FPreAnimatedObjectGroupManager>();
-}
+	// Begin by finding or creating a pre-animated state group for this bound object
+	FPreAnimatedStorageGroupHandle Group = this->Traits.FindGroup(Object);
 
-void FAnimTypePreAnimatedStateObjectStorage::OnObjectReplaced(FPreAnimatedStorageIndex StorageIndex, const FObjectKey& OldObject, const FObjectKey& NewObject)
-{
-	FPreAnimatedObjectTokenTraits::FAnimatedKey ExistingKey = GetKey(StorageIndex);
-	ExistingKey.BoundObject = NewObject;
+	// Find the storage index for the specific anim-type and object we're animating
+	FPreAnimatedStorageIndex StorageIndex = FindStorageIndex(Key);
 
-	ReplaceKey(StorageIndex, ExistingKey);
+	return FPreAnimatedStateEntry{ Group, FPreAnimatedStateCachedValueHandle{ StorageID, StorageIndex } };
 }
 
 FPreAnimatedStateEntry FAnimTypePreAnimatedStateObjectStorage::MakeEntry(UObject* Object, FMovieSceneAnimTypeID AnimTypeID)
 {
-	FPreAnimatedObjectTokenTraits::FAnimatedKey Key{ Object, AnimTypeID };
+	FPreAnimatedObjectTokenTraits::KeyType Key{ Object, AnimTypeID };
 
 	// Begin by finding or creating a pre-animated state group for this bound object
-	FPreAnimatedStorageGroupHandle Group = ObjectGroupManager->MakeGroupForObject(Object);
+	FPreAnimatedStorageGroupHandle Group = this->Traits.MakeGroup(Object);
 
 	// Find the storage index for the specific anim-type and object we're animating
 	FPreAnimatedStorageIndex StorageIndex = GetOrCreateStorageIndex(Key);

@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "LevelEditorPlaySettingsCustomization.h"
+#include "Settings/LevelEditorPlaySettingsCustomization.h"
 
 #include "Misc/Attribute.h"
 #include "Layout/Margin.h"
@@ -23,7 +23,7 @@
 #include "IDetailPropertyRow.h"
 #include "DetailWidgetRow.h"
 #include "Widgets/Input/SComboBox.h"
-#include "Runtime/Engine/Classes/Sound/AudioSettings.h"
+#include "Sound/AudioSettings.h"
 #include "DeviceProfiles/DeviceProfileManager.h"
 #include "DeviceProfiles/DeviceProfile.h"
 #include "ToolMenus.h"
@@ -271,9 +271,9 @@ const FSlateBrush* SScreenResolutionCustomization::GetAspectRatioSwitchImage() c
 	int32 Width = FCString::Atoi( *WidthString );
 	if ( Height > Width )
 	{
-		return FEditorStyle::Get().GetBrush( "UMGEditor.OrientPortrait" );
+		return FAppStyle::Get().GetBrush( "UMGEditor.OrientPortrait" );
 	}
-	return FEditorStyle::Get().GetBrush( "UMGEditor.OrientLandscape" );
+	return FAppStyle::Get().GetBrush( "UMGEditor.OrientLandscape" );
 }
 
 void SScreenResolutionCustomization::OnSizeChanged()
@@ -525,7 +525,7 @@ FText FLevelEditorPlaySettingsCustomization::HandleMultiplayerOptionsDescription
 	FString Desc;
 	if ( CanRunUnderOneProcess )
 	{
-		Desc += LOCTEXT( "MultiplayerDescription_OneProcess", "The following will all run under one UE4 instance:\n" ).ToString();
+		Desc += LOCTEXT( "MultiplayerDescription_OneProcess", "The following will all run under one UE instance:\n" ).ToString();
 		if ( PlayNetMode == EPlayNetMode::PIE_Client )
 		{
 			Desc += LOCTEXT( "MultiplayerDescription_DedicatedServerHidden", "A hidden dedicated server instance will run in editor. " ).ToString();
@@ -568,7 +568,7 @@ FText FLevelEditorPlaySettingsCustomization::HandleMultiplayerOptionsDescription
 	}
 	else
 	{
-		Desc += LOCTEXT( "MultiplayerDescription_MultiProcess", "The following will run with multiple UE4 instances:\n" ).ToString();
+		Desc += LOCTEXT( "MultiplayerDescription_MultiProcess", "The following will run with multiple UE instances:\n" ).ToString();
 		if ( PlayNetMode == PIE_Standalone )
 		{
 			if ( PlayNumberOfClients == 1 )

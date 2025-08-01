@@ -18,83 +18,90 @@ class FSlateWindowElementList;
 /**
  * Canvas is a layout widget that allows you to arbitrary position and size child widgets in a relative coordinate space
  */
-class SLATE_API SCanvas
-	: public SPanel
+class SCanvas : public SPanel
 {
+	SLATE_DECLARE_WIDGET_API(SCanvas, SPanel, SLATE_API)
+
 public:
 
 	/**
 	 * Canvas slots allow child widgets to be positioned and sized
+	 *
+	 * Horizontal Alignment 
+	 *  Given a top aligned slot, where '+' represents the 
+	 *  anchor point defined by PositionAttr.
+	 *  
+	 *   Left				Center				Right
+	 *	+ _ _ _ _            _ _ + _ _          _ _ _ _ +
+	 *	|		  |		   | 		   |	  |		    |
+	 *	| _ _ _ _ |        | _ _ _ _ _ |	  | _ _ _ _ |
+	 * 
+	 *  Note: FILL is NOT supported.
+	 *
+	 * Vertical Alignment 
+	 *   Given a left aligned slot, where '+' represents the 
+	 *   anchor point defined by PositionAttr.
+	 *  
+	 *   Top				Center			  Bottom
+	 *	+_ _ _ _ _          _ _ _ _ _		 _ _ _ _ _ 
+	 *	|		  |		   | 		 |		|		  |
+	 *	| _ _ _ _ |        +		 |		|		  |
+	 *					   | _ _ _ _ |		+ _ _ _ _ |
+	 * 
+	 *  Note: FILL is NOT supported.
 	 */
-	class FSlot : public TSlotBase<FSlot>
+	class FSlot : public TWidgetSlotWithAttributeSupport<FSlot>, public TAlignmentWidgetSlotMixin<FSlot>
 	{
-	public:		
-		FSlot& Position( const TAttribute<FVector2D>& InPosition )
+	public:
+		SLATE_SLOT_BEGIN_ARGS_OneMixin(FSlot, TSlotBase<FSlot>, TAlignmentWidgetSlotMixin<FSlot>)
+			SLATE_ATTRIBUTE(FVector2D, Position)
+			SLATE_ATTRIBUTE(FVector2D, Size)
+		SLATE_SLOT_END_ARGS()
+
+		void SetPosition( TAttribute<FVector2D> InPosition )
 		{
-			PositionAttr = InPosition;
-			return *this;
+			Position.Assign(*this, MoveTemp(InPosition));
+		}
+		FVector2D GetPosition() const
+		{
+			return Position.Get();
 		}
 
-		FSlot& Size( const TAttribute<FVector2D>& InSize )
+		void SetSize( TAttribute<FVector2D> InSize )
 		{
-			SizeAttr = InSize;
-			return *this;
+			Size.Assign(*this, MoveTemp(InSize));
+		}
+		FVector2D GetSize() const
+		{
+			return Size.Get();
 		}
 
-		FSlot& HAlign( EHorizontalAlignment InHAlignment )
-		{
-			HAlignment = InHAlignment;
-			return *this;
-		}
+	public:
+#if WITH_EDITORONLY_DATA
+		UE_DEPRECATED(5.0, "Direct access to PositionAttr is now deprecated. Use the getter or setter.")
+		TSlateDeprecatedTAttribute<FVector2D> PositionAttr;
+		UE_DEPRECATED(5.0, "Direct access to SizeAttr is now deprecated. Use the getter or setter.")
+		TSlateDeprecatedTAttribute<FVector2D> SizeAttr;
+#endif
 
-		FSlot& VAlign( EVerticalAlignment InVAlignment )
-		{
-			VAlignment = InVAlignment;
-			return *this;
-		}
-
-		/** Position */
-		TAttribute<FVector2D> PositionAttr;
-
-		/** Size */
-		TAttribute<FVector2D> SizeAttr;
-
-		/** Horizontal Alignment 
-		*  Given a top aligned slot, where '+' represents the 
-		*  anchor point defined by PositionAttr.
-		*  
-		*   Left				Center				Right
-			+ _ _ _ _            _ _ + _ _          _ _ _ _ +
-			|		  |		   | 		   |	  |		    |
-			| _ _ _ _ |        | _ _ _ _ _ |	  | _ _ _ _ |
-		* 
-		*  Note: FILL is NOT supported.
-		*/
-		EHorizontalAlignment HAlignment;
-
-		/** Vertical Alignment 
-		*   Given a left aligned slot, where '+' represents the 
-		*   anchor point defined by PositionAttr.
-		*  
-		*   Top					Center			  Bottom
-		*	+_ _ _ _ _          _ _ _ _ _		 _ _ _ _ _ 
-		*	|		  |		   | 		 |		|		  |
-		*	| _ _ _ _ |        +		 |		|		  |
-		*					   | _ _ _ _ |		+ _ _ _ _ |
-		* 
-		*  Note: FILL is NOT supported.
-		*/
-		EVerticalAlignment VAlignment;
-
-
+	public:
 		/** Default values for a slot. */
 		FSlot()
-			: TSlotBase<FSlot>()
-			, PositionAttr( FVector2D::ZeroVector )
-			, SizeAttr( FVector2D( 1.0f, 1.0f ) )
-			, HAlignment(HAlign_Left)
-			, VAlignment(VAlign_Top)
+			: TWidgetSlotWithAttributeSupport<FSlot>()
+			, TAlignmentWidgetSlotMixin<FSlot>(HAlign_Left, VAlign_Top)
+			, Position(*this, FVector2D::ZeroVector)
+			, Size(*this, FVector2D(1.0f, 1.0f))
 		{ }
+
+		SLATE_API void Construct(const FChildren& SlotOwner, FSlotArguments&& InArg);
+		static SLATE_API void RegisterAttributes(FSlateWidgetSlotAttributeInitializer& AttributeInitializer);
+
+	private:
+		/** Position */
+		TSlateSlotAttribute<FVector2D> Position;
+
+		/** Size */
+		TSlateSlotAttribute<FVector2D> Size;
 	};
 
 	SLATE_BEGIN_ARGS( SCanvas )
@@ -102,60 +109,52 @@ public:
 			_Visibility = EVisibility::SelfHitTestInvisible;
 		}
 
-		SLATE_SUPPORTS_SLOT( SCanvas::FSlot )
+		SLATE_SLOT_ARGUMENT( FSlot, Slots )
 
 	SLATE_END_ARGS()
 
-	SCanvas();
+	SLATE_API SCanvas();
 
 	/**
 	 * Construct this widget
 	 *
 	 * @param	InArgs	The declaration data for this widget
 	 */
-	void Construct( const FArguments& InArgs );
+	SLATE_API void Construct( const FArguments& InArgs );
 
-	static FSlot& Slot()
-	{
-		return *(new FSlot());
-	}
+	static SLATE_API FSlot::FSlotArguments Slot();
 
+	using FScopedWidgetSlotArguments = TPanelChildren<FSlot>::FScopedWidgetSlotArguments;
 	/**
 	 * Adds a content slot.
 	 *
 	 * @return The added slot.
 	 */
-	FSlot& AddSlot()
-	{
-		SCanvas::FSlot& NewSlot = *new FSlot();
-		this->Children.Add( &NewSlot );
-		return NewSlot;
-	}
+	SLATE_API FScopedWidgetSlotArguments AddSlot();
 
 	/**
 	 * Removes a particular content slot.
 	 *
 	 * @param SlotWidget The widget in the slot to remove.
 	 */
-	int32 RemoveSlot( const TSharedRef<SWidget>& SlotWidget );
+	SLATE_API int32 RemoveSlot( const TSharedRef<SWidget>& SlotWidget );
 
 	/**
 	 * Removes all slots from the panel.
 	 */
-	void ClearChildren();
+	SLATE_API void ClearChildren();
 
 public:
 
-	// SWidget overrides
-
-	virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
-	virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
-	virtual FChildren* GetChildren() override;
+	//~ SWidget overrides
+	SLATE_API virtual void OnArrangeChildren( const FGeometry& AllottedGeometry, FArrangedChildren& ArrangedChildren ) const override;
+	SLATE_API virtual int32 OnPaint( const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled ) const override;
+	SLATE_API virtual FChildren* GetChildren() override;
 
 protected:
-	// Begin SWidget overrides.
-	virtual FVector2D ComputeDesiredSize(float) const override;
-	// End SWidget overrides.
+	//~ Begin SWidget overrides.
+	SLATE_API virtual FVector2D ComputeDesiredSize(float) const override;
+	//~ End SWidget overrides.
 
 protected:
 

@@ -2,19 +2,20 @@
 
 
 #include "SDetailNameArea.h"
-#include "Components/ActorComponent.h"
-#include "Modules/ModuleManager.h"
-#include "Misc/PackageName.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
-#include "Engine/World.h"
+
 #include "AssetSelection.h"
-#include "Styling/SlateIconFinder.h"
-#include "EditorWidgetsModule.h"
+#include "Components/ActorComponent.h"
 #include "EditorClassUtils.h"
+#include "Styling/AppStyle.h"
+#include "EditorWidgetsModule.h"
+#include "Engine/World.h"
+#include "Misc/PackageName.h"
+#include "Modules/ModuleManager.h"
+#include "Styling/SlateIconFinder.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SDetailsView"
 
@@ -24,63 +25,59 @@ void SDetailNameArea::Construct( const FArguments& InArgs, const TArray< TWeakOb
 	IsLocked = InArgs._IsLocked;
 	SelectionTip = InArgs._SelectionTip;
 	bShowLockButton = InArgs._ShowLockButton;
-	bShowActorLabel = InArgs._ShowActorLabel;
+	bShowObjectLabel = InArgs._ShowObjectLabel;
+	CustomContent = SNullWidget::NullWidget;
 }
 
-void SDetailNameArea::Refresh( const TArray< TWeakObjectPtr<UObject> >& SelectedObjects )
+void SDetailNameArea::Refresh( const TArray< TWeakObjectPtr<UObject> >& SelectedObjects, int32 NameAreaSettings )
 {
-	ChildSlot
-	[
-		BuildObjectNameArea( SelectedObjects )
-	];
-}
-
-void SDetailNameArea::Refresh( const TArray< TWeakObjectPtr<AActor> >& SelectedActors, const TArray< TWeakObjectPtr<UObject> >& SelectedObjects, FDetailsViewArgs::ENameAreaSettings NameAreaSettings  )
-{
-	// Convert the actor array to base object type
-
 	TArray< TWeakObjectPtr<UObject> > FinalSelectedObjects;
-	if(NameAreaSettings == FDetailsViewArgs::ActorsUseNameArea)
+	FinalSelectedObjects.Reserve(SelectedObjects.Num());
+
+	// Apply the name area filter in priority order
+	if ((NameAreaSettings & FDetailsViewArgs::ActorsUseNameArea) && FinalSelectedObjects.Num() == 0)
 	{
-		for(auto Actor : SelectedActors)
+		for (const TWeakObjectPtr<UObject>& Object : SelectedObjects)
 		{
-			const TWeakObjectPtr<UObject> ObjectWeakPtr = Actor.Get();
-			FinalSelectedObjects.Add(ObjectWeakPtr);
+			if (AActor* Actor = Cast<AActor>(Object.Get()))
+			{
+				FinalSelectedObjects.Add(Actor);
+			}
 		}
 	}
-	else if( NameAreaSettings == FDetailsViewArgs::ComponentsAndActorsUseNameArea )
+	if ((NameAreaSettings & FDetailsViewArgs::ComponentsAndActorsUseNameArea) && FinalSelectedObjects.Num() == 0)
 	{
-		for(auto Actor : SelectedActors)
+		for (const TWeakObjectPtr<UObject>& Object : SelectedObjects)
 		{
-			const TWeakObjectPtr<UObject> ObjectWeakPtr = Actor.Get();
-			FinalSelectedObjects.Add(ObjectWeakPtr);
-		}
-
-		// Note: assumes that actors and components are not selected together.
-		if( FinalSelectedObjects.Num() == 0 )
-		{
-			for(auto Object : SelectedObjects)
+			if (UActorComponent* ActorComp = Cast<UActorComponent>(Object.Get()))
 			{
-				UActorComponent* ActorComp = Cast<UActorComponent>(Object.Get());
-				if(ActorComp && ActorComp->GetOwner())
+				if (AActor* Actor = ActorComp->GetOwner())
 				{
-					FinalSelectedObjects.AddUnique(ActorComp->GetOwner());
+					FinalSelectedObjects.AddUnique(Actor);
 				}
 			}
 		}
 	}
-	Refresh( FinalSelectedObjects );
+	if ((NameAreaSettings & FDetailsViewArgs::ObjectsUseNameArea) && FinalSelectedObjects.Num() == 0)
+	{
+		FinalSelectedObjects = SelectedObjects;
+	}
+
+	ChildSlot
+	[
+		BuildObjectNameArea( FinalSelectedObjects )
+	];
 }
 
 const FSlateBrush* SDetailNameArea::OnGetLockButtonImageResource() const
 {
 	if( IsLocked.Get() )
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.Locked"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.Locked"));
 	}
 	else
 	{
-		return FEditorStyle::GetBrush(TEXT("PropertyWindow.Unlocked"));
+		return FAppStyle::GetBrush(TEXT("PropertyWindow.Unlocked"));
 	}
 }
 
@@ -118,7 +115,7 @@ TSharedRef< SWidget > SDetailNameArea::BuildObjectNameArea( const TArray< TWeakO
 		.AutoWidth()
 		.HAlign(HAlign_Left)
 		.VAlign(VAlign_Center)
-		.Padding(0,0,6,0)
+		.Padding(0.0f)
 		[
 			SNew(SImage)
 			.Image(ActorIcon)
@@ -131,14 +128,14 @@ TSharedRef< SWidget > SDetailNameArea::BuildObjectNameArea( const TArray< TWeakO
 	const int32 NumSelectedSurfaces = AssetSelectionUtils::GetNumSelectedSurfaces( GWorld );
 	if( SelectedObjects.Num() > 0 )
 	{
-		if ( bShowActorLabel )
+		if ( bShowObjectLabel )
 		{
 			FEditorWidgetsModule& EdWidgetsModule = FModuleManager::LoadModuleChecked<FEditorWidgetsModule>(TEXT("EditorWidgets"));
 			TSharedRef<IObjectNameEditableTextBox> ObjectNameBox = EdWidgetsModule.CreateObjectNameEditableTextBox(SelectedObjects);
 
 			ObjectNameArea->AddSlot()
-				.AutoWidth()
-				.Padding(0, 0, 3, 0)
+				.FillWidth(1.0f)
+				.Padding(8.0f, 0.0f, 3.0f, 0.0f)
 				[
 					SNew(SBox)
 					.WidthOverride(200.0f)
@@ -152,18 +149,31 @@ TSharedRef< SWidget > SDetailNameArea::BuildObjectNameArea( const TArray< TWeakO
 		const TWeakObjectPtr< UObject > ObjectWeakPtr = SelectedObjects.Num() == 1 ? SelectedObjects[0] : NULL;
 		BuildObjectNameAreaSelectionLabel( ObjectNameArea, ObjectWeakPtr, SelectedObjects.Num() );
 
+		ObjectNameArea->AddSlot()
+		.Expose(CustomContentSlot)
+		.AutoWidth()
+		[
+			CustomContent.ToSharedRef()
+		];
+
 		if( bShowLockButton )
 		{
 			ObjectNameArea->AddSlot()
 				.HAlign(HAlign_Right)
-				.FillWidth(1.0f)
+				.VAlign(VAlign_Center)
+				.Padding(4.0f,0.0f,4.0f,0.0f)
+				.AutoWidth()
 				[
 					SNew( SButton )
-					.ButtonStyle( FEditorStyle::Get(), "NoBorder" )
+					.ButtonStyle( FAppStyle::Get(), "SimpleButton" )
 					.OnClicked(	OnLockButtonClicked )
+					.ContentPadding(FMargin(4,2))
+					.HAlign(HAlign_Center)
+					.VAlign(VAlign_Center)
 					.ToolTipText( LOCTEXT("LockSelectionButton_ToolTip", "Locks the current selection into the Details panel") )
 					[
 						SNew( SImage )
+						.ColorAndOpacity(FSlateColor::UseForeground())
 						.Image( this, &SDetailNameArea::OnGetLockButtonImageResource )
 					]
 				];
@@ -180,7 +190,7 @@ TSharedRef< SWidget > SDetailNameArea::BuildObjectNameArea( const TArray< TWeakO
 			[
 				SNew( STextBlock )
 				.Text( LOCTEXT("NoObjectsSelected", "Select an object to view details.") )
-				.ShadowOffset( FVector2D(1,1) )
+				.TextStyle( FAppStyle::Get(), "HintText")
 			];
 		}
 		else
@@ -197,45 +207,7 @@ void SDetailNameArea::BuildObjectNameAreaSelectionLabel( TSharedRef< SHorizontal
 {
 	check( NumSelectedObjects > 1 || ObjectWeakPtr.IsValid() );
 
-	if( NumSelectedObjects == 1 )
-	{
-		UClass* ObjectClass = ObjectWeakPtr.Get()->GetClass();
-		if( ObjectClass != nullptr )
-		{
-			SelectionLabelBox->AddSlot()
-				.AutoWidth()
-				.VAlign( VAlign_Center )
-				.HAlign( HAlign_Left )
-				.Padding( 1.0f, 1.0f, 0.0f, 0.0f )
-				[
-					FEditorClassUtils::GetDocumentationLinkWidget(ObjectClass)
-				];
-
-
-			if( ObjectClass && ObjectClass->ClassGeneratedBy == nullptr && ObjectClass->GetOutermost() )
-			{
-				const FString ModuleName = FPackageName::GetShortName(ObjectClass->GetOutermost()->GetFName());
-
-				FModuleStatus PackageModuleStatus;
-				if(FModuleManager::Get().QueryModule(*ModuleName, PackageModuleStatus))
-				{
-					if( PackageModuleStatus.bIsGameModule ) 
-					{
-						SelectionLabelBox->AddSlot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.HAlign(HAlign_Left)
-						.Padding(6.0f, 1.0f, 0.0f, 0.0f)
-						[
-							FEditorClassUtils::GetSourceLink(ObjectClass, ObjectWeakPtr)
-						];
-					}
-				}
-			}
-		
-		}
-	}
-	else
+	if (NumSelectedObjects > 1)
 	{
 		const FText SelectionText = FText::Format( LOCTEXT("MultipleObjectsSelectedFmt", "{0} objects"), FText::AsNumber(NumSelectedObjects) );
 		SelectionLabelBox->AddSlot()
@@ -246,10 +218,21 @@ void SDetailNameArea::BuildObjectNameAreaSelectionLabel( TSharedRef< SHorizontal
 			SNew(STextBlock)
 			.Text( SelectionText )
 		];
-
 	}
 }
 
+
+void SDetailNameArea::SetCustomContent(TSharedRef<SWidget>& InCustomContent)
+{
+	CustomContent = InCustomContent;
+
+	if (CustomContentSlot != nullptr)
+	{
+		SHorizontalBox::FSlot& T = *CustomContentSlot;
+		T[InCustomContent];
+	}
+
+}
 
 #undef LOCTEXT_NAMESPACE
 

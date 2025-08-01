@@ -10,6 +10,7 @@ public abstract class DatasmithRevitBaseTarget : TargetRules
 		: base(Target)
 	{
 		Type = TargetType.Program;
+		IncludeOrderVersion = EngineIncludeOrderVersion.Latest;
 		SolutionDirectory = "Programs/Datasmith";
 		bBuildInSolutionByDefault = false;
 
@@ -24,7 +25,6 @@ public abstract class DatasmithRevitBaseTarget : TargetRules
 		LinkType = TargetLinkType.Monolithic;
 
 		bBuildDeveloperTools = false;
-		bUseMallocProfiler = false;
 		bBuildWithEditorOnlyData = true;
 		bCompileAgainstEngine = false;
 		bCompileAgainstCoreUObject = true;

@@ -4,46 +4,122 @@
 
 #include "CoreTypes.h"
 #include "Misc/AssertionMacros.h"
-#include "Containers/Array.h" // TIndexedContainerIterator
 #include "Containers/ArrayView.h"
 #include "Templates/IsPODType.h"
-#include "Templates/IsTriviallyDestructible.h"
 #include "Templates/MemoryOps.h"
 #include "Templates/UnrealTemplate.h"
 
-// PUBLIC_RINGBUFFER_TODO: Move TMakeSigned and TMakeUnsigned into MakeSigned.h
-template <typename T>
-struct TMakeSigned
+#include <type_traits>
+
+template< typename ContainerType, typename ElementType, typename SizeType>
+class TRingBufferIterator
 {
-	static_assert(sizeof(T) == 0, "Unsupported type in TMakeSigned<T>.");
+public:
+	TRingBufferIterator(ContainerType& InContainer, SizeType StartIndex = 0)
+		: Container(InContainer)
+		, Index(StartIndex)
+	{
+	}
+
+	/** Advances iterator to the next element in the container. */
+	TRingBufferIterator& operator++()
+	{
+		++Index;
+		return *this;
+	}
+	TRingBufferIterator operator++(int)
+	{
+		TRingBufferIterator Tmp(*this);
+		++Index;
+		return Tmp;
+	}
+
+	/** Moves iterator to the previous element in the container. */
+	TRingBufferIterator& operator--()
+	{
+		--Index;
+		return *this;
+	}
+	TRingBufferIterator operator--(int)
+	{
+		TRingBufferIterator Tmp(*this);
+		--Index;
+		return Tmp;
+	}
+
+	/** iterator arithmetic support */
+	TRingBufferIterator& operator+=(SizeType Offset)
+	{
+		Index += Offset;
+		return *this;
+	}
+
+	TRingBufferIterator operator+(SizeType Offset) const
+	{
+		TRingBufferIterator Tmp(*this);
+		return Tmp += Offset;
+	}
+
+	TRingBufferIterator& operator-=(SizeType Offset)
+	{
+		return *this += -Offset;
+	}
+
+	TRingBufferIterator operator-(SizeType Offset) const
+	{
+		TRingBufferIterator Tmp(*this);
+		return Tmp -= Offset;
+	}
+
+	FORCEINLINE ElementType& operator* () const
+	{
+		return Container[Index];
+	}
+
+	FORCEINLINE ElementType* operator->() const
+	{
+		return &Container[Index];
+	}
+
+	/** conversion to "bool" returning true if the iterator has not reached the last element. */
+	FORCEINLINE explicit operator bool() const
+	{
+		return Container.IsValidIndex(Index);
+	}
+
+	/** Returns an index to the current element. */
+	SizeType GetIndex() const
+	{
+		return Index;
+	}
+
+	/** Resets the iterator to the first element. */
+	void Reset()
+	{
+		Index = 0;
+	}
+
+	/** Sets the iterator to one past the last element. */
+	void SetToEnd()
+	{
+		Index = Container.Num();
+	}
+
+	/** Removes current element in array. This invalidates the current iterator value and it must be incremented */
+	void RemoveCurrent()
+	{
+		Container.RemoveAt(Index);
+		Index--;
+	}
+
+	FORCEINLINE bool operator==(const TRingBufferIterator& Rhs) const { return &Container == &Rhs.Container && Index == Rhs.Index; }
+	FORCEINLINE bool operator!=(const TRingBufferIterator& Rhs) const { return &Container != &Rhs.Container || Index != Rhs.Index; }
+
+private:
+
+	ContainerType& Container;
+	SizeType      Index;
 };
-template <typename T> struct TMakeSigned<const          T> { using Type = const          typename TMakeSigned<T>::Type; };
-template <typename T> struct TMakeSigned<      volatile T> { using Type =       volatile typename TMakeSigned<T>::Type; };
-template <typename T> struct TMakeSigned<const volatile T> { using Type = const volatile typename TMakeSigned<T>::Type; };
-template <> struct TMakeSigned<int8>   { using Type = int8; };
-template <> struct TMakeSigned<uint8>  { using Type = int8; };
-template <> struct TMakeSigned<int16>  { using Type = int16; };
-template <> struct TMakeSigned<uint16> { using Type = int16; };
-template <> struct TMakeSigned<int32>  { using Type = int32; };
-template <> struct TMakeSigned<uint32> { using Type = int32; };
-template <> struct TMakeSigned<int64>  { using Type = int64; };
-template <> struct TMakeSigned<uint64> { using Type = int64; };
-template <typename T>
-struct TMakeUnsigned
-{
-	static_assert(sizeof(T) == 0, "Unsupported type in TMakeUnsigned<T>.");
-};
-template <typename T> struct TMakeUnsigned<const          T> { using Type = const          typename TMakeUnsigned<T>::Type; };
-template <typename T> struct TMakeUnsigned<      volatile T> { using Type =       volatile typename TMakeUnsigned<T>::Type; };
-template <typename T> struct TMakeUnsigned<const volatile T> { using Type = const volatile typename TMakeUnsigned<T>::Type; };
-template <> struct TMakeUnsigned<int8>   { using Type = uint8; };
-template <> struct TMakeUnsigned<uint8>  { using Type = uint8; };
-template <> struct TMakeUnsigned<int16>  { using Type = uint16; };
-template <> struct TMakeUnsigned<uint16> { using Type = uint16; };
-template <> struct TMakeUnsigned<int32>  { using Type = uint32; };
-template <> struct TMakeUnsigned<uint32> { using Type = uint32; };
-template <> struct TMakeUnsigned<int64>  { using Type = uint64; };
-template <> struct TMakeUnsigned<uint64> { using Type = uint64; };
 
 /**
  * RingBuffer - an array with a Front and Back pointer and with implicit wraparound to the beginning of the array when reaching the end of the array when iterating from Front to Back
@@ -63,12 +139,12 @@ public:
 	/* The Allocator type being used */
 	typedef AllocatorT Allocator;
 	/** Type used to request values at a given index in the container. */
-	typedef typename TMakeSigned<typename Allocator::SizeType>::Type IndexType;
+	typedef std::make_signed_t<typename Allocator::SizeType> IndexType;
 	/** Type used to communicate size and capacity and counts */
-	typedef typename TMakeUnsigned<typename Allocator::SizeType>::Type SizeType;
+	typedef std::make_unsigned_t<typename Allocator::SizeType> SizeType;
 	/** Iterator type used for ranged-for traversal. */
-	typedef TIndexedContainerIterator<TRingBuffer, ElementType, typename Allocator::SizeType> TIterator;
-	typedef TIndexedContainerIterator<const TRingBuffer, const ElementType, typename Allocator::SizeType> TConstIterator;
+	typedef TRingBufferIterator<TRingBuffer, ElementType, typename Allocator::SizeType> TIterator;
+	typedef TRingBufferIterator<const TRingBuffer, const ElementType, typename Allocator::SizeType> TConstIterator;
 private:
 	/**
 	 * Type used for variables that are indexes into the underlying storage.
@@ -76,7 +152,7 @@ private:
 	 * They may have added on multiples of the capacity due to wrapping around, but will be interpreted as pointing to the value at (value & IndexMask).
 	 * StorageModuloTypes are also allowed to underflow/overflow their integer storage type; the only constraint is that X - Front <= Capacity for all valid indexes and for AfterBack.
 	 */
-	typedef typename TMakeUnsigned<typename Allocator::SizeType>::Type StorageModuloType;
+	typedef std::make_unsigned_t<typename Allocator::SizeType> StorageModuloType;
 public:
 
 	/** Construct Empty Queue with capacity 0. */
@@ -258,6 +334,45 @@ public:
 	ElementType& AddUninitialized_GetRef()
 	{
 		return GetAtIndexNoCheck(AddUninitialized());
+	}
+
+	/**
+	 * Append elements from a range onto the back pointer of the RingBuffer, resizing if necessary.
+	 * Each element is move-constructed into the RingBuffer; source elements may therefore be modified.
+	 */
+	void MoveAppendRange(ElementType* OtherData, SizeType OtherNum)
+	{
+		if (OtherNum == 0)
+		{
+			return;
+		}
+		check(OtherData);
+		const SizeType OldNum = static_cast<SizeType>(Num());
+		const SizeType NewNum = OldNum + OtherNum;
+		checkf(NewNum > OldNum, TEXT("Overflow: Num() == %d, OtherNum == %d, NewNum == %d"), OldNum, OtherNum, NewNum);
+		Reserve(NewNum);
+		const SizeType LocalIndexMask = IndexMask;
+
+		const SizeType MoveRangeStart = AfterBack;
+		const SizeType MoveRangeEnd = AfterBack + OtherNum;
+		const StorageModuloType MaskedMoveRangeStart = MoveRangeStart & LocalIndexMask;
+		const StorageModuloType MaskedMoveRangeEnd = MoveRangeEnd & LocalIndexMask;
+		ElementType* const Data = GetStorage();
+		if (MaskedMoveRangeStart >= MaskedMoveRangeEnd)
+		{
+			// We should not be reaching capacity and overwriting front
+			check(MaskedMoveRangeEnd <= (Front & LocalIndexMask) && (Front & LocalIndexMask) <= MaskedMoveRangeStart);
+			const SizeType FirstMoveCount = (LocalIndexMask + 1 - MaskedMoveRangeStart);
+			MoveConstructItems(Data + MaskedMoveRangeStart, OtherData, FirstMoveCount);
+			MoveConstructItems(Data, OtherData + FirstMoveCount, MaskedMoveRangeEnd);
+		}
+		else
+		{
+			// We should not be reaching capacity and overwriting front
+			check((Front & LocalIndexMask) <= MaskedMoveRangeStart || MaskedMoveRangeEnd <= (Front & LocalIndexMask));
+			MoveConstructItems(Data + MaskedMoveRangeStart, OtherData, OtherNum);
+		}
+		AfterBack += OtherNum;
 	}
 
 	/** Add a new element before the front pointer of the RingBuffer, resizing if necessary.  The new element is move constructed from the argument. Returns the index of the added element. */
@@ -576,7 +691,7 @@ public:
 		{
 			if (!Predicate(Data[ReadIndex & IndexMask]))
 			{
-				if (bDestructElements)
+				if (NeedsDestructElements())
 				{
 					DestructItem(&Data[WriteIndex & IndexMask]);
 				}
@@ -588,7 +703,7 @@ public:
 		AfterBack = WriteIndex;
 
 		SizeType NumDeleted = static_cast<SizeType>(ReadIndex - WriteIndex);
-		if (bDestructElements)
+		if (NeedsDestructElements())
 		{
 			while (WriteIndex != ReadIndex)
 			{
@@ -640,12 +755,23 @@ public:
 		return TArrayView<T>(GetStorage() + MaskedFront, Num());
 	}
 
-private:
-	enum : uint32
+	/**
+	 * Helper function to return the amount of memory allocated by this
+	 * container.
+	 * Only returns the size of allocations made directly by the container, not the elements themselves.
+	 *
+	 * @returns Number of bytes allocated by this container.
+	 */
+	SIZE_T GetAllocatedSize(void) const
 	{
-		bConstructElements = (TIsPODType<T>::Value ? 0U : 1U),
-		bDestructElements = (TIsTriviallyDestructible<T>::Value ? 0U : 1U),
-	};
+		return Max() * sizeof(ElementType);
+	}
+
+private:
+	static constexpr bool NeedsDestructElements()
+	{
+		return !std::is_trivially_destructible_v<T>;
+	}
 
 	/** Set the capacity to the given value and move or copy all elements from the old storage into a new storage with the given capacity.  Assumes the capacity has already been normalized and is greater than or equal to the number of elements in the RingBuffer. */
 	void Reallocate(SizeType NewCapacity)
@@ -726,7 +852,7 @@ private:
 			return;
 		}
 		const StorageModuloType DestructCount = RangeEnd - RangeStart;
-		if (bDestructElements && DestructCount > 0)
+		if (NeedsDestructElements() && DestructCount > 0)
 		{
 			ElementType* Data = GetStorage();
 			const StorageModuloType MaskedRangeStart = RangeStart & IndexMask;
@@ -779,7 +905,7 @@ private:
 
 		ElementType* Data = GetStorage();
 		ElementType Copy(MoveTemp(Data[RangeLast & IndexMask]));
-		if (bDestructElements)
+		if (NeedsDestructElements())
 		{
 			for (StorageModuloType Index = RangeLast; Index != RangeFirst; Index += RangeDirection)
 			{
@@ -835,7 +961,6 @@ private:
 		}
 	}
 
-
 	friend class FRingBufferTest;
 
 	/**
@@ -857,7 +982,7 @@ private:
 	 */
 	StorageModuloType Front;
 	/**
-	 * Pointer to the first location after the back poointer of the RingBuffer; when the RingBuffer is non-empty, one element before this index is the back of the RingBuffer
+	 * Pointer to the first location after the back pointer of the RingBuffer; when the RingBuffer is non-empty, one element before this index is the back of the RingBuffer
 	 * AfterBack is in StorageModulo space.
 	 * Like all values in StorageModulo space, AfterBack is allowed to underflow or overflow its StorageModuloType; it might be 0 and then subtract 1 to wrap around to 0xffffffff, but
 	 * it is always true that (AfterBack - Front) <= capacity.
@@ -866,3 +991,9 @@ private:
 	 */
 	StorageModuloType AfterBack;
 };
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_4
+#include "Templates/IsTriviallyDestructible.h"
+#include "Templates/MakeSigned.h"
+#include "Templates/MakeUnsigned.h"
+#endif

@@ -2,18 +2,30 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/ContainerAllocationPolicies.h"
 #include "Containers/SortedMap.h"
-
-#include "CurveEditorTypes.h"
 #include "CurveEditorScreenSpace.h"
-
+#include "CurveEditorTypes.h"
+#include "HAL/Platform.h"
+#include "Math/NumericLimits.h"
+#include "Math/TransformCalculus2D.h"
+#include "Math/Vector2D.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "Templates/Less.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
+#include "CurveEditorSettings.h"
+#include "CurveDrawInfo.h"
 
 class FCurveEditor;
-class SCurveEditorPanel;
 class FSlateRect;
-struct FCurveDrawParams;
+class FText;
+class SCurveEditorPanel;
+class FCurveModel;
+class SRetainerWidget;
 
 /**
  * This is the base widget type for all views that exist on a curve editor panel. A view may contain 0 or more curves (stored in CurveInfoByID).
@@ -134,6 +146,17 @@ public:
 	 */
 	void ZoomAround(const FVector2D& Amount, double InputOrigin, double OutputOrigin);
 
+	/** This should be called every tick by an owning widget, to see if the cache is valid, which will then recreate it and invalidate widget*/
+	virtual void CheckCacheAndInvalidateIfNeeded();
+
+	UE_DEPRECATED(5.3, "Use UpdateViewToTransformCurves(double InputMin, double InputMax) instead.")
+	virtual void UpdateViewToTransformCurves() {}
+
+	/** Function to make sure to update the view to the transform curves, we need to do this before we cache*/
+	virtual void UpdateViewToTransformCurves(double InputMin, double InputMax) {};
+
+	/** Frame the view vertially by the input and output bounds, peformaing any custom clipping as needed */
+	virtual void FrameVertical(double InOutputMin, double InOutputMax);
 public:
 
 	/**
@@ -196,7 +219,14 @@ public:
 protected:
 
 	/** Gets info about the curves being drawn. Converts actual curves into an abstract series of lines/points/handles/etc. */
-	void GetCurveDrawParams(TArray<FCurveDrawParams>& OutDrawParams) const;
+	void GetCurveDrawParams(TArray<FCurveDrawParams>& OutDrawParams);
+
+	/** Get it for just one curve*/
+	void GetCurveDrawParam(TSharedPtr<FCurveEditor>& CurveEditor, const FCurveModelID& ModelID, FCurveModel* CurveModel,
+		double InputMin, double InputMax, FCurveDrawParams& OutDrawParam) const;
+
+	/** Request a new render from the retainer widget */
+	void RefreshRetainer();
 
 	// ~SWidget interface
 	virtual FVector2D ComputeDesiredSize(float LayoutScaleMultiplier) const override;
@@ -261,4 +291,47 @@ protected:
 	 * @note: Should only be added to or removed from in AddCurve/RemoveCurve. Derived types must only change the FCurveInfo contained within this map.
 	 */
 	TSortedMap<FCurveModelID, FCurveInfo, TInlineAllocator<1>> CurveInfoByID;
+
+	/** Flag enum signifying how the curve cache has changed since it was last generated
+	Note for a data change it may only effect certain data(curves) not every drawn curve*/
+	enum class ECurveCacheFlags : uint8
+	{
+		CheckCurves = 0,       // The cache may be valid need to check each curve to see if they are still valid
+		All = 1 << 0,		   // Get all
+	};
+	/** Curve cache flags that change based upon data or view getting modified*/
+	ECurveCacheFlags CurveCacheFlags;
+
+	/** Curve draw parameters that are re-generated on tick if the cache has changed. We generate them once and then they're used in multiple places per frame. */
+	TArray<FCurveDrawParams> CachedDrawParams;
+
+	/** Set of Cached values we need to check each tick to see if we need to redo cache*/
+	struct FCachedValuesToCheck
+	{
+		/** Serial number cached from FCurveEditor::GetActiveCurvesSerialNumber() on tick */
+		uint32 CachedActiveCurvesSerialNumber;
+
+		/** Serial number bached from CurveEditorSelecstion::GetSerialNumber */
+		uint32 CachedSelectionSerialNumber;
+
+		/** Cached Tangent Visibility*/
+		ECurveEditorTangentVisibility CachedTangentVisibility;
+
+		/** Cached input and output min max values to see if we need to recalc curves, though we need to poll it's safer*/
+		double CachedInputMin, CachedInputMax, CachedOutputMin, CachedOutputMax;
+
+		/** Cached Geometry Size*/
+		FVector2D CachedGeometrySize;
+	};
+
+	FCachedValuesToCheck CachedValues;
+
+	/** Possible pointer to a retainer widget that we may need to force update*/
+	TSharedPtr<SRetainerWidget> RetainerWidget;
+
+public:
+	void SetRetainerWidget(TSharedPtr<SRetainerWidget>& InWidget)
+	{
+		RetainerWidget = InWidget;
+	}
 };

@@ -68,40 +68,56 @@ float FGenericPlatformMath::Atan2(float Y, float X)
 	t0 = t0 * t4 + c[6];
 	t3 = t0 * t3;
 
-	t3 = yAbsBigger ? (0.5f * PI) - t3 : t3;
-	t3 = (X < 0.0f) ? PI - t3 : t3;
+	t3 = yAbsBigger ? (0.5f * UE_PI) - t3 : t3;
+	t3 = (X < 0.0f) ? UE_PI - t3 : t3;
 	t3 = (Y < 0.0f) ? -t3 : t3;
 
 	return t3;
 }
 
-/*FORCENOINLINE*/ float FGenericPlatformMath::Fmod(float X, float Y)
+double FGenericPlatformMath::Atan2(double Y, double X)
 {
-	const float AbsY = fabsf(Y);
-	if (AbsY <= 1.e-8f)
+	if (X == 0.0 && Y == 0.0)
+	{
+		return 0.0;
+	}
+
+	return atan2(Y,X);
+}
+
+float FGenericPlatformMath::Fmod(float X, float Y)
+{
+	const float AbsY = FMath::Abs(Y);
+	if (AbsY <= UE_SMALL_NUMBER) // Note: this constant should match that used by VectorMod() implementations
 	{
 		FmodReportError(X, Y);
-		return 0.f;
+		return 0.0;
 	}
-	const float Div = (X / Y);
-	// All floats where abs(f) >= 2^23 (8388608) are whole numbers so do not need truncation, and avoid overflow in TruncToFloat as they get even larger.
-	const float Quotient = fabsf(Div) < FLOAT_NON_FRACTIONAL ? TruncToFloat(Div) : Div;
-	float IntPortion = Y * Quotient;
 
-	// Rounding and imprecision could cause IntPortion to exceed X and cause the result to be outside the expected range.
-	// For example Fmod(55.8, 9.3) would result in a very small negative value!
-	if (fabsf(IntPortion) > fabsf(X))
+	return fmodf(X, Y);
+}
+
+double FGenericPlatformMath::Fmod(double X, double Y)
+{
+	const double AbsY = FMath::Abs(Y);
+	if (AbsY <= UE_DOUBLE_SMALL_NUMBER) // Note: this constant should match that used by VectorMod() implementations
 	{
-		IntPortion = X;
+		FmodReportError(X, Y);
+		return 0.0;
 	}
 
-	const float Result = X - IntPortion;
-	// Clamp to [-AbsY, AbsY] because of possible failures for very large numbers (>1e10) due to precision loss.
-	// We could instead fall back to stock fmodf() for large values, however this would diverge from the SIMD VectorMod() which has no similar fallback with reasonable performance.
-	return FMath::Clamp(Result, -AbsY, AbsY);
+	return fmod(X, Y);
 }
 
 void FGenericPlatformMath::FmodReportError(float X, float Y)
+{
+	if (Y == 0)
+	{
+		ensureMsgf(Y != 0, TEXT("FMath::FMod(X=%f, Y=%f) : Y is zero, this is invalid and would result in NaN!"), X, Y);
+	}
+}
+
+void FGenericPlatformMath::FmodReportError(double X, double Y)
 {
 	if (Y == 0)
 	{
@@ -122,7 +138,7 @@ namespace CompilerHiddenConstants
 	volatile float Twelve = 12.0f;
 	volatile float Sixteen = 16.0f;
 	volatile float MinusOneE37 = -1.0e37f;
-	volatile float FloatMax = MAX_FLT;
+	volatile float FloatMax = UE_MAX_FLT;
 }
 
 template<class MathPlatform>

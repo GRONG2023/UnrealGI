@@ -5,18 +5,18 @@
 =============================================================================*/
 
 #include "PreviewScene.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
 #include "Misc/ConfigCacheIni.h"
 #include "UObject/Package.h"
 #include "SceneInterface.h"
-#include "Components/MeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "AudioDevice.h"
-#include "Engine/TextureCube.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Components/SkyLightComponent.h"
 #include "Components/LineBatchComponent.h"
 #include "Components/ReflectionCaptureComponent.h"
 #include "GameFramework/GameModeBase.h"
-#include "GameFramework/GameMode.h"
 
 FPreviewScene::FPreviewScene(FPreviewScene::ConstructionValues CVS)
 	: PreviewWorld(nullptr)
@@ -42,7 +42,8 @@ FPreviewScene::FPreviewScene(FPreviewScene::ConstructionValues CVS)
 										.CreateAISystem(false)
 										.ShouldSimulatePhysics(CVS.bShouldSimulatePhysics)
 										.SetTransactional(CVS.bTransactional)
-										.SetDefaultGameMode(CVS.DefaultGameMode));
+										.SetDefaultGameMode(CVS.DefaultGameMode)
+										.ForceUseMovementComponentInNonGameWorld(CVS.bForceUseMovementComponentInNonGameWorld));
 
 	FURL URL = FURL();
 	//URL += TEXT("?SpectatorOnly=1");
@@ -63,7 +64,7 @@ FPreviewScene::FPreviewScene(FPreviewScene::ConstructionValues CVS)
 		{
 			PreviewWorld->SetGameMode(URL);
 
-			AGameMode* Mode = PreviewWorld->GetAuthGameMode<AGameMode>();
+			AGameModeBase* Mode = PreviewWorld->GetAuthGameMode<AGameModeBase>();
 			ensure(Mode);
 		}
 	}
@@ -75,6 +76,7 @@ FPreviewScene::FPreviewScene(FPreviewScene::ConstructionValues CVS)
 		DirectionalLight = NewObject<UDirectionalLightComponent>(GetTransientPackage(), NAME_None, RF_Transient);
 		DirectionalLight->Intensity = CVS.LightBrightness;
 		DirectionalLight->LightColor = FColor::White;
+		DirectionalLight->bTransmission = true;
 		AddComponent(DirectionalLight, FTransform(CVS.LightRotation));
 
 		SkyLight = NewObject<USkyLightComponent>(GetTransientPackage(), NAME_None, RF_Transient);
@@ -88,9 +90,17 @@ FPreviewScene::FPreviewScene(FPreviewScene::ConstructionValues CVS)
 		LineBatcher->bCalculateAccurateBounds = false;
 		AddComponent(LineBatcher, FTransform::Identity);
 	}
+
+	FCoreDelegates::OnEnginePreExit.AddRaw(this, &FPreviewScene::Uninitialize);
 }
 
 FPreviewScene::~FPreviewScene()
+{
+	FCoreDelegates::OnEnginePreExit.RemoveAll(this);
+	Uninitialize();
+}
+
+void FPreviewScene::Uninitialize()
 {
 	// Stop any audio components playing in this scene
 	if (GEngine)
@@ -106,9 +116,9 @@ FPreviewScene::~FPreviewScene()
 	}
 
 	// Remove all the attached components
-	for( int32 ComponentIndex = 0; ComponentIndex < Components.Num(); ComponentIndex++ )
+	for (int32 ComponentIndex = 0; ComponentIndex < Components.Num(); ComponentIndex++)
 	{
-		UActorComponent* Component = Components[ ComponentIndex ];
+		UActorComponent* Component = Components[ComponentIndex];
 
 		if (bForceAllUsedMipsResident)
 		{
@@ -122,14 +132,27 @@ FPreviewScene::~FPreviewScene()
 
 		Component->UnregisterComponent();
 	}
-	
+
+	// Uninitialize can get called from destructor or FCoreDelegates::OnPreExit (or both)
+	// so make sure we empty Components and set PreviewWorld to nullptr
+	Components.Empty();
+		
+	UWorld* LocalPreviewWorld = PreviewWorld;
+	PreviewWorld = nullptr;
+
 	// The world may be released by now.
-	if (PreviewWorld)
+	if (LocalPreviewWorld && GEngine)
 	{
-		PreviewWorld->CleanupWorld();
-		GEngine->DestroyWorldContext(GetWorld());
+		LocalPreviewWorld->CleanupWorld();
+		GEngine->DestroyWorldContext(LocalPreviewWorld);
 		// Release PhysicsScene for fixing big fbx importing bug
-		PreviewWorld->ReleasePhysicsScene();
+		LocalPreviewWorld->ReleasePhysicsScene();
+
+		// The preview world is a heavy-weight object and may hold a significant amount of resources,
+		// including various GPU render targets and buffers required for rendering the scene.
+		// Since UWorld is garbage-collected, this memory may not be cleaned for an indeterminate amount of time.
+		// By forcing garbage collection explicitly, we allow memory to be reused immediately.
+		GEngine->ForceGarbageCollection(true /*bFullPurge*/);
 	}
 }
 
@@ -160,6 +183,7 @@ void FPreviewScene::AddComponent(UActorComponent* Component,const FTransform& Lo
 		if(pStaticMesh != nullptr)
 		{
 			pStaticMesh->bEvaluateWorldPositionOffset = true;
+			pStaticMesh->bEvaluateWorldPositionOffsetInRayTracing = true;
 		}
 	}
 
@@ -195,8 +219,12 @@ FString FPreviewScene::GetReferencerName() const
 
 void FPreviewScene::UpdateCaptureContents()
 {
+	// This function is called from FAdvancedPreviewScene::Tick, FBlueprintEditor::Tick, and FThumbnailPreviewScene::Tick,
+	// so assume we are inside a Tick function.
+	const bool bInsideTick = true;
+
 	USkyLightComponent::UpdateSkyCaptureContents(PreviewWorld);
-	UReflectionCaptureComponent::UpdateReflectionCaptureContents(PreviewWorld);
+	UReflectionCaptureComponent::UpdateReflectionCaptureContents(PreviewWorld, nullptr, false, false, bInsideTick);
 }
 
 void FPreviewScene::ClearLineBatcher()
@@ -210,52 +238,72 @@ void FPreviewScene::ClearLineBatcher()
 /** Accessor for finding the current direction of the preview scene's DirectionalLight. */
 FRotator FPreviewScene::GetLightDirection()
 {
-	return DirectionalLight->GetComponentTransform().GetUnitAxis( EAxis::X ).Rotation();
+	if (DirectionalLight != NULL)
+	{
+		return DirectionalLight->GetComponentTransform().GetUnitAxis( EAxis::X ).Rotation();
+	}
+
+	return FRotator::ZeroRotator;
 }
 
 /** Function for modifying the current direction of the preview scene's DirectionalLight. */
 void FPreviewScene::SetLightDirection(const FRotator& InLightDir)
 {
+	if (DirectionalLight != NULL)
+	{
 #if WITH_EDITOR
-	DirectionalLight->PreEditChange(NULL);
+		DirectionalLight->PreEditChange(NULL);
 #endif // WITH_EDITOR
-	DirectionalLight->SetAbsolute(true, true, true);
-	DirectionalLight->SetRelativeRotation(InLightDir);
+		DirectionalLight->SetAbsolute(true, true, true);
+		DirectionalLight->SetRelativeRotation(InLightDir);
 #if WITH_EDITOR
-	DirectionalLight->PostEditChange();
+		DirectionalLight->PostEditChange();
 #endif // WITH_EDITOR
+	}
 }
 
 void FPreviewScene::SetLightBrightness(float LightBrightness)
 {
+	if (DirectionalLight != NULL)
+	{
 #if WITH_EDITOR
-	DirectionalLight->PreEditChange(NULL);
+		DirectionalLight->PreEditChange(NULL);
 #endif // WITH_EDITOR
-	DirectionalLight->Intensity = LightBrightness;
+		DirectionalLight->Intensity = LightBrightness;
 #if WITH_EDITOR
-	DirectionalLight->PostEditChange();
+		DirectionalLight->PostEditChange();
 #endif // WITH_EDITOR
+	}
 }
 
 void FPreviewScene::SetLightColor(const FColor& LightColor)
 {
+	if (DirectionalLight != NULL)
+	{
 #if WITH_EDITOR
-	DirectionalLight->PreEditChange(NULL);
+		DirectionalLight->PreEditChange(NULL);
 #endif // WITH_EDITOR
-	DirectionalLight->LightColor = LightColor;
+		DirectionalLight->LightColor = LightColor;
 #if WITH_EDITOR
-	DirectionalLight->PostEditChange();
+		DirectionalLight->PostEditChange();
 #endif // WITH_EDITOR
+	}
 }
 
 void FPreviewScene::SetSkyBrightness(float SkyBrightness)
 {
-	SkyLight->SetIntensity(SkyBrightness);
+	if (SkyLight != NULL)
+	{
+		SkyLight->SetIntensity(SkyBrightness);
+	}
 }
 
 void FPreviewScene::SetSkyCubemap(UTextureCube* Cubemap)
 {
-	SkyLight->SetCubemap(Cubemap);
+	if (SkyLight != NULL)
+	{
+		SkyLight->SetCubemap(Cubemap);
+	}
 }
 
 void FPreviewScene::LoadSettings(const TCHAR* Section)

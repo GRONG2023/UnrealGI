@@ -1,7 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "DatasmithMaxWriter.h"
-#include "DatasmithMaxSceneParser.h"
+#include "DatasmithMaxSceneHelper.h"
 #include "DatasmithMaxSceneExporter.h"
 
 #include "Misc/Paths.h"
@@ -123,59 +123,6 @@ FString FDatasmithMaxMatWriter::DumpVrayHdri(TSharedPtr<IDatasmithCompositeTextu
 	return *BitmapName;
 }
 
-void FDatasmithMaxMatWriter::GetVrayHdri(TSharedRef< IDatasmithScene > DatasmithScene, BitmapTex* InBitmapTex)
-{
-	FString Path = TEXT("");
-
-	int NumParamBlocks = InBitmapTex->NumParamBlocks();
-
-	for (int j = 0; j < NumParamBlocks; j++)
-	{
-		IParamBlock2* ParamBlock2 = InBitmapTex->GetParamBlockByID((short)j);
-		// The the descriptor to 'decode'
-		ParamBlockDesc2* ParamBlockDesc = ParamBlock2->GetDesc();
-		// Loop through all the defined parameters therein
-		for (int i = 0; i < ParamBlockDesc->count; i++)
-		{
-			const ParamDef& ParamDefinition = ParamBlockDesc->paramdefs[i];
-
-			if (FCString::Stricmp(ParamDefinition.int_name, TEXT("HDRIMapName")) == 0)
-			{
-				Path = FDatasmithMaxSceneExporter::GetActualPath(ParamBlock2->GetStr(ParamDefinition.ID, GetCOREInterface()->GetTime()));
-			}
-		}
-		ParamBlock2->ReleaseDesc();
-	}
-
-	
-
-	if (Path.IsEmpty())
-	{
-		return;
-	}
-
-	float Gamma =  FDatasmithMaxMatHelper::GetVrayHdriGamma(InBitmapTex);
-
-	FString BaseName = FPaths::GetBaseFilename(Path);
-	FString Base = BaseName + FString("_") + FString::SanitizeFloat(Gamma).Replace(TEXT("."), TEXT("_")) + TextureSuffix;
-
-	for (int i = 0; i < DatasmithScene->GetTexturesCount(); i++)
-	{
-		if (DatasmithScene->GetTexture(i)->GetFile() == Path && DatasmithScene->GetTexture(i)->GetName() == Base)
-		{
-			return;
-		}
-	}
-
-	TSharedPtr< IDatasmithTextureElement > TextureElement = FDatasmithSceneFactory::CreateTexture(*Base);
-	if (gammaMgr.IsEnabled())
-	{
-		TextureElement->SetRGBCurve(Gamma / 2.2f);
-	}
-	TextureElement->SetFile(*Path);
-	DatasmithScene->AddTexture(TextureElement);
-}
-
 void FDatasmithMaxMatWriter::ExportVRayMaterial(TSharedRef< IDatasmithScene > DatasmithScene, TSharedPtr< IDatasmithMaterialElement >& MaterialElement, Mtl* Material)
 {
 	TSharedPtr< IDatasmithShaderElement > MaterialShader = FDatasmithSceneFactory::CreateShader( (TCHAR*)Material->GetName().data() );
@@ -192,10 +139,8 @@ void FDatasmithMaxMatWriter::ExportVRayMaterial(TSharedRef< IDatasmithScene > Da
 	bool bOpacityTexEnable = true;
 	bool bLockIor = true;
 	bool bRefleFresnel = true;
-	bool bDisplaceTexEnable = true;
 
 	float BumpAmount = 0.f;
-	float DisplaceAmount = 5.f;
 
 	BMM_Color_fl ColorDiffuse;
 	BMM_Color_fl ColorReflection;
@@ -269,17 +214,6 @@ void FDatasmithMaxMatWriter::ExportVRayMaterial(TSharedRef< IDatasmithScene > Da
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_bump_multiplier")) == 0)
 			{
 				BumpAmount = ParamBlock2->GetFloat(ParamDefinition.ID, GetCOREInterface()->GetTime());
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_displacement")) == 0)
-			{
-				if (ParamBlock2->GetTexmap(ParamDefinition.ID, GetCOREInterface()->GetTime()) == NULL)
-				{
-					bDisplaceTexEnable = false;
-				}
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_displacement_multiplier")) == 0)
-			{
-				DisplaceAmount = ParamBlock2->GetFloat(ParamDefinition.ID, GetCOREInterface()->GetTime()) * 0.1f;
 			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_diffuse_on")) == 0)
 			{
@@ -372,13 +306,6 @@ void FDatasmithMaxMatWriter::ExportVRayMaterial(TSharedRef< IDatasmithScene > Da
 				if (ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) == 0)
 				{
 					bBumpTexEnable = false;
-				}
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_displacement_on")) == 0)
-			{
-				if (ParamBlock2->GetInt(ParamDefinition.ID, GetCOREInterface()->GetTime()) == 0)
-				{
-					bDisplaceTexEnable = false;
 				}
 			}
 			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_opacity_on")) == 0)
@@ -577,16 +504,6 @@ void FDatasmithMaxMatWriter::ExportVRayMaterial(TSharedRef< IDatasmithScene > Da
 					{
 						DumpTexture(DatasmithScene, MaterialShader->GetBumpComp(), LocalTex, DATASMITH_BUMPTEXNAME, DATASMITH_BUMPTEXNAME, false, true);
 					}
-				}
-			}
-			else if (FCString::Stricmp(ParamDefinition.int_name, TEXT("texmap_displacement")) == 0 && bDisplaceTexEnable == true)
-			{
-				Texmap* LocalTex = ParamBlock2->GetTexmap(ParamDefinition.ID, GetCOREInterface()->GetTime());
-				if (LocalTex)
-				{
-					DumpTexture(DatasmithScene, MaterialShader->GetDisplaceComp(), LocalTex, DATASMITH_DISPLACETEXNAME, DATASMITH_DISPLACETEXNAME, false, true);
-					MaterialShader->SetDisplace( DisplaceAmount );
-					MaterialShader->SetDisplaceSubDivision(4.0);
 				}
 			}
 		}

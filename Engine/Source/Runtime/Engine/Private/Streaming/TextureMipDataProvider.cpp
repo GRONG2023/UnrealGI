@@ -5,15 +5,15 @@ TextureMipDataProvider.cpp: Base class for providing the mip data used by FTextu
 =============================================================================*/
 
 #include "Streaming/TextureMipDataProvider.h"
-#include "Engine/Texture.h"
 #include "Rendering/StreamableTextureResource.h"
+#include "Templates/Casts.h"
 
 FTextureUpdateContext::FTextureUpdateContext(const UTexture* InTexture, EThreadType InCurrentThread) 
 	: Texture(InTexture)
 	, CurrentThread(InCurrentThread)
 {
 	check(InTexture);
-	Resource = Texture && Texture->Resource ? Texture->Resource->GetStreamableTextureResource() : nullptr;
+	Resource = Texture && Texture->GetResource() ? const_cast<UTexture*>(Texture)->GetResource()->GetStreamableTextureResource() : nullptr;
 	if (Resource)
 	{
 		MipsView = Resource->GetPlatformMipsView();

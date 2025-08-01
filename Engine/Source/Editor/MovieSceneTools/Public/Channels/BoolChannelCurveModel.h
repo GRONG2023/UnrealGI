@@ -2,18 +2,25 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "UObject/WeakObjectPtr.h"
-#include "UObject/WeakObjectPtrTemplates.h"
 #include "Channels/ChannelCurveModel.h"
-#include "IBufferedCurveModel.h"
-#include "MovieSceneSection.h"
 #include "Channels/MovieSceneBoolChannel.h"
 #include "Channels/MovieSceneChannelHandle.h"
+#include "Containers/ArrayView.h"
+#include "CoreTypes.h"
+#include "IBufferedCurveModel.h"
+#include "MovieSceneSection.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/UniquePtr.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
-struct FMovieSceneBoolChannel;
-class UMovieSceneSection;
+class IBufferedCurveModel;
 class ISequencer;
+class UMovieSceneSection;
+class UObject;
+struct FKeyHandle;
+struct FMovieSceneBoolChannel;
+template <typename ChannelType> struct TMovieSceneChannelHandle;
 
 class FBoolChannelCurveModel : public FChannelCurveModel<FMovieSceneBoolChannel, bool, bool>
 {
@@ -23,6 +30,8 @@ public:
 	// FCurveModel
 	virtual void CreateKeyProxies(TArrayView<const FKeyHandle> InKeyHandles, TArrayView<UObject*> OutObjects) override;
 	virtual TUniquePtr<IBufferedCurveModel> CreateBufferedCurveCopy() const override;
+	virtual void GetCurveAttributes(FCurveAttributes& OutAttributes) const override;
+	virtual void SetCurveAttributes(const FCurveAttributes& InAttributes) override;
 
 protected:
 

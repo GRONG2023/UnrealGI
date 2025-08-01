@@ -1,8 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ISequencer.h"
-#include "MovieSceneSequence.h"
+
+#include "AnimatedRange.h"
+#include "Misc/AssertionMacros.h"
 #include "MovieScene.h"
+#include "MovieSceneSequence.h"
+#include "ITimeSlider.h"
+
+FAnimatedRange ISequencer::GetViewRange() const
+{
+	return FAnimatedRange();
+}
 
 FFrameRate ISequencer::GetRootTickResolution() const
 {

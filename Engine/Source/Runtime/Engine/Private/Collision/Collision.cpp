@@ -5,18 +5,13 @@
 =============================================================================*/
 
 #include "Collision.h"
-#include "HAL/IConsoleManager.h"
-#include "UObject/UObjectHash.h"
+#include "Engine/SkinnedAsset.h"
 #include "UObject/UObjectIterator.h"
-#include "UObject/Package.h"
-#include "CollisionQueryParams.h"
 #include "Engine/World.h"
-#include "Components/PrimitiveComponent.h"
 #include "Components/ShapeComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "Engine/StaticMesh.h"
-#include "Engine/SkeletalMesh.h"
 #include "Engine/CollisionProfile.h"
 #include "BodySetupEnums.h"
 #include "PhysicsEngine/BodySetup.h"
@@ -26,147 +21,13 @@
 #include "LandscapeHeightfieldCollisionComponent.h"
 
 //////////////////////////////////////////////////////////////////////////
-// FHitResult
+// FCollisionQueryFlag
 
-FHitResult::FHitResult(class AActor* InActor, class UPrimitiveComponent* InComponent, FVector const& HitLoc, FVector const& HitNorm)
+FCollisionQueryFlag& FCollisionQueryFlag::Get()
 {
-	FMemory::Memzero(this, sizeof(FHitResult));
-	Location = HitLoc;
-	ImpactPoint = HitLoc;
-	Normal = HitNorm;
-	ImpactNormal = HitNorm;
-	Actor = InActor;
-	Component = InComponent;
+	static FCollisionQueryFlag CollisionQueryFlag;
+	return CollisionQueryFlag;
 }
-
-bool FHitResult::NetSerialize(FArchive& Ar, class UPackageMap* Map, bool& bOutSuccess)
-{
-	// Most of the time the vectors are the same values, use that as an optimization
-	bool bImpactPointEqualsLocation = 0, bImpactNormalEqualsNormal = 0;
-
-	// Often times the indexes are invalid, use that as an optimization
-	bool bInvalidItem = 0, bInvalidFaceIndex = 0, bNoPenetrationDepth = 0, bInvalidElementIndex = 0;
-
-	if (Ar.IsSaving())
-	{
-		bImpactPointEqualsLocation = (ImpactPoint == Location);
-		bImpactNormalEqualsNormal = (ImpactNormal == Normal);
-		bInvalidItem = (Item == INDEX_NONE);
-		bInvalidFaceIndex = (FaceIndex == INDEX_NONE);
-		bNoPenetrationDepth = (PenetrationDepth == 0.0f);
-		bInvalidElementIndex = (ElementIndex == INDEX_NONE);
-	}
-
-	// pack bitfield with flags
-	uint8 Flags = (bBlockingHit << 0) | (bStartPenetrating << 1) | (bImpactPointEqualsLocation << 2) | (bImpactNormalEqualsNormal << 3) | (bInvalidItem << 4) | (bInvalidFaceIndex << 5) | (bNoPenetrationDepth << 6) | (bInvalidElementIndex << 7);
-	Ar.SerializeBits(&Flags, 8); 
-	bBlockingHit = (Flags & (1 << 0)) ? 1 : 0;
-	bStartPenetrating = (Flags & (1 << 1)) ? 1 : 0;
-	bImpactPointEqualsLocation = (Flags & (1 << 2)) ? 1 : 0;
-	bImpactNormalEqualsNormal = (Flags & (1 << 3)) ? 1 : 0;
-	bInvalidItem = (Flags & (1 << 4)) ? 1 : 0;
-	bInvalidFaceIndex = (Flags & (1 << 5)) ? 1 : 0;
-	bNoPenetrationDepth = (Flags & (1 << 6)) ? 1 : 0;
-	bInvalidElementIndex = (Flags & (1 << 7)) ? 1 : 0;
-	// NOTE: Every bit in Flags is being used. If any more bits are added,
-	// Flags will need to be upgraded to a uint16.
-
-	Ar << Time;
-
-	bOutSuccess = true;
-
-	bool bOutSuccessLocal = true;
-
-	Location.NetSerialize(Ar, Map, bOutSuccessLocal);
-	bOutSuccess &= bOutSuccessLocal;
-	Normal.NetSerialize(Ar, Map, bOutSuccessLocal);
-	bOutSuccess &= bOutSuccessLocal;
-
-	if (!bImpactPointEqualsLocation)
-	{
-		ImpactPoint.NetSerialize(Ar, Map, bOutSuccessLocal);
-		bOutSuccess &= bOutSuccessLocal;
-	}
-	else if (Ar.IsLoading())
-	{
-		ImpactPoint = Location;
-	}
-	
-	if (!bImpactNormalEqualsNormal)
-	{
-		ImpactNormal.NetSerialize(Ar, Map, bOutSuccessLocal);
-		bOutSuccess &= bOutSuccessLocal;
-	}
-	else if (Ar.IsLoading())
-	{
-		ImpactNormal = Normal;
-	}
-	TraceStart.NetSerialize(Ar, Map, bOutSuccessLocal);
-	bOutSuccess &= bOutSuccessLocal;
-	TraceEnd.NetSerialize(Ar, Map, bOutSuccessLocal);
-	bOutSuccess &= bOutSuccessLocal;
-
-	if (!bNoPenetrationDepth)
-	{
-		Ar << PenetrationDepth;
-	}
-	else if(Ar.IsLoading())
-	{
-		PenetrationDepth = 0.0f;
-	}
-
-	if (Ar.IsLoading() && bOutSuccess)
-	{
-		Distance = (ImpactPoint - TraceStart).Size();
-	}
-	
-	if (!bInvalidItem)
-	{
-		Ar << Item;
-	}
-	else if (Ar.IsLoading())
-	{
-		Item = INDEX_NONE;
-	}
-
-	Ar << PhysMaterial;
-	Ar << Actor;
-	Ar << Component;
-	Ar << BoneName;
-	if (!bInvalidFaceIndex)
-	{
-		Ar << FaceIndex;
-	}
-	else if (Ar.IsLoading())
-	{
-		FaceIndex = INDEX_NONE;
-	}
-	
-	if (!bInvalidElementIndex)
-	{
-		Ar << ElementIndex;
-	}
-	else if (Ar.IsLoading())
-	{
-		ElementIndex = INDEX_NONE;
-	}
-
-	return true;
-}
-
-//////////////////////////////////////////////////////////////////////////
-// FOverlapResult
-
-AActor* FOverlapResult::GetActor() const
-{
-	return Actor.Get();
-}
-
-UPrimitiveComponent* FOverlapResult::GetComponent() const
-{
-	return Component.Get();
-}
-
 
 //////////////////////////////////////////////////////////////////////////
 // FCollisionQueryParams
@@ -194,6 +55,8 @@ FCollisionQueryParams::FCollisionQueryParams(FName InTraceTag, const TStatId& In
 #if !(UE_BUILD_TEST || UE_BUILD_SHIPPING)
 		bDebugQuery = false;
 #endif
+	bTraceIntoSubComponents = true;
+	bReplaceHitWithSubComponents = true;
 }
 
 
@@ -346,7 +209,7 @@ const FCollisionQueryParams::IgnoreComponentsArrayType& FCollisionQueryParams::G
 				}
 				D += 1;
 			}
-			IgnoreComponents.SetNum(U - IgnoreComponents.GetData() + 1, /*bAllowShrinking=*/ false);
+			IgnoreComponents.SetNum(U - IgnoreComponents.GetData() + 1, EAllowShrinking::No);
 		}
 	}
 
@@ -360,7 +223,7 @@ void FCollisionQueryParams::SetNumIgnoredComponents(int32 NewNum)
 		// We can only make it smaller (and uniqueness does not change).
 		if (NewNum < IgnoreComponents.Num())
 		{
-			IgnoreComponents.SetNum(NewNum, /*bAllowShrinking=*/ false);
+			IgnoreComponents.SetNum(NewNum, EAllowShrinking::No);
 		}
 	}
 	else
@@ -371,8 +234,6 @@ void FCollisionQueryParams::SetNumIgnoredComponents(int32 NewNum)
 
 //////////////////////////////////////////////////////////////////////////
 // FSeparatingAxisPointCheck
-
-TArray<FVector> FSeparatingAxisPointCheck::TriangleVertices;
 
 bool FSeparatingAxisPointCheck::TestSeparatingAxisCommon(const FVector& Axis, float ProjectedPolyMin, float ProjectedPolyMax)
 {
@@ -389,7 +250,7 @@ bool FSeparatingAxisPointCheck::TestSeparatingAxisCommon(const FVector& Axis, fl
 	if (bCalcLeastPenetration)
 	{
 		const float AxisMagnitudeSqr = Axis.SizeSquared();
-		if (AxisMagnitudeSqr > (SMALL_NUMBER * SMALL_NUMBER))
+		if (AxisMagnitudeSqr > (UE_SMALL_NUMBER * UE_SMALL_NUMBER))
 		{
 			const float InvAxisMagnitude = FMath::InvSqrt(AxisMagnitudeSqr);
 			const float MinPenetrationDist = (ProjectedBoxMax - ProjectedPolyMin) * InvAxisMagnitude;
@@ -535,7 +396,7 @@ bool FSeparatingAxisPointCheck::FindSeparatingAxisGeneric()
 		const FVector EdgeDir1 = V2 - V1;
 
 		FVector Normal = FVector::CrossProduct(EdgeDir1, EdgeDir0);
-		if (Normal.SizeSquared() > SMALL_NUMBER)
+		if (Normal.SizeSquared() > UE_SMALL_NUMBER)
 		{
 			if (!TestSeparatingAxisGeneric(Normal))
 			{
@@ -551,6 +412,46 @@ bool FSeparatingAxisPointCheck::FindSeparatingAxisGeneric()
 	return true;
 }
 
+bool LineCheckWithTriangle(FHitResult& Result, const FVector& V1, const FVector& V2, const FVector& V3, const FVector& Start, const FVector& End, const FVector& Direction)
+{
+	FVector	Edge1 = V3 - V1,
+		       Edge2 = V2 - V1,
+		       P = Direction ^ Edge2;
+	FVector::FReal	Determinant = Edge1 | P;
+
+	if(Determinant < UE_DELTA)
+	{
+		return false;
+	}
+
+	FVector	T = Start - V1;
+	FVector::FReal	U = T | P;
+
+	if(U < 0.0f || U > Determinant)
+	{
+		return false;
+	}
+
+	FVector	Q = T ^ Edge1;
+	FVector::FReal	V = Direction | Q;
+
+	if(V < 0.0f || U + V > Determinant)
+	{
+		return false;
+	}
+
+	FVector::FReal	Time = (Edge2 | Q) / Determinant;
+
+	if(Time < 0.0f || Time > Result.Time)
+	{
+		return false;
+	}
+
+	Result.Normal = ((V3-V2)^(V2-V1)).GetSafeNormal();
+	Result.Time = static_cast<float>(((V1 - Start)|Result.Normal) / (Result.Normal|Direction));							// LWC_TODO: precision loss. Make FHitResult::Time/Distance doubles?
+
+	return true;
+}
 
 
 #if !UE_BUILD_SHIPPING
@@ -635,9 +536,9 @@ namespace CollisionResponseConsoleCommands
 		}
 		else if (const USkinnedMeshComponent* SkinnedMeshComp = Cast<USkinnedMeshComponent>(Comp))
 		{
-			if (SkinnedMeshComp->SkeletalMesh)
+			if (SkinnedMeshComp->GetSkinnedAsset())
 			{
-				AssetName = SkinnedMeshComp->SkeletalMesh->GetPathName();
+				AssetName = SkinnedMeshComp->GetSkinnedAsset()->GetPathName();
 			}
 		}
 

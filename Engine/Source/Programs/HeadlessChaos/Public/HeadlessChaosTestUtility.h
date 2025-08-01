@@ -17,6 +17,8 @@
 #include "Chaos/Utilities.h"
 #include "Chaos/ParticleHandleFwd.h"
 #include "Chaos/PBDRigidsEvolutionFwd.h"
+#include "Chaos/Collision/CollisionApplyType.h"
+#include "Chaos/Collision/CollisionContext.h"
 
 namespace Chaos
 {
@@ -146,11 +148,12 @@ namespace ChaosTest {
 	void InitEvolutionSettings(T_Evolution& Evolution)
 	{
 		// Settings used for unit tests
-		const float CullDistance = 0.0f;
-		Evolution.GetBroadPhase().SetCullDistance(CullDistance);
-		Evolution.GetBroadPhase().SetBoundsThickness(CullDistance);
-		Evolution.GetCollisionDetector().GetNarrowPhase().GetContext().bDeferUpdate = false;
-		Evolution.GetCollisionDetector().GetNarrowPhase().GetContext().bAllowManifolds = true;
+		const float CullDistance = 3.0f;
+		FCollisionDetectorSettings DetectorSettings = Evolution.GetCollisionConstraints().GetDetectorSettings();
+		DetectorSettings.BoundsExpansion = CullDistance;
+		DetectorSettings.bDeferNarrowPhase = false;
+		DetectorSettings.bAllowManifolds = true;
+		Evolution.GetCollisionConstraints().SetDetectorSettings(DetectorSettings);
 	}
 
 	template<typename T_SOLVER>
@@ -160,8 +163,18 @@ namespace ChaosTest {
 	}
 
 
-	extern FImplicitConvex3 CreateConvexBox(const FVec3& BoxSize, const FReal Margin);
-	extern FImplicitConvex3 CreateConvexBox(const FVec3& BoxMin, const FVec3& BoxMax, const FReal Margin);
-	extern TImplicitObjectInstanced<FImplicitConvex3> CreateInstancedConvexBox(const FVec3& BoxSize, const FReal Margin);
-	extern TImplicitObjectScaled<FImplicitConvex3> CreateScaledConvexBox(const FVec3& BoxSize, const FVec3 BoxScale, const FReal Margin);
+	template <typename TParticle>
+	void SetCubeInertiaTensor(TParticle& Particle, float Dimension, float Mass)
+	{
+		float Element = Mass * Dimension * Dimension / 6.0f;
+		float InvElement = 1.f / Element;
+		Particle.SetI(TVec3<FRealSingle>(Element));
+		Particle.SetInvI(TVec3<FRealSingle>(InvElement));
+	}
+
+
+	extern FImplicitConvex3 CreateConvexBox(const FConvex::FVec3Type& BoxSize, const FReal Margin);
+	extern FImplicitConvex3 CreateConvexBox(const FConvex::FVec3Type& BoxMin, const FConvex::FVec3Type& BoxMax, const FReal Margin);
+	extern TImplicitObjectInstanced<FImplicitConvex3> CreateInstancedConvexBox(const FConvex::FVec3Type& BoxSize, const FReal Margin);
+	extern TImplicitObjectScaled<FImplicitConvex3> CreateScaledConvexBox(const FConvex::FVec3Type& BoxSize, const FVec3 BoxScale, const FReal Margin);
 }

@@ -3,7 +3,7 @@
 
 #include "MiniCurveEditor.h"
 #include "Widgets/Layout/SBorder.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SCurveEditor.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Editor.h"
@@ -17,7 +17,7 @@ void SMiniCurveEditor::Construct(const FArguments& InArgs)
 	this->ChildSlot
 	[
 		SNew(SBorder)
-		.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
+		.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
 		.Padding(0.0f)
 		[
 			SAssignNew(TrackWidget, SCurveEditor)
@@ -71,18 +71,17 @@ void SMiniCurveEditor::FocusWindow(UObject* ObjectToFocusOn)
 
 bool SMiniCurveEditor::CloseWindow()
 {
+	return CloseWindow(EAssetEditorCloseReason::AssetEditorHostClosed);
+}
+
+bool SMiniCurveEditor::CloseWindow(EAssetEditorCloseReason InCloseReason)
+{
 	if(WidgetWindow.IsValid())
 	{
 		WidgetWindow.Pin()->RequestDestroyWindow();
 	}
 
 	return true;
-}
-
-FName SMiniCurveEditor::GetToolbarTabId() const
-{
-	//@TODO: This editor should probably derive from FAssetEditorToolkit instead!
-	return NAME_None;
 }
 
 TSharedPtr<class FTabManager> SMiniCurveEditor::GetAssociatedTabManager()

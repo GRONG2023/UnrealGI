@@ -21,25 +21,32 @@ public:
 		FRHIVertexDeclaration* InVertexDeclaration,
 		FRHIVertexShader* InVertexShader,
 		FRHIPixelShader* InPixelShader,
-		FRHIHullShader* InHullShader = nullptr,
-		FRHIDomainShader* InDomainShader = nullptr,
 		FRHIGeometryShader* InGeometryShader = nullptr
 		)
 		: VertexDeclaration(InVertexDeclaration)
 		, VertexShader(InVertexShader)
 		, PixelShader(InPixelShader)
-		, HullShader(InHullShader)
-		, DomainShader(InDomainShader)
 		, GeometryShader(InGeometryShader)
+	{}
+
+	/** Initialization constructor. */
+	FBoundShaderStateKey(
+		FRHIMeshShader* InMeshShader,
+		FRHIAmplificationShader* InAmplificationShader,
+		FRHIPixelShader* InPixelShader
+	)
+		: MeshShader(InMeshShader)
+		, AmplificationShader(InAmplificationShader)
+		, PixelShader(InPixelShader)
 	{}
 
 	/**
 	 * Get the RHI shader for the given frequency.
 	 */
 	FORCEINLINE FRHIVertexShader*   GetVertexShader() const   { return VertexShader; }
+	FORCEINLINE FRHIMeshShader*     GetMeshShader() const   { return MeshShader; }
+	FORCEINLINE FRHIAmplificationShader*   GetAmplificationShader() const   { return AmplificationShader; }
 	FORCEINLINE FRHIPixelShader*    GetPixelShader() const    { return PixelShader; }
-	FORCEINLINE FRHIHullShader*     GetHullShader() const     { return HullShader; }
-	FORCEINLINE FRHIDomainShader*   GetDomainShader() const   { return DomainShader; }
 	FORCEINLINE FRHIGeometryShader* GetGeometryShader() const { return GeometryShader; }
 
 	/**
@@ -61,12 +68,12 @@ private:
 	FVertexDeclarationRHIRef VertexDeclaration;
 	/** vs for this combination */
 	FVertexShaderRHIRef VertexShader;
+	/** ms for this combination */
+	FMeshShaderRHIRef MeshShader;
+	/** as for this combination */
+	FAmplificationShaderRHIRef AmplificationShader;
 	/** ps for this combination */
 	FPixelShaderRHIRef PixelShader;
-	/** hs for this combination */
-	FHullShaderRHIRef HullShader;
-	/** ds for this combination */
-	FDomainShaderRHIRef DomainShader;
 	/** gs for this combination */
 	FGeometryShaderRHIRef GeometryShader;
 
@@ -85,9 +92,9 @@ public:
 	FBoundShaderStateLookupKey(const FBoundShaderStateKey& Key)
 		: VertexDeclaration(Key.VertexDeclaration.GetReference())
 		, VertexShader(Key.VertexShader.GetReference())
+		, MeshShader(Key.MeshShader.GetReference())
+		, AmplificationShader(Key.AmplificationShader.GetReference())
 		, PixelShader(Key.PixelShader.GetReference())
-		, HullShader(Key.HullShader.GetReference())
-		, DomainShader(Key.DomainShader.GetReference())
 		, GeometryShader(Key.GeometryShader.GetReference())
 	{}
 
@@ -95,16 +102,22 @@ public:
 		FRHIVertexDeclaration* InVertexDeclaration,
 		FRHIVertexShader* InVertexShader,
 		FRHIPixelShader* InPixelShader,
-		FRHIHullShader* InHullShader = nullptr,
-		FRHIDomainShader* InDomainShader = nullptr,
 		FRHIGeometryShader* InGeometryShader = nullptr
 	)
 		: VertexDeclaration(InVertexDeclaration)
 		, VertexShader(InVertexShader)
 		, PixelShader(InPixelShader)
-		, HullShader(InHullShader)
-		, DomainShader(InDomainShader)
 		, GeometryShader(InGeometryShader)
+	{}
+
+	FBoundShaderStateLookupKey(
+		FRHIMeshShader* InMeshShader,
+		FRHIAmplificationShader* InAmplificationShader,
+		FRHIPixelShader* InPixelShader
+	)
+		: MeshShader(InMeshShader)
+		, AmplificationShader(InAmplificationShader)
+		, PixelShader(InPixelShader)
 	{}
 
 	/**
@@ -116,9 +129,9 @@ public:
 	{
 		return	A.VertexDeclaration == B.VertexDeclaration &&
 			A.VertexShader == B.VertexShader &&
+			A.MeshShader == B.MeshShader &&
+			A.AmplificationShader == B.AmplificationShader &&
 			A.PixelShader == B.PixelShader &&
-			A.HullShader == B.HullShader &&
-			A.DomainShader == B.DomainShader &&
 			A.GeometryShader == B.GeometryShader;
 	}
 
@@ -131,19 +144,18 @@ public:
 	{
 		return GetTypeHash(Key.VertexDeclaration) ^
 			GetTypeHash(Key.VertexShader) ^
+			GetTypeHash(Key.MeshShader) ^
+			GetTypeHash(Key.AmplificationShader) ^
 			GetTypeHash(Key.PixelShader) ^
-			GetTypeHash(Key.HullShader) ^
-			GetTypeHash(Key.DomainShader) ^
 			GetTypeHash(Key.GeometryShader);
 	}
 
 private:
-
 	const FRHIVertexDeclaration* VertexDeclaration = nullptr;
 	const FRHIVertexShader* VertexShader = nullptr;
+	const FRHIMeshShader* MeshShader = nullptr;
+	const FRHIAmplificationShader* AmplificationShader = nullptr;
 	const FRHIPixelShader* PixelShader = nullptr;
-	const FRHIHullShader* HullShader = nullptr;
-	const FRHIDomainShader* DomainShader = nullptr;
 	const FRHIGeometryShader* GeometryShader = nullptr;
 };
 
@@ -152,7 +164,7 @@ private:
  * Handles removal from the bound shader state cache on destruction.
  * RHIs that use cached bound shader states should create one for each bound shader state.
  */
-class RHI_API FCachedBoundShaderStateLink
+class FCachedBoundShaderStateLink
 {
 public:
 
@@ -163,7 +175,7 @@ public:
 	FRHIBoundShaderState* BoundShaderState;
 
 	/** Adds the bound shader state to the cache. */
-	FCachedBoundShaderStateLink(
+	RHI_API FCachedBoundShaderStateLink(
 		FRHIVertexDeclaration* VertexDeclaration,
 		FRHIVertexShader* VertexShader,
 		FRHIPixelShader* PixelShader,
@@ -172,27 +184,34 @@ public:
 		);
 
 	/** Adds the bound shader state to the cache. */
-	FCachedBoundShaderStateLink(
+	RHI_API FCachedBoundShaderStateLink(
 		FRHIVertexDeclaration* VertexDeclaration,
 		FRHIVertexShader* VertexShader,
 		FRHIPixelShader* PixelShader,
-		FRHIHullShader* HullShader,
-		FRHIDomainShader* DomainShader,
 		FRHIGeometryShader* GeometryShader,
 		FRHIBoundShaderState* InBoundShaderState,
 		bool bAddToSingleThreadedCache = true
-		);
+	);
+
+	/** Adds the bound shader state to the cache. */
+	RHI_API FCachedBoundShaderStateLink(
+		FRHIMeshShader* MeshShader,
+		FRHIAmplificationShader* AmplificationShader,
+		FRHIPixelShader* PixelShader,
+		FRHIBoundShaderState* InBoundShaderState,
+		bool bAddToSingleThreadedCache = true
+	);
 
 	/** Destructor.  Removes the bound shader state from the cache. */
-	~FCachedBoundShaderStateLink();
+	RHI_API ~FCachedBoundShaderStateLink();
 
 	/**
 	 * Get the RHI shader for the given frequency.
 	 */
 	FORCEINLINE FRHIVertexShader*   GetVertexShader() const   { return Key.GetVertexShader(); }
+	FORCEINLINE FRHIMeshShader*     GetMeshShader() const     { return Key.GetMeshShader(); }
+	FORCEINLINE FRHIAmplificationShader* GetAmplificationShader() const { return Key.GetAmplificationShader(); }
 	FORCEINLINE FRHIPixelShader*    GetPixelShader() const    { return Key.GetPixelShader(); }
-	FORCEINLINE FRHIHullShader*     GetHullShader() const     { return Key.GetHullShader(); }
-	FORCEINLINE FRHIDomainShader*   GetDomainShader() const   { return Key.GetDomainShader(); }
 	FORCEINLINE FRHIGeometryShader* GetGeometryShader() const { return Key.GetGeometryShader(); }
 
 	/**
@@ -214,14 +233,14 @@ extern RHI_API FCachedBoundShaderStateLink* GetCachedBoundShaderState(
 	FRHIVertexDeclaration* VertexDeclaration,
 	FRHIVertexShader* VertexShader,
 	FRHIPixelShader* PixelShader,
-	FRHIHullShader* HullShader = nullptr,
-	FRHIDomainShader* DomainShader = nullptr,
-	FRHIGeometryShader* GeometryShader = nullptr
+	FRHIGeometryShader* GeometryShader = nullptr,
+	FRHIMeshShader* MeshShader = nullptr,
+	FRHIAmplificationShader* AmplificationShader = nullptr
 	);
 
 extern RHI_API void EmptyCachedBoundShaderStates();
 
-class RHI_API FCachedBoundShaderStateLink_Threadsafe : public FCachedBoundShaderStateLink
+class FCachedBoundShaderStateLink_Threadsafe : public FCachedBoundShaderStateLink
 {
 public:
 	/** Adds the bound shader state to the cache. */
@@ -240,17 +259,26 @@ public:
 		FRHIVertexDeclaration* VertexDeclaration,
 		FRHIVertexShader* VertexShader,
 		FRHIPixelShader* PixelShader,
-		FRHIHullShader* HullShader,
-		FRHIDomainShader* DomainShader,
 		FRHIGeometryShader* GeometryShader,
 		FRHIBoundShaderState* InBoundShaderState
 		)
-		: FCachedBoundShaderStateLink(VertexDeclaration, VertexShader, PixelShader, HullShader, DomainShader, GeometryShader, InBoundShaderState, false)
+		: FCachedBoundShaderStateLink(VertexDeclaration, VertexShader, PixelShader, GeometryShader, InBoundShaderState, false)
 	{
 	}
 
-	void AddToCache();
-	void RemoveFromCache();
+	/** Adds the bound shader state to the cache. */
+	FCachedBoundShaderStateLink_Threadsafe(
+		FRHIMeshShader* MeshShader,
+		FRHIAmplificationShader* AmplificationShader,
+		FRHIPixelShader* PixelShader,
+		FRHIBoundShaderState* InBoundShaderState
+	)
+		: FCachedBoundShaderStateLink(MeshShader, AmplificationShader, PixelShader, InBoundShaderState, false)
+	{
+	}
+
+	RHI_API void AddToCache();
+	RHI_API void RemoveFromCache();
 };
 
 /**
@@ -261,8 +289,8 @@ extern RHI_API FBoundShaderStateRHIRef GetCachedBoundShaderState_Threadsafe(
 	FRHIVertexDeclaration* VertexDeclaration,
 	FRHIVertexShader* VertexShader,
 	FRHIPixelShader* PixelShader,
-	FRHIHullShader* HullShader = nullptr,
-	FRHIDomainShader* DomainShader = nullptr,
-	FRHIGeometryShader* GeometryShader = nullptr
+	FRHIGeometryShader* GeometryShader = nullptr,
+	FRHIMeshShader* MeshShader = nullptr,
+	FRHIAmplificationShader* AmplificationShader = nullptr
 	);
 

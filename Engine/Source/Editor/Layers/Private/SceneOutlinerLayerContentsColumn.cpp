@@ -2,10 +2,24 @@
 
 
 #include "SceneOutlinerLayerContentsColumn.h"
-#include "Widgets/Layout/SSpacer.h"
+
+#include "ActorTreeItem.h"
+#include "HAL/Platform.h"
+#include "ISceneOutlinerTreeItem.h"
+#include "Internationalization/Internationalization.h"
+#include "LayerViewModel.h"
+#include "Layout/Margin.h"
+#include "Misc/Attribute.h"
+#include "Styling/AppStyle.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
+#include "Widgets/Layout/SSpacer.h"
+#include "Widgets/SNullWidget.h"
+
+class AActor;
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "SceneOutlinerLayerContentsColumn"
 
@@ -36,19 +50,23 @@ SHeaderRow::FColumn::FArguments FSceneOutlinerLayerContentsColumn::ConstructHead
 		];
 }
 
-TSharedRef<SWidget> FSceneOutlinerLayerContentsColumn::ConstructRowWidget(const TWeakObjectPtr< AActor >& Actor )
+const TSharedRef<SWidget> FSceneOutlinerLayerContentsColumn::ConstructRowWidget(FSceneOutlinerTreeItemRef TreeItem, const STableRow<FSceneOutlinerTreeItemPtr>& Row)
 {
-	return SNew( SButton )
-		.HAlign( HAlign_Center )
-		.VAlign( VAlign_Center )
-		.ButtonStyle( FEditorStyle::Get(), "LayerBrowserButton" )
-		.ContentPadding( 0 )
-		.OnClicked( this, &FSceneOutlinerLayerContentsColumn::OnRemoveFromLayerClicked, Actor )
-		.ToolTipText( LOCTEXT("RemoveFromLayerButtonText", "Remove from Layer") )
-		[
-			SNew( SImage )
-			.Image( FEditorStyle::GetBrush( TEXT( "LayerBrowser.Actor.RemoveFromLayer" ) ) )
-		];
+	if (FActorTreeItem* ActorItem = TreeItem->CastTo<FActorTreeItem>())
+	{
+		return SNew(SButton)
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			.ButtonStyle(FAppStyle::Get(), "LayerBrowserButton")
+			.ContentPadding(0)
+			.OnClicked(this, &FSceneOutlinerLayerContentsColumn::OnRemoveFromLayerClicked, ActorItem->Actor)
+			.ToolTipText(LOCTEXT("RemoveFromLayerButtonText", "Remove from Layer"))
+			[
+				SNew(SImage)
+				.Image(FAppStyle::GetBrush(TEXT("LayerBrowser.Actor.RemoveFromLayer")))
+			];
+	}
+	return SNullWidget::NullWidget;
 }
 
 FReply FSceneOutlinerLayerContentsColumn::OnRemoveFromLayerClicked( const TWeakObjectPtr< AActor > Actor )

@@ -2,8 +2,11 @@
 
 #include "BoneControllers/AnimNode_TwistCorrectiveNode.h"
 #include "AnimationRuntime.h"
-
 #include "Animation/AnimInstanceProxy.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "UObject/UE5MainStreamObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimNode_TwistCorrectiveNode)
 
 /////////////////////////////////////////////////////
 // FAnimNode_TwistCorrectiveNode
@@ -47,14 +50,13 @@ void FAnimNode_TwistCorrectiveNode::EvaluateComponentSpaceInternal(FComponentSpa
 	const float FinalMappedValue = (FMath::Clamp(CurAngle, ReferenceAngle, RangeMaxInRadian) - ReferenceAngle) * (RemappedMax - RemappedMin) / (RangeMaxInRadian - ReferenceAngle);
 
 	//	set Curve Value
-	Context.Curve.Set(Curve.UID, FinalMappedValue*Alpha);
+	Context.Curve.Set(CurveName, FinalMappedValue*Alpha);
 }
 
 bool FAnimNode_TwistCorrectiveNode::IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones)
 {
 	return BaseFrame.Bone.IsValidToEvaluate(RequiredBones) && BaseFrame.Axis.IsValid() &&
-		TwistFrame.Bone.IsValidToEvaluate(RequiredBones) && TwistFrame.Axis.IsValid() &&
-		Curve.IsValidToEvaluate();
+		TwistFrame.Bone.IsValidToEvaluate(RequiredBones) && TwistFrame.Axis.IsValid();
 }
 
 void FAnimNode_TwistCorrectiveNode::InitializeBoneReferences(const FBoneContainer& RequiredBones)
@@ -73,7 +75,6 @@ void FAnimNode_TwistCorrectiveNode::Initialize_AnyThread(const FAnimationInitial
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_ANIMNODE(Initialize_AnyThread)
 	FAnimNode_SkeletalControlBase::Initialize_AnyThread(Context);
-	Curve.Initialize(Context.AnimInstanceProxy->GetSkeleton());
 }
 
 void FAnimNode_TwistCorrectiveNode::CacheBones_AnyThread(const FAnimationCacheBonesContext& Context)
@@ -105,25 +106,42 @@ float FAnimNode_TwistCorrectiveNode::GetAngle(const FVector& Base, const FVector
 	FVector TwistPlaneNormal = TwistPlaneNormalAxis.GetTransformedAxis(ReferencetBoneTransform);
 
 	// find out if it's same direction. If not, we're clamped
-	float BaseAngle = 0.f, TwistAngle = 0.f;
+	float BaseAngle = 0.0, TwistAngle = 0.0;
 
 	// if facing same direction we care
-	float BaseDotProduct = FVector::DotProduct(TwistPlaneNormal, Base);
-	if (BaseDotProduct > 0.f)
+	float BaseDotProduct = static_cast<float>(FVector::DotProduct(TwistPlaneNormal, Base));
+	if (BaseDotProduct > 0.0)
 	{
 		// http://www.vitutor.com/geometry/distance/line_plane.html
 		BaseAngle = FMath::Asin(BaseDotProduct);
 	}
 
-	float TwistDotProduct = FVector::DotProduct(TwistPlaneNormal, Twist);
-	if (TwistDotProduct > 0.f)
+	float TwistDotProduct = static_cast<float>(FVector::DotProduct(TwistPlaneNormal, Twist));
+	if (TwistDotProduct > 0.0)
 	{
 		// http://www.vitutor.com/geometry/distance/line_plane.html
 		TwistAngle = FMath::Asin(TwistDotProduct);
 	}
 
-	return (TwistAngle - BaseAngle);
+	return TwistAngle - BaseAngle;
+}
+
+bool FAnimNode_TwistCorrectiveNode::Serialize(FArchive& Ar)
+{
+	Ar.UsingCustomVersion(FUE5MainStreamObjectVersion::GUID);
+	return false;
+}
+
+void FAnimNode_TwistCorrectiveNode::PostSerialize(const FArchive& Ar)
+{
+#if WITH_EDITORONLY_DATA
+	if(Ar.CustomVer(FUE5MainStreamObjectVersion::GUID) < FUE5MainStreamObjectVersion::AnimationRemoveSmartNames)
+	{
+		CurveName = Curve_DEPRECATED.Name;
+	}
+#endif
 }
 
 /////////////////////////////////////////////////////////
+
 

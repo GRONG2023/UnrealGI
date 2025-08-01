@@ -15,11 +15,13 @@
 #include "Factories/MaterialFactoryNew.h"
 #include "UnrealEdGlobals.h"
 #include "Tests/AutomationCommon.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Engine/Texture.h"
 #include "LevelEditor.h"
 #include "ScopedTransaction.h"
 #include "Interfaces/IMainFrameModule.h"
+
+#if WITH_AUTOMATION_TESTS
 
 #define LOCTEXT_NAMESPACE "EditorPromotionTestCommon"
 
@@ -197,8 +199,7 @@ FString FEditorPromotionTestUtilities::GetPropertyByName(UObject* TargetObject, 
 	if (FoundProperty)
 	{
 		FString ValueString;
-		const uint8* PropertyAddr = FoundProperty->ContainerPtrToValuePtr<uint8>(TargetObject);
-		FoundProperty->ExportTextItem(ValueString, PropertyAddr, NULL, NULL, PPF_None);
+		FoundProperty->ExportTextItem_InContainer(ValueString, TargetObject, NULL, NULL, PPF_None);
 		return ValueString;
 	}
 	return TEXT("");
@@ -221,7 +222,7 @@ void FEditorPromotionTestUtilities::SetPropertyByName(UObject* TargetObject, con
 		TargetObject->Modify();
 
 		TargetObject->PreEditChange(FoundProperty);
-		FoundProperty->ImportText(*NewValueString, FoundProperty->ContainerPtrToValuePtr<uint8>(TargetObject), 0, TargetObject);
+		FoundProperty->ImportText_InContainer(*NewValueString, TargetObject, TargetObject, 0);
 		FPropertyChangedEvent PropertyChangedEvent(FoundProperty, EPropertyChangeType::ValueSet);
 		TargetObject->PostEditChangeProperty(PropertyChangedEvent);
 	}
@@ -319,3 +320,5 @@ void FEditorPromotionTestUtilities::TakeScreenshot(const FString& ScreenshotName
 }
 
 #undef LOCTEXT_NAMESPACE
+
+#endif

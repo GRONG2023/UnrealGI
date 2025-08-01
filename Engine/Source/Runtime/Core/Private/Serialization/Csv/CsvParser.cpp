@@ -2,15 +2,26 @@
 
 #include "Serialization/Csv/CsvParser.h"
 
-FCsvParser::FCsvParser(FString InSourceString)
-	: SourceString(MoveTemp(InSourceString))		
+#include "Templates/UnrealTemplate.h"
+
+FCsvParser::FCsvParser(FString&& InSourceString)
+	: SourceString(MoveTemp(InSourceString))
 {
 	if (!SourceString.IsEmpty())
 	{
 		ParseRows();
 	}
 }
-		
+
+FCsvParser::FCsvParser(const FString& InSourceString)
+	: SourceString(InSourceString)
+{
+	if (!SourceString.IsEmpty())
+	{
+		ParseRows();
+	}
+}
+
 void FCsvParser::ParseRows()
 {
 	BufferStart = &SourceString[0];
@@ -47,7 +58,7 @@ FCsvParser::EParseResult FCsvParser::ParseRow()
 
 FCsvParser::EParseResult FCsvParser::ParseCell()
 {
-	TCHAR* WriteAt = BufferStart + (ReadAt - BufferStart);
+	TCHAR* WriteAt = const_cast<TCHAR*>(ReadAt);
 
 	// Check if this cell is quoted. Whitespace between cell opening and quote is invalid.
 	bool bQuoted = *ReadAt == '"';
@@ -69,23 +80,21 @@ FCsvParser::EParseResult FCsvParser::ParseCell()
 			{
 				// RFC 4180 specifies that double quotes are escaped as ""
 
-				int32 NumQuotes = 0;
-				while (*(ReadAt + NumQuotes) == '"') ++NumQuotes;
-
-				if (NumQuotes % 2 != 0)
+				while (*ReadAt == '"')
 				{
-					// No longer quoted if there are an even number of quotes before this one
-					bQuoted = false;
+					++ReadAt;
+					bQuoted = !bQuoted;
+
+					// Unescape the double quotes
+					if (bQuoted)
+					{
+						*WriteAt++ = TEXT('"');
+					}
 				}
 
-				ReadAt += NumQuotes;
-
-				// Unescape the double quotes
 				// We null terminate and leave the write pos pointing at the trailing closing quote 
 				// if present so it gets overwritten by any subsequent text in the cell
-				NumQuotes /= 2;
-				while(NumQuotes-- > 0) *(WriteAt++) = '"';
-				*WriteAt = '\0';
+				*WriteAt = TEXT('\0');
 
 				continue;
 			}
@@ -97,14 +106,14 @@ FCsvParser::EParseResult FCsvParser::ParseCell()
 			if (NewLineSize != 0)
 			{
 				// Null terminate the cell
-				*WriteAt = '\0';
+				*WriteAt = TEXT('\0');
 				ReadAt += NewLineSize;
 
 				return *ReadAt ? EParseResult::EndOfRow : EParseResult::EndOfString;
 			}
 			else if (*ReadAt == ',')
 			{
-				*WriteAt = '\0';
+				*WriteAt = TEXT('\0');
 				++ReadAt;
 
 				// We always return EndOfCell here as we still have another (potentially empty) cell to add

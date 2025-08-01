@@ -17,6 +17,7 @@ namespace UnrealBuildTool.Rules
 				new string[]
 				{
 					"AutomationMessages",
+					"AutomationTest",
 					"CoreUObject",
                     "Analytics",
     				"AnalyticsET",
@@ -29,13 +30,6 @@ namespace UnrealBuildTool.Rules
 				new string[]
 				{
 					"MessagingCommon",
-				}
-			);
-
-			PrivateIncludePaths.AddRange(
-				new string[]
-				{
-					"Runtime/AutomationWorker/Private",
 				}
 			);
 

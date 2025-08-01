@@ -4,37 +4,41 @@
 #include "Windows/WindowsApplication.h"
 #include "Windows/WindowsApplicationErrorOutputDevice.h"
 #include "Windows/WindowsConsoleOutputDevice.h"
+#include "Windows/WindowsConsoleOutputDevice2.h"
 #include "Windows/WindowsFeedbackContext.h"
 #include "HAL/FeedbackContextAnsi.h"
 #include "Misc/App.h"
 #include "Math/Color.h"
-#include "Windows/WindowsHWrapper.h"
+#include "Misc/ScopeExit.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/CoreDelegates.h"
 #include "Windows/WindowsPlatformOutputDevices.h"
 #include "GenericPlatform/GenericPlatformCrashContext.h"
 #include "Templates/RefCounting.h"
+#include "Null/NullPlatformApplicationMisc.h"
 
 // Resource includes.
 #include "Runtime/Launch/Resources/Windows/Resource.h"
 
 THIRD_PARTY_INCLUDES_START
 #include "Windows/AllowWindowsPlatformTypes.h"
-#include "Windows/PreWindowsApi.h"
 #include "dxgi1_3.h"
 #include "dxgi1_4.h"
 #include "dxgi1_6.h"
-#include "Windows/PostWindowsApi.h"
 #include "Windows/HideWindowsPlatformTypes.h"
 THIRD_PARTY_INCLUDES_END
 
 typedef HRESULT(STDAPICALLTYPE *GetDpiForMonitorProc)(HMONITOR Monitor, int32 DPIType, uint32 *DPIX, uint32 *DPIY);
 APPLICATIONCORE_API GetDpiForMonitorProc GetDpiForMonitor;
 
+void FWindowsPlatformApplicationMisc::PreInit()
+{
+	FApp::SetHasFocusFunction(&FWindowsPlatformApplicationMisc::IsThisApplicationForeground);
+}
+
 void FWindowsPlatformApplicationMisc::LoadStartupModules()
 {
 #if !UE_SERVER
-	FModuleManager::Get().LoadModule(TEXT("XAudio2"));
 	FModuleManager::Get().LoadModule(TEXT("HeadMountedDisplay"));
 #endif // !UE_SERVER
 
@@ -46,7 +50,10 @@ void FWindowsPlatformApplicationMisc::LoadStartupModules()
 class FOutputDeviceConsole* FWindowsPlatformApplicationMisc::CreateConsoleOutputDevice()
 {
 	// this is a slightly different kind of singleton that gives ownership to the caller and should not be called more than once
-	return new FWindowsConsoleOutputDevice();
+	if (FParse::Param(FCommandLine::Get(), TEXT("NewConsole")))
+		return new FWindowsConsoleOutputDevice2();
+	else
+		return new FWindowsConsoleOutputDevice();
 }
 
 class FOutputDeviceError* FWindowsPlatformApplicationMisc::GetErrorOutputDevice()
@@ -67,6 +74,11 @@ class FFeedbackContext* FWindowsPlatformApplicationMisc::GetFeedbackContext()
 
 GenericApplication* FWindowsPlatformApplicationMisc::CreateApplication()
 {
+	if (FParse::Param(FCommandLine::Get(), TEXT("RenderOffScreen")))
+	{
+		return FNullPlatformApplicationMisc::CreateApplication();
+	}
+
 	HICON AppIconHandle = LoadIcon( hInstance, MAKEINTRESOURCE( GetAppIcon() ) );
 	if( AppIconHandle == NULL )
 	{
@@ -90,11 +102,12 @@ bool FWindowsPlatformApplicationMisc::IsThisApplicationForeground()
 
 int32 FWindowsPlatformApplicationMisc::GetAppIcon()
 {
-	return IDICON_UE4Game;
+	return IDICON_UEGame;
 }
 
 static void WinPumpMessages()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(WinPumpMessages);
 	{
 		MSG Msg;
 		while( PeekMessage(&Msg,NULL,0,0,PM_REMOVE) )
@@ -108,12 +121,19 @@ static void WinPumpMessages()
 
 void FWindowsPlatformApplicationMisc::PumpMessages(bool bFromMainLoop)
 {
-	TSharedPtr<void> RevertGlobalFlag;
-	if (!GPumpingMessages)
+	const bool bSetPumpingMessages = !GPumpingMessages;
+	if (bSetPumpingMessages)
 	{
 		GPumpingMessages = true;
-		RevertGlobalFlag = MakeShareable<void>(nullptr, [](auto) {GPumpingMessages = false; });
 	}
+
+	ON_SCOPE_EXIT
+	{
+		if (bSetPumpingMessages)
+		{
+			GPumpingMessages = false;
+		}
+	};
 
 	if (!bFromMainLoop)
 	{
@@ -125,44 +145,21 @@ void FWindowsPlatformApplicationMisc::PumpMessages(bool bFromMainLoop)
 	WinPumpMessages();
 
 	// Determine if application has focus
-	bool HasFocus = FApp::UseVRFocus() ? FApp::HasVRFocus() : FWindowsPlatformApplicationMisc::IsThisApplicationForeground();
-	static bool HadFocus = false;
-
-#if WITH_EDITOR
-	// If editor thread doesn't have the focus, don't suck up too much CPU time.
-	if( GIsEditor )
-	{
-		if( HadFocus && !HasFocus )
-		{
-			// Drop our priority to speed up whatever is in the foreground.
-			SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL );
-		}
-		else if( HasFocus && !HadFocus )
-		{
-			// Boost our priority back to above normal as initially set in WindowsRunnableThread::CreateInternal.
-			SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL );
-		}
-		if( !HasFocus )
-		{
-			// Sleep for a bit to not eat up all CPU time.
-			FPlatformProcess::Sleep(0.005f);
-		}
-		HadFocus = HasFocus;
-	}
-#endif
+	bool bHasFocus = FApp::HasFocus();
+	static bool bHadFocus = false;
 
 #if !UE_SERVER
 	// For non-editor clients, record if the active window is in focus
-	if( HadFocus != HasFocus )
+	if( bHadFocus != bHasFocus )
 	{
-		FGenericCrashContext::SetEngineData(TEXT("Platform.AppHasFocus"), HasFocus ? TEXT("true") : TEXT("false"));
+		FGenericCrashContext::SetEngineData(TEXT("Platform.AppHasFocus"), bHasFocus ? TEXT("true") : TEXT("false"));
 	}
 #endif
 
-	HadFocus = HasFocus;
+	bHadFocus = bHasFocus;
 
 	// if its our window, allow sound, otherwise apply multiplier
-	FApp::SetVolumeMultiplier( HasFocus ? 1.0f : FApp::GetUnfocusedVolumeMultiplier() );
+	FApp::SetVolumeMultiplier( bHasFocus ? 1.0f : FApp::GetUnfocusedVolumeMultiplier() );
 }
 
 void FWindowsPlatformApplicationMisc::PreventScreenSaver()
@@ -180,12 +177,15 @@ void FWindowsPlatformApplicationMisc::PreventScreenSaver()
 
 FLinearColor FWindowsPlatformApplicationMisc::GetScreenPixelColor(const FVector2D& InScreenPos, float /*InGamma*/)
 {
-	COLORREF PixelColorRef = GetPixel(GetDC(HWND_DESKTOP), InScreenPos.X, InScreenPos.Y);
+	HDC TempDC = GetDC(HWND_DESKTOP);
+	COLORREF PixelColorRef = GetPixel(TempDC, (int)InScreenPos.X, (int)InScreenPos.Y);
+
+	ReleaseDC(HWND_DESKTOP, TempDC);
 
 	FColor sRGBScreenColor(
-		(PixelColorRef & 0xFF),
-		((PixelColorRef & 0xFF00) >> 8),
-		((PixelColorRef & 0xFF0000) >> 16),
+		(uint8)(PixelColorRef & 0xFF),
+		(uint8)((PixelColorRef & 0xFF00) >> 8),
+		(uint8)((PixelColorRef & 0xFF0000) >> 16),
 		255);
 
 	// Assume the screen color is coming in as sRGB space
@@ -231,7 +231,7 @@ void FWindowsPlatformApplicationMisc::SetHighDPIMode()
 
 			FPlatformProcess::FreeDllHandle(ShCoreDll);
 		}
-		else if (void* User32Dll = FPlatformProcess::GetDllHandle(TEXT("user32.dll")))
+		else if (void* User32Dll = GetModuleHandle(L"user32.dll"))
 		{
 			typedef BOOL(WINAPI *SetProcessDpiAwareProc)(void);
 			SetProcessDpiAwareProc SetProcessDpiAware = (SetProcessDpiAwareProc)FPlatformProcess::GetDllExport(User32Dll, TEXT("SetProcessDPIAware"));
@@ -246,8 +246,6 @@ void FWindowsPlatformApplicationMisc::SetHighDPIMode()
 					UE_LOG(LogInit, Warning, TEXT("SetProcessDpiAware failed"));
 				}
 			}
-
-			FPlatformProcess::FreeDllHandle(User32Dll);
 		}
 	}
 }
@@ -318,15 +316,16 @@ int32 FWindowsPlatformApplicationMisc::GetMonitorDPI(const FMonitorInfo& Monitor
 	return DisplayDPI;
 }
 
-// Looks for an adapter with >= 512 MB of dedicated video memory and assumes we use it.
-bool FWindowsPlatformApplicationMisc::ProbablyHasIntegratedGPU()
+// Looks for an adapter with the most dedicated video memory
+FWindowsPlatformApplicationMisc::FGPUInfo FWindowsPlatformApplicationMisc::GetBestGPUInfo()
 { 
 	TRefCountPtr<IDXGIFactory1> DXGIFactory1;
 	if (CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&DXGIFactory1) != S_OK || !DXGIFactory1)
 	{
-		return false;
+		return {};
 	}
 
+	DXGI_ADAPTER_DESC BestDesc = {};
 	TRefCountPtr<IDXGIAdapter> TempAdapter;
 	for (uint32 AdapterIndex = 0; DXGIFactory1->EnumAdapters(AdapterIndex, TempAdapter.GetInitReference()) != DXGI_ERROR_NOT_FOUND; ++AdapterIndex)
 	{
@@ -335,15 +334,14 @@ bool FWindowsPlatformApplicationMisc::ProbablyHasIntegratedGPU()
 			DXGI_ADAPTER_DESC Desc;
 			TempAdapter->GetDesc(&Desc);
 
-			const int MIN_GPU_MEMORY = 512 * 1024 * 1024;
-			if (Desc.DedicatedVideoMemory >= MIN_GPU_MEMORY)
+			if (Desc.DedicatedVideoMemory > BestDesc.DedicatedVideoMemory || AdapterIndex == 0)
 			{
-				return false;
+				BestDesc = Desc;
 			}
 		}
 	}
 
-	return true;
+	return FGPUInfo{ BestDesc.VendorId, BestDesc.DeviceId, BestDesc.DedicatedVideoMemory };
 }
 
 float FWindowsPlatformApplicationMisc::GetDPIScaleFactorAtPoint(float X, float Y)
@@ -381,7 +379,7 @@ float FWindowsPlatformApplicationMisc::GetDPIScaleFactorAtPoint(float X, float Y
 // Disabling optimizations helps to reduce the frequency of OpenClipboard failing with error code 0. It still happens
 // though only with really large text buffers and we worked around this by changing the editor to use an intermediate
 // text buffer for internal operations.
-PRAGMA_DISABLE_OPTIMIZATION 
+UE_DISABLE_OPTIMIZATION_SHIP
 
 void FWindowsPlatformApplicationMisc::ClipboardCopy(const TCHAR* Str)
 {
@@ -398,6 +396,10 @@ void FWindowsPlatformApplicationMisc::ClipboardCopy(const TCHAR* Str)
 		if( SetClipboardData( CF_UNICODETEXT, GlobalMem ) == NULL )
 			UE_LOG(LogWindows, Fatal,TEXT("SetClipboardData failed with error code %i"), (uint32)GetLastError() );
 		verify(CloseClipboard());
+	}
+	else
+	{
+		UE_LOG(LogWindows, Warning, TEXT("OpenClipboard failed with error code %i"), (uint32)GetLastError());
 	}
 }
 
@@ -442,7 +444,8 @@ void FWindowsPlatformApplicationMisc::ClipboardPaste(class FString& Result)
 	else 
 	{
 		Result=TEXT("");
+		UE_LOG(LogWindows, Warning, TEXT("OpenClipboard failed with error code %i"), (uint32)GetLastError());
 	}
 }
 
-PRAGMA_ENABLE_OPTIMIZATION 
+UE_ENABLE_OPTIMIZATION_SHIP

@@ -6,8 +6,11 @@
 
 #include "Streaming/LevelTextureManager.h"
 #include "Components/PrimitiveComponent.h"
-#include "Engine/Texture2D.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
+#include "SceneInterface.h"
+#include "Streaming/DynamicTextureInstanceManager.h"
+#include "Streaming/StaticTextureInstanceManager.h"
 
 FLevelRenderAssetManager::FLevelRenderAssetManager(ULevel* InLevel, RenderAssetInstanceTask::FDoWorkTask& AsyncTask)
 	: Level(InLevel)
@@ -125,7 +128,7 @@ void FLevelRenderAssetManager::IncrementalBuild(FDynamicRenderAssetInstanceManag
 		BuildStep = EStaticBuildStep::ProcessActors;
 
 		// Update the level context with the texture guid map. This is required in case the incremental build runs more steps.
-		LevelContext = FStreamingTextureLevelContext(EMaterialQualityLevel::Num, Level, &TextureGuidToLevelIndex);
+		LevelContext.UpdateContext(EMaterialQualityLevel::Num, Level, &TextureGuidToLevelIndex);
 		break;
 	}
 	case EStaticBuildStep::ProcessActors:
@@ -140,7 +143,7 @@ void FLevelRenderAssetManager::IncrementalBuild(FDynamicRenderAssetInstanceManag
 			const bool bIsStaticActor = Actor->IsRootComponentStatic();
 
 			TInlineComponentArray<UPrimitiveComponent*> Primitives;
-			Actor->GetComponents<UPrimitiveComponent>(Primitives);
+			Actor->GetComponents(Primitives);
 			for (const UPrimitiveComponent* Primitive : Primitives)
 			{
 				check(Primitive);
@@ -172,7 +175,7 @@ void FLevelRenderAssetManager::IncrementalBuild(FDynamicRenderAssetInstanceManag
 
 		while ((bForceCompletion || NumStepsLeft > 0) && UnprocessedComponents.Num())
 		{
-			const UPrimitiveComponent* Primitive = UnprocessedComponents.Pop(false);
+			const UPrimitiveComponent* Primitive = UnprocessedComponents.Pop(EAllowShrinking::No);
 
 			const EAddComponentResult AddResult = StaticInstances.Add(Primitive, LevelContext, MaxTextureUVDensity);
 			if (AddResult == EAddComponentResult::Fail && !bLevelIsVisible)
@@ -227,7 +230,7 @@ void FLevelRenderAssetManager::IncrementalBuild(FDynamicRenderAssetInstanceManag
 			// Reprocess the components that didn't have valid data.
 			while (PendingComponents.Num())
 			{
-				const UPrimitiveComponent* Primitive = PendingComponents.Pop(false);
+				const UPrimitiveComponent* Primitive = PendingComponents.Pop(EAllowShrinking::No);
 
 				if (StaticInstances.Add(Primitive, LevelContext, MaxTextureUVDensity) != EAddComponentResult::Success)
 				{

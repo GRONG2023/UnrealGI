@@ -3,7 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "PackageTools.h"
 #include "ISourceControlProvider.h"
 #include "UObject/TextProperty.h"
@@ -183,13 +183,27 @@ public:
 class FEditorFileUtils
 {
 public:
+	/** Dirty Package Ignore */
+	using FShouldIgnorePackageFunctionRef = TFunctionRef<bool(UPackage*)>;
+	struct FShouldIgnorePackage
+	{
+		static bool Default(UPackage*) { return false; }
+	};
 
+	
 	/** Used to decide how to handle garbage collection. */
 	enum EGarbageCollectionOption
 	{
 		GCO_SkipGarbageCollection	= 0,
 		GCO_CollectGarbage			= 1,
 	};
+
+	DECLARE_MULTICAST_DELEGATE(FOnLoadMapStart);
+	static UNREALED_API FOnLoadMapStart& GetOnLoadMapStartDelegate();
+
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnLoadMapEnd, const FString& Filename);
+	static UNREALED_API FOnLoadMapEnd& GetOnLoadMapEndDelegate();
+
 
 	/** Sets the active level filename so that "Save" operates on this file and "SaveAs" must be used on others */
 	static void RegisterLevelFilename(UObject* Object, const FString& NewLevelFilename);
@@ -273,8 +287,15 @@ public:
 	 */
 	static UNREALED_API bool SaveLevel(ULevel* Level, const FString& DefaultFilename = TEXT( "" ), FString* OutSavedFilename = nullptr );
 
-	/** Saves packages which contain map data but are not map packages themselves. */
-	static UNREALED_API void SaveMapDataPackages(UWorld* World, bool bCheckDirty, bool bSaveExternal = false);
+	/** 
+	 * Saves packages which contain map data but are not map packages themselves. 
+	 * 
+	 * @param	World				The world map data packages to be saved.
+	 * @param	bCheckDirty			If true, only packages that are dirty will be saved.
+	 * 
+	 * @return				true if the data packages were saved.
+	 */
+	static UNREALED_API bool SaveMapDataPackages(UWorld* World, bool bCheckDirty);
 
 	/**
 	 * Does a SaveAs for the specified assets.
@@ -294,14 +315,14 @@ public:
 	UNREALED_API static bool SaveLevelAs(ULevel* Level, FString* OutSavedFilename = nullptr);
 
 	/**
-	 * Saves all levels to the specified directory.
-	 *
+	 * Get the autosave filename for the given package.
+	 * 
+	 * @param	Package						Package to get the autosave filename for.
 	 * @param	AbsoluteAutosaveDir			Autosave directory.
-	 * @param	AutosaveIndex				Integer prepended to autosave filenames..
-	 * @param	bForceIfNotInList			Should the save be forced if the package is dirty, but not in DirtyPackagesForAutoSave?
-	 * @param	DirtyPackagesForAutoSave	A set of packages that are considered by the auto-save system to be dirty, you should check this to see if a package needs saving
+	 * @param	AutosaveIndex				Integer prepended to autosave filenames.
+	 * @param	PackageExt					Extension to use for the given package. Note: This must include the dot.
 	 */
-	static bool AutosaveMap(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage> >& DirtyPackagesForAutoSave);
+	static FString GetAutoSaveFilename(UPackage* const Package, const FString& AbsoluteAutosaveDir, const int32 AutoSaveIndex, const FString& PackageExt);
 
 	/**
 	 * Saves all levels to the specified directory.
@@ -311,7 +332,17 @@ public:
 	 * @param	bForceIfNotInList			Should the save be forced if the package is dirty, but not in DirtyPackagesForAutoSave?
 	 * @param	DirtyPackagesForAutoSave	A set of packages that are considered by the auto-save system to be dirty, you should check this to see if a package needs saving
 	 */
-	static EAutosaveContentPackagesResult::Type AutosaveMapEx(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage> >& DirtyPackagesForAutoSave);
+	static bool AutosaveMap(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>> >& DirtyPackagesForAutoSave);
+
+	/**
+	 * Saves all levels to the specified directory.
+	 *
+	 * @param	AbsoluteAutosaveDir			Autosave directory.
+	 * @param	AutosaveIndex				Integer prepended to autosave filenames..
+	 * @param	bForceIfNotInList			Should the save be forced if the package is dirty, but not in DirtyPackagesForAutoSave?
+	 * @param	DirtyPackagesForAutoSave	A set of packages that are considered by the auto-save system to be dirty, you should check this to see if a package needs saving
+	 */
+	static EAutosaveContentPackagesResult::Type AutosaveMapEx(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>> >& DirtyPackagesForAutoSave);
 
 	/**
 	 * Saves all asset packages to the specified directory.
@@ -323,7 +354,7 @@ public:
 	 *
 	 * @return	true if one or more packages were autosaved; false otherwise
 	 */
-	static bool AutosaveContentPackages(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage> >& DirtyPackagesForAutoSave);
+	static bool AutosaveContentPackages(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>> >& DirtyPackagesForAutoSave);
 
 	/**
 	 * Saves all asset packages to the specified directory.
@@ -335,7 +366,7 @@ public:
 	 *
 	 * @return	Success if saved at least one faile. NothingToDo if there was nothing to save. Failure on at least one auto-save failure.
 	 */
-	static EAutosaveContentPackagesResult::Type AutosaveContentPackagesEx(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage> >& DirtyPackagesForAutoSave);
+	static EAutosaveContentPackagesResult::Type AutosaveContentPackagesEx(const FString& AbsoluteAutosaveDir, const int32 AutosaveIndex, const bool bForceIfNotInList, const TSet< TWeakObjectPtr<UPackage>, TWeakObjectPtrSetKeyFuncs<TWeakObjectPtr<UPackage>> >& DirtyPackagesForAutoSave);
 
 	/**
 	 * Looks at all currently loaded packages and saves them if their "bDirty" flag is set, optionally prompting the user to select which packages to save)
@@ -347,9 +378,11 @@ public:
 	 * @param	bNotifyNoPackagesSaved		true if a notification should be displayed when no packages need to be saved.
 	 * @param	bCanBeDeclined				true if the user prompt should contain a "Don't Save" button in addition to "Cancel", which won't result in a failure return code.
 	 * @param	bOutPackagesNeededSaving	when not NULL, will be set to true if there was any work to be done, and false otherwise.
+	 * @param	ShouldIgnorePackageFunction callback that allows filtering if package should be saved or not.
+	 * @param	bSkipExternalObjectSave		true if saved package should skip saving their own external packages.
 	 * @return								true on success, false on fail.
 	 */
-	UNREALED_API static bool SaveDirtyPackages(const bool bPromptUserToSave, const bool bSaveMapPackages, const bool bSaveContentPackages, const bool bFastSave = false, const bool bNotifyNoPackagesSaved = false, const bool bCanBeDeclined = true, bool* bOutPackagesNeededSaving = NULL);
+	UNREALED_API static bool SaveDirtyPackages(const bool bPromptUserToSave, const bool bSaveMapPackages, const bool bSaveContentPackages, const bool bFastSave = false, const bool bNotifyNoPackagesSaved = false, const bool bCanBeDeclined = true, bool* bOutPackagesNeededSaving = NULL, const FShouldIgnorePackageFunctionRef& ShouldIgnorePackageFunction = FShouldIgnorePackage::Default, bool bSkipExternalObjectSave = false);
 
 	/**
 	* Looks at all currently loaded packages and saves them if their "bDirty" flag is set and they include specified clasees, optionally prompting the user to select which packages to save)
@@ -368,14 +401,35 @@ public:
 	 *
 	 * @param OutDirtyPackages Array to append dirty packages to.
 	 */
-	UNREALED_API static void GetDirtyWorldPackages(TArray<UPackage*>& OutDirtyPackages);
+	UNREALED_API static void GetDirtyWorldPackages(TArray<UPackage*>& OutDirtyPackages, const FShouldIgnorePackageFunctionRef& ShouldIgnorePackageFunction = FShouldIgnorePackage::Default);
 
 	/**
 	 * Appends array with all currently dirty content packages.
 	 *
 	 * @param OutDirtyPackages Array to append dirty packages to.
 	 */
-	UNREALED_API static void GetDirtyContentPackages(TArray<UPackage*>& OutDirtyPackages);
+	UNREALED_API static void GetDirtyContentPackages(TArray<UPackage*>& OutDirtyPackages, const FShouldIgnorePackageFunctionRef& ShouldIgnorePackageFunction = FShouldIgnorePackage::Default);
+
+	/**
+	 * Appends array with all currently dirty packages
+	 *
+	 * @param OutDirtyPackages Array to append dirty packages to.
+	 * @param FilterFunction Allows filtering out some dirty packages.
+	 */
+	UNREALED_API static void GetDirtyPackages(TArray<UPackage*>& OutDirtyPackages, const FShouldIgnorePackageFunctionRef& ShouldIgnorePackageFunction = FShouldIgnorePackage::Default);
+
+	DECLARE_MULTICAST_DELEGATE_OneParam(FOnPrepareWorldsForExplicitSave, TArray<UWorld*> Worlds);
+	UNREALED_API static FOnPrepareWorldsForExplicitSave OnPrepareWorldsForExplicitSave;
+
+	/**
+	 * Broadcasts the OnPrepareWorldsForExplicitSave event to allow validation and changes to worlds before they're saved.
+	 * Used for Editor triggered explicit saves caused by user input such as ctrl+s, or clicking the save button.
+	 * Changes to worlds include dirtying the world itself or affecting its ExternalActors through Adds/Removes/Edits.
+	 * 
+	 * 
+	 * @param Worlds A list of the worlds that will be broadcasted.
+	 */
+	UNREALED_API static void PrepareWorldsForExplicitSave(TArray<UWorld*> Worlds);
 
 	/**
 	 * Saves the active level, prompting the use for checkout if necessary.
@@ -394,6 +448,23 @@ public:
 		PR_Cancelled	/** The user has cancelled out of a prompt; the caller should abort whatever it was doing */
 	};
 
+	struct FPromptForCheckoutAndSaveParams
+	{
+		FPromptForCheckoutAndSaveParams()
+			: Title(NSLOCTEXT("PackagesDialogModule", "PackagesDialogTitle", "Save Content")),
+			  Message(NSLOCTEXT("PackagesDialogModule", "PackagesDialogMessage", "Select Content to Save"))
+		{}
+
+		bool bCheckDirty = false;                       /** If true, only packages that are dirty in PackagesToSave will be saved	*/
+		bool bPromptToSave = false;                     /** If true the user will be prompted with a list of packages to save, otherwise all passed in packages are saved */
+		bool bAlreadyCheckedOut = false;                /** If true, the user will not be prompted with the source control dialog */
+		bool bCanBeDeclined = true;                     /** If true, offer a "Don't Save" option in addition to "Cancel", which will not result in a cancellation return code. */
+		bool bIsExplicitSave = false;                   /** If true, marks the save as explicit. Explicit saves are triggered by user facing actions such as Save As, or ctrl + s*/
+		FText Title;                                    /** If bPromptToSave true provides a dialog title */
+		FText Message;                                  /** If bPromptToSave true provides a dialog message */
+		TArray<UPackage*>* OutFailedPackages = nullptr; /** [out] If specified, will be filled in with all of the packages that failed to save successfully */
+	};
+
 	/**
 	 * Optionally prompts the user for which of the provided packages should be saved, and then additionally prompts the user to check-out any of
 	 * the provided packages which are under source control. If the user cancels their way out of either dialog, no packages are saved. It is possible the user
@@ -405,6 +476,8 @@ public:
 	 * @param		PackagesToSave				The list of packages to save.  Both map and content packages are supported 
 	 * @param		bCheckDirty					If true, only packages that are dirty in PackagesToSave will be saved	
 	 * @param		bPromptToSave				If true the user will be prompted with a list of packages to save, otherwise all passed in packages are saved
+	 * @param		Title						If bPromptToSave true provides a dialog title
+	 * @param		Message						If bPromptToSave true provides a dialog message
 	 * @param		OutFailedPackages			[out] If specified, will be filled in with all of the packages that failed to save successfully
 	 * @param		bAlreadyCheckedOut			If true, the user will not be prompted with the source control dialog
 	 * @param		bCanBeDeclined				If true, offer a "Don't Save" option in addition to "Cancel", which will not result in a cancellation return code.
@@ -415,6 +488,8 @@ public:
 	 *				Save" option on the dialog, the return code will indicate the user has declined out of the prompt. This way calling code can distinguish between a decline and a cancel
 	 *				and then proceed as planned, or abort its operation accordingly.
 	 */
+	UNREALED_API static EPromptReturnCode PromptForCheckoutAndSave(const TArray<UPackage*>& PackagesToSave, FPromptForCheckoutAndSaveParams& InOutParams);
+	UNREALED_API static EPromptReturnCode PromptForCheckoutAndSave(const TArray<UPackage*>& PackagesToSave, bool bCheckDirty, bool bPromptToSave, const FText& Title, const FText& Message, TArray<UPackage*>* OutFailedPackages = NULL, bool bAlreadyCheckedOut = false, bool bCanBeDeclined = true);
 	UNREALED_API static EPromptReturnCode PromptForCheckoutAndSave( const TArray<UPackage*>& PackagesToSave, bool bCheckDirty, bool bPromptToSave, TArray<UPackage*>* OutFailedPackages = NULL, bool bAlreadyCheckedOut = false, bool bCanBeDeclined = true );
 
 	////////////////////////////////////////////////////////////////////////////
@@ -432,7 +507,7 @@ public:
 	// Source Control
 
 	/**
-	 * Prompt the user with a check-box dialog allowing him/her to check out the provided packages
+	 * Prompt the user with a check-box dialog allowing them to check out the provided packages
 	 * from source control, if desired
 	 *
 	 * @param	bCheckDirty								If true, non-dirty packages won't be added to the dialog
@@ -440,11 +515,12 @@ public:
 	 * @param	OutPackagesCheckedOutOrMadeWritable		If not NULL, this array will be populated with packages that the user selected to check out or make writable.
 	 * @param	OutPackagesNotNeedingCheckout			If not NULL, this array will be populated with packages that the user was not prompted about and do not need to be checked out to save.  Useful for saving packages even if the user canceled the checkout dialog.
 	 * @param	bPromptingAfterModify					If true, we are prompting the user after an object has been modified, which changes the cancel button to "Ask me later".
+	 * @param	bAllowSkip								If true, user can skip the checkout / make writable.
 	 *
 	 * @return	true if the user did not cancel out of the dialog and has potentially checked out some files
 	 *			(or if there is no source control integration); false if the user cancelled the dialog
 	 */
-	UNREALED_API static bool PromptToCheckoutPackages(bool bCheckDirty, const TArray<UPackage*>& PackagesToCheckOut, TArray< UPackage* >* OutPackagesCheckedOutOrMadeWritable = NULL, TArray< UPackage* >* OutPackagesNotNeedingCheckout = NULL, const bool bPromptingAfterModify = false );
+	UNREALED_API static bool PromptToCheckoutPackages(bool bCheckDirty, const TArray<UPackage*>& PackagesToCheckOut, TArray< UPackage* >* OutPackagesCheckedOutOrMadeWritable = NULL, TArray< UPackage* >* OutPackagesNotNeedingCheckout = NULL, const bool bPromptingAfterModify = false, const bool bAllowSkip = false );
 	
 	/**
 	 * Check out the specified packages from source control and report any errors while checking out
@@ -470,7 +546,7 @@ public:
 	UNREALED_API static ECommandResult::Type CheckoutPackages(const TArray<FString>& PkgsToCheckOut, TArray<FString>* OutPackagesCheckedOut = NULL, const bool bErrorIfAlreadyCheckedOut = true);
 
 	/**
-	 * Prompt the user with a check-box dialog allowing him/her to check out relevant level packages 
+	 * Prompt the user with a check-box dialog allowing them to check out relevant level packages 
 	 * from source control
 	 *
 	 * @param	bCheckDirty					If true, non-dirty packages won't be added to the dialog
@@ -486,7 +562,7 @@ public:
 
 	/**
 	 * Overloaded version of PromptToCheckOutLevels which prompts the user with a check-box dialog allowing
-	 * him/her to check out the relevant level package if necessary
+	 * them to check out the relevant level package if necessary
 	 *
 	 * @param	bCheckDirty				If true, non-dirty packages won't be added to the dialog
 	 * @param	SpecificLevelToCheckOut	The level whose package will display in the dialog if it is
@@ -496,16 +572,6 @@ public:
 	 *			no source control integration); false if the user cancelled the dialog
 	 */
 	UNREALED_API static bool PromptToCheckoutLevels(bool bCheckDirty, ULevel* SpecificLevelToCheckOut);
-
-	/**
-	 * Checks to see if a filename is valid for saving.
-	 * A filename must be under FPlatformMisc::GetMaxPathLength() to be saved
-	 *
-	 * @param Filename	Filename, with or without path information, to check.
-	 * @param OutError	If an error occurs, this is the reason why
-	 */
-	UE_DEPRECATED(4.18, "Call FFileHelper::IsFilenameValidForSaving instead")
-	UNREALED_API static bool IsFilenameValidForSaving(const FString& Filename, FText& OutError);
 
 	/** Loads a simple example map */
 	UNREALED_API static void LoadDefaultMapAtStartup();
@@ -524,7 +590,10 @@ public:
 	static bool SaveWorlds(UWorld* InWorld, const FString& RootPath, const TCHAR* Prefix, TArray<FString>& OutFilenames);
 
 	/** Whether or not we're in the middle of loading the simple startup map */
-	static bool IsLoadingStartupMap() {return bIsLoadingDefaultStartupMap;}
+	static bool IsLoadingStartupMap() { return bIsLoadingDefaultStartupMap; }
+
+	/** Whether or not saving the map package should save the external objects packages */
+	static bool ShouldSkipExternalObjectSave() { return bSkipExternalObjectSave; }
 
 	/**
 	 * Returns a file filter string appropriate for a specific file interaction.
@@ -550,6 +619,13 @@ public:
 	UNREALED_API static void FindAllSubmittablePackageFiles(TMap<FString, FSourceControlStatePtr>& OutPackages, const bool bIncludeMaps);
 
 	/**
+	 * Looks for source control submittable non-package project files for the current project.
+	 *
+	 * @param	OutProjectFiles	All found project filenames and their source control state.
+	 */
+	UNREALED_API static void FindAllSubmittableProjectFiles(TMap<FString, FSourceControlStatePtr>& OutProjectFiles);
+
+	/**
 	 * Looks for config files for the current project.
 	 *
 	 * @param	OutConfigFiles	All found config filenames.
@@ -557,7 +633,7 @@ public:
 	UNREALED_API static void FindAllConfigFiles(TArray<FString>& OutConfigFiles);
 
 	/**
-	 * Looks for source control submittable config files for the current project.
+	 * Looks for source control submittable non-package config files for the current project.
 	 *
 	 * @param	OutConfigFiles	All found config filenames and their source control state.
 	 */
@@ -602,15 +678,31 @@ private:
 
 	/** Callback from PackagesDialog used to update the list of items when the source control state changes */
 	static void UpdateCheckoutPackageItems(bool bCheckDirty, TArray<UPackage*> PackagesToCheckOut, TArray<UPackage*>* OutPackagesNotNeedingCheckout);
+	
+	/** Prompts for package checkout without reentrance check */
+	static bool PromptToCheckoutPackagesInternal(bool bCheckDirty, const TArray<UPackage*>& PackagesToCheckOut, TArray<UPackage*>* OutPackagesCheckedOutOrMadeWritable, TArray<UPackage*>* OutPackagesNotNeedingCheckout, const bool bPromptingAfterModify, const bool bAllowSkip);
+
+	/** Tries to checkout packages without prompting and only prompts (for revert) if that fails */
+	static bool AutomaticCheckoutOrPromptToRevertPackages(const TArray<UPackage*>& PackagesToCheckOut, TArray<UPackage*>* OutPackagesCheckedOutOrMadeWritable, TArray<UPackage*>* OutPackagesNotNeedingCheckout, TArray<UPackage*>* OutPackagesToRevert);
+
+	/** Tries to make the given packages writable */
+	static void MakePackagesWritable(const TArray<UPackage*>& PackagesToMakeWritable, TArray<UPackage*>* OutPackagesMadeWritable, TArray<UPackage*>* OutPackagesMadeWritableFailed);
 
 	static bool bIsLoadingDefaultStartupMap;
 
 	/** Flag used to determine if the checkout and save prompt is already open to prevent re-entrance */
 	static bool bIsPromptingForCheckoutAndSave;
 	
+	/** Flag used in SaveMap to skip saving external objects and only save the map */
+	static bool bSkipExternalObjectSave;
+
 	// Set of packages to ignore for save/checkout when using SaveAll.
 	static TSet<FString> PackagesNotSavedDuringSaveAll;
 
 	// Set of packages which should no longer prompt for checkouts / to be made writable
 	static TSet<FString> PackagesNotToPromptAnyMore;
+
+	static FOnLoadMapStart OnLoadMapStart;
+	static FOnLoadMapEnd OnLoadMapEnd;
+
 };

@@ -161,7 +161,7 @@ public:
 	bool PreprocessedInputKey( const FKey Key, const EInputEvent Event );
 
 	/** Handles the axis input from the Input Preprocessor*/
-	bool PreprocessedInputAxis( const int32 ControllerId, const FKey Key, const float Delta, const float DeltaTime );
+	bool PreprocessedInputAxis( const int32 ControllerId, const FKey Key, const float Delta, const double DeltaTime );
 
 	/** Gets the world space transform of the calibrated VR room origin.  When using a seated VR device, this will feel like the
 	camera's world transform (before any HMD positional or rotation adjustments are applied.) */
@@ -330,7 +330,7 @@ public:
 	void AllowWorldMovement( bool bAllow );
 
 	/** For other systems to check if the Viewport World Interaction system is currently aligning transformables to actors*/
-	bool AreAligningToActors();
+	bool AreAligningToActors() const;
 	/** For other systems to check if the Viewport World Interaction system currently has candidate actors selected */
 	bool HasCandidatesSelected();
 	/** If there are no currently selected candidates, use the currently selected actors as candidates. Otherwise, reset the candidates */
@@ -545,11 +545,11 @@ private:
 
 	/** All the interactors registered to modify the world */
 	UPROPERTY()
-	TArray< class UViewportInteractor* > Interactors;
+	TArray< TObjectPtr<class UViewportInteractor> > Interactors;
 
 	/** The active system being used to transform objects */
 	UPROPERTY()
-	class UViewportTransformer* ViewportTransformer;
+	TObjectPtr<class UViewportTransformer> ViewportTransformer;
 
 	//
 	// Viewport
@@ -621,7 +621,7 @@ private:
 
 	/** Transform gizmo actor, for manipulating selected actor(s) */
 	UPROPERTY()
-	class ABaseTransformGizmo* TransformGizmoActor;
+	TObjectPtr<class ABaseTransformGizmo> TransformGizmoActor;
 
 	/** Class used for when refreshing the transform gizmo */
 	TSubclassOf<ABaseTransformGizmo> TransformGizmoClass;
@@ -650,15 +650,15 @@ private:
 
 	/** Actor for the snap grid */
 	UPROPERTY()
-	class AActor* SnapGridActor;
+	TObjectPtr<class AActor> SnapGridActor;
 
 	/** The plane mesh we use to draw a snap grid under selected objects */
 	UPROPERTY()
-	class UStaticMeshComponent* SnapGridMeshComponent;
+	TObjectPtr<class UStaticMeshComponent> SnapGridMeshComponent;
 
 	/** MID for the snap grid, so we can update snap values on the fly */
 	UPROPERTY()
-	class UMaterialInstanceDynamic* SnapGridMID;
+	TObjectPtr<class UMaterialInstanceDynamic> SnapGridMID;
 
 	//
 	// Interactable
@@ -710,7 +710,7 @@ private:
 
 	/** The default mouse cursor interactor, activated on demand */
 	UPROPERTY()
-	class UMouseCursorInteractor* DefaultMouseCursorInteractor;
+	TObjectPtr<class UMouseCursorInteractor> DefaultMouseCursorInteractor;
 
 	/** Reference count for the default mouse cursor interactor.  When this reaches zero, the mouse cursor interactor goes away. */
 	int32 DefaultMouseCursorInteractorRefCount;
@@ -753,7 +753,7 @@ private:
 
 	/** Container of assets */
 	UPROPERTY()
-	const UViewportInteractionAssetContainer* AssetContainer;
+	TObjectPtr<const UViewportInteractionAssetContainer> AssetContainer;
 
 	/** If we want to skip playing the sound when refreshing the transform gizmo next time */
 	bool bPlayNextRefreshTransformGizmoSound;

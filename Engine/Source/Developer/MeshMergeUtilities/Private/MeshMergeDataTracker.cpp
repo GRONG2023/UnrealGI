@@ -5,6 +5,8 @@
 #include "Misc/Crc.h"
 #include "Engine/StaticMesh.h"
 #include "StaticMeshAttributes.h"
+#include "TriangleTypes.h"
+#include "MaterialUtilities.h"
 
 FMeshMergeDataTracker::FMeshMergeDataTracker()
 	: AvailableLightMapUVChannel(INDEX_NONE), SummedLightMapPixels(0)
@@ -108,7 +110,7 @@ void FMeshMergeDataTracker::AddLightMapPixels(int32 Dimension)
 
 int32 FMeshMergeDataTracker::GetLightMapDimension() const
 {
-	return FMath::CeilToInt(FMath::Sqrt(SummedLightMapPixels));
+	return FMath::CeilToInt(FMath::Sqrt(static_cast<float>(SummedLightMapPixels)));
 }
 
 bool FMeshMergeDataTracker::DoesLODContainVertexColors(int32 LODIndex) const
@@ -250,8 +252,9 @@ void FMeshMergeDataTracker::ProcessRawMeshes()
 		const int32 LODIndex = Key.GetLODIndex();
 		const FMeshDescription& RawMesh = MeshPair.Value;
 
-		TVertexInstanceAttributesConstRef<FVector4> VertexInstanceColors = RawMesh.VertexInstanceAttributes().GetAttributesRef<FVector4>(MeshAttribute::VertexInstance::Color);
-		TVertexInstanceAttributesConstRef<FVector2D> VertexInstanceUVs = RawMesh.VertexInstanceAttributes().GetAttributesRef<FVector2D>(MeshAttribute::VertexInstance::TextureCoordinate);
+		FStaticMeshConstAttributes Attributes(RawMesh);
+		TVertexInstanceAttributesConstRef<FVector4f> VertexInstanceColors = Attributes.GetVertexInstanceColors();
+		TVertexInstanceAttributesConstRef<FVector2f> VertexInstanceUVs = Attributes.GetVertexInstanceUVs();
 
 		// hash vertex color buffer so we can see if instances have unique vertex data
 		if(VertexInstanceColors.GetNumElements() > 0)
@@ -264,7 +267,7 @@ void FMeshMergeDataTracker::ProcessRawMeshes()
 		
 		if (VertexInstanceUVs.GetNumElements() > 0)
 		{
-			for (int32 ChannelIndex = 0; ChannelIndex < FMath::Min(VertexInstanceUVs.GetNumIndices(), (int32)MAX_MESH_TEXTURE_COORDS_MD); ++ChannelIndex)
+			for (int32 ChannelIndex = 0; ChannelIndex < FMath::Min(VertexInstanceUVs.GetNumChannels(), (int32)MAX_MESH_TEXTURE_COORDS_MD); ++ChannelIndex)
 			{
 				bOcuppiedUVChannels[LODIndex][ChannelIndex] = true;
 				bPotentialLODLightmapUVChannels[LODIndex][ChannelIndex] = (ChannelIndex == LightmapChannelIdx);
@@ -302,4 +305,28 @@ void FMeshMergeDataTracker::ProcessRawMeshes()
 			break;
 		}
 	}
+}
+
+double FMeshMergeDataTracker::GetTextureSizeFromTargetTexelDensity(float InTargetTexelDensity) const
+{
+	double Mesh3DArea = 0;
+	const double MeshUVArea = 1.0;		// UVs are not available yet, assume perfect UV space usage.
+
+	for (const TPair<FMeshLODKey, FMeshDescription>& MeshPair : RawMeshLODs)
+	{
+		const FMeshDescription& MeshDescription = MeshPair.Value;
+			
+		FStaticMeshConstAttributes Attributes(MeshDescription);
+		TVertexAttributesConstRef<FVector3f> Positions = Attributes.GetVertexPositions();
+		TUVAttributesConstRef<FVector2f> UVs = Attributes.GetUVCoordinates(0);
+
+		for (const FTriangleID TriangleID : MeshDescription.Triangles().GetElementIDs())
+		{
+			// World space area
+			TArrayView<const FVertexID> TriVertices = MeshDescription.GetTriangleVertices(TriangleID);
+			Mesh3DArea += UE::Geometry::VectorUtil::Area(Positions[TriVertices[0]], Positions[TriVertices[1]], Positions[TriVertices[2]]);
+		}
+	}
+
+	return FMaterialUtilities::GetTextureSizeFromTargetTexelDensity(Mesh3DArea, MeshUVArea, InTargetTexelDensity);
 }

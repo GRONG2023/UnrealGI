@@ -1,10 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/InterpToMovementComponent.h"
-#include "EngineDefines.h"
 #include "GameFramework/DamageType.h"
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InterpToMovementComponent)
 
 DEFINE_LOG_CATEGORY_STATIC(LogInterpToMovementComponent, Log, All);
 
@@ -63,7 +64,7 @@ void UInterpToMovementComponent::TickComponent(float DeltaTime, enum ELevelTick 
 	{
 		return;
 	}
-	if((bStopped == true ) || ( ActorOwner->IsPendingKill() ) )
+	if((bStopped == true ) || ( !IsValid(ActorOwner) ) )
 	{
 		return;
 	}
@@ -76,6 +77,10 @@ void UInterpToMovementComponent::TickComponent(float DeltaTime, enum ELevelTick 
 	UpdateControlPoints(false);
 
 	float RemainingTime = DeltaTime;
+	if (SpeedMultiplier > 0.f)
+	{
+		RemainingTime *= SpeedMultiplier;
+	}
 	int32 NumBounces = 0;
 	int32 Iterations = 0;
 	FHitResult Hit(1.f);
@@ -85,7 +90,7 @@ void UInterpToMovementComponent::TickComponent(float DeltaTime, enum ELevelTick 
 	{
 		WaitPos = UpdatedComponent->GetComponentLocation(); //-V595
 	}
-	while (RemainingTime >= MIN_TICK_TIME && (Iterations < MaxSimulationIterations) && !ActorOwner->IsPendingKill() && UpdatedComponent && IsActive())
+	while (RemainingTime >= MIN_TICK_TIME && (Iterations < MaxSimulationIterations) && IsValid(ActorOwner) && UpdatedComponent && IsActive())
 	{
 		Iterations++;
 
@@ -93,7 +98,7 @@ void UInterpToMovementComponent::TickComponent(float DeltaTime, enum ELevelTick 
 		RemainingTime -= TimeTick;
 
 		// Calculate the current alpha with this tick iteration
-		const float TargetTime = FMath::Clamp(CurrentTime + ((TimeTick*TimeMultiplier)*CurrentDirection), 0.0f, 1.0f);		
+		const float TargetTime = FMath::Clamp(CurrentTime + ((TimeTick*TimeMultiplier)*CurrentDirection), 0.0f, 1.0f);
 		FVector MoveDelta = ComputeMoveDelta(TargetTime);
 		
 		// Update velocity
@@ -116,7 +121,7 @@ void UInterpToMovementComponent::TickComponent(float DeltaTime, enum ELevelTick 
 		}
 		//DrawDebugPoint(GetWorld(), UpdatedComponent->GetComponentLocation(), 16, FColor::White,true,5.0f);
 		// If we hit a trigger that destroyed us, abort.
-		if (ActorOwner->IsPendingKill() || !UpdatedComponent || !IsActive())
+		if (!IsValid(ActorOwner) || !UpdatedComponent || !IsActive())
 		{
 			return;
 		}
@@ -299,13 +304,13 @@ void UInterpToMovementComponent::StopSimulating(const FHitResult& HitResult)
 bool UInterpToMovementComponent::HandleHitWall(const FHitResult& Hit, float Time, const FVector& MoveDelta)
 {
 	AActor* ActorOwner = UpdatedComponent ? UpdatedComponent->GetOwner() : NULL;
-	if (!CheckStillInWorld() || !ActorOwner || ActorOwner->IsPendingKill())
+	if (!CheckStillInWorld() || !IsValid(ActorOwner))
 	{
 		return true;
 	}
 	HandleImpact(Hit, Time, MoveDelta);
 
-	if (ActorOwner->IsPendingKill() || !UpdatedComponent)
+	if (!IsValid(ActorOwner) || !UpdatedComponent)
 	{
 		return true;
 	}
@@ -371,7 +376,7 @@ bool UInterpToMovementComponent::CheckStillInWorld()
 	}
 	// check the variations of KillZ
 	AWorldSettings* WorldSettings = MyWorld->GetWorldSettings(true);
-	if (!WorldSettings->bEnableWorldBoundsChecks)
+	if (!WorldSettings->AreWorldBoundsChecksEnabled())
 	{
 		return true;
 	}
@@ -588,3 +593,4 @@ void UInterpToMovementComponent::PostEditChangeProperty(FPropertyChangedEvent& P
 
 
 #endif // WITH_EDITOR
+

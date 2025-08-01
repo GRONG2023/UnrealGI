@@ -17,9 +17,8 @@ public class SourceCodeAccess : ModuleRules
 			new string[] {
 				"CoreUObject",
 				"Slate",
+				"SlateCore",
 			}
 		);
-
-		PrivateIncludePaths.Add("Developer/SourceCodeAccess/Private");
 	}
 }

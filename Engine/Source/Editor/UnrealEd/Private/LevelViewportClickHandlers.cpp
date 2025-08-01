@@ -15,7 +15,7 @@
 #include "Engine/PointLight.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/TargetPoint.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Engine/Selection.h"
 #include "Editor.h"
 #include "EditorModeManager.h"
@@ -30,16 +30,36 @@
 #include "StaticLightingSystem/StaticLightingPrivate.h"
 #include "LightMap.h"
 #include "Subsystems/BrushEditingSubsystem.h"
+#include "Elements/Framework/TypedElementSelectionSet.h"
+#include "AssetSelection.h"
 
 #define LOCTEXT_NAMESPACE "ClickHandlers"
 
 namespace LevelViewportClickHandlers
 {
-	static void PrivateSummonContextMenu( FLevelEditorViewportClient* ViewportClient )
+	static const UTypedElementSelectionSet* PrivateGetElementSelectionSet(FLevelEditorViewportClient* ViewportClient)
+	{
+		if (TSharedPtr<ILevelEditor> LevelEditor = ViewportClient->ParentLevelEditor.Pin())
+		{
+			return LevelEditor->GetElementSelectionSet();
+		}
+		return nullptr;
+	}
+
+	static UTypedElementSelectionSet* PrivateGetMutableElementSelectionSet(FLevelEditorViewportClient* ViewportClient)
+	{
+		if (TSharedPtr<ILevelEditor> LevelEditor = ViewportClient->ParentLevelEditor.Pin())
+		{
+			return LevelEditor->GetMutableElementSelectionSet();
+		}
+		return nullptr;
+	}
+
+	static void PrivateSummonContextMenu( FLevelEditorViewportClient* ViewportClient, const FTypedElementHandle& HitProxyElement = FTypedElementHandle())
 	{
 		if( ViewportClient->ParentLevelEditor.IsValid() )
 		{
-			ViewportClient->ParentLevelEditor.Pin()->SummonLevelViewportContextMenu();
+			ViewportClient->ParentLevelEditor.Pin()->SummonLevelViewportContextMenu(HitProxyElement);
 		}
 	}	
 
@@ -58,22 +78,7 @@ namespace LevelViewportClickHandlers
 	 */
 	static AActor* PrivateAddActor(UClass* ActorClass)
 	{
-		if ( ActorClass )
-		{
-			// use an actor factory if possible
-			UActorFactory* ActorFactory = GEditor->FindActorFactoryForActorClass( ActorClass );
-			if( ActorFactory )
-			{
-				return GEditor->UseActorFactory( ActorFactory, FAssetData(), nullptr );
-			}
-			// otherwise use AddActor so that we can return the newly created actor
-			else
-			{
-				const FTransform ActorTransform = FActorPositioning::GetCurrentViewportPlacementTransform(*ActorClass->GetDefaultObject<AActor>());
-				return GEditor->AddActor( GCurrentLevelEditingViewportClient->GetWorld()->GetCurrentLevel(), ActorClass, ActorTransform );
-			}
-		}
-		return NULL;
+		return FActorFactoryAssetProxy::AddActorForAsset(ActorClass);
 	}
 
 	/**
@@ -119,6 +124,94 @@ namespace LevelViewportClickHandlers
 		return false;
 	}
 
+	bool ClickElement(FLevelEditorViewportClient* ViewportClient, const FTypedElementHandle& HitElement, const FViewportClick& Click)
+	{
+		// Pivot snapping
+		if (Click.GetKey() == EKeys::MiddleMouseButton && Click.IsAltDown())
+		{
+			//GEditor->SetPivot(GEditor->ClickLocation, true, false, true); // TODO: This last param is only for actor pivots
+			//return true;
+			return false; // Let actor and component clicks handle pivots for now
+		}
+
+		UTypedElementSelectionSet* LevelEditorElementSelectionSet = PrivateGetMutableElementSelectionSet(ViewportClient);
+		if (!LevelEditorElementSelectionSet)
+		{
+			return false;
+		}
+
+		bool bHandledClick = false;
+
+		const bool bIsLeftClickSelection = Click.GetKey() == EKeys::LeftMouseButton && !(ViewportClient->Viewport->KeyState(EKeys::T) || ViewportClient->Viewport->KeyState(EKeys::L) || ViewportClient->Viewport->KeyState(EKeys::S) || ViewportClient->Viewport->KeyState(EKeys::A));
+		const bool bIsRightClickSelection = Click.GetKey() == EKeys::RightMouseButton && !Click.IsControlDown() && !ViewportClient->Viewport->KeyState(EKeys::LeftMouseButton);
+
+		if (bIsLeftClickSelection || bIsRightClickSelection)
+		{
+			const ETypedElementSelectionMethod SelectionMethod = Click.GetEvent() == IE_DoubleClick ? ETypedElementSelectionMethod::Secondary : ETypedElementSelectionMethod::Primary;
+			if (const FTypedElementHandle ResolvedElement = LevelEditorElementSelectionSet->GetSelectionElement(HitElement, SelectionMethod))
+			{
+				bHandledClick = true;
+
+				const FTypedElementSelectionOptions SelectionOptions = FTypedElementSelectionOptions()
+					.SetAllowHidden(true)
+					.SetWarnIfLocked(true);
+
+				bool bNeedViewportRefresh = false;
+
+				if (LevelEditorElementSelectionSet->CanSelectElement(ResolvedElement, SelectionOptions))
+				{
+					const FScopedTransaction Transaction(NSLOCTEXT("UnrealEd", "ClickingOnElements", "Clicking on Elements"));
+
+					const bool bAllowSelectionModifiers = bIsLeftClickSelection && LevelEditorElementSelectionSet->AllowSelectionModifiers(ResolvedElement);
+					if (Click.IsControlDown() && bAllowSelectionModifiers)
+					{
+						if (LevelEditorElementSelectionSet->IsElementSelected(ResolvedElement, FTypedElementIsSelectedOptions().SetAllowIndirect(true)))
+						{
+							LevelEditorElementSelectionSet->DeselectElement(ResolvedElement, SelectionOptions);
+						}
+						else
+						{
+							LevelEditorElementSelectionSet->SelectElement(ResolvedElement, SelectionOptions);
+						}
+					}
+					else if (Click.IsShiftDown() && bAllowSelectionModifiers)
+					{
+						LevelEditorElementSelectionSet->SelectElement(ResolvedElement, SelectionOptions);
+					}
+					else
+					{
+						// Skip the clear if we're doing a RMB select and this actor is already selected, as we want to summon the menu for the current selection
+						if (bIsLeftClickSelection || !LevelEditorElementSelectionSet->IsElementSelected(ResolvedElement, FTypedElementIsSelectedOptions().SetAllowIndirect(true)))
+						{
+							bNeedViewportRefresh = bIsRightClickSelection; // Refresh the viewport so the user will see what they just clicked while the menu is open
+							GEditor->DeselectAllSurfaces();
+							LevelEditorElementSelectionSet->ClearSelection(SelectionOptions);
+						}
+						LevelEditorElementSelectionSet->SelectElement(ResolvedElement, SelectionOptions);
+					}
+
+					// Notify any pending selection change now, as this avoids the visual pivot location "lagging" behind the actual selection,
+					// and also ensures that the pivot is at the correct location prior to opening any context menus (which block the update)
+					LevelEditorElementSelectionSet->NotifyPendingChanges();
+				}
+
+				if (bNeedViewportRefresh)
+				{
+					// Redraw the viewport so the user can see which object was clicked on
+					ViewportClient->Viewport->Draw();
+					FlushRenderingCommands();
+				}
+
+				if (bIsRightClickSelection)
+				{
+					PrivateSummonContextMenu(ViewportClient, ResolvedElement);
+				}
+			}
+		}
+
+		return bHandledClick;
+	}
+
 	bool ClickActor(FLevelEditorViewportClient* ViewportClient,AActor* Actor,const FViewportClick& Click,bool bAllowSelectionChange)
 	{
 		// Pivot snapping
@@ -142,7 +235,7 @@ namespace LevelViewportClickHandlers
 				if( bAllowSelectionChange && GEditor->CanSelectActor(Actor, true, true) )
 				{
 					// If the actor the user clicked on was already selected, then we won't bother clearing the selection
-					if( !Actor->IsSelected() )
+					if(!Actor->IsActorOrSelectionParentSelected())
 					{
 						GEditor->SelectNone( false, true );
 						bNeedViewportRefresh = true;
@@ -160,7 +253,7 @@ namespace LevelViewportClickHandlers
 				FlushRenderingCommands();
 			}
 
-			PrivateSummonContextMenu(ViewportClient);
+			PrivateSummonContextMenu(ViewportClient, Actor ? UEngineElementsLibrary::AcquireEditorActorElementHandle(Actor) : FTypedElementHandle());
 			return true;
 		}
 		else if( Click.GetEvent() == IE_DoubleClick && Click.GetKey() == EKeys::LeftMouseButton && !Click.IsControlDown() && !Click.IsShiftDown() )
@@ -304,7 +397,7 @@ namespace LevelViewportClickHandlers
 		}
 		else
 		{
-			UPrimitiveComponent* TestComponent = const_cast<UPrimitiveComponent*>(ActorHitProxy->PrimComponent);
+			UPrimitiveComponent* TestComponent = ConstCast(ActorHitProxy->PrimComponent);
 			if (ActorHitProxy->Actor->GetComponents().Contains(TestComponent))
 			{
 				Component = TestComponent;
@@ -540,7 +633,7 @@ namespace LevelViewportClickHandlers
 					Model->Surfs[i].Material = SelectedMaterialInstance;
 					const bool bUpdateTexCoords = false;
 					const bool bOnlyRefreshSurfaceMaterials = true;
-					GEditor->polyUpdateMaster(Model, i, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
+					GEditor->polyUpdateBrush(Model, i, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 				}
 			}
 		}
@@ -610,13 +703,13 @@ namespace LevelViewportClickHandlers
 				Surf.PolyFlags	= GSaveSurf.PolyFlags;
 				const bool bUpdateTexCoords = true;
 				const bool bOnlyRefreshSurfaceMaterials = true;
-				GEditor->polyUpdateMaster(Model, iSurf, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
+				GEditor->polyUpdateBrush(Model, iSurf, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 			}
 			else
 			{
 				const bool bUpdateTexCoords = false;
 				const bool bOnlyRefreshSurfaceMaterials = true;
-				GEditor->polyUpdateMaster(Model, iSurf, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
+				GEditor->polyUpdateBrush(Model, iSurf, bUpdateTexCoords, bOnlyRefreshSurfaceMaterials);
 			}
 		}
 		else if( Click.GetKey() == EKeys::RightMouseButton && !Click.IsControlDown() )

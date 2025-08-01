@@ -5,11 +5,18 @@
 =============================================================================*/
 
 #include "Components/DecalComponent.h"
+#include "Engine/World.h"
 #include "Materials/Material.h"
+#include "MaterialDomain.h"
+#include "SceneInterface.h"
 #include "TimerManager.h"
 #include "SceneManagement.h"
+#include "SceneView.h"
+#include "LocalVertexFactory.h"
 #include "Materials/MaterialInstanceDynamic.h"
-#include "HAL/LowLevelMemTracker.h"
+#include "MarkActorRenderStateDirtyTask.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DecalComponent)
 
 static TAutoConsoleVariable<float> CVarDecalFadeDurationScale(
 	TEXT("r.Decal.FadeDurationScale"),
@@ -24,7 +31,8 @@ FDeferredDecalProxy::FDeferredDecalProxy(const UDecalComponent* InComponent)
 	, InvFadeInDuration(1.0f)
 	, FadeStartDelayNormalized(1.0f)
 	, FadeInStartDelayNormalized(0.0f)
-	, FadeScreenSize( InComponent->FadeScreenSize )
+	, FadeScreenSize(InComponent->FadeScreenSize)
+	, DecalColor(InComponent->DecalColor)
 {
 	UMaterialInterface* EffectiveMaterial = UMaterial::GetDefaultMaterial(MD_DeferredDecal);
 	UMaterialInterface* ComponentMaterial = InComponent->GetDecalMaterial();
@@ -41,13 +49,12 @@ FDeferredDecalProxy::FDeferredDecalProxy(const UDecalComponent* InComponent)
 
 	Component = InComponent;
 	DecalMaterial = EffectiveMaterial;
-	SetTransformIncludingDecalSize(InComponent->GetTransformIncludingDecalSize());
-	bOwnerSelected = InComponent->IsOwnerSelected();
+	SetTransformIncludingDecalSize(InComponent->GetTransformIncludingDecalSize(), InComponent->CalcBounds(InComponent->GetComponentTransform()));
 	SortOrder = InComponent->SortOrder;
 
 #if WITH_EDITOR
 	// We don't want to fade when we're editing, only in Simulate/PIE/Game
-	if (!GIsEditor || GIsPlayInEditorWorld)
+	if (!GIsEditor || (InComponent->GetWorld() && InComponent->GetWorld()->IsPlayInEditor()))
 #endif
 	{
 		InitializeFadingParameters(InComponent->GetWorld()->GetTimeSeconds(), InComponent->GetFadeDuration(), InComponent->GetFadeStartDelay(), InComponent->GetFadeInDuration(), InComponent->GetFadeInStartDelay());
@@ -62,9 +69,46 @@ FDeferredDecalProxy::FDeferredDecalProxy(const UDecalComponent* InComponent)
 	}
 }
 
-void FDeferredDecalProxy::SetTransformIncludingDecalSize(const FTransform& InComponentToWorldIncludingDecalSize)
+FDeferredDecalProxy::FDeferredDecalProxy(const USceneComponent* InComponent, UMaterialInterface* InMaterial)
+	: DrawInGame(InComponent->GetVisibleFlag() && !InComponent->bHiddenInGame)
+	, DrawInEditor(InComponent->GetVisibleFlag())
+	, InvFadeDuration(-1.0f)
+	, InvFadeInDuration(1.0f)
+	, FadeStartDelayNormalized(1.0f)
+	, FadeInStartDelayNormalized(0.0f)
+	, FadeScreenSize(0.1f)
+{
+	Component = InComponent;
+	DecalMaterial = InMaterial;
+	if (InMaterial == nullptr || (InMaterial->GetMaterial()->MaterialDomain != MD_DeferredDecal))
+	{
+		DecalMaterial = UMaterial::GetDefaultMaterial(MD_DeferredDecal);
+	}
+
+	SetTransformIncludingDecalSize(FTransform::Identity, InComponent->CalcBounds(InComponent->GetComponentTransform()));
+	SortOrder = 0;
+
+#if WITH_EDITOR
+	// We don't want to fade when we're editing, only in Simulate/PIE/Game
+	if (!GIsEditor || (InComponent->GetWorld() && InComponent->GetWorld()->IsPlayInEditor()))
+#endif
+	{
+		InitializeFadingParameters(InComponent->GetWorld()->GetTimeSeconds(), 1.0f, 1.0f, 0.0f, 0.0f);
+	}
+
+	if (InComponent->GetOwner())
+	{
+		DrawInGame &= !(InComponent->GetOwner()->IsHidden());
+#if WITH_EDITOR
+		DrawInEditor &= !InComponent->GetOwner()->IsHiddenEd();
+#endif
+	}
+}
+
+void FDeferredDecalProxy::SetTransformIncludingDecalSize(const FTransform& InComponentToWorldIncludingDecalSize, const FBoxSphereBounds& InBounds)
 {
 	ComponentTrans = InComponentToWorldIncludingDecalSize;
+	Bounds = InBounds;
 }
 
 void FDeferredDecalProxy::InitializeFadingParameters(float AbsSpawnTime, float FadeDuration, float FadeStartDelay, float FadeInDuration, float FadeInStartDelay)
@@ -121,7 +165,7 @@ void UDecalComponent::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
 
-	if (Ar.UE4Ver() < VER_UE4_DECAL_SIZE)
+	if (Ar.UEVer() < VER_UE4_DECAL_SIZE)
 	{
 		DecalSize = FVector(1.0f, 1.0f, 1.0f);
 	}
@@ -131,6 +175,21 @@ bool UDecalComponent::IsPostLoadThreadSafe() const
 {
 	return true;
 }
+
+#if WITH_EDITOR
+bool UDecalComponent::GetMaterialPropertyPath(int32 ElementIndex, UObject*& OutOwner, FString& OutPropertyPath, FProperty*& OutProperty)
+{
+	if(ElementIndex == 0)
+	{
+		OutOwner = this;
+		OutPropertyPath = GET_MEMBER_NAME_STRING_CHECKED(UDecalComponent, DecalMaterial);
+		OutProperty = UDecalComponent::StaticClass()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(UDecalComponent, DecalMaterial));
+		return true;
+	}
+
+	return false;
+}
+#endif // WITH_EDITOR
 
 void UDecalComponent::SetLifeSpan(const float LifeSpan)
 {
@@ -180,7 +239,7 @@ float UDecalComponent::GetFadeInStartDelay() const
 void UDecalComponent::SetFadeOut(float StartDelay, float Duration, bool DestroyOwnerAfterFade /*= true*/)
 {
 	float FadeDurationScale = CVarDecalFadeDurationScale.GetValueOnGameThread();
-	FadeDurationScale = (FadeDurationScale <= SMALL_NUMBER) ? 0.0f : FadeDurationScale;
+	FadeDurationScale = (FadeDurationScale <= UE_SMALL_NUMBER) ? 0.0f : FadeDurationScale;
 
 	FadeStartDelay = StartDelay * FadeDurationScale;
 	FadeDuration = Duration * FadeDurationScale;
@@ -228,16 +287,63 @@ void UDecalComponent::SetSortOrder(int32 Value)
 	MarkRenderStateDirty();
 }
 
+void UDecalComponent::SetDecalColor(const FLinearColor& InColor)
+{
+	DecalColor = InColor;
+
+	MarkRenderStateDirty();
+}
+
 void UDecalComponent::SetDecalMaterial(class UMaterialInterface* NewDecalMaterial)
 {
 	DecalMaterial = NewDecalMaterial;
 
+	PrecachePSOs();
+
 	MarkRenderStateDirty();	
+}
+
+void UDecalComponent::PostLoad()
+{
+	Super::PostLoad();
+
+	PrecachePSOs();
+}
+
+void UDecalComponent::PrecachePSOs()
+{
+#if UE_WITH_PSO_PRECACHING
+	if (!FApp::CanEverRender() || !IsComponentPSOPrecachingEnabled())
+	{
+		return;
+	}
+
+	// clear the current request data
+	PSOPrecacheCompileEvent = nullptr;
+
+	if (DecalMaterial && !DecalMaterial->HasAnyFlags(RF_NeedPostLoad))
+	{
+		FPSOPrecacheParams PSOPrecacheParams;		
+		FPSOPrecacheVertexFactoryDataList VertexFactoryDataList;		
+		VertexFactoryDataList.Add(FPSOPrecacheVertexFactoryData(&FLocalVertexFactory::StaticType));
+
+		// Immediately create at high priority and thus doesn't need boosting anymore
+		TArray<FMaterialPSOPrecacheRequestID> MaterialPSOPrecacheRequestIDs;
+		FGraphEventArray GraphEvents = DecalMaterial->PrecachePSOs(VertexFactoryDataList, PSOPrecacheParams, EPSOPrecachePriority::High, MaterialPSOPrecacheRequestIDs);
+
+		// Request recreate of the render state when the PSO compilation is ready (if we want to delay proxy creation)
+		if (GraphEvents.Num() > 0 && GetPSOPrecacheProxyCreationStrategy() != EPSOPrecacheProxyCreationStrategy::AlwaysCreate)
+		{
+			PSOPrecacheCompileEvent = TGraphTask<FMarkActorRenderStateDirtyTask>::CreateTask(&GraphEvents).ConstructAndDispatchWhenReady(this);
+		}
+	}
+#endif
 }
 
 void UDecalComponent::PushSelectionToProxy()
 {
-	MarkRenderStateDirty();	
+	// The decal's proxy does not actually need to know if the decal is selected or not, so there is nothing to do here.
+	// This function has been marked as deprecated and can eventually be removed.
 }
 
 class UMaterialInterface* UDecalComponent::GetDecalMaterial() const
@@ -247,13 +353,21 @@ class UMaterialInterface* UDecalComponent::GetDecalMaterial() const
 
 class UMaterialInstanceDynamic* UDecalComponent::CreateDynamicMaterialInstance()
 {
+	UMaterialInterface* CurrentMaterial = DecalMaterial;
+	
+	// If we already set a MID, then we need to create based on its parent.
+	if (UMaterialInstanceDynamic* CurrentMaterialMID = Cast<UMaterialInstanceDynamic>(CurrentMaterial))
+	{
+		CurrentMaterial = CurrentMaterialMID->Parent;
+	}
+
 	// Create the MID
-	UMaterialInstanceDynamic* Instance = UMaterialInstanceDynamic::Create(DecalMaterial, this);
+	UMaterialInstanceDynamic* NewMaterialInstance = UMaterialInstanceDynamic::Create(CurrentMaterial, this);
 
-	// Assign it, once parent is set
-	SetDecalMaterial(Instance);
+	// Assign the MID
+	SetDecalMaterial(NewMaterialInstance);
 
-	return Instance;
+	return NewMaterialInstance;
 }
 
 void UDecalComponent::GetUsedMaterials( TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials ) const
@@ -265,6 +379,15 @@ void UDecalComponent::GetUsedMaterials( TArray<UMaterialInterface*>& OutMaterial
 FDeferredDecalProxy* UDecalComponent::CreateSceneProxy()
 {
 	LLM_SCOPE(ELLMTag::SceneRender);
+
+#if UE_WITH_PSO_PRECACHING
+	if (PSOPrecacheCompileEvent && !PSOPrecacheCompileEvent->IsComplete() && GetPSOPrecacheProxyCreationStrategy() == EPSOPrecacheProxyCreationStrategy::DelayUntilPSOPrecached)
+	{
+		return nullptr;
+	}
+	PSOPrecacheCompileEvent = nullptr;
+#endif // UE_WITH_PSO_PRECACHING
+
 	return new FDeferredDecalProxy(this);
 }
 
@@ -312,4 +435,5 @@ void UDecalComponent::DestroyRenderState_Concurrent()
 	Super::DestroyRenderState_Concurrent();
 	GetWorld()->Scene->RemoveDecal(this);
 }
+
 

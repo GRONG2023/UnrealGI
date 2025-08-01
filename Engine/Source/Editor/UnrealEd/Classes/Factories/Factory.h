@@ -7,18 +7,19 @@
 #include "UObject/Object.h"
 #include "Templates/SubclassOf.h"
 #include "Misc/SecureHash.h"
+
 #include "Factory.generated.h"
 
 class UAssetImportTask;
-struct FUntypedBulkData;
+class FBulkData;
 
 /**
  * Base class for all factories
  * An object responsible for creating and importing new objects.
  * 
  */
-UCLASS(abstract)
-class UNREALED_API UFactory : public UObject
+UCLASS(abstract, MinimalAPI)
+class UFactory : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
@@ -37,7 +38,7 @@ public:
 	 *
 	 * @return true if the file is supported, false otherwise.
 	 */
-	virtual bool FactoryCanImport(const FString& Filename);
+	UNREALED_API virtual bool FactoryCanImport(const FString& Filename);
 
 	/**
 	 * Whether the factory is checking for SlowTask::ShouldCancel()
@@ -56,7 +57,7 @@ public:
 	 * @return true if the file is supported, false otherwise.
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Miscellaneous")
-	bool ScriptFactoryCanImport(const FString& Filename);
+	UNREALED_API bool ScriptFactoryCanImport(const FString& Filename);
 
 	/**
 	 * Create a new object by importing it from a file name.
@@ -75,7 +76,7 @@ public:
 	 * @param bOutOperationCanceled Will indicate whether the user canceled the import.
 	 * @return The new object.
 	 */
-	virtual UObject* FactoryCreateFile(UClass* InClass, UObject* InParent, FName InName, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled);
+	UNREALED_API virtual UObject* FactoryCreateFile(UClass* InClass, UObject* InParent, FName InName, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, FFeedbackContext* Warn, bool& bOutOperationCanceled);
 
 	/**
 	 * Create a new object by class.
@@ -110,7 +111,7 @@ public:
 		return nullptr;
 	}
 
-	virtual UObject* ImportObject(UClass* InClass, UObject* InOuter, FName InName, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, bool& OutCanceled);
+	UNREALED_API virtual UObject* ImportObject(UClass* InClass, UObject* InOuter, FName InName, EObjectFlags Flags, const FString& Filename, const TCHAR* Parms, bool& OutCanceled);
 
 	/**
 	 * Returns an array of all the additional objects created during the last imports, as some factories may produce more than one object.
@@ -125,47 +126,47 @@ public:
 	 * @return True if script implements
 	 */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Miscellaneous")
-	bool ScriptFactoryCreateFile(UAssetImportTask* InTask);
+	UNREALED_API bool ScriptFactoryCreateFile(UAssetImportTask* InTask);
 
 	/** Returns true if this factory should be shown in the New Asset menu (by default calls CanCreateNew). */
-	virtual bool ShouldShowInNewMenu() const;
+	UNREALED_API virtual bool ShouldShowInNewMenu() const;
 
 	/** Returns an optional override brush name for the new asset menu. If this is not specified, the thumbnail for the supported class will be used. */
-	virtual FName GetNewAssetThumbnailOverride() const;
+	UNREALED_API virtual FName GetNewAssetThumbnailOverride() const;
 
 	/** Returns the name of the factory for menus */
-	virtual FText GetDisplayName() const;
+	UNREALED_API virtual FText GetDisplayName() const;
 
 	/** When shown in menus, this is the category containing this factory. Return type is a BitFlag mask using EAssetTypeCategories. */
-	virtual uint32 GetMenuCategories() const;
+	UNREALED_API virtual uint32 GetMenuCategories() const;
 
 	/** Branch of sub-menus containing factory under each provided category. */
-	virtual const TArray<FText>& GetMenuCategorySubMenus() const;
+	UNREALED_API virtual const TArray<FText>& GetMenuCategorySubMenus() const;
 
 	/** Returns the tooltip text description of this factory */
-	virtual FText GetToolTip() const;
+	UNREALED_API virtual FText GetToolTip() const;
 
 	/** Returns the documentation page that should be use for the rich tool tip for this factory */
-	virtual FString GetToolTipDocumentationPage() const;
+	UNREALED_API virtual FString GetToolTipDocumentationPage() const;
 
 	/** Returns the documentation excerpt that should be use for the rich tool tip for this factory */
-	virtual FString GetToolTipDocumentationExcerpt() const;
+	UNREALED_API virtual FString GetToolTipDocumentationExcerpt() const;
 
 	/**
 	 * @return		The object class supported by this factory.
 	 */
-	UClass* GetSupportedClass() const;
+	UNREALED_API UClass* GetSupportedClass() const;
 
 	/**
 	 * @return true if it supports this class 
 	 */
-	virtual bool DoesSupportClass(UClass* Class);
+	UNREALED_API virtual bool DoesSupportClass(UClass* Class);
 
 	/**
 	 * Resolves SupportedClass for factories which support multiple classes.
 	 * Such factories will have a nullptr SupportedClass member.
 	 */
-	virtual UClass* ResolveSupportedClass();
+	UNREALED_API virtual UClass* ResolveSupportedClass();
 
 	/** Opens a dialog to configure the factory properties. Return false if user opted out of configuring properties */
 	virtual bool ConfigureProperties()
@@ -174,10 +175,13 @@ public:
 	}
 
 	// @todo document
-	virtual bool ImportUntypedBulkDataFromText(const TCHAR*& Buffer, FUntypedBulkData& BulkData);
+	UNREALED_API virtual bool ImportUntypedBulkDataFromText(const TCHAR*& Buffer, FBulkData& BulkData);
 
 	/** Creates a list of file extensions supported by this factory */
-	virtual void GetSupportedFileExtensions(TArray<FString>& OutExtensions) const;
+	UNREALED_API virtual void GetSupportedFileExtensions(TArray<FString>& OutExtensions) const;
+
+	/** Returns true if the provided file extension is supported */
+	UNREALED_API virtual bool IsSupportedFileExtension(FStringView InExtension) const;
 
 	/** Do clean up after importing is done. Will be called once for multi batch import. */
 	virtual void CleanUp() { AdditionalImportedObjects.Empty(); }
@@ -192,10 +196,10 @@ public:
 	 *	               If nullptr, the class default object is used instead.
 	 * @return A pointer to a new asset of the specified type or null if the creation failed.
 	 */
-	UObject* CreateOrOverwriteAsset(UClass* InClass, UObject* InParent, FName InName, EObjectFlags InFlags, UObject* InTemplate = nullptr) const;
+	UNREALED_API UObject* CreateOrOverwriteAsset(UClass* InClass, UObject* InParent, FName InName, EObjectFlags InFlags, UObject* InTemplate = nullptr) const;
 
 	/** Returns a new starting point name for newly created assets in the content browser */
-	virtual FString GetDefaultNewAssetName() const;
+	UNREALED_API virtual FString GetDefaultNewAssetName() const;
 
 	/** @return the parser that is capable of parsing a json string of import settings for this factory */
 	virtual class IImportSettingsParser* GetImportSettingsParser() {return nullptr;}
@@ -205,19 +209,24 @@ public:
 	 *
 	 * @param Data	The automated import data or nullptr if it doesnt exist
 	 */
-	void SetAutomatedAssetImportData(const class UAutomatedAssetImportData* Data);
+	UNREALED_API void SetAutomatedAssetImportData(const class UAutomatedAssetImportData* Data);
 
 	/**
 	 * Sets the import task being used with this factory
 	 *
 	 * @param Task	The import task or nullptr if it does not exist
 	 */
-	void SetAssetImportTask(class UAssetImportTask* Task);
+	UNREALED_API void SetAssetImportTask(class UAssetImportTask* Task);
 
 	/**
 	 * @return true if this factory is being used for automated import.  Dialogs and user input should be disabled if this method returns true
 	 */
-	virtual bool IsAutomatedImport() const;
+	UNREALED_API virtual bool IsAutomatedImport() const;
+
+	/**
+	 * @return the supported factory formats list.
+	 */
+	virtual TArray<FString> GetFormats() const { return Formats; }
 public:
 
 	/**
@@ -225,7 +234,7 @@ public:
 	 *
 	 * @param Message The message text.
 	 **/
-	void DisplayOverwriteOptionsDialog(const FText& Message);
+	UNREALED_API void DisplayOverwriteOptionsDialog(const FText& Message);
 
 	/** Get the name of the file currently being imported. */
 	static FString GetCurrentFilename()
@@ -253,20 +262,20 @@ public:
 	 * The states are used to suppress messages during multiple object import. 
 	 * It needs to be reset each time a new import is started
 	 */
-	void ResetState();
+	UNREALED_API void ResetState();
 
 	/** Helper function to sort an array of factories by their import priority - use as a predicate for Sort */
-	static bool SortFactoriesByPriority(const UFactory& A, const UFactory& B);
+	static UNREALED_API bool SortFactoriesByPriority(const UFactory& A, const UFactory& B);
 
 	// @todo document
-	static UObject* StaticImportObject(UClass* Class, UObject* InOuter, FName Name, EObjectFlags Flags, const TCHAR* Filename = TEXT(""), UObject* Context = nullptr, UFactory* Factory = nullptr, const TCHAR* Parms = nullptr, FFeedbackContext* Warn = GWarn, int32 MaxImportFileSize = 0xC100000);
-	static UObject* StaticImportObject(UClass* Class, UObject* InOuter, FName Name, EObjectFlags Flags, bool& bOutOperationCanceled, const TCHAR* Filename = TEXT(""), UObject* Context = nullptr, UFactory* Factory = nullptr, const TCHAR* Parms = nullptr, FFeedbackContext* Warn = GWarn, int32 MaxImportFileSize = 0xC100000);
+	static UNREALED_API UObject* StaticImportObject(UClass* Class, UObject* InOuter, FName Name, EObjectFlags Flags, const TCHAR* Filename = TEXT(""), UObject* Context = nullptr, UFactory* Factory = nullptr, const TCHAR* Parms = nullptr, FFeedbackContext* Warn = GWarn, int32 MaxImportFileSize = 0xC100000);
+	static UNREALED_API UObject* StaticImportObject(UClass* Class, UObject* InOuter, FName Name, EObjectFlags Flags, bool& bOutOperationCanceled, const TCHAR* Filename = TEXT(""), UObject* Context = nullptr, UFactory* Factory = nullptr, const TCHAR* Parms = nullptr, FFeedbackContext* Warn = GWarn, int32 MaxImportFileSize = 0xC100000);
 
 public:
 
 	//~ UObject interface
 
-	static void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
+	static UNREALED_API void AddReferencedObjects(UObject* InThis, FReferenceCollector& Collector);
 
 protected:
 
@@ -386,23 +395,23 @@ public:
 
 	/** Data for how to import files via the automated command line importing interface */
 	UPROPERTY(BlueprintReadWrite, Category=Misc)
-	const class UAutomatedAssetImportData* AutomatedImportData;
+	TObjectPtr<const class UAutomatedAssetImportData> AutomatedImportData;
 
 	/** Task for importing file via script interfaces */
 	UPROPERTY(BlueprintReadWrite, Category=Misc)
-	class UAssetImportTask* AssetImportTask;
+	TObjectPtr<class UAssetImportTask> AssetImportTask;
 
 protected:
 
 	/** Name of the file currently being imported. */
-	static FString CurrentFilename;
+	static UNREALED_API FString CurrentFilename;
 
 	/** This is the import priority that all factories are given in the default constructor. */
-	static const int32 DefaultImportPriority;
+	static UNREALED_API const int32 DefaultImportPriority;
 
 	//@third party code BEGIN SIMPLYGON
 	/** This is the HASH for the file being imported */
-	static FMD5Hash FileHash;
+	static UNREALED_API FMD5Hash FileHash;
 	//@third party code END SIMPLYGON
 
 	/**

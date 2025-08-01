@@ -5,12 +5,12 @@
 =============================================================================*/
 
 #include "Rendering/StreamableTextureResource.h"
-#include "Engine/Texture.h"
 #include "DeviceProfiles/DeviceProfile.h"
 #include "DeviceProfiles/DeviceProfileManager.h"
+#include "Misc/CoreStats.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
 #include "ProfilingDebugging/ScopedDebugInfo.h"
-#include "RenderUtils.h"
+#include "Stats/StatsTrace.h"
 
 #if STATS
 int64 GUITextureMemory = 0;
@@ -23,17 +23,17 @@ static TAutoConsoleVariable<int32> CVarVirtualTextureEnabled(
 	TEXT("If set to 1, textures will use virtual memory so they can be partially resident."),
 	ECVF_RenderThreadSafe);
 
-bool CanCreateWithPartiallyResidentMips(uint32 TexCreateFlags)
+bool CanCreateWithPartiallyResidentMips(ETextureCreateFlags TexCreateFlags)
 {
 #if PLATFORM_SUPPORTS_VIRTUAL_TEXTURES
-	const uint32 iDisableFlags = 
+	const ETextureCreateFlags iDisableFlags =
 		TexCreate_RenderTargetable |
 		TexCreate_ResolveTargetable |
 		TexCreate_DepthStencilTargetable |
 		TexCreate_Dynamic |
 		TexCreate_UAV |
 		TexCreate_Presentable;
-	const uint32 iRequiredFlags =
+	const ETextureCreateFlags iRequiredFlags =
 		TexCreate_OfflineProcessed;
 
 	return ((TexCreateFlags & (iDisableFlags | iRequiredFlags)) == iRequiredFlags) && CVarVirtualTextureEnabled.GetValueOnAnyThread();
@@ -93,12 +93,16 @@ FStreamableTextureResource::FStreamableTextureResource(UTexture* InOwner, const 
 	, LODGroup(InOwner->LODGroup)
 	, PixelFormat(InPlatformData->PixelFormat)
 {
-	// HDR images are stored in linear but still require gamma correction to display correctly.
-	bIgnoreGammaConversions = !InOwner->SRGB && InOwner->CompressionSettings != TC_HDR && InOwner->CompressionSettings != TC_HDR_Compressed && InOwner->CompressionSettings != TC_HalfFloat;
 	bSRGB = InOwner->SRGB;
-	bGreyScaleFormat = (PixelFormat == PF_G8) || (PixelFormat == PF_BC4);
+	bGreyScaleFormat = UE::TextureDefines::ShouldUseGreyScaleEditorVisualization( InOwner->CompressionSettings );
 
-	Filter = (ESamplerFilter)UDeviceProfileManager::Get().GetActiveProfile()->GetTextureLODSettings()->GetSamplerFilter(InOwner);
+	const UTextureLODSettings* TextureLODSettings = UDeviceProfileManager::Get().GetActiveProfile()->GetTextureLODSettings();
+
+	Filter = (ESamplerFilter)TextureLODSettings->GetSamplerFilter(InOwner);
+	AddressU = InOwner->GetTextureAddressX() == TA_Wrap ? AM_Wrap : (InOwner->GetTextureAddressX() == TA_Clamp ? AM_Clamp : AM_Mirror);
+	AddressV = InOwner->GetTextureAddressY() == TA_Wrap ? AM_Wrap : (InOwner->GetTextureAddressY() == TA_Clamp ? AM_Clamp : AM_Mirror);
+	AddressW = InOwner->GetTextureAddressZ() == TA_Wrap ? AM_Wrap : (InOwner->GetTextureAddressZ() == TA_Clamp ? AM_Clamp : AM_Mirror);
+	MaxAniso = TextureLODSettings->GetTextureLODGroup(InOwner->LODGroup).MaxAniso;
 
 	// Get the biggest mips size, might be different from the actual resolution (depending on NumOfResidentLODs).
 	const FTexture2DMipMap& Mip0 = PlatformData->Mips[State.AssetLODBias];
@@ -107,7 +111,12 @@ FStreamableTextureResource::FStreamableTextureResource(UTexture* InOwner, const 
 	SizeZ = Mip0.SizeZ;
 
 	MipFadeSetting = (LODGroup == TEXTUREGROUP_Lightmap || LODGroup == TEXTUREGROUP_Shadowmap) ? MipFade_Slow : MipFade_Normal;
-	CreationFlags = (InOwner->SRGB ? TexCreate_SRGB : TexCreate_None)  | (InOwner->bNotOfflineProcessed ? TexCreate_None : TexCreate_OfflineProcessed) | TexCreate_ShaderResource | TexCreate_Streamable | (InOwner->bNoTiling ? TexCreate_NoTiling : TexCreate_None);
+	CreationFlags = (InOwner->SRGB ? TexCreate_SRGB : TexCreate_None)  | (InOwner->bNotOfflineProcessed ? TexCreate_None : TexCreate_OfflineProcessed) | TexCreate_ShaderResource | (InOwner->bNoTiling ? TexCreate_NoTiling : TexCreate_None);
+
+	if (InPostInitState.MaxNumLODs > 1)
+	{
+		CreationFlags |= TexCreate_Streamable;
+	}
 
 	// Whether the virtual update path is enabled for this texture. This allows to map / unmap top mip memory in an out.
 	// Whether the texture will be created with TexCreate_Virtual depends on the requested mip count and "r.VirtualTextureReducedMemory"
@@ -118,6 +127,12 @@ FStreamableTextureResource::FStreamableTextureResource(UTexture* InOwner, const 
 }
 
 #if STATS
+
+void FStreamableTextureResource::CalcRequestedMipsSize() 
+{ 
+	TextureSize = GetPlatformMipsSize(State.NumRequestedLODs); 
+}
+
 void FStreamableTextureResource::IncrementTextureStats() const
 {
 	INC_DWORD_STAT_BY( STAT_TextureMemory, TextureSize );
@@ -149,7 +164,7 @@ void FStreamableTextureResource::DecrementTextureStats() const
 }
 #endif
 
-void FStreamableTextureResource::InitRHI()
+void FStreamableTextureResource::InitRHI(FRHICommandListBase&)
 {
 	SCOPED_LOADTIMER(FStreamableTextureResource_InitRHI);
 
@@ -175,6 +190,7 @@ void FStreamableTextureResource::InitRHI()
 	// Update mip-level fading.
 	MipBiasFade.SetNewMipCount( State.NumRequestedLODs, State.NumRequestedLODs, LastRenderTime, MipFadeSetting );
 
+	TextureRHI->SetOwnerName(GetOwnerName());
 	TextureRHI->SetName(TextureName);
 	RHIBindDebugLabelName(TextureRHI, *TextureName.ToString());
 
@@ -188,7 +204,11 @@ void FStreamableTextureResource::ReleaseRHI()
 {
 	STAT(DecrementTextureStats());
 
-	RHIUpdateTextureReference(TextureReferenceRHI, nullptr);
+	if (ensure(TextureReferenceRHI.IsValid()))
+	{
+		RHIUpdateTextureReference(TextureReferenceRHI, nullptr);
+	}
+
 	TextureRHI.SafeRelease();
 	FTextureResource::ReleaseRHI();
 }
@@ -210,13 +230,12 @@ void FStreamableTextureResource::FinalizeStreaming(FRHITexture* InTextureRHI)
 		STAT(IncrementTextureStats());
 	}
 
-	if (GRHIForceNoDeletionLatencyForStreamingTextures && !GRHIValidationEnabled)
-	{
-		TextureRHI->DoNoDeferDelete();
-	}
-
 	TextureRHI = InTextureRHI;
-	RHIUpdateTextureReference(TextureReferenceRHI, TextureRHI);
+	TextureRHI->SetOwnerName(GetOwnerName());
+	if (ensure(TextureReferenceRHI.IsValid()))
+	{
+		RHIUpdateTextureReference(TextureReferenceRHI, TextureRHI);
+	}
 	State.NumResidentLODs = State.NumRequestedLODs;
 }
 
@@ -230,7 +249,8 @@ void FStreamableTextureResource::RefreshSamplerStates()
 		AddressU,
 		AddressV,
 		AddressW,
-		MipBias
+		MipBias,
+		MaxAniso
 	);
 	SamplerStateRHI = GetOrCreateSamplerState(SamplerStateInitializer);
 

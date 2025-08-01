@@ -167,6 +167,12 @@ public:
 	 */
 	virtual void RequestAvailableWorkers( const FGuid& InSessionId ) = 0;
 
+	/** 
+	 * Return true when the manager is ready and capable of executing tests. 
+	 * if RunTests is called earlier it may block until internally these conditions are met
+	 */
+	virtual bool IsReadyForTests() = 0;
+
 	/** Send request for tests that are available to run. */
 	virtual void RequestTests() = 0;
 
@@ -218,14 +224,35 @@ public:
 	virtual void SetSendAnalytics(const bool bNewValue) = 0;
 
 	/**
+	* Returns if PIE should be kept open when test pass end
+	*/
+	virtual bool KeepPIEOpen() const = 0;
+
+	/**
+	* Sets if PIE should be kept open when test pass end
+	*/
+	virtual void SetKeepPIEOpen(const bool bNewValue) = 0;
+
+	/**
 	 * Filters the visible list of tests.
 	 */
 	virtual void SetFilter( TSharedPtr< AutomationFilterCollection > InFilter ) = 0;
 
 	/**
-	 * Gives the array of test results to the UI.
+	 * Gives the array of filtered test results to the UI.
 	 */
+	UE_DEPRECATED(5.3, "Use GetFilteredReports or GetEnabledReports instead.")
 	virtual TArray <TSharedPtr <IAutomationReport> >& GetReports() = 0;
+	
+	/**
+	 * Gives the array of filtered test results to the UI.
+	 */
+	virtual TArray <TSharedPtr <IAutomationReport> >& GetFilteredReports() = 0;
+
+	/**
+	 * Gives the array of enabled test results to the UI.
+	 */
+	virtual TArray <TSharedPtr <IAutomationReport> > GetEnabledReports() = 0;
 
 	/**
 	 * Get num devices types.
@@ -248,12 +275,29 @@ public:
 	virtual FString GetDeviceTypeName(const int32 ClusterIndex) const = 0;
 
 	/**
+	 * Get a game instance ID.
+	 *
+	 * @param ClusterIndex The cluster Index.
+	 * @param DeviceIndex The Device Index.
+	 * @return identifier of a game.
+	 */
+	virtual FGuid GetGameInstanceId(const int32 ClusterIndex, const int32 DeviceIndex) const = 0;
+
+	/**
 	 * Get a game instance name.
 	 *
 	 * @param ClusterIndex The cluster Index.
  	 * @param DeviceIndex The Device Index.
 	 */
 	virtual FString GetGameInstanceName(const int32 ClusterIndex, const int32 DeviceIndex) const = 0;
+
+	/**
+	 * Get a device name.
+	 *
+	 * @param ClusterIndex The cluster Index.
+	 * @param DeviceIndex The Device Index.
+	 */
+	virtual FString GetDeviceName(const int32 ClusterIndex, const int32 DeviceIndex) const = 0;
 
 	/**
 	 * Sets whether all visible tests are enabled or not.
@@ -271,6 +315,13 @@ public:
 	 * @param OutEnabledTestNames The list to populate with enabled test names.
 	 */
 	virtual void GetEnabledTestNames(TArray<FString>& OutEnabledTestNames) const = 0;
+
+	/**
+	* Gets the names of all the filtered tests.
+	*
+	* @param OutFilteredTestNames The list to populate with filtered test names.
+	*/
+	virtual void GetFilteredTestNames(TArray<FString>& OutFilteredTestNames) const = 0;
 
 	/**
 	 * Sets any tests that match a name in the enabled tests array.

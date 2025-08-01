@@ -1,16 +1,18 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 using AutomationTool;
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using UnrealBuildBase;
 
-namespace BuildGraph.Tasks
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a zip task
@@ -30,6 +32,18 @@ namespace BuildGraph.Tasks
 		public DirectoryReference ToDir;
 
 		/// <summary>
+		/// Whether or not to use the legacy unzip code.
+		/// </summary>
+		[TaskParameter(Optional = true)]
+		public bool UseLegacyUnzip = false;
+
+		/// <summary>
+		/// Whether or not to overwrite files during unzip.
+		/// </summary>
+		[TaskParameter(Optional = true)]
+		public bool OverwriteFiles = true;
+
+		/// <summary>
 		/// Tag to be applied to the extracted files.
 		/// </summary>
 		[TaskParameter(Optional = true, ValidationType = TaskParameterValidationType.TagList)]
@@ -40,7 +54,7 @@ namespace BuildGraph.Tasks
 	/// Extract files from a zip archive.
 	/// </summary>
 	[TaskElement("Unzip", typeof(UnzipTaskParameters))]
-	public class UnzipTask : CustomTask
+	public class UnzipTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task
@@ -62,18 +76,25 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names \to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			DirectoryReference ToDir = Parameters.ToDir;
 
 			// Find all the zip files
-			IEnumerable<FileReference> ZipFiles = ResolveFilespec(CommandUtils.RootDirectory, Parameters.ZipFile, TagNameToFileSet);
+			IEnumerable<FileReference> ZipFiles = ResolveFilespec(Unreal.RootDirectory, Parameters.ZipFile, TagNameToFileSet);
 
 			// Extract the files
 			HashSet<FileReference> OutputFiles = new HashSet<FileReference>();
 			foreach(FileReference ZipFile in ZipFiles)
 			{
-				OutputFiles.UnionWith(CommandUtils.UnzipFiles(ZipFile.FullName, ToDir.FullName).Select(x => new FileReference(x)));
+				if (Parameters.UseLegacyUnzip)
+				{
+					OutputFiles.UnionWith(CommandUtils.LegacyUnzipFiles(ZipFile.FullName, ToDir.FullName, Parameters.OverwriteFiles).Select(x => new FileReference(x)));
+				}
+				else
+				{
+					OutputFiles.UnionWith(CommandUtils.UnzipFiles(ZipFile, ToDir, Parameters.OverwriteFiles));
+				}
 			}
 
 			// Apply the optional tag to the produced archive
@@ -84,6 +105,7 @@ namespace BuildGraph.Tasks
 
 			// Add the archive to the set of build products
 			BuildProducts.UnionWith(OutputFiles);
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

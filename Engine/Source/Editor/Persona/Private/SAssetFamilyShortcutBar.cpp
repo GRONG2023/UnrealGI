@@ -12,18 +12,23 @@
 #include "Framework/MultiBox/MultiBoxDefs.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "Widgets/Layout/SSeparator.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "IAssetFamily.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
-#include "AssetRegistryModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "WorkflowOrientedApp/WorkflowCentricApplication.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Images/SImage.h"
 #include "Widgets/Input/SComboButton.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Subsystems/AssetEditorSubsystem.h"
+#include "Styling/ToolBarStyle.h"
+#include "AssetToolsModule.h"
+#include "IAssetTools.h"
+#include "PersonaAssetFamilyManager.h"
 
 #define LOCTEXT_NAMESPACE "SAssetFamilyShortcutBar"
 
@@ -64,106 +69,106 @@ public:
 		TArray<FAssetData> Assets;
 		InAssetFamily->FindAssetsOfType(InAssetData.GetClass(), Assets);
 		bMultipleAssetsExist = Assets.Num() > 1;
-		AssetDirtyBrush = FEditorStyle::GetBrush("ContentBrowser.ContentDirty");
+		AssetDirtyBrush = FAppStyle::Get().GetBrush("Icons.DirtyBadge");
+
+		const FToolBarStyle& ToolBarStyle = FAppStyle::Get().GetWidgetStyle<FToolBarStyle>("ToolBar");
 
 		ChildSlot
 		[
 			SNew(SHorizontalBox)
+
+			// This is the fat button for when there are not multiple options
 			+SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
 			[
+
 				SAssignNew(CheckBox, SCheckBox)
-				.Style(FEditorStyle::Get(), "ToolBar.ToggleButton")
-				.ForegroundColor(FSlateColor::UseForeground())
-				.Padding(0.0f)
+				.Style(FAppStyle::Get(), "SegmentedCombo.ButtonOnly")
 				.OnCheckStateChanged(this, &SAssetShortcut::HandleOpenAssetShortcut)
 				.IsChecked(this, &SAssetShortcut::GetCheckState)
-				.Visibility(this, &SAssetShortcut::GetButtonVisibility)
+				.Visibility(this, &SAssetShortcut::GetSoloButtonVisibility)
 				.ToolTipText(this, &SAssetShortcut::GetButtonTooltip)
+				.Padding(0.0f)
 				[
-					SNew(SHorizontalBox)
-					+ SHorizontalBox::Slot()
+					SNew(SOverlay)
+
+					+ SOverlay::Slot()
 					.VAlign(VAlign_Center)
-					.AutoWidth()
+					.HAlign(HAlign_Center)
+					.Padding(FMargin(28.f, 4.f))
 					[
-						SNew(SBorder)
-						.Padding(4.0f)
-						.BorderImage(FEditorStyle::GetBrush("PropertyEditor.AssetThumbnailShadow"))
-						[
-							SNew(SHorizontalBox)
-							+SHorizontalBox::Slot()
-							[
-								SAssignNew(ThumbnailBox, SBox)
-								.WidthOverride(AssetShortcutConstants::ThumbnailSize)
-								.HeightOverride(AssetShortcutConstants::ThumbnailSize)
-								.Visibility(this, &SAssetShortcut::GetThumbnailVisibility)
-								[
-									SNew(SOverlay)
-									+SOverlay::Slot()
-									[
-										AssetThumbnail->MakeThumbnailWidget()
-									]
-									+SOverlay::Slot()
-									.HAlign(HAlign_Left)
-									.VAlign(VAlign_Bottom)
-									[
-										SNew(SImage)
-										.Image(this, &SAssetShortcut::GetDirtyImage)
-									]
-								]
-							]
-							+SHorizontalBox::Slot()
-							[
-								SAssignNew(ThumbnailSmallBox, SBox)
-								.WidthOverride(AssetShortcutConstants::ThumbnailSizeSmall)
-								.HeightOverride(AssetShortcutConstants::ThumbnailSizeSmall)
-								.Visibility(this, &SAssetShortcut::GetSmallThumbnailVisibility)
-								[
-									SNew(SOverlay)
-									+SOverlay::Slot()
-									[
-										AssetThumbnailSmall->MakeThumbnailWidget()
-									]
-									+SOverlay::Slot()
-									.HAlign(HAlign_Left)
-									.VAlign(VAlign_Bottom)
-									[
-										SNew(SImage)
-										.Image(this, &SAssetShortcut::GetDirtyImage)
-									]
-								]
-							]
-						]
+						SNew(SImage)
+						.ColorAndOpacity(this, &SAssetShortcut::GetAssetTint)
+						.Image(this, &SAssetShortcut::GetAssetIcon)
 					]
-					+SHorizontalBox::Slot()
-					.VAlign(VAlign_Center)
-					.AutoWidth()
+
+					+ SOverlay::Slot()
+					.VAlign(VAlign_Bottom)
+					.HAlign(HAlign_Right)
+					.Padding(FMargin(2.f, 2.f))
 					[
-						SNew(SHorizontalBox)
-						+SHorizontalBox::Slot()
-						.AutoWidth()
-						.VAlign(VAlign_Center)
-						.Padding(4.0f)
-						[
-							SNew(STextBlock)
-							.Text(this, &SAssetShortcut::GetAssetText)
-							.TextStyle(FEditorStyle::Get(), "Toolbar.Label")
-							.ShadowOffset(FVector2D::UnitVector)
-						]
+						SNew(SImage)
+						.ColorAndOpacity(FSlateColor::UseForeground())
+						.Image(this, &SAssetShortcut::GetDirtyImage)
+					]
+				]
+			]
+
+			// This is the left half of the button / combo pair for when there are multiple options
+			+SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			[
+				SAssignNew(CheckBox, SCheckBox)
+				.Style(FAppStyle::Get(), "SegmentedCombo.Left")
+				.OnCheckStateChanged(this, &SAssetShortcut::HandleOpenAssetShortcut)
+				.IsChecked(this, &SAssetShortcut::GetCheckState)
+				.Visibility(this, &SAssetShortcut::GetComboButtonVisibility)
+				.ToolTipText(this, &SAssetShortcut::GetButtonTooltip)
+				.Padding(0.0f)
+				[
+					SNew(SOverlay)
+
+					+ SOverlay::Slot()
+					.VAlign(VAlign_Center)
+					.HAlign(HAlign_Center)
+					.Padding(FMargin(16.f, 4.f))
+					[
+						SNew(SImage)
+						.ColorAndOpacity(this, &SAssetShortcut::GetAssetTint)
+						.Image(this, &SAssetShortcut::GetAssetIcon)
+					]
+
+					+ SOverlay::Slot()
+					.VAlign(VAlign_Bottom)
+					.HAlign(HAlign_Right)
+					.Padding(FMargin(2.f, 2.f))
+					[
+						SNew(SImage)
+						.ColorAndOpacity(FSlateColor::UseForeground())
+						.Image(this, &SAssetShortcut::GetDirtyImage)
 					]
 				]
 			]
 			+SHorizontalBox::Slot()
-			.VAlign(VAlign_Fill)
+			.VAlign(VAlign_Center)
 			.AutoWidth()
-			.Padding(2.0f, 0.0f, 0.0f, 0.0f)
+			[
+				SNew(SSeparator)
+				.Visibility(this, &SAssetShortcut::GetComboVisibility)
+				.Thickness(1.0f)
+				.Orientation(EOrientation::Orient_Vertical)
+			]
+			+SHorizontalBox::Slot()
+			.VAlign(VAlign_Center)
+			.AutoWidth()
 			[
 				SNew(SComboButton)
 				.Visibility(this, &SAssetShortcut::GetComboVisibility)
-				.ContentPadding(0)
+				.ContentPadding(FMargin(7.f, 0.f))
 				.ForegroundColor(FSlateColor::UseForeground())
-				.ButtonStyle(FEditorStyle::Get(), "Toolbar.Button")
+				.ComboButtonStyle(&FAppStyle::Get(), "SegmentedCombo.Right")
 				.OnGetMenuContent(this, &SAssetShortcut::HandleGetMenuContent)
-				.ToolTipText(LOCTEXT("AssetComboTooltip", "Find other assets of this type and perform asset operations./nShift-Click to open in new window."))
+				.ToolTipText(LOCTEXT("AssetComboTooltip", "Find other assets of this type and perform asset operations.\nShift-Click to open in new window."))
 			]
 		];
 
@@ -176,11 +181,14 @@ public:
 	{
 		if (FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
 		{
-			FAssetRegistryModule& AssetRegistryModule = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-			AssetRegistryModule.Get().OnFilesLoaded().RemoveAll(this);
-			AssetRegistryModule.Get().OnAssetAdded().RemoveAll(this);
-			AssetRegistryModule.Get().OnAssetRemoved().RemoveAll(this);
-			AssetRegistryModule.Get().OnAssetRenamed().RemoveAll(this);
+			IAssetRegistry* AssetRegistry = FModuleManager::GetModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).TryGet();
+			if (AssetRegistry)
+			{
+				AssetRegistry->OnFilesLoaded().RemoveAll(this);
+				AssetRegistry->OnAssetAdded().RemoveAll(this);
+				AssetRegistry->OnAssetRemoved().RemoveAll(this);
+				AssetRegistry->OnAssetRenamed().RemoveAll(this);
+			}
 		}
 
 		AssetFamily->GetOnAssetOpened().RemoveAll(this);
@@ -200,7 +208,7 @@ public:
 			}
 			else
 			{
-				UE_LOG(LogAnimation, Error, TEXT("Asset cannot be opened: %s"), *AssetData.ObjectPath.ToString());
+				UE_LOG(LogAnimation, Error, TEXT("Asset cannot be opened: %s"), *AssetData.GetObjectPathString());
 			}
 		}
 	}
@@ -208,6 +216,20 @@ public:
 	FText GetAssetText() const
 	{
 		return AssetFamily->GetAssetTypeDisplayName(AssetData.GetClass());
+	}
+
+	const FSlateBrush* GetAssetIcon() const 
+	{
+		return AssetFamily->GetAssetTypeDisplayIcon(AssetData.GetClass());	
+	}
+
+	FSlateColor GetAssetTint() const
+	{
+		if (GetCheckState() == ECheckBoxState::Checked)
+		{
+			return FSlateColor::UseForeground();
+		}
+		return AssetFamily->GetAssetTypeDisplayTint(AssetData.GetClass());
 	}
 
 	ECheckBoxState GetCheckState() const
@@ -219,7 +241,7 @@ public:
 			{
 				for (UObject* Object : *Objects)
 				{
-					if (FAssetData(Object) == AssetData)
+					if (Object->GetPathName().Compare(AssetData.GetObjectPathString(), ESearchCase::IgnoreCase) == 0)
 					{
 						return ECheckBoxState::Checked;
 					}
@@ -232,7 +254,7 @@ public:
 	FSlateColor GetAssetTextColor() const
 	{
 		static const FName InvertedForeground("InvertedForeground");
-		return GetCheckState() == ECheckBoxState::Checked || CheckBox->IsHovered() ? FEditorStyle::GetSlateColor(InvertedForeground) : FSlateColor::UseForeground();
+		return GetCheckState() == ECheckBoxState::Checked || CheckBox->IsHovered() ? FAppStyle::GetSlateColor(InvertedForeground) : FSlateColor::UseForeground();
 	}
 
 	TSharedRef<SWidget> HandleGetMenuContent()
@@ -247,7 +269,7 @@ public:
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("ShowInContentBrowser", "Show In Content Browser"),
 				LOCTEXT("ShowInContentBrowser_ToolTip", "Show this asset in the content browser."),
-				FSlateIcon(FEditorStyle::GetStyleSetName(), "PropertyWindow.Button_Browse"),
+				FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Search"),
 				FUIAction(FExecuteAction::CreateSP(this, &SAssetShortcut::HandleShowInContentBrowser)));
 		}
 		MenuBuilder.EndSection();
@@ -261,7 +283,7 @@ public:
 				UClass* FilterClass = AssetFamily->GetAssetFamilyClass(AssetData.GetClass());
 				if (FilterClass != nullptr)
 				{
-					AssetPickerConfig.Filter.ClassNames.Add(FilterClass->GetFName());
+					AssetPickerConfig.Filter.ClassPaths.Add(FilterClass->GetClassPathName());
 					AssetPickerConfig.Filter.bRecursiveClasses = true;
 				}
 
@@ -275,8 +297,8 @@ public:
 
 				MenuBuilder.AddWidget(
 					SNew(SBox)
-					.WidthOverride(300)
-					.HeightOverride(600)
+					.WidthOverride(300.f)
+					.HeightOverride(600.f)
 					[
 						ContentBrowserModule.Get().CreateAssetPicker(AssetPickerConfig)
 					],
@@ -314,9 +336,14 @@ public:
 		return !AssetFamily->IsAssetCompatible(InAssetData);
 	}
 
-	EVisibility GetButtonVisibility() const
+	EVisibility GetSoloButtonVisibility() const
 	{
-		return AssetData.IsValid() || bMultipleAssetsExist ? EVisibility::Visible : EVisibility::Collapsed;
+		return AssetData.IsValid() && !bMultipleAssetsExist ? EVisibility::Visible : EVisibility::Collapsed;
+	}
+
+	EVisibility GetComboButtonVisibility() const
+	{
+		return AssetData.IsValid() && bMultipleAssetsExist ? EVisibility::Visible : EVisibility::Collapsed;
 	}
 
 	EVisibility GetComboVisibility() const
@@ -345,7 +372,7 @@ public:
 	{
 		if (AssetFamily->IsAssetCompatible(InAssetData))
 		{
-			if(InOldObjectPath == AssetData.ObjectPath.ToString())
+			if (InOldObjectPath == AssetData.GetObjectPathString())
 			{
 				AssetData = InAssetData;
 
@@ -356,11 +383,15 @@ public:
 
 	void HandleAssetAdded(const FAssetData& InAssetData)
 	{
-		if (AssetFamily->IsAssetCompatible(InAssetData))
+		const IAssetRegistry& AssetRegistry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry").Get();
+		if(!AssetRegistry.IsLoadingAssets())
 		{
-			TArray<FAssetData> Assets;
-			AssetFamily->FindAssetsOfType(AssetData.GetClass(), Assets);
-			bMultipleAssetsExist = Assets.Num() > 1;
+			if (AssetFamily->IsAssetCompatible(InAssetData))
+			{
+				TArray<FAssetData> Assets;
+				AssetFamily->FindAssetsOfType(AssetData.GetClass(), Assets);
+				bMultipleAssetsExist = Assets.Num() > 1;
+			}
 		}
 	}
 
@@ -413,7 +444,7 @@ public:
 
 			// switch to new asset if needed
 			FAssetData NewAssetData = AssetFamily->FindAssetOfType(AssetData.GetClass());
-			if (!bAssetBeingEdited && NewAssetData.IsValid() && NewAssetData != AssetData)
+			if (!bAssetBeingEdited && NewAssetData != AssetData)
 			{
 				AssetData = NewAssetData;
 
@@ -428,9 +459,6 @@ public:
 		{
 			AssetThumbnail = MakeShareable(new FAssetThumbnail(AssetData, AssetShortcutConstants::ThumbnailSize, AssetShortcutConstants::ThumbnailSize, ThumbnailPoolPtr.Pin()));
 			AssetThumbnailSmall = MakeShareable(new FAssetThumbnail(AssetData, AssetShortcutConstants::ThumbnailSizeSmall, AssetShortcutConstants::ThumbnailSizeSmall, ThumbnailPoolPtr.Pin()));
-
-			ThumbnailBox->SetContent(AssetThumbnail->MakeThumbnailWidget());
-			ThumbnailSmallBox->SetContent(AssetThumbnailSmall->MakeThumbnailWidget());
 		}
 	}
 
@@ -474,10 +502,6 @@ private:
 	TSharedPtr<FAssetThumbnail> AssetThumbnail;
 	TSharedPtr<FAssetThumbnail> AssetThumbnailSmall;
 
-	/** Thumbnail widget containers */
-	TSharedPtr<SBox> ThumbnailBox;
-	TSharedPtr<SBox> ThumbnailSmallBox;
-
 	/** The asset editor we are embedded in */
 	TWeakPtr<class FWorkflowCentricApplication> HostingApp;
 
@@ -495,35 +519,76 @@ private:
 
 	/** Cache the package's dirty state */
 	bool bPackageDirty;
+
+	/** Flag for handling deferred refreshes */
+	bool bDeferAssetAdded;
 };
 
-void SAssetFamilyShortcutBar::Construct(const FArguments& InArgs, const TSharedRef<class FWorkflowCentricApplication>& InHostingApp, const TSharedRef<class IAssetFamily>& InAssetFamily)
+void SAssetFamilyShortcutBar::Construct(const FArguments& InArgs, const TSharedRef<FWorkflowCentricApplication>& InHostingApp, const TSharedRef<IAssetFamily>& InAssetFamily)
 {
+	WeakHostingApp = InHostingApp;
+	AssetFamily = InAssetFamily;
+
 	ThumbnailPool = MakeShareable(new FAssetThumbnailPool(16, false));
 
-	TSharedRef<SHorizontalBox> HorizontalBox = SNew(SHorizontalBox);
+	InAssetFamily->GetOnAssetFamilyChanged().AddSP(this, &SAssetFamilyShortcutBar::OnAssetFamilyChanged);
 
-	TArray<UClass*> AssetTypes;
-	InAssetFamily->GetAssetTypes(AssetTypes);
+	HorizontalBox = SNew(SHorizontalBox);
 
-	int32 AssetTypeIndex = 0;
-	for (UClass* Class : AssetTypes)
-	{
-		FAssetData AssetData = InAssetFamily->FindAssetOfType(Class);
-		HorizontalBox->AddSlot()
-		.AutoWidth()
-		.Padding(0.0f, 0.0f, AssetTypeIndex == AssetTypes.Num() - 1 ? 0.0f: 2.0f, 0.0f)
-		[
-			SNew(SAssetShortcut, InHostingApp, InAssetFamily, AssetData, ThumbnailPool.ToSharedRef())
-		];
-
-		AssetTypeIndex++;
-	}
+	BuildShortcuts();
 
 	ChildSlot
 	[
-		HorizontalBox
+		HorizontalBox.ToSharedRef()
 	];
+}
+
+void SAssetFamilyShortcutBar::BuildShortcuts()
+{
+	TArray<UClass*> AssetTypes;
+	AssetFamily->GetAssetTypes(AssetTypes);
+
+	for (UClass* Class : AssetTypes)
+	{
+		FAssetData AssetData = AssetFamily->FindAssetOfType(Class);
+		HorizontalBox->AddSlot()
+		.AutoWidth()
+		.Padding(0.0f, 4.0f, 16.0f, 4.0f)
+		[
+			SNew(SAssetShortcut, WeakHostingApp.Pin().ToSharedRef(), AssetFamily.ToSharedRef(), AssetData, ThumbnailPool.ToSharedRef())
+			.Visibility_Lambda([Class]()
+			{
+				IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools").Get();
+
+				bool bIsVisible = false;
+				TWeakPtr<IAssetTypeActions> AssetTypeActions = AssetTools.GetAssetTypeActionsForClass(Class);
+				if (AssetTypeActions.IsValid())
+				{
+					if (const UClass* SupportedClass = AssetTypeActions.Pin()->GetSupportedClass())
+					{
+						bIsVisible = AssetTools.GetAssetClassPathPermissionList(EAssetClassAction::ViewAsset)->PassesFilter(SupportedClass->GetClassPathName().ToString());
+					}
+				}
+				return bIsVisible ? EVisibility::Visible : EVisibility::Collapsed;
+			})
+		];
+	}
+}
+
+void SAssetFamilyShortcutBar::OnAssetFamilyChanged()
+{
+	HorizontalBox->ClearChildren();
+
+	const TArray<UObject*>* CurrentObjects = WeakHostingApp.Pin()->GetObjectsCurrentlyBeingEdited();
+	if(CurrentObjects && CurrentObjects->Num() > 0 && (*CurrentObjects)[0])
+	{
+		AssetFamily->GetOnAssetFamilyChanged().RemoveAll((this));
+		AssetFamily.Reset();
+		AssetFamily = FPersonaAssetFamilyManager::Get().CreatePersonaAssetFamily((*CurrentObjects)[0]);
+		AssetFamily->GetOnAssetFamilyChanged().AddSP(this, &SAssetFamilyShortcutBar::OnAssetFamilyChanged);
+
+		BuildShortcuts();
+	}
 }
 
 #undef LOCTEXT_NAMESPACE

@@ -1,7 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Serialization/NameAsStringIndexProxyArchive.h"
+
+#include "Containers/Array.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "Serialization/Archive.h"
 #include "Serialization/VarInt.h"
+#include "UObject/NameTypes.h"
 
 FArchive& FNameAsStringIndexProxyArchive::operator<<(class FName& N)
 {
@@ -38,7 +45,7 @@ FArchive& FNameAsStringIndexProxyArchive::operator<<(class FName& N)
 		if (Id.IsValidId())
 		{
 			int32 Index = Id.AsInteger();
-			WriteVarUIntToArchive(InnerArchive, uint64(Index + 1));
+			WriteVarUIntToArchive(InnerArchive, uint64(Index) + 1);
 		}
 		else
 		{

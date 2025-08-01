@@ -23,6 +23,7 @@
 #define DETOURTILECACHE_H
 
 #include "CoreMinimal.h"
+#include "Detour/DetourLargeWorldCoordinates.h"
 #include "Detour/DetourStatus.h"
 
 struct dtTileCacheAlloc;
@@ -61,7 +62,8 @@ enum ObstacleState
 static const int DT_MAX_TOUCHED_TILES = 8;
 struct dtTileCacheObstacle
 {
-	float pos[3], radius, height;
+	dtReal pos[3];
+	dtReal radius, height;
 	dtCompressedTileRef touched[DT_MAX_TOUCHED_TILES];
 	dtCompressedTileRef pending[DT_MAX_TOUCHED_TILES];
 	unsigned short salt;
@@ -73,38 +75,48 @@ struct dtTileCacheObstacle
 
 struct dtTileCacheParams
 {
-	float orig[3];
-	float cs, ch;
+	dtReal orig[3];
+	dtReal cs, ch;
 	int width, height;
-	float walkableHeight;
-	float walkableRadius;
-	float walkableClimb;
-	float maxSimplificationError;
+	dtReal walkableHeight;
+	dtReal walkableRadius;
+	dtReal walkableClimb;
+	dtReal maxVerticalMergeError; // UE
+	dtReal maxSimplificationError;
+	dtReal simplificationElevationRatio; // UE
 	int maxTiles;
 	int maxObstacles;
-//@UE4 BEGIN
-	float detailSampleDist;
-	float detailSampleMaxError;
+//@UE BEGIN
+	dtReal detailSampleDist;
+	dtReal detailSampleMaxError;
 	int minRegionArea;
 	int mergeRegionArea;
 	int regionChunkSize;
 	int regionPartitioning;
-//@UE4 END
+//@UE END
 };
 
-struct NAVMESH_API dtTileCacheMeshProcess
+struct dtTileCacheMeshProcess
 {
-	virtual void markAreas(struct dtTileCacheLayer* layer, const float* orig, const float cs, const float ch) = 0;
+	virtual void markAreas(struct dtTileCacheLayer* layer, const dtReal* orig, const dtReal cs, const dtReal ch) = 0;
+	
+//@UE BEGIN Adding support for LWCoords.
+#if !DT_LARGE_WORLD_COORDINATES_DISABLED
+	// This function is deprecated use the version that uses dtReal
+	virtual void markAreas(struct dtTileCacheLayer* layer, const float* orig, const float cs, const float ch) final {};
+#endif // DT_LARGE_WORLD_COORDINATES_DISABLED
+//@UE END Adding support for LWCoords.
+
 	virtual void process(struct dtNavMeshCreateParams* params,
 						 unsigned char* polyAreas, unsigned short* polyFlags) = 0;
 };
 
 
-class NAVMESH_API dtTileCache
+class dtTileCache
 {
 public:
-	dtTileCache();
-	~dtTileCache();
+	NAVMESH_API dtTileCache();
+	NAVMESH_API ~dtTileCache();
 	
 	struct dtTileCacheAlloc* getAlloc() { return m_talloc; }
 	struct dtTileCacheCompressor* getCompressor() { return m_tcomp; }
@@ -117,40 +129,40 @@ public:
 	inline int getObstacleCount() const { return m_params.maxObstacles; }
 	inline const dtTileCacheObstacle* getObstacle(const int i) const { return &m_obstacles[i]; }
 	
-	const dtTileCacheObstacle* getObstacleByRef(dtObstacleRef ref);
+	NAVMESH_API const dtTileCacheObstacle* getObstacleByRef(dtObstacleRef ref);
 	
-	dtObstacleRef getObstacleRef(const dtTileCacheObstacle* obmin) const;
+	NAVMESH_API dtObstacleRef getObstacleRef(const dtTileCacheObstacle* obmin) const;
 	
-	dtStatus init(const dtTileCacheParams* params,
+	NAVMESH_API dtStatus init(const dtTileCacheParams* params,
 				  struct dtTileCacheAlloc* talloc,
 				  struct dtTileCacheCompressor* tcomp,
 				  struct dtTileCacheMeshProcess* tmproc);
 	
-	int getTilesAt(const int tx, const int ty, dtCompressedTileRef* tiles, const int maxTiles) const ;
+	NAVMESH_API int getTilesAt(const int tx, const int ty, dtCompressedTileRef* tiles, const int maxTiles) const ;
 	
-	dtCompressedTile* getTileAt(const int tx, const int ty, const int tlayer);
-	dtCompressedTileRef getTileRef(const dtCompressedTile* tile) const;
-	const dtCompressedTile* getTileByRef(dtCompressedTileRef ref) const;
+	NAVMESH_API dtCompressedTile* getTileAt(const int tx, const int ty, const int tlayer);
+	NAVMESH_API dtCompressedTileRef getTileRef(const dtCompressedTile* tile) const;
+	NAVMESH_API const dtCompressedTile* getTileByRef(dtCompressedTileRef ref) const;
 	
-	dtStatus addTile(unsigned char* data, const int dataSize, unsigned char flags, dtCompressedTileRef* result);
+	NAVMESH_API dtStatus addTile(unsigned char* data, const int dataSize, unsigned char flags, dtCompressedTileRef* result);
 	
-	dtStatus removeTile(dtCompressedTileRef ref, unsigned char** data, int* dataSize);
+	NAVMESH_API dtStatus removeTile(dtCompressedTileRef ref, unsigned char** data, int* dataSize);
 	
-	dtStatus addObstacle(const float* pos, const float radius, const float height, dtObstacleRef* result);
-	dtStatus removeObstacle(const dtObstacleRef ref);
+	NAVMESH_API dtStatus addObstacle(const dtReal* pos, const dtReal radius, const dtReal height, dtObstacleRef* result);
+	NAVMESH_API dtStatus removeObstacle(const dtObstacleRef ref);
 	
-	dtStatus queryTiles(const float* bmin, const float* bmax,
+	NAVMESH_API dtStatus queryTiles(const dtReal* bmin, const dtReal* bmax,
 						dtCompressedTileRef* results, int* resultCount, const int maxResults) const;
 	
-	dtStatus update(const float /*dt*/, class dtNavMesh* navmesh);
+	NAVMESH_API dtStatus update(const dtReal /*dt*/, class dtNavMesh* navmesh);
 	
-	dtStatus buildNavMeshTilesAt(const int tx, const int ty, class dtNavMesh* navmesh);
+	NAVMESH_API dtStatus buildNavMeshTilesAt(const int tx, const int ty, class dtNavMesh* navmesh);
 	
-	dtStatus buildNavMeshTile(const dtCompressedTileRef ref, class dtNavMesh* navmesh);
+	NAVMESH_API dtStatus buildNavMeshTile(const dtCompressedTileRef ref, class dtNavMesh* navmesh);
 	
-	void calcTightTileBounds(const struct dtTileCacheLayerHeader* header, float* bmin, float* bmax) const;
+	NAVMESH_API void calcTightTileBounds(const struct dtTileCacheLayerHeader* header, dtReal* bmin, dtReal* bmax) const;
 	
-	void getObstacleBounds(const struct dtTileCacheObstacle* ob, float* bmin, float* bmax) const;
+	NAVMESH_API void getObstacleBounds(const struct dtTileCacheObstacle* ob, dtReal* bmin, dtReal* bmax) const;
 	
 
 	/// Encodes a tile id.

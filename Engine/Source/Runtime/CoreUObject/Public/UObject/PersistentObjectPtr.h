@@ -6,9 +6,8 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "UObject/Object.h"
 #include "UObject/WeakObjectPtr.h"
-#include "UObject/FastReferenceCollectorOptions.h"
 
 /**
  * TPersistentObjectPtr is a template base class for FLazyObjectPtr and FSoftObjectPtr
@@ -16,10 +15,7 @@
 template<class TObjectID>
 struct TPersistentObjectPtr
 {
-public:	
-
-	template <typename ReferenceProcessorType, typename CollectorType, typename ArrayPoolType, EFastReferenceCollectorOptions Options>
-	friend class TFastReferenceCollector;
+	using ElementType = TObjectID;
 
 	/** Default constructor, will be null */
 	FORCEINLINE TPersistentObjectPtr()
@@ -32,20 +28,17 @@ public:
 	{
 		WeakPtr.Reset();
 		ObjectID.Reset();
-		TagAtLastTest = 0;
 	}
 
 	/** Resets the weak ptr only, call this when ObjectId may change */
 	FORCEINLINE void ResetWeakPtr()
 	{
 		WeakPtr.Reset();
-		TagAtLastTest = 0;
 	}
 
 	/** Construct from a unique object identifier */
 	explicit FORCEINLINE TPersistentObjectPtr(const TObjectID& InObjectID)
 		: WeakPtr()
-		, TagAtLastTest(0)
 		, ObjectID(InObjectID)
 	{
 	}
@@ -55,7 +48,6 @@ public:
 	{
 		WeakPtr.Reset();
 		ObjectID = InObjectID;
-		TagAtLastTest = 0;
 	}
 
 	/** Copy from an object pointer */
@@ -65,7 +57,6 @@ public:
 		{
 			ObjectID = TObjectID::GetOrCreateIDForObject(Object);
 			WeakPtr = Object;
-			TagAtLastTest = TObjectID::GetCurrentTag();
 		}
 		else
 		{
@@ -106,20 +97,15 @@ public:
 	{
 		UObject* Object = WeakPtr.Get();
 		
-		// Do a full resolve if the returned object is null and either we think we've loaded new objects, or the weak ptr may be stale
-		if (!Object && ObjectID.IsValid() && (TObjectID::GetCurrentTag() != TagAtLastTest || !WeakPtr.IsExplicitlyNull()))
+		// Do a full resolve if the cached object is null but we have a valid object ID that might resolve
+		// This used to check TObjectID::GetCurrentTag() before resolving but that was unreliable and did not improve performance in actual use
+		if (!Object && ObjectID.IsValid())
 		{
 			Object = ObjectID.ResolveObject();
 			WeakPtr = Object;
 
-			// Not safe to update tag during save as ResolveObject may have failed accidentally
-			if (Object || !GIsSavingPackage)
-			{
-				TagAtLastTest = TObjectID::GetCurrentTag();
-			}
-
-			// If this object is pending kill or otherwise invalid, this will return nullptr as expected
-			Object = WeakPtr.Get();
+			// Make sure it isn't garbage to match the default behavior of WeakPtr.Get() without looking it up again
+			return ::GetValid(Object);
 		}
 		return Object;
 	}
@@ -133,18 +119,15 @@ public:
 	FORCEINLINE UObject* Get(bool bEvenIfPendingKill) const
 	{
 		UObject* Object = WeakPtr.Get(bEvenIfPendingKill);
-		if (!Object && TObjectID::GetCurrentTag() != TagAtLastTest && ObjectID.IsValid())
+
+		// Do a full resolve if the cached object is null but we have a valid object ID that might resolve
+		// This used to check TObjectID::GetCurrentTag() before resolving but that was unreliable and did not improve performance in actual use
+		if (!Object && ObjectID.IsValid())
 		{
 			Object = ObjectID.ResolveObject();
 			WeakPtr = Object;
 
-			// Not safe to update tag during save as ResolveObject may have failed accidentally
-			if (Object || !GIsSavingPackage)
-			{
-				TagAtLastTest = TObjectID::GetCurrentTag();
-			}
-
-			// If this object is pending kill or otherwise invalid, this will return nullptr as expected
+			// Get the object again using the correct flag
 			Object = WeakPtr.Get(bEvenIfPendingKill);
 		}
 		return Object;
@@ -243,8 +226,6 @@ private:
 
 	/** Once the object has been noticed to be loaded, this is set to the object weak pointer **/
 	mutable FWeakObjectPtr	WeakPtr;
-	/** Compared to CurrentAnnotationTag and if they are not equal, a guid search will be performed **/
-	mutable int32			TagAtLastTest;
 	/** Guid for the object this pointer points to or will point to. **/
 	TObjectID				ObjectID;
 };
@@ -252,3 +233,6 @@ private:
 template <class TObjectID> struct TIsPODType<TPersistentObjectPtr<TObjectID> > { enum { Value = TIsPODType<TObjectID>::Value }; };
 template <class TObjectID> struct TIsWeakPointerType<TPersistentObjectPtr<TObjectID> > { enum { Value = TIsWeakPointerType<FWeakObjectPtr>::Value }; };
 
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

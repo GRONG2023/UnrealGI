@@ -4,7 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Rendering/SlateRenderer.h"
-
+#include "IWebBrowserResourceLoader.h"
 class FCEFWebBrowserWindow;
 class IWebBrowserCookieManager;
 class IWebBrowserWindow;
@@ -25,12 +25,13 @@ public:
 		FString InitialURL,
 		bool bUseTransparency,
 		bool bThumbMouseButtonNavigation,
+		bool InterceptLoadRequests = true,
 		TOptional<FString> ContentsToLoad = TOptional<FString>(),
 		bool ShowErrorMessage = true,
 		FColor BackgroundColor = FColor(255, 255, 255, 255)) = 0;
 };
 
-struct WEBBROWSER_API FBrowserContextSettings
+struct FBrowserContextSettings
 {
 	FBrowserContextSettings(const FString& InId)
 		: Id(InId)
@@ -47,16 +48,18 @@ struct WEBBROWSER_API FBrowserContextSettings
 	bool bPersistSessionCookies;
 	bool bIgnoreCertificateErrors;
 	bool bEnableNetSecurityExpiration;
+	FOnBeforeContextResourceLoadDelegate OnBeforeContextResourceLoad;
 };
 
 
-struct WEBBROWSER_API FCreateBrowserWindowSettings
+struct FCreateBrowserWindowSettings
 {
 
 	FCreateBrowserWindowSettings()
 		: OSWindowHandle(nullptr)
 		, InitialURL()
 		, bUseTransparency(false)
+		, bInterceptLoadRequests(true)
 		, bThumbMouseButtonNavigation(false)
 		, ContentsToLoad()
 		, bShowErrorMessage(true)
@@ -69,6 +72,7 @@ struct WEBBROWSER_API FCreateBrowserWindowSettings
 	void* OSWindowHandle;
 	FString InitialURL;
 	bool bUseTransparency;
+	bool bInterceptLoadRequests;
 	bool bThumbMouseButtonNavigation;
 	TOptional<FString> ContentsToLoad;
 	bool bShowErrorMessage;
@@ -81,7 +85,7 @@ struct WEBBROWSER_API FCreateBrowserWindowSettings
 /**
  * A singleton class that takes care of general web browser tasks
  */
-class WEBBROWSER_API IWebBrowserSingleton
+class IWebBrowserSingleton
 {
 public:
 	/**
@@ -108,45 +112,14 @@ public:
 	/**
 	 * Create a new web browser window
 	 *
-	 * @param OSWindowHandle Handle of OS Window that the browser will be displayed in (can be null)
-	 * @param InitialURL URL that the browser should initially navigate to
-	 * @param bUseTransparency Whether to allow transparent rendering of pages
-	 * @param ContentsToLoad Optional string to load as a web page
-	 * @param ShowErrorMessage Whether to show an error message in case of loading errors.
-	 * @param BackgroundColor Opaque background color used before a document is loaded and when no document color is specified.
-	 * @param BrowserFrameRate The framerate of the browser in FPS
+	 * @param Settings Struct containing browser window settings
 	 * @return New Web Browser Window Interface (may be null if not supported)
 	 */
-	UE_DEPRECATED(4.11, "Please use the new overload that takes a settings struct.")
-	virtual TSharedPtr<IWebBrowserWindow> CreateBrowserWindow(
-		void* OSWindowHandle,
-		FString InitialURL,
-		bool bUseTransparency,
-		bool bThumbMouseButtonNavigation,
-		TOptional<FString> ContentsToLoad = TOptional<FString>(),
-		bool ShowErrorMessage = true,
-		FColor BackgroundColor = FColor(255, 255, 255, 255),
-		int BrowserFrameRate = 24,
-		const TArray<FString>& AltRetryDomains = TArray<FString>()) = 0;
-
 	virtual TSharedPtr<IWebBrowserWindow> CreateBrowserWindow(const FCreateBrowserWindowSettings& Settings) = 0;
 
 #if	BUILD_EMBEDDED_APP
 	virtual TSharedPtr<IWebBrowserWindow> CreateNativeBrowserProxy() = 0;
 #endif
-
-	/**
-	 * Delete all browser cookies.
-	 *
-	 * Removes all matching cookies. Leave both URL and CookieName blank to delete the entire cookie database.
-	 * The actual deletion will be scheduled on the browser IO thread, so the operation may not have completed when the function returns.
-	 *
-	 * @param URL The base URL to match when searching for cookies to remove. Use blank to match all URLs.
-	 * @param CookieName The name of the cookie to delete. If left unspecified, all cookies will be removed.
-	 * @param Completed A callback function that will be invoked asynchronously on the game thread when the deletion is complete passing in the number of deleted objects.
-	 */
-	UE_DEPRECATED(4.11, "Please use the CookieManager instead via GetCookieManager().")
-	virtual void DeleteBrowserCookies(FString URL = TEXT(""), FString CookieName = TEXT(""), TFunction<void(int)> Completed = nullptr) = 0;
 
 	virtual TSharedPtr<class IWebBrowserCookieManager> GetCookieManager() const = 0;
 
@@ -206,6 +179,16 @@ public:
 	 * @param bEnabled a boolean value to enable or disable the to-lowering.
 	 */
 	virtual void SetJSBindingToLoweringEnabled(bool bEnabled) = 0;
+
+
+	/**
+	 * Delete old/unused web cache paths. Some Web implementations (i.e CEF) use version specific cache folders, this
+	 * call lets you schedule a deletion of any now unused folders. Calling this may resulting in async disk I/O.
+	 *
+	 * @param CachePathRoot the base path used for saving the webcache folder
+	 * @param CachePrefix the filename prefix we use for the cache folder (i.e "webcache")
+	 */
+	virtual void ClearOldCacheFolders(const FString &CachePathRoot, const FString &CachePrefix) = 0;
 
 
 	/** Set a reference to UWebBrowser's default material*/

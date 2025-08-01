@@ -4,14 +4,15 @@
 #pragma once
 
 #include "CoreTypes.h"
-#include "Math/Vector2D.h"
-#include "Containers/Map.h"
-#include "UObject/NameTypes.h"
 #include "ICurveEditorDragOperation.h"
+#include "Layout/SlateRect.h"
+#include "Math/Vector2D.h"
 
 class FCurveEditor;
+class FSlateWindowElementList;
 class SCurveEditorView;
-class SCurveEditorPanel;
+struct FGeometry;
+struct FPointerEvent;
 
 class FCurveEditorDragOperation_Marquee : public ICurveEditorDragOperation
 {
@@ -33,4 +34,6 @@ private:
 	FCurveEditor* CurveEditor;
 	/** When valid, marquee selection should only occur inside this view; all geometries are in local space */
 	SCurveEditorView* LockedToView;
+	/** Real Initial Position do to the delayed drag*/
+	FVector2D RealInitialPosition;
 };

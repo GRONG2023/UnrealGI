@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "LevelEditor.h"
+#include "Model.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Misc/App.h"
@@ -8,7 +9,7 @@
 #include "Layout/WidgetPath.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Layout/SBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Editor/EditorPerProjectUserSettings.h"
 #include "Editor/UnrealEdEngine.h"
 #include "LevelEditorViewport.h"
@@ -20,33 +21,35 @@
 #include "LightmapResRatioAdjust.h"
 #include "LevelEditorActions.h"
 #include "LevelEditorModesActions.h"
-#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructure.h"
-#include "Editor/WorkspaceMenuStructure/Public/WorkspaceMenuStructureModule.h"
+#include "WorkspaceMenuStructure.h"
+#include "WorkspaceMenuStructureModule.h"
 #include "MessageLogModule.h"
 #include "EditorViewportCommands.h"
 #include "LevelViewportActions.h"
 #include "Toolkits/GlobalEditorCommonCommands.h"
 #include "ISlateReflectorModule.h"
 #include "Widgets/Docking/SDockTab.h"
-#include "IIntroTutorials.h"
 #include "Interfaces/IProjectManager.h"
 #include "LevelViewportLayoutEntity.h"
 #include "PixelInspectorModule.h"
 #include "CommonMenuExtensionsModule.h"
 #include "ProjectDescriptor.h"
 #include "PlatformInfo.h"
+#include "Editor.h"
+#include "SLevelViewport.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 // @todo Editor: remove this circular dependency
 #include "Interfaces/IMainFrameModule.h"
 #include "Framework/Commands/GenericCommands.h"
 #include "Misc/EngineBuildSettings.h"
 #include "Subsystems/PanelExtensionSubsystem.h"
-#include "Classes/EditorStyleSettings.h"
-#include "DDC/SDDCStatusIndicator.h"
+#include "LevelEditorOutlinerSettings.h"
 
 #define LOCTEXT_NAMESPACE "LevelEditor"
 
 IMPLEMENT_MODULE( FLevelEditorModule, LevelEditor );
+LLM_DEFINE_TAG(LevelEditor);
 
 const FName LevelEditorApp = FName(TEXT("LevelEditorApp"));
 const FName MainFrame("MainFrame");
@@ -57,7 +60,6 @@ const FName LevelEditorTabIds::LevelEditorViewport_Clone1(TEXT("LevelEditorViewp
 const FName LevelEditorTabIds::LevelEditorViewport_Clone2(TEXT("LevelEditorViewport_Clone2"));
 const FName LevelEditorTabIds::LevelEditorViewport_Clone3(TEXT("LevelEditorViewport_Clone3"));
 const FName LevelEditorTabIds::LevelEditorViewport_Clone4(TEXT("LevelEditorViewport_Clone4"));
-const FName LevelEditorTabIds::LevelEditorToolBar(TEXT("LevelEditorToolBar"));
 const FName LevelEditorTabIds::LevelEditorToolBox(TEXT("LevelEditorToolBox"));
 const FName LevelEditorTabIds::LevelEditorSelectionDetails(TEXT("LevelEditorSelectionDetails"));
 const FName LevelEditorTabIds::LevelEditorSelectionDetails2(TEXT("LevelEditorSelectionDetails2"));
@@ -66,12 +68,17 @@ const FName LevelEditorTabIds::LevelEditorSelectionDetails4(TEXT("LevelEditorSel
 const FName LevelEditorTabIds::PlacementBrowser(TEXT("PlacementBrowser"));
 const FName LevelEditorTabIds::LevelEditorBuildAndSubmit(TEXT("LevelEditorBuildAndSubmit"));
 const FName LevelEditorTabIds::LevelEditorSceneOutliner(TEXT("LevelEditorSceneOutliner"));
+const FName LevelEditorTabIds::LevelEditorSceneOutliner2(TEXT("LevelEditorSceneOutliner2"));
+const FName LevelEditorTabIds::LevelEditorSceneOutliner3(TEXT("LevelEditorSceneOutliner3"));
+const FName LevelEditorTabIds::LevelEditorSceneOutliner4(TEXT("LevelEditorSceneOutliner4"));
 const FName LevelEditorTabIds::LevelEditorStatsViewer(TEXT("LevelEditorStatsViewer"));
 const FName LevelEditorTabIds::LevelEditorLayerBrowser(TEXT("LevelEditorLayerBrowser"));
+const FName LevelEditorTabIds::LevelEditorDataLayerBrowser(TEXT("LevelEditorDataLayerBrowser"));
 const FName LevelEditorTabIds::Sequencer(TEXT("Sequencer"));
 const FName LevelEditorTabIds::SequencerGraphEditor(TEXT("SequencerGraphEditor"));
 const FName LevelEditorTabIds::WorldSettings(TEXT("WorldSettingsTab"));
 const FName LevelEditorTabIds::WorldBrowserComposition(TEXT("WorldBrowserComposition"));
+const FName LevelEditorTabIds::WorldBrowserPartitionEditor(TEXT("WorldBrowserPartitionEditor"));
 const FName LevelEditorTabIds::WorldBrowserHierarchy(TEXT("WorldBrowserHierarchy"));
 const FName LevelEditorTabIds::WorldBrowserDetails(TEXT("WorldBrowserDetails"));
 const FName LevelEditorTabIds::LevelEditorHierarchicalLODOutliner(TEXT("LevelEditorHierarchicalLODOutliner"));
@@ -98,14 +105,11 @@ public:
 		FString ProjectNameWatermarkPrefix;
 		GConfig->GetString(TEXT("LevelEditor"), TEXT("ProjectNameWatermarkPrefix"), /*out*/ ProjectNameWatermarkPrefix, GEditorPerProjectIni);
 
-		FColor BadgeBackgroundColor = FColor::Black;
-		GConfig->GetColor(TEXT("LevelEditor"), TEXT("ProjectBadgeBackgroundColor"), /*out*/ BadgeBackgroundColor, GEditorPerProjectIni);
-
-		FColor BadgeTextColor = FColor(128,128,128,255);
+		FColor BadgeTextColor = FColor(128, 128, 128, 255);
 		GConfig->GetColor(TEXT("LevelEditor"), TEXT("ProjectBadgeTextColor"), /*out*/ BadgeTextColor, GEditorPerProjectIni);
 
 		const FString EngineVersionString = FEngineVersion::Current().ToString(FEngineVersion::Current().HasChangelist() ? EVersionComponent::Changelist : EVersionComponent::Patch);
-		
+
 		FFormatNamedArguments Args;
 
 		Args.Add(TEXT("ProjectNameWatermarkPrefix"), FText::FromString(ProjectNameWatermarkPrefix));
@@ -143,7 +147,8 @@ public:
 		TSharedRef<SWidget> DefaultNamePlate = SNew(STextBlock)
 			.Text(RightContentText)
 			.Visibility(EVisibility::HitTestInvisible)
-			.TextStyle(FEditorStyle::Get(), "SProjectBadge.Text")
+			.TextStyle(FAppStyle::Get(), "SProjectBadge.Text")
+			.Margin(FAppStyle::Get().GetMargin("SProjectBadge.BadgePadding"))
 			.ColorAndOpacity(BadgeTextColor);
 
 		SBox::Construct(SBox::FArguments()
@@ -151,16 +156,10 @@ public:
 			.VAlign(VAlign_Top)
 			.Padding(FMargin(0.0f, 0.0f, 2.0f, 0.0f))
 			[
-				SNew(SBorder)
-				.BorderImage(FEditorStyle::GetBrush("SProjectBadge.BadgeShape"))
-				.Padding(FMargin(10.0f, 2.5f))
-				.BorderBackgroundColor(BadgeBackgroundColor)
-				.VAlign(VAlign_Top)
-				[
-					SNew(SExtensionPanel)
-					.ExtensionPanelID("LevelEditorProjectNamePlate")
-					.DefaultWidget(DefaultNamePlate)
-				]
+				SNew(SExtensionPanel)
+				.ExtensionPanelID("LevelEditorProjectNamePlate")
+				.DefaultWidget(DefaultNamePlate)
+				.WindowZoneOverride(EWindowZone::TitleBar)
 			]);
 	}
 
@@ -180,16 +179,18 @@ private:
 	FGeometry CachedGeometry;
 };
 
-static FMargin GetRoomForBadge(TWeakPtr<SProjectBadge> ProjBadge)
-{
-	return FMargin(8.0f, 0.0f, ProjBadge.Pin()->GetSizeLastFrame().X + 8.0f, 0.0f);
-}
+
 
 TSharedRef<SDockTab> FLevelEditorModule::SpawnLevelEditor( const FSpawnTabArgs& InArgs )
 {
+	LLM_SCOPE_BYTAG(LevelEditor);
+	
 	TSharedRef<SDockTab> LevelEditorTab = SNew(SDockTab)
 		.TabRole(ETabRole::MajorTab)
-		.ContentPadding( FMargin(0) );
+		.ContentPadding(FMargin(0))
+		.IconColor(FAppStyle::Get().GetColor("LevelEditor.AssetColor")); // Same color as FAssetTypeActions_World
+
+	LevelEditorTab->SetTabIcon(FAppStyle::Get().GetBrush("LevelEditor.Tab"));
 
 	SetLevelEditorInstanceTab(LevelEditorTab);
 	TSharedPtr< SWindow > OwnerWindow = InArgs.GetOwnerWindow();
@@ -200,82 +201,40 @@ TSharedRef<SDockTab> FLevelEditorModule::SpawnLevelEditor( const FSpawnTabArgs& 
 		OwnerWindow = MainFrameModule.GetParentWindow();
 	}
 
-	if ( OwnerWindow.IsValid() )
-	{
-		TSharedPtr<SLevelEditor> LevelEditorTmp;
-		LevelEditorTab->SetContent( SAssignNew(LevelEditorTmp, SLevelEditor ) );
-		SetLevelEditorInstance(LevelEditorTmp);
-		LevelEditorTmp->Initialize( LevelEditorTab, OwnerWindow.ToSharedRef() );
+	OutlinerSettings->CreateDefaultFilters();
 
-		if (GetDefault<UEditorStyleSettings>()->bEnableLegacyEditorModeUI)
-		{
-			GLevelEditorModeTools().RemoveDefaultMode(FBuiltinEditorModes::EM_Default);
-			GLevelEditorModeTools().AddDefaultMode(FBuiltinEditorModes::EM_Placement);
-		}
+	TSharedPtr<SLevelEditor> LevelEditorTmp;
+	if (OwnerWindow.IsValid())
+	{
+		LevelEditorTab->SetContent(SAssignNew(LevelEditorTmp, SLevelEditor));
+		SetLevelEditorInstance(LevelEditorTmp);
+		LevelEditorTmp->Initialize(LevelEditorTab, OwnerWindow.ToSharedRef());
 
 		GLevelEditorModeTools().DeactivateAllModes();
-		GLevelEditorModeTools().ActivateDefaultMode();
-
-		if (GetDefault<UEditorStyleSettings>()->bEnableLegacyEditorModeUI)
-		{
-			// In legacy mode this toolbox should always be open
-			static const FTabId ToolboxTabId("LevelEditorToolBox");
-			LevelEditorTabManager->TryInvokeTab(ToolboxTabId);
-
-			// In legacy mode the standalone placement browser tab should not be opened
-			static const FTabId PlacementBrowserTabId("PlacementBrowser");
-			TSharedPtr<SDockTab> PlacementBrowserTab = LevelEditorTabManager->FindExistingLiveTab(PlacementBrowserTabId);
-			if (PlacementBrowserTab.IsValid())
-			{
-				PlacementBrowserTab->RequestCloseTab();
-			}
-		}
 
 		LevelEditorCreatedEvent.Broadcast(LevelEditorTmp);
+
+		TSharedRef<SProjectBadge> ProjectBadge = SNew(SProjectBadge);
+
+		TSharedPtr< SWidget > RightContent =
+			SNew(SHorizontalBox)
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(8.0f, 0.0f)
+			.VAlign(VAlign_Center)
+			[
+				LevelEditorTmp->GetTitleBarMessageWidget()
+			]
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(0.0f, 0.0f, 8.0f, 0.0f)
+			[
+				ProjectBadge
+			];
+
+
+		LevelEditorTab->SetTitleBarRightContent(RightContent.ToSharedRef());
 	}
-
-	IIntroTutorials& IntroTutorials = FModuleManager::LoadModuleChecked<IIntroTutorials>(TEXT("IntroTutorials"));
-	TSharedRef<SWidget> TutorialWidget = IntroTutorials.CreateTutorialsWidget(TEXT("LevelEditor"), OwnerWindow);
-
-	TSharedRef<SProjectBadge> ProjectBadge = SNew(SProjectBadge);
-	TAttribute<FMargin> BadgeSizeGetter = TAttribute<FMargin>::Create(TAttribute<FMargin>::FGetter::CreateStatic(&GetRoomForBadge, TWeakPtr<SProjectBadge>(ProjectBadge)));
-		
-	TSharedPtr< SWidget > RightContent=
-		SNew( SHorizontalBox )
-
-// Put the level editor stats/notification widgets on the main window title bar since we don't have a menu bar on OS X
-#if PLATFORM_MAC
-		+SHorizontalBox::Slot()
-		.AutoWidth()
-		.Padding(8.0f, 0.0f, 0.0f, 0.0f)
-		.VAlign(VAlign_Center)
-		[
-			LevelEditorTab->GetRightContent()
-		]
-#endif
-
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.VAlign(VAlign_Center)
-		[
-			TutorialWidget
-		]
-
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.VAlign(VAlign_Top)
-		.Padding(BadgeSizeGetter)
-		[
-			SNew(SDDCStatusIndicator)
-		]
-	;
-
-	LevelEditorTab->SetRightContent( RightContent.ToSharedRef() );
-
-	LevelEditorTab->SetBackgroundContent(
-		ProjectBadge
-	);
-	
 	
 	return LevelEditorTab;
 }
@@ -291,15 +250,13 @@ void FLevelEditorModule::StartupModule()
 
 	FModuleManager::LoadModuleChecked<FCommonMenuExtensionsModule>(CommonMenuExtensionsName);
 
-	MenuExtensibilityManager = MakeShareable(new FExtensibilityManager);
-	
-	ToolBarExtensibilityManager = MakeShareable(new FExtensibilityManager);
-
-	ModeBarExtensibilityManager = MakeShareable(new FExtensibilityManager);
-
-	NotificationBarExtensibilityManager = MakeShareable(new FExtensibilityManager);
+	MenuExtensibilityManager = MakeShared<FExtensibilityManager>();
+	ToolBarExtensibilityManager = MakeShared<FExtensibilityManager>();
+	ModeBarExtensibilityManager = MakeShared<FExtensibilityManager>();
+	NotificationBarExtensibilityManager = MakeShared<FExtensibilityManager>();
 
 	// Note this must come before any tab spawning because that can create the SLevelEditor and attempt to map commands
+	FGlobalEditorCommonCommands::Register();
 	FEditorViewportCommands::Register();
 	FLevelViewportCommands::Register();
 	FLevelEditorCommands::Register();
@@ -307,20 +264,34 @@ void FLevelEditorModule::StartupModule()
 	// Bind level editor commands shared across an instance
 	BindGlobalLevelEditorCommands();
 
-	FViewportTypeDefinition ViewportType = FViewportTypeDefinition::FromType<FLevelViewportLayoutEntity>(FLevelViewportCommands::Get().SetDefaultViewportType);
+	// Exposes the global level editor command list to subscribers from other systems
+	FInputBindingManager::Get().RegisterCommandList(FLevelEditorCommands::Get().GetContextName(), GetGlobalLevelEditorActions());
+
+	FViewportTypeDefinition ViewportType = FViewportTypeDefinition([](const FAssetEditorViewportConstructionArgs& ConstructionArgs, TSharedPtr<ILevelEditor> InLevelEditor)
+		{
+			TSharedPtr<SLevelViewport> EditorViewport = SNew(SLevelViewport, ConstructionArgs)
+				.ParentLevelEditor(InLevelEditor);
+
+			return MakeShareable(new FLevelViewportLayoutEntity(EditorViewport));
+		},
+		FLevelViewportCommands::Get().SetDefaultViewportType);
 	RegisterViewportType("Default", ViewportType);
 
 	const IWorkspaceMenuStructure& MenuStructure = WorkspaceMenu::GetMenuStructure();
 
-	FGlobalTabmanager::Get()->RegisterTabSpawner("LevelEditor", FOnSpawnTab::CreateRaw( this, &FLevelEditorModule::SpawnLevelEditor ) )
-		.SetDisplayName( NSLOCTEXT("LevelEditor", "LevelEditorTab", "Level Editor") );
+	FGlobalTabmanager::Get()->RegisterTabSpawner("LevelEditor", FOnSpawnTab::CreateRaw(this, &FLevelEditorModule::SpawnLevelEditor))
+		.SetDisplayName(NSLOCTEXT("LevelEditor", "LevelEditorTab", "Level Editor"))
+		.SetAutoGenerateMenuEntry(false);
 
-	FModuleManager::LoadModuleChecked<ISlateReflectorModule>("SlateReflector").RegisterTabSpawner(MenuStructure.GetDeveloperToolsMiscCategory());
+	FModuleManager::LoadModuleChecked<ISlateReflectorModule>("SlateReflector").RegisterTabSpawner(MenuStructure.GetDeveloperToolsDebugCategory());
 
-	FModuleManager::LoadModuleChecked<FPixelInspectorModule>("PixelInspectorModule").RegisterTabSpawner(MenuStructure.GetDeveloperToolsMiscCategory());
+	FModuleManager::LoadModuleChecked<FPixelInspectorModule>("PixelInspectorModule").RegisterTabSpawner(MenuStructure.GetDeveloperToolsDebugCategory());
 
 	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
 	MessageLogModule.RegisterLogListing("BuildAndSubmitErrors", LOCTEXT("BuildAndSubmitErrors", "Build and Submit Errors"));
+
+	OutlinerSettings = MakeShared<FLevelEditorOutlinerSettings>();
+	OutlinerSettings->SetupBuiltInCategories();
 }
 
 /**
@@ -348,23 +319,26 @@ void FLevelEditorModule::ShutdownModule()
 
 	// If the level editor tab is currently open, close it
 	{
-		TSharedPtr<SDockTab> LevelEditorTab = LevelEditorInstanceTabPtr.Pin();
-		if (LevelEditorTab.IsValid())
+		if (!IsEngineExitRequested())
 		{
-			LevelEditorTab->RemoveTabFromParent();
+			TSharedPtr<SDockTab> LevelEditorTab = LevelEditorInstanceTabPtr.Pin();
+			if (LevelEditorTab.IsValid())
+			{
+				LevelEditorTab->RemoveTabFromParent();
+			}
+			LevelEditorInstanceTabPtr.Reset();
 		}
-		LevelEditorInstanceTabPtr.Reset();
 	}
 
 	// Clear out some globals that may be referencing this module
 	SetLevelEditorTabManager(nullptr);
-	WorkspaceMenu::GetModule().ResetLevelEditorCategory();
+	WorkspaceMenu::GetMenuStructure().GetLevelEditorCategory()->ClearItems();
 
 	if (FSlateApplication::IsInitialized() && FModuleManager::Get().IsModuleLoaded("SlateReflector"))
 	{
 		FGlobalTabmanager::Get()->UnregisterTabSpawner("LevelEditor");
 		FModuleManager::GetModuleChecked<ISlateReflectorModule>("SlateReflector").UnregisterTabSpawner();
-	}	
+	}
 
 	FLevelEditorCommands::Unregister();
 	FLevelEditorModesCommands::Unregister();
@@ -408,11 +382,15 @@ void FLevelEditorModule::SummonWorldBrowserComposition()
 }
 
 // @todo remove when world-centric mode is added
-void FLevelEditorModule::AttachSequencer( TSharedPtr<SWidget> SequencerWidget, TSharedPtr<IAssetEditorInstance> SequencerAssetEditor )
+TSharedPtr<SDockTab> FLevelEditorModule::AttachSequencer(TSharedPtr<SWidget> SequencerWidget, TSharedPtr<IAssetEditorInstance> SequencerAssetEditor)
 {
 	TSharedPtr<SLevelEditor> LevelEditorInstance = LevelEditorInstancePtr.Pin();
+	if (LevelEditorInstance)
+	{
+		return LevelEditorInstance->AttachSequencer(SequencerWidget, SequencerAssetEditor);
+	}
 
-	LevelEditorInstance->AttachSequencer( SequencerWidget, SequencerAssetEditor );
+	return nullptr;
 }
 
 TSharedPtr<IAssetViewport> FLevelEditorModule::GetFirstActiveViewport()
@@ -454,6 +432,16 @@ void FLevelEditorModule::FocusViewport()
 void FLevelEditorModule::BroadcastActorSelectionChanged(const TArray<UObject*>& NewSelection, bool bForceRefresh)
 {
 	ActorSelectionChangedEvent.Broadcast(NewSelection, bForceRefresh);
+}
+
+void FLevelEditorModule::BroadcastElementSelectionChanged(const UTypedElementSelectionSet* SelectionSet, bool bForceRefresh)
+{
+	ElementSelectionChangedEvent.Broadcast(SelectionSet, bForceRefresh);
+}
+
+void FLevelEditorModule::BroadcastOverridePropertyEditorSelection(const TArray<AActor*>& NewSelection, bool bForceRefresh)
+{
+	OverridePropertyEditorSelectionEvent.Broadcast(NewSelection, bForceRefresh);
 }
 
 void FLevelEditorModule::BroadcastRedrawViewports( bool bInvalidateHitProxies )
@@ -529,6 +517,7 @@ void FLevelEditorModule::SetLevelEditorTabManager( const TSharedPtr<SDockTab>& O
 	{
 		LevelEditorTabManager = FGlobalTabmanager::Get()->NewTabManager(OwnerTab.ToSharedRef());
 		LevelEditorTabManager->SetOnPersistLayout(FTabManager::FOnPersistLayout::CreateRaw(this, &FLevelEditorModule::HandleTabManagerPersistLayout));
+		LevelEditorTabManager->SetAllowWindowMenuBar(true);
 
 		TabManagerChangedEvent.Broadcast();
 	}
@@ -606,7 +595,7 @@ void FLevelEditorModule::ToggleImmersiveOnActiveLevelViewport()
 }
 
 /** @return Returns the first Level Editor that we currently know about */
-TSharedPtr<ILevelEditor> FLevelEditorModule::GetFirstLevelEditor()
+TSharedPtr<ILevelEditor> FLevelEditorModule::GetFirstLevelEditor() const
 {
 	return LevelEditorInstancePtr.Pin();
 }
@@ -616,27 +605,28 @@ TSharedPtr<SDockTab> FLevelEditorModule::GetLevelEditorTab() const
 	return LevelEditorInstanceTabPtr.Pin();
 }
 
-void FLevelEditorModule::AddStatusBarItem(FName InStatusBarIdentifier, const FStatusBarItem& InStatusBarItem)
+void FLevelEditorModule::AddTitleBarItem(FName InTitleBarIdentifier, const FTitleBarItem& InTitleBarItem)
 {
-	StatusBarItems.FindOrAdd(InStatusBarIdentifier) = InStatusBarItem;
-	BroadcastNotificationBarChanged();
+	TitleBarItems.FindOrAdd(InTitleBarIdentifier) = InTitleBarItem;
+	BroadcastTitleBarMessagesChanged();
 }
 
-void FLevelEditorModule::RemoveStatusBarItem(FName InStatusBarIdentifier)
+void FLevelEditorModule::RemoveTitleBarItem(FName InTitleBarIdentifier)
 {
-	StatusBarItems.Remove(InStatusBarIdentifier);
-	BroadcastNotificationBarChanged();
+	TitleBarItems.Remove(InTitleBarIdentifier);
+	BroadcastTitleBarMessagesChanged();
 }
 
-TSharedRef<ILevelViewportLayoutEntity> FLevelEditorModule::FactoryViewport(FName InTypeName, const FViewportConstructionArgs& ConstructionArgs) const
+TSharedRef<ILevelViewportLayoutEntity> FLevelEditorModule::FactoryViewport(FName InTypeName, const FAssetEditorViewportConstructionArgs& ConstructionArgs) const
 {
 	const FViewportTypeDefinition* Definition = CustomViewports.Find(InTypeName);
 	if (Definition)
 	{
-		return Definition->FactoryFunction(ConstructionArgs);
+		return Definition->FactoryFunction(ConstructionArgs, GetFirstLevelEditor());
 	}
 
-	return MakeShareable(new FLevelViewportLayoutEntity(ConstructionArgs));
+	check(CustomViewports.Find("Default"));
+	return CustomViewports["Default"].FactoryFunction(ConstructionArgs, GetFirstLevelEditor());
 }
 
 TSharedPtr<FExtender> FLevelEditorModule::AssembleExtenders(TSharedRef<FUICommandList>& InCommandList, TArray<FLevelEditorMenuExtender>& MenuExtenderDelegates) const
@@ -665,20 +655,21 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 	FCanExecuteAction DefaultExecuteAction = FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::DefaultCanExecuteAction );
 
 	ActionList.MapAction( Commands.BrowseDocumentation, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::BrowseDocumentation ) );
-	ActionList.MapAction( Commands.BrowseAPIReference, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::BrowseAPIReference ) );
-	ActionList.MapAction( Commands.BrowseCVars, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::BrowseCVars ) );
 	ActionList.MapAction( Commands.BrowseViewportControls, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::BrowseViewportControls ) );
 	ActionList.MapAction( Commands.NewLevel, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::NewLevel ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::NewLevel_CanExecute ) );
 	ActionList.MapAction(Commands.OpenLevel, FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::OpenLevel), FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::OpenLevel_CanExecute));
 	ActionList.MapAction( Commands.Save, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::Save ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSaveWorld ) );
-	ActionList.MapAction( Commands.SaveAs, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::SaveCurrentAs ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSaveWorld ) );
-	ActionList.MapAction( Commands.SaveAllLevels, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::SaveAllLevels ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSaveWorld ) );
+	ActionList.MapAction( Commands.SaveAs, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::SaveCurrentAs ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSaveCurrentAs), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic( &FLevelEditorActionCallbacks::CanSaveCurrentAs) );
+	ActionList.MapAction( Commands.SaveAllLevels, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::SaveAllLevels ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSaveUnpartitionedWorld), FGetActionCheckState(), FIsActionButtonVisible::CreateStatic(&FLevelEditorActionCallbacks::CanSaveUnpartitionedWorld) );
+	ActionList.MapAction( Commands.BrowseLevel, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::Browse ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanBrowse ) );
 	ActionList.MapAction( Commands.ToggleFavorite, FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ToggleFavorite ), FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ToggleFavorite_CanExecute ), FIsActionChecked::CreateStatic( &FLevelEditorActionCallbacks::ToggleFavorite_IsChecked ) );
 
 	for( int32 CurRecentIndex = 0; CurRecentIndex < FLevelEditorCommands::MaxRecentFiles; ++CurRecentIndex )
 	{
 		ActionList.MapAction( Commands.OpenRecentFileCommands[ CurRecentIndex ], FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::OpenRecentFile, CurRecentIndex ), DefaultExecuteAction );
 	}
+
+	ActionList.MapAction( Commands.ClearRecentFiles, FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ClearRecentFiles) );
 
 	for (int32 CurFavoriteIndex = 0; CurFavoriteIndex < FLevelEditorCommands::MaxFavoriteFiles; ++CurFavoriteIndex)
 	{
@@ -705,28 +696,7 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::Build_Execute ),
 		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::Build_CanExecute ) );
 
-	ActionList.MapAction(
-		Commands.ConnectToSourceControl,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ConnectToSourceControl_Clicked)
-		);
-
-	ActionList.MapAction(
-		Commands.ChangeSourceControlSettings,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ConnectToSourceControl_Clicked)
-		);
-
-	ActionList.MapAction(
-		Commands.CheckOutModifiedFiles,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::CheckOutModifiedFiles_Clicked),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::CheckOutModifiedFiles_CanExecute)
-		);
-
-	ActionList.MapAction(
-		Commands.SubmitToSourceControl,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SubmitToSourceControl_Clicked),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SubmitToSourceControl_CanExecute)
-		);
-
+	
 	ActionList.MapAction(Commands.RecompileGameCode,
 		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::RecompileGameCode_Clicked ),
 		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::Recompile_CanExecute )
@@ -758,15 +728,15 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 
 	ActionList.MapAction( 
 		FGlobalEditorCommonCommands::Get().FindInContentBrowser, 
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::FindInContentBrowser_Clicked )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::FindInContentBrowser_Clicked ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::FindInContentBrowser_CanExecute )
 		);
 
-	const FVector* NullVector = nullptr;
 	ActionList.MapAction(
 		Commands.GoHere,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GoHere_Clicked, NullVector )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GoHere_Clicked, (const FVector*)nullptr )
 		);
-
+		
 	ActionList.MapAction( 
 		Commands.SnapCameraToObject,
 		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("CAMERA SNAP") ) )
@@ -778,8 +748,28 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		);
 
 	ActionList.MapAction(
+		Commands.CopyActorFilePathtoClipboard,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::CopyActorFilePathtoClipboard_Clicked)
+		);
+
+	ActionList.MapAction(
+		Commands.SaveActor,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SaveActor_Clicked),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SaveActor_CanExecute)
+		);
+
+	ActionList.MapAction(
+		Commands.ShowActorHistory,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ShowActorHistory_Clicked),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ShowActorHistory_CanExecute)
+	);
+
+	ActionList.MapAction(
 		Commands.GoToCodeForActor, 
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GoToCodeForActor_Clicked )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GoToCodeForActor_Clicked ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GoToCodeForActor_CanExecute ),
+		FIsActionChecked(),
+		FIsActionButtonVisible::CreateStatic(&FLevelEditorActionCallbacks::GoToCodeForActor_IsVisible)
 		);
 
 	ActionList.MapAction( 
@@ -829,41 +819,34 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::PasteHere_CanExecute )
 		);
 
-	bool bAlign = false;
-	bool bPerActor = false;
 	ActionList.MapAction(
 		Commands.SnapOriginToGrid,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveActorToGrid_Clicked, bAlign, bPerActor),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveElementsToGrid_Clicked, /*bAlign*/false, /*bPerElement*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bPerActor = true;
 	ActionList.MapAction(
 		Commands.SnapOriginToGridPerActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveActorToGrid_Clicked, bAlign, bPerActor),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveElementsToGrid_Clicked, /*bAlign*/false, /*bPerElement*/true),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 	
-	bAlign = true;
-	bPerActor = false;
 	ActionList.MapAction(
 		Commands.AlignOriginToGrid,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveActorToGrid_Clicked, bAlign, bPerActor),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveElementsToGrid_Clicked, /*bAlign*/true, /*bPerElement*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = false;
 	ActionList.MapAction(
 		Commands.SnapOriginToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveActorToActor_Clicked, bAlign),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveElementsToElement_Clicked, /*bAlign*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 	
-	bAlign = true;
 	ActionList.MapAction(
 		Commands.AlignOriginToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveActorToActor_Clicked, bAlign),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::MoveElementsToElement_Clicked, /*bAlign*/true),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
 	ActionList.MapAction(
@@ -907,152 +890,105 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::AlignBrushVerticesToGrid_Execute)
 		);
 
-	bAlign = false;
-	bool bUseLineTrace = false;
-	bool bUseBounds = false;
-	bool bUsePivot = false;
 	ActionList.MapAction(
 		Commands.SnapToFloor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, /*bAlign*/false, /*bUseLineTrace*/false, /*bUseBounds*/false, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = true;
-	bUseLineTrace = false;
-	bUseBounds = false;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.AlignToFloor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, /*bAlign*/true, /*bUseLineTrace*/false, /*bUseBounds*/false, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = false;
-	bUseLineTrace = true;
-	bUseBounds = false;
-	bUsePivot = true;
 	ActionList.MapAction(
 		Commands.SnapPivotToFloor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, /*bAlign*/false, /*bUseLineTrace*/true, /*bUseBounds*/false, /*bUsePivot*/true),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = true;
-	bUseLineTrace = true;
-	bUseBounds = false;
-	bUsePivot = true;
 	ActionList.MapAction(
 		Commands.AlignPivotToFloor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, /*bAlign*/true, /*bUseLineTrace*/true, /*bUseBounds*/false, /*bUsePivot*/true),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = false;
-	bUseLineTrace = true;
-	bUseBounds = true;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.SnapBottomCenterBoundsToFloor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, /*bAlign*/false, /*bUseLineTrace*/true, /*bUseBounds*/true, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = true;
-	bUseLineTrace = true;
-	bUseBounds = true;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.AlignBottomCenterBoundsToFloor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapToFloor_Clicked, /*bAlign*/true, /*bUseLineTrace*/true, /*bUseBounds*/true, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
-	bAlign = false;
-	bUseLineTrace = false;
-	bUseBounds = false;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.SnapToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapActorToActor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapElementsToElement_Clicked, /*bAlign*/false, /*bUseLineTrace*/false, /*bUseBounds*/false, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
-	bAlign = true;
-	bUseLineTrace = false;
-	bUseBounds = false;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.AlignToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapActorToActor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapElementsToElement_Clicked, /*bAlign*/true, /*bUseLineTrace*/false, /*bUseBounds*/false, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
-	bAlign = false;
-	bUseLineTrace = true;
-	bUseBounds = false;
-	bUsePivot = true;
 	ActionList.MapAction(
 		Commands.SnapPivotToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapActorToActor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapElementsToElement_Clicked, /*bAlign*/false, /*bUseLineTrace*/true, /*bUseBounds*/false, /*bUsePivot*/true),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
-	bAlign = true;
-	bUseLineTrace = true;
-	bUseBounds = false;
-	bUsePivot = true;
 	ActionList.MapAction(
 		Commands.AlignPivotToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapActorToActor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapElementsToElement_Clicked, /*bAlign*/true, /*bUseLineTrace*/true, /*bUseBounds*/false, /*bUsePivot*/true),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
-	bAlign = false;
-	bUseLineTrace = true;
-	bUseBounds = true;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.SnapBottomCenterBoundsToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapActorToActor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapElementsToElement_Clicked, /*bAlign*/false, /*bUseLineTrace*/true, /*bUseBounds*/true, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
-	bAlign = true;
-	bUseLineTrace = true;
-	bUseBounds = true;
-	bUsePivot = false;
 	ActionList.MapAction(
 		Commands.AlignBottomCenterBoundsToActor,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapActorToActor_Clicked, bAlign, bUseLineTrace, bUseBounds, bUsePivot),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorsSelected_CanExecute)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SnapElementsToElement_Clicked, /*bAlign*/true, /*bUseLineTrace*/true, /*bUseBounds*/true, /*bUsePivot*/false),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementsSelected_CanExecuteMove)
 		);
 
 	ActionList.MapAction(
 		Commands.DeltaTransformToActors, 
 		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::DeltaTransform ), 
-		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute ) );
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove) );
 
 	ActionList.MapAction(
 		Commands.MirrorActorX,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR MIRROR X=-1") ) ),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ELEMENT MIRROR X=-1") ) ),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
 	ActionList.MapAction(
 		Commands.MirrorActorY,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR MIRROR Y=-1") ) ),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ELEMENT MIRROR Y=-1") ) ),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
 	ActionList.MapAction(
 		Commands.MirrorActorZ,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR MIRROR Z=-1") ) ),
-		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ActorSelected_CanExecute)
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ELEMENT MIRROR Z=-1") ) ),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::ElementSelected_CanExecuteMove)
 		);
 
 	ActionList.MapAction(
 		Commands.DetachFromParent,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::DetachActor_Clicked )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::DetachActor_Clicked ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::DetachActor_CanExecute )
 		);
 
 	ActionList.MapAction(
@@ -1079,7 +1015,8 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 
 	ActionList.MapAction(
 		Commands.RegroupActors,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::RegroupActor_Clicked )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::RegroupActor_Clicked ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GroupActors_CanExecute )
 		);
 
 	ActionList.MapAction(
@@ -1099,7 +1036,8 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 
 	ActionList.MapAction(
 		Commands.AddActorsToGroup,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::AddActorsToGroup_Clicked )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::AddActorsToGroup_Clicked ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::GroupActors_CanExecute )
 		);
 
 	ActionList.MapAction(
@@ -1164,22 +1102,26 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 
 	ActionList.MapAction(
 		Commands.SelectImmediateChildren,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT ALL CHILDREN") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT ALL CHILDREN") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute )
 	);
 
 	ActionList.MapAction(
 		Commands.SelectAllDescendants,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT ALL DESCENDANTS") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT ALL DESCENDANTS") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute )
 	);
 
 	ActionList.MapAction(
 		Commands.SelectAllActorsOfSameClass,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::OnSelectAllActorsOfClass, (bool)false )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::OnSelectAllActorsOfClass, false ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSelectAllActorsOfClass )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectAllActorsOfSameClassWithArchetype,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::OnSelectAllActorsOfClass, (bool)true )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::OnSelectAllActorsOfClass, true ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::CanSelectAllActorsOfClass )
 		);
 
 	ActionList.MapAction(
@@ -1190,47 +1132,51 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 
 	ActionList.MapAction(
 		Commands.SelectRelevantLights,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT RELEVANTLIGHTS") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT RELEVANTLIGHTS") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectStaticMeshesOfSameClass,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSTATICMESH") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSTATICMESH") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectStaticMeshesAllClasses,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSTATICMESH ALLCLASSES") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSTATICMESH ALLCLASSES") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectOwningHierarchicalLODCluster,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::OnSelectOwningHLODCluster)
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::OnSelectOwningHLODCluster),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorTypesSelected_CanExecute, FLevelEditorActionCallbacks::IncludeStaticMeshes, /*bSingleOnly*/ true )
 		);
 
+	FLevelEditorActionCallbacks::EActorTypeFlags IncludePawnsAndSkeletalMeshes = static_cast<FLevelEditorActionCallbacks::EActorTypeFlags>(FLevelEditorActionCallbacks::IncludePawns | FLevelEditorActionCallbacks::IncludeSkeletalMeshes);
 	ActionList.MapAction(
 		Commands.SelectSkeletalMeshesOfSameClass,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSKELETALMESH") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSKELETALMESH") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorTypesSelected_CanExecute, IncludePawnsAndSkeletalMeshes, /*bSingleOnly*/ false )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectSkeletalMeshesAllClasses,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSKELETALMESH ALLCLASSES") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGSKELETALMESH ALLCLASSES") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorTypesSelected_CanExecute, IncludePawnsAndSkeletalMeshes, /*bSingleOnly*/ false )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectAllWithSameMaterial,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGMATERIAL") ) )
-		);
-
-	ActionList.MapAction(
-		Commands.SelectAllActorsControlledByMatinee,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::OnSelectAllActorsControlledByMatinee )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGMATERIAL") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorSelected_CanExecute )
 		);
 
 	ActionList.MapAction(
 		Commands.SelectMatchingEmitter,
-		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGEMITTER") ) )
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("ACTOR SELECT MATCHINGEMITTER") ) ),
+		FCanExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ActorTypesSelected_CanExecute, FLevelEditorActionCallbacks::IncludeEmitters, /*bSingleOnly*/ false )
 		);
 
 	ActionList.MapAction(
@@ -1537,17 +1483,34 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 	ActionList.MapAction( Commands.BuildPathsOnly,
 		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::BuildPathsOnly_Execute ) );
 
-	ActionList.MapAction(Commands.BuildLODsOnly,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildLODsOnly_Execute));
+	ActionList.MapAction(Commands.BuildHLODs,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildHLODs_Execute),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::IsWorldPartitionStreamingEnabled));
 	
+	ActionList.MapAction(Commands.BuildMinimap,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildMinimap_Execute),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::IsWorldPartitionEnabled));
+
+	ActionList.MapAction(Commands.BuildLandscapeSplineMeshes,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildLandscapeSplineMeshes_Execute),
+		FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::IsWorldPartitionStreamingEnabled));
+
 	ActionList.MapAction(Commands.BuildTextureStreamingOnly,
 		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildTextureStreamingOnly_Execute));
 
 	ActionList.MapAction(Commands.BuildVirtualTextureOnly,
 		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildVirtualTextureOnly_Execute));
 
-	ActionList.MapAction(Commands.BuildGrassMapsOnly,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildGrassMapsOnly_Execute));
+	ActionList.MapAction(Commands.BuildAllLandscape,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildAllLandscape_Execute));
+
+	for (int32 Index = 0; Index < FLevelEditorCommands::MaxExternalBuildTypes; ++Index)
+	{
+		ActionList.MapAction(
+			Commands.ExternalBuildTypeCommands[Index],
+			FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildExternalType_Execute, Index),
+			FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::BuildExternalType_CanExecute, Index));
+	}
 
 	ActionList.MapAction( 
 		Commands.LightingQuality_Production, 
@@ -1619,6 +1582,13 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		FCanExecuteAction(),
 		FIsActionChecked::CreateStatic( &FLevelEditorActionCallbacks::OnGetTransformWidgetVisibility )
 		);
+
+	ActionList.MapAction(
+		Commands.ShowSelectionSubcomponents,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::OnToggleShowSelectionSubcomponents),
+		FCanExecuteAction(),
+		FIsActionChecked::CreateStatic(&FLevelEditorActionCallbacks::OnGetShowSelectionSubcomponents)
+	);
 
 	ActionList.MapAction(
 		Commands.AllowTranslucentSelection,
@@ -1764,6 +1734,11 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		Commands.ProfileGPU,
 		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("PROFILEGPU") ) )
 		);
+	
+	ActionList.MapAction(
+		Commands.DumpGPU,
+		FExecuteAction::CreateStatic( &FLevelEditorActionCallbacks::ExecuteExecCommand, FString( TEXT("DUMPGPU") ) )
+		);
 
 	ActionList.MapAction(
 		Commands.ResetAllParticleSystems,
@@ -1828,26 +1803,38 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		FIsActionChecked::CreateStatic(&FLevelEditorActionCallbacks::IsFeatureLevelPreviewActive),
 		FIsActionButtonVisible::CreateStatic(FLevelEditorActionCallbacks::IsPreviewModeButtonVisible));
 
-	ActionList.MapAction(
-		Commands.PreviewPlatformOverride_SM5,
-		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SetPreviewPlatform, FPreviewPlatformInfo(ERHIFeatureLevel::SM5, NAME_None, NAME_None, NAME_None, false)),
-		FCanExecuteAction(),
-		FIsActionChecked::CreateStatic(&FLevelEditorActionCallbacks::IsPreviewPlatformChecked, FPreviewPlatformInfo(ERHIFeatureLevel::SM5, NAME_None)));
-
-	const TArray<PlatformInfo::FPreviewPlatformMenuItem> MenuItems = PlatformInfo::GetPreviewPlatformMenuItems();
+	const TArray<FPreviewPlatformMenuItem>& MenuItems = FDataDrivenPlatformInfoRegistry::GetAllPreviewPlatformMenuItems();
+	// We need one extra slot for the Disable Preview option
 	check(MenuItems.Num() == Commands.PreviewPlatformOverrides.Num());
 
 	for (int32 Index=0; Index < MenuItems.Num(); Index++)
 	{
-		const PlatformInfo::FPreviewPlatformMenuItem& Item = MenuItems[Index];
-		EShaderPlatform ShaderPlatform = ShaderFormatToLegacyShaderPlatform(Item.ShaderFormat);
-		ERHIFeatureLevel::Type FeatureLevel = GetMaxSupportedFeatureLevel(ShaderPlatform);
+		const FPreviewPlatformMenuItem& Item = MenuItems[Index];
+		EShaderPlatform ShaderPlatform = FDataDrivenShaderPlatformInfo::GetShaderPlatformFromName(Item.PreviewShaderPlatformName);
+		
+		if (ShaderPlatform < SP_NumPlatforms)
+		{
+			const bool bIsDefaultShaderPlatform = FDataDrivenShaderPlatformInfo::GetPreviewShaderPlatformParent(ShaderPlatform) == GMaxRHIShaderPlatform;
 
-		ActionList.MapAction(
-			Commands.PreviewPlatformOverrides[Index],
-			FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SetPreviewPlatform, FPreviewPlatformInfo(FeatureLevel, Item.PlatformName, Item.ShaderFormat, Item.DeviceProfileName, true)),
-			FCanExecuteAction(),
-			FIsActionChecked::CreateStatic(&FLevelEditorActionCallbacks::IsPreviewPlatformChecked, FPreviewPlatformInfo(FeatureLevel, Item.PlatformName, Item.ShaderFormat, Item.DeviceProfileName)));
+			auto GetPreviewFeatureLevelInfo = [&]()
+			{
+				if (bIsDefaultShaderPlatform)
+				{
+					return FPreviewPlatformInfo(GMaxRHIFeatureLevel, GMaxRHIShaderPlatform, NAME_None, NAME_None, NAME_None, true, NAME_None);
+				}
+
+				const ERHIFeatureLevel::Type FeatureLevel = GetMaxSupportedFeatureLevel(ShaderPlatform);
+				return FPreviewPlatformInfo(FeatureLevel, ShaderPlatform, Item.PlatformName, Item.ShaderFormat, Item.DeviceProfileName, true, Item.PreviewShaderPlatformName);
+			};
+
+			FPreviewPlatformInfo PreviewFeatureLevelInfo = GetPreviewFeatureLevelInfo();
+
+			ActionList.MapAction(
+				Commands.PreviewPlatformOverrides[Index],
+				FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::SetPreviewPlatform, PreviewFeatureLevelInfo),
+				bIsDefaultShaderPlatform ? FCanExecuteAction() : FCanExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::CanExecutePreviewPlatform, PreviewFeatureLevelInfo),
+				FIsActionChecked::CreateStatic(&FLevelEditorActionCallbacks::IsPreviewPlatformChecked, PreviewFeatureLevelInfo));
+		}
 	}
 
 	ActionList.MapAction(
@@ -1856,26 +1843,37 @@ void FLevelEditorModule::BindGlobalLevelEditorCommands()
 		);
 
 	ActionList.MapAction(
-		Commands.GeometryCollectionSelectAllGeometry,
-		FExecuteAction::CreateStatic(FLevelEditorActionCallbacks::GeometryCollection_SelectAllGeometry),
-		FCanExecuteAction(),
-		FIsActionChecked::CreateStatic(FLevelEditorActionCallbacks::GeometryCollection_IsChecked)
-		);
-
-	ActionList.MapAction(
-		Commands.GeometryCollectionSelectNone,
-		FExecuteAction::CreateStatic(FLevelEditorActionCallbacks::GeometryCollection_SelectNone),
-		FCanExecuteAction(),
-		FIsActionChecked::CreateStatic(FLevelEditorActionCallbacks::GeometryCollection_IsChecked)
-		);
-
-	ActionList.MapAction(
-		Commands.GeometryCollectionSelectInverseGeometry,
-		FExecuteAction::CreateStatic(FLevelEditorActionCallbacks::GeometryCollection_SelectInverseGeometry),
-		FCanExecuteAction(),
-		FIsActionChecked::CreateStatic(FLevelEditorActionCallbacks::GeometryCollection_IsChecked)
-		);
+		Commands.FixupGroupActor,
+		FExecuteAction::CreateStatic(&FLevelEditorActionCallbacks::FixupGroupActor_Clicked)
+	);
 }
-	
+
+TSharedPtr<FLevelEditorOutlinerSettings> FLevelEditorModule::GetLevelEditorOutlinerSettings() const
+{
+	return OutlinerSettings;
+}
+
+void FLevelEditorModule::AddCustomFilterToOutliner(TSharedRef<FFilterBase<const ISceneOutlinerTreeItem&>> InCustomFilter)
+{
+	// Disable deprecation warnings so we can call the deprecated function to support this function (which is also deprecated)
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	OutlinerSettings->AddCustomFilter(InCustomFilter);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+}
+
+void FLevelEditorModule::AddCustomFilterToOutliner(FLevelEditorOutlinerSettings::FOutlinerFilterFactory InCreateCustomFilter)
+{
+	OutlinerSettings->AddCustomFilter(InCreateCustomFilter);
+}
+
+void FLevelEditorModule::AddCustomClassFilterToOutliner(TSharedRef<FCustomClassFilterData> InCustomClassFilterData)
+{
+	OutlinerSettings->AddCustomClassFilter(InCustomClassFilterData);
+}
+
+TSharedPtr<FFilterCategory> FLevelEditorModule::GetOutlinerFilterCategory(const FName& CategoryName) const
+{
+	return OutlinerSettings->GetFilterCategory(CategoryName);
+}
 
 #undef LOCTEXT_NAMESPACE

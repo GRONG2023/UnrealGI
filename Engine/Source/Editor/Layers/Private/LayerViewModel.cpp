@@ -57,7 +57,7 @@ FName FLayerViewModel::GetFName() const
 		return NAME_None;
 	}
 
-	return Layer->LayerName;
+	return Layer->GetLayerName();
 }
 
 
@@ -66,7 +66,7 @@ FString FLayerViewModel::GetName() const
 	FString name;
 	if( Layer.IsValid() )
 	{
-		name = Layer->LayerName.ToString();
+		name = Layer->GetLayerName().ToString();
 	}
 	return name;
 }
@@ -78,7 +78,7 @@ FText FLayerViewModel::GetNameAsText() const
 		return FText::GetEmpty();
 	}
 
-	return FText::FromName(Layer->LayerName);
+	return FText::FromName(Layer->GetLayerName());
 }
 
 
@@ -89,7 +89,7 @@ bool FLayerViewModel::IsVisible() const
 		return false;
 	}
 
-	return Layer->bIsVisible;
+	return Layer->IsVisible();
 }
 
 
@@ -130,7 +130,7 @@ void FLayerViewModel::RenameTo( const FName& NewLayerName )
 		return;
 	}
 
-	if( Layer->LayerName == NewLayerName)
+	if( Layer->GetLayerName() == NewLayerName)
 	{
 		return;
 	}
@@ -144,7 +144,7 @@ void FLayerViewModel::RenameTo( const FName& NewLayerName )
 
 	const FScopedTransaction Transaction( LOCTEXT("RenameTo", "Rename Layer") );
 
-	WorldLayers->RenameLayer( Layer->LayerName, UniqueNewLayerName );
+	WorldLayers->RenameLayer( Layer->GetLayerName(), UniqueNewLayerName );
 }
 
 
@@ -157,7 +157,7 @@ bool FLayerViewModel::CanAssignActors( const TArray< TWeakObjectPtr<AActor> > Ac
 	}
 
 	FFormatNamedArguments LayerArgs;
-	LayerArgs.Add(TEXT("LayerName"), FText::FromName(Layer->LayerName));
+	LayerArgs.Add(TEXT("LayerName"), FText::FromName(Layer->GetLayerName()));
 
 	bool bHasValidActorToAssign = false;
 	int32 bAlreadyAssignedActors = 0;
@@ -179,7 +179,7 @@ bool FLayerViewModel::CanAssignActors( const TArray< TWeakObjectPtr<AActor> > Ac
 			return false;
 		}
 
-		if( Actor->Layers.Contains( Layer->LayerName ) )
+		if( Actor->Layers.Contains( Layer->GetLayerName() ) )
 		{
 			bAlreadyAssignedActors++;
 		}
@@ -215,7 +215,7 @@ bool FLayerViewModel::CanAssignActor( const TWeakObjectPtr<AActor> Actor, FText&
 	}
 
 	FFormatNamedArguments Args;
-	Args.Add(TEXT("LayerName"), FText::FromName(Layer->LayerName));
+	Args.Add(TEXT("LayerName"), FText::FromName(Layer->GetLayerName()));
 
 	if( !Actor.IsValid() )
 	{
@@ -231,7 +231,7 @@ bool FLayerViewModel::CanAssignActor( const TWeakObjectPtr<AActor> Actor, FText&
 		return false;
 	}
 
-	if( Actor->Layers.Contains( Layer->LayerName )  )
+	if( Actor->Layers.Contains( Layer->GetLayerName() )  )
 	{
 		OutMessage = FText::Format(LOCTEXT("AlreadyAssignedActor", "Already assigned to {LayerName}"), Args);
 		return false;
@@ -249,7 +249,7 @@ void FLayerViewModel::AppendActors( TArray< TWeakObjectPtr< AActor > >& InActors
 		return;
 	}
 
-	WorldLayers->AppendActorsFromLayer( Layer->LayerName, InActors );
+	WorldLayers->AppendActorsFromLayer( Layer->GetLayerName(), InActors );
 }
 
 
@@ -269,7 +269,7 @@ void FLayerViewModel::AppendActorsOfSpecificType( TArray< TWeakObjectPtr< AActor
 	};
 
 	TSharedRef< TDelegateFilter< const TWeakObjectPtr< AActor >& > > Filter = MakeShareable( new TDelegateFilter< const TWeakObjectPtr< AActor >& >( TDelegateFilter< const TWeakObjectPtr< AActor >& >::FPredicate::CreateStatic( &Local::ActorIsOfClass, Class ) ) );
-	WorldLayers->AppendActorsFromLayer( Layer->LayerName, InActors, Filter );
+	WorldLayers->AppendActorsFromLayer( Layer->GetLayerName(), InActors, Filter );
 }
 
 
@@ -281,7 +281,7 @@ void FLayerViewModel::AddActor( const TWeakObjectPtr< AActor >& Actor )
 	}
 
 	const FScopedTransaction Transaction( LOCTEXT("AddActor", "Add Actor to Layer") );
-	WorldLayers->AddActorToLayer( Actor.Get(), Layer->LayerName );
+	WorldLayers->AddActorToLayer( Actor.Get(), Layer->GetLayerName() );
 }
 
 
@@ -293,7 +293,7 @@ void FLayerViewModel::AddActors( const TArray< TWeakObjectPtr< AActor > >& Actor
 	}
 
 	const FScopedTransaction Transaction( LOCTEXT("AddActors", "Add Actors to Layer") );
-	WorldLayers->AddActorsToLayer( Actors, Layer->LayerName );
+	WorldLayers->AddActorsToLayer( Actors, Layer->GetLayerName() );
 }
 
 
@@ -305,7 +305,7 @@ void FLayerViewModel::RemoveActors( const TArray< TWeakObjectPtr< AActor > >& Ac
 	}
 
 	const FScopedTransaction Transaction( LOCTEXT("RemoveActors", "Remove Actors from Layer") );
-	WorldLayers->RemoveActorsFromLayer( Actors, Layer->LayerName );
+	WorldLayers->RemoveActorsFromLayer( Actors, Layer->GetLayerName() );
 }
 
 
@@ -317,7 +317,7 @@ void FLayerViewModel::RemoveActor( const TWeakObjectPtr< AActor >& Actor )
 	}
 
 	const FScopedTransaction Transaction( LOCTEXT("RemoveActor", "Remove Actor from Layer") );
-	WorldLayers->RemoveActorFromLayer( Actor.Get(), Layer->LayerName );
+	WorldLayers->RemoveActorFromLayer( Actor.Get(), Layer->GetLayerName() );
 }
 
 
@@ -334,7 +334,7 @@ void FLayerViewModel::SelectActors( bool bSelect, bool bNotify, bool bSelectEven
 	const bool bDeselectBSPSurfs = true;
 	Editor->SelectNone( bNotifySelectNone, bDeselectBSPSurfs );
 
-	WorldLayers->SelectActorsInLayer( Layer->LayerName, bSelect, bNotify, bSelectEvenIfHidden, Filter );
+	WorldLayers->SelectActorsInLayer( Layer->GetLayerName(), bSelect, bNotify, bSelectEvenIfHidden, Filter );
 }
 
 
@@ -431,7 +431,7 @@ void FLayerViewModel::RefreshActorStats()
 		return;
 	}
 
-	ActorStats.Append( Layer->ActorStats );
+	ActorStats.Append( Layer->GetActorStats() );
 
 	struct FCompareLayerActorStats
 	{

@@ -21,11 +21,17 @@ public:
 	FTimerAggregator() : FStatsAggregator(TEXT("Timers")) {}
 	virtual ~FTimerAggregator() {}
 
-	Trace::ITable<Trace::FTimingProfilerAggregatedStats>* GetResultTable() const;
+	TraceServices::ITable<TraceServices::FTimingProfilerAggregatedStats>* GetResultTable() const;
 	void ResetResults();
 
+	ETraceFrameType GetFrameType() { return FrameType; }
+	void SetFrameType(ETraceFrameType InFrameType) { FrameType = InFrameType; }
+
 protected:
-	virtual IStatsAggregationWorker* CreateWorker(TSharedPtr<const Trace::IAnalysisSession> InSession) override;
+	virtual IStatsAggregationWorker* CreateWorker(TSharedPtr<const TraceServices::IAnalysisSession> InSession) override;
+
+private:
+	ETraceFrameType FrameType = ETraceFrameType::TraceFrameType_Count;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

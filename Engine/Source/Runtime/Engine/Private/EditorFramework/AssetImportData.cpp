@@ -3,11 +3,13 @@
 #include "EditorFramework/AssetImportData.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
+#include "Misc/PathViews.h"
 #include "Misc/PackageName.h"
-#include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
 #include "UObject/AnimPhysObjectVersion.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AssetImportData)
 
 #if WITH_EDITOR
 #include "Editor/EditorPerProjectUserSettings.h"
@@ -83,10 +85,10 @@ TOptional<FAssetImportInfo> FAssetImportInfo::FromJson(FString InJsonString)
 		}
 
 		FString RelativeFilename, TimestampString, MD5String, DisplayLabelName;
-		SourceFile->TryGetStringField("RelativeFilename", RelativeFilename);
-		SourceFile->TryGetStringField("Timestamp", TimestampString);
-		SourceFile->TryGetStringField("FileMD5", MD5String);
-		SourceFile->TryGetStringField("DisplayLabelName", DisplayLabelName);
+		SourceFile->TryGetStringField(TEXT("RelativeFilename"), RelativeFilename);
+		SourceFile->TryGetStringField(TEXT("Timestamp"), TimestampString);
+		SourceFile->TryGetStringField(TEXT("FileMD5"), MD5String);
+		SourceFile->TryGetStringField(TEXT("DisplayLabelName"), DisplayLabelName);
 
 		if (RelativeFilename.IsEmpty())
 		{
@@ -133,6 +135,7 @@ void UAssetImportData::UpdateFilenameOnly(const FString& InPath, int32 Index)
 
 void UAssetImportData::AddFileName(const FString& InPath, int32 Index, FString SourceFileLabel /*= FString()*/)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UAssetImportData::AddFileName);
 	FAssetImportInfo Old = SourceData;
 
 	// Reset our current data
@@ -173,8 +176,32 @@ void UAssetImportData::AddFileName(const FString& InPath, int32 Index, FString S
 	OnImportDataChanged.Broadcast(Old, this);
 }
 
+void UAssetImportData::SetSourceFiles(TArray<FAssetImportInfo::FSourceFile>&& SourceFiles)
+{
+	TRACE_CPUPROFILER_EVENT_SCOPE(UAssetImportData::SetSourceFiles);
+	FAssetImportInfo Old = SourceData;
+
+	for (FAssetImportInfo::FSourceFile& SourceFile : SourceFiles)
+	{
+		if (!SourceFile.FileHash.IsValid())
+		{
+			SourceFile.FileHash = FMD5Hash::HashFile(*SourceFile.RelativeFilename);
+		}
+
+		if (SourceFile.Timestamp == FDateTime())
+		{
+			SourceFile.Timestamp = IFileManager::Get().GetTimeStamp(*SourceFile.RelativeFilename);
+		}
+	}
+
+	SourceData.SourceFiles = MoveTemp(SourceFiles);
+
+	OnImportDataChanged.Broadcast(Old, this);
+}
+
 void UAssetImportData::Update(const FString& InPath, FMD5Hash *Md5Hash/* = nullptr*/)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(UAssetImportData::Update);
 	FAssetImportInfo Old = SourceData;
 	SourceData.SourceFiles.Reset();
 	for (int32 SourceIndex = 0; SourceIndex < Old.SourceFiles.Num(); ++SourceIndex)
@@ -328,17 +355,31 @@ FString UAssetImportData::SanitizeImportFilename(const FString& InPath, const FS
 FString UAssetImportData::ResolveImportFilename(const FString& InRelativePath, const UPackage* Outermost)
 {
 	if (Outermost)
+	{ 
+		return ResolveImportFilename(InRelativePath, FStringView(Outermost->GetPathName()));
+	}
+
+	return ResolveImportFilename(InRelativePath, FStringView());
+}
+
+FString UAssetImportData::ResolveImportFilename(FStringView InRelativePath, FStringView OutermostPath)
+{
+	if (!OutermostPath.IsEmpty())
 	{
 		// Relative to the package filename?
-		const FString PathRelativeToPackage = FPaths::GetPath(FPackageName::LongPackageNameToFilename(Outermost->GetPathName())) / InRelativePath;
-		FString FullConvertPath = FPaths::ConvertRelativePathToFull(PathRelativeToPackage);
-		if (FPaths::FileExists(FullConvertPath))
+		FStringBuilderBase Path;
+		FPathViews::Append(Path, FPathViews::GetPath(FPackageName::LongPackageNameToFilename(FString(OutermostPath))), InRelativePath);
+
+		
+		FPathViews::ToAbsolutePathInline(Path);
+		FString ResolvedFile = Path.ToString();
+		if (FPaths::FileExists(ResolvedFile))
 		{
 			//FileExist return true when testing Path like c:/../folder1/filename. ConvertRelativePathToFull specify having .. in front of a drive letter is an error.
 			//It is relative to package only if the conversion to full path is successful.
-			if (FullConvertPath.Find(TEXT("..")) == INDEX_NONE)
+			if (ResolvedFile.Find(TEXT("..")) == INDEX_NONE)
 			{
-				return FullConvertPath;
+				return ResolvedFile;
 			}
 		}
 	}
@@ -365,7 +406,9 @@ FString UAssetImportData::ResolveImportFilename(const FString& InRelativePath, c
 #endif
 
 	// Convert relative paths
-	return FPaths::ConvertRelativePathToFull(InRelativePath);
+	FStringBuilderBase Path;
+	FPathViews::ToAbsolutePath(InRelativePath, Path);
+	return Path.ToString();
 }
 
 FString UAssetImportData::ResolveImportFilename(const FString& InRelativePath) const
@@ -377,7 +420,7 @@ void UAssetImportData::Serialize(FStructuredArchive::FRecord Record)
 {
 	FArchive& BaseArchive = Record.GetUnderlyingArchive();
 
-	if (BaseArchive.UE4Ver() >= VER_UE4_ASSET_IMPORT_DATA_AS_JSON)
+	if (BaseArchive.UEVer() >= VER_UE4_ASSET_IMPORT_DATA_AS_JSON)
 	{
 		if (!BaseArchive.IsFilterEditorOnly())
 		{
@@ -429,3 +472,4 @@ void UAssetImportData::PostLoad()
 }
 
 #endif // WITH_EDITORONLY_DATA
+

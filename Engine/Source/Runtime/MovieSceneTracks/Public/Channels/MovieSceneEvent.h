@@ -2,24 +2,43 @@
 
 #pragma once
 
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreTypes.h"
 #include "Engine/Blueprint.h"
+#include "Misc/Guid.h"
+#include "UObject/FieldPath.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "UObject/SoftObjectPtr.h"
+
 #include "MovieSceneEvent.generated.h"
 
-class UK2Node;
-class UEdGraph;
+class FProperty;
 class UBlueprint;
+class UClass;
+class UEdGraph;
 class UEdGraphNode;
+class UFunction;
+class UK2Node;
 class UK2Node_FunctionEntry;
 class UMovieSceneEventSectionBase;
+class UObject;
 
 /** Value definition for any type-agnostic variable (exported as text) */
-USTRUCT()
+USTRUCT(BlueprintType)
 struct FMovieSceneEventPayloadVariable
 {
 	GENERATED_BODY()
 
 	UPROPERTY()
+	/** If the value for this pin should be an object, we store a pointer to it */
+	FSoftObjectPath ObjectValue;
+
+	UPROPERTY(EditAnywhere, Category="Sequencer|Event")
 	FString Value;
 };
 
@@ -35,7 +54,7 @@ struct FMovieSceneEventPtrs
 	{}
 
 	UPROPERTY()
-	UFunction* Function;
+	TObjectPtr<UFunction> Function;
 
 	UPROPERTY()
 	TFieldPath<FProperty> BoundObjectProperty;
@@ -55,20 +74,23 @@ struct FMovieSceneEvent
 
 public:
 
+	/** Return the class of the bound object property */
+	MOVIESCENETRACKS_API UClass* GetBoundObjectPropertyClass() const;
+
 #if WITH_EDITORONLY_DATA
 
 	/** Array of payload variables to be added to the generated function */
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, Category="Sequencer|Event")
 	TMap<FName, FMovieSceneEventPayloadVariable> PayloadVariables;
 
 	UPROPERTY(transient)
 	FName CompiledFunctionName;
 
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, Category="Sequencer|Event")
 	FName BoundObjectPinName;
 
 	/** Serialized weak pointer to the function entry (UK2Node_FunctionEntry) or custom event node (UK2Node_CustomEvent) within the blueprint graph for this event. Stored as an editor-only UObject so UHT can parse it when building for non-editor. */
-	UPROPERTY()
+	UPROPERTY(EditAnywhere, Category="Sequencer|Event")
 	TWeakObjectPtr<UObject> WeakEndpoint;
 
 	/** (deprecated) The UEdGraph::GraphGuid property that relates the graph within which our endpoint lives. */

@@ -9,14 +9,21 @@
 #include "UObject/UnrealType.h"
 #include "UObject/UnrealTypePrivate.h"
 #include "UObject/LinkerPlaceholderClass.h"
-
-// WARNING: This should always be the last include in any file that needs it (except .generated.h)
-#include "UObject/UndefineUPropertyMacros.h"
+#include "Hash/Blake3.h"
+#include "UObject/CoreNet.h"
+#include "Misc/EngineNetworkCustomVersion.h"
 
 /*-----------------------------------------------------------------------------
 	FInterfaceProperty.
 -----------------------------------------------------------------------------*/
 IMPLEMENT_FIELD(FInterfaceProperty)
+
+FInterfaceProperty::FInterfaceProperty(FFieldVariant InOwner, const UECodeGen_Private::FInterfacePropertyParams& Prop)
+	: FInterfaceProperty_Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+	this->PropertyFlags &= (~CPF_InterfaceClearMask);
+	this->InterfaceClass = Prop.InterfaceClassFunc ? Prop.InterfaceClassFunc() : nullptr;
+}
 
 #if WITH_EDITORONLY_DATA
 FInterfaceProperty::FInterfaceProperty(UField* InField)
@@ -152,25 +159,41 @@ void FInterfaceProperty::SerializeItem( FStructuredArchive::FSlot Slot, void* Va
 
 bool FInterfaceProperty::NetSerializeItem( FArchive& Ar, UPackageMap* Map, void* Data, TArray<uint8> * MetaData ) const
 {
-	//@todo
+	Ar.UsingCustomVersion(FEngineNetworkCustomVersion::Guid);
+
+	if (Ar.EngineNetVer() >= FEngineNetworkCustomVersion::InterfacePropertySerialization)
+	{ 
+		FScriptInterface* InterfaceValue = (FScriptInterface*)Data;
+		bool Result = Map->SerializeObject(Ar, InterfaceClass, MutableView(InterfaceValue->GetObjectRef()));
+		if (Ar.IsLoading())
+		{
+			if (InterfaceValue->GetObject() != nullptr)
+			{
+				InterfaceValue->SetInterface(InterfaceValue->GetObject()->GetInterfaceAddress(InterfaceClass));
+			}
+			else
+			{
+				InterfaceValue->SetInterface(nullptr);
+			}
+		}
+		return Result;
+	}
 	return false;
 }
 
-void FInterfaceProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FInterfaceProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	FScriptInterface* InterfaceValue = (FScriptInterface*)PropertyValue;
-
-	UObject* Temp = InterfaceValue->GetObject();
-
-	if (0 != (PortFlags & PPF_ExportCpp))
+	UObject* Temp = nullptr;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		const FString GetObjectStr = Temp
-			? FString::Printf(TEXT("LoadObject<UObject>(nullptr, TEXT(\"%s\"))"), *Temp->GetPathName().ReplaceCharWithEscapedChar())
-			: TEXT("");
-		ValueStr += FString::Printf(TEXT("TScriptInterface<I%s>(%s)")
-			, (InterfaceClass ? *InterfaceClass->GetName() : TEXT("Interface"))
-			, *GetObjectStr);
-		return;
+		FScriptInterface InterfaceValue;
+		GetValue_InContainer(PropertyValueOrContainer, &InterfaceValue);
+		Temp = InterfaceValue.GetObject();
+	}
+	else
+	{
+		FScriptInterface* InterfaceValue = (FScriptInterface*)PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType);
+		Temp = InterfaceValue->GetObject();
 	}
 
 	if( Temp != NULL )
@@ -204,42 +227,65 @@ void FInterfaceProperty::ExportTextItem( FString& ValueStr, const void* Property
 	}
 }
 
-const TCHAR* FInterfaceProperty::ImportText_Internal( const TCHAR* InBuffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText/*=NULL*/ ) const
+const TCHAR* FInterfaceProperty::ImportText_Internal( const TCHAR* InBuffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText) const
 {
-	FScriptInterface* InterfaceValue = (FScriptInterface*)Data;
-	UObject* ResolvedObject = InterfaceValue->GetObject();
-	void* InterfaceAddress = InterfaceValue->GetInterface();
+	FScriptInterface* InterfaceValue = (FScriptInterface*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+	TObjectPtr<UObject> ResolvedObject = InterfaceValue->GetObject();
+
+	auto SetInterfaceValue = [InterfaceValue, ContainerOrPropertyPtr, PropertyPointerType, this](UObject* NewObject, void* NewInterfaceAddress)
+	{
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+		{
+			FScriptInterface LocalInterfaceValue;
+			LocalInterfaceValue.SetObject(NewObject);
+			LocalInterfaceValue.SetInterface(NewInterfaceAddress);
+			SetValue_InContainer(ContainerOrPropertyPtr, LocalInterfaceValue);
+		}
+		else
+		{
+			InterfaceValue->SetObject(NewObject);
+			if (NewObject)
+			{
+				// if NewObject was set to nullptr, SetObject will take care of clearing the interface address too
+				InterfaceValue->SetInterface(NewInterfaceAddress);
+			}
+		}
+	};
 
 	const TCHAR* Buffer = InBuffer;
-	if ( !FObjectPropertyBase::ParseObjectPropertyValue(this, Parent, UObject::StaticClass(), PortFlags, Buffer, ResolvedObject) )
+	if (!FObjectPropertyBase::ParseObjectPropertyValue(this, Parent, UObject::StaticClass(), PortFlags, Buffer, ResolvedObject))
 	{
-		// we only need to call SetObject here - if ObjectAddress was not modified, then InterfaceValue should not be modified either
-		// if it was set to NULL, SetObject will take care of clearing the interface address too
-		InterfaceValue->SetObject(ResolvedObject);
-		return NULL;
+		SetInterfaceValue(ResolvedObject, InterfaceValue->GetInterface());
+		return nullptr;
 	}
 
 	// so we should now have a valid object
-	if ( ResolvedObject == NULL )
+	if (ResolvedObject == nullptr)
 	{
-		// if ParseObjectPropertyValue returned true but ResolvedObject is NULL, the imported text was "None".  Make sure the interface pointer
+		// if ParseObjectPropertyValue returned true but ResolvedObject is nullptr, the imported text was "None".  Make sure the interface pointer
 		// is cleared, then stop
-		InterfaceValue->SetObject(NULL);
+		SetInterfaceValue(nullptr, nullptr);
 		return Buffer;
 	}
 
 	void* NewInterfaceAddress = ResolvedObject->GetInterfaceAddress(InterfaceClass);
-	if ( NewInterfaceAddress == NULL )
+	if (NewInterfaceAddress == nullptr)
 	{
+		// If this is a bp implementation of a native interface, set object but clear the interface
+		if (ResolvedObject->GetClass()->ImplementsInterface(InterfaceClass))
+		{
+			SetInterfaceValue(ResolvedObject, nullptr);
+			return Buffer;
+		}
+
 		// the object we imported doesn't implement our interface class
 		ErrorText->Logf( TEXT("%s: specified object doesn't implement the required interface class '%s': %s"),
 						*GetFullName(), *InterfaceClass->GetName(), InBuffer );
 
-		return NULL;
+		return nullptr;
 	}
 
-	InterfaceValue->SetObject(ResolvedObject);
-	InterfaceValue->SetInterface(NewInterfaceAddress);
+	SetInterfaceValue(ResolvedObject, NewInterfaceAddress);
 	return Buffer;
 }
 
@@ -300,10 +346,22 @@ bool FInterfaceProperty::SameType(const FProperty* Other) const
 	return Super::SameType(Other) && (InterfaceClass == ((FInterfaceProperty*)Other)->InterfaceClass);
 }
 
+#if WITH_EDITORONLY_DATA
+void FInterfaceProperty::AppendSchemaHash(FBlake3& Builder, bool bSkipEditorOnly) const
+{
+	Super::AppendSchemaHash(Builder, bSkipEditorOnly);
+	if (InterfaceClass)
+	{
+		// Hash the class's name instead of recursively hashing the class; the class's schema does not impact how we serialize our pointer to it
+		FNameBuilder ObjectPath;
+		InterfaceClass->GetPathName(nullptr, ObjectPath);
+		Builder.Update(ObjectPath.GetData(), ObjectPath.Len() * sizeof(ObjectPath.GetData()[0]));
+	}
+}
+#endif
+
 void FInterfaceProperty::AddReferencedObjects(FReferenceCollector& Collector)
 {
 	Collector.AddReferencedObject(InterfaceClass);
 	Super::AddReferencedObjects(Collector);
 }
-
-#include "UObject/DefineUPropertyMacros.h"

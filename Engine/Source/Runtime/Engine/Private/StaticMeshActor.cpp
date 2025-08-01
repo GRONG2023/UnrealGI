@@ -6,17 +6,19 @@
 
 #include "Engine/StaticMeshActor.h"
 #include "UObject/FrameworkObjectVersion.h"
-#include "CollisionQueryParams.h"
-#include "WorldCollision.h"
-#include "Components/StaticMeshComponent.h"
 #include "Engine/CollisionProfile.h"
-#include "Logging/TokenizedMessage.h"
+#include "Engine/OverlapResult.h"
+#include "Engine/World.h"
 #include "Logging/MessageLog.h"
 #include "Misc/UObjectToken.h"
 #include "Misc/MapErrors.h"
 #include "PhysicsEngine/BodySetup.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "StaticMeshResources.h"
 #include "Engine/StaticMesh.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(StaticMeshActor)
 
 
 #define LOCTEXT_NAMESPACE "StaticMeshActor"
@@ -46,13 +48,17 @@ void AStaticMeshActor::BeginPlay()
 	// we need to do this here. 
 	//
 	// This is a short term fix until we find a better play for SetReplicates to be called in AActor.
-
 	if (GetLocalRole() == ROLE_Authority && bStaticMeshReplicateMovement)
 	{
 		bReplicates = false;
 		SetRemoteRoleForBackwardsCompat(ROLE_SimulatedProxy);
 		SetReplicates(true);
 	}	
+
+	if (StaticMeshComponent && StaticMeshComponent->BodyInstance.bSimulatePhysics)
+	{
+		SetPhysicsReplicationMode(StaticMeshPhysicsReplicationMode);
+	}
 
 	Super::BeginPlay();
 }
@@ -84,7 +90,7 @@ void AStaticMeshActor::LoadedFromAnotherClass(const FName& OldClassName)
 {
 	Super::LoadedFromAnotherClass(OldClassName);
 
-	if(GetLinkerUE4Version() < VER_UE4_REMOVE_STATICMESH_MOBILITY_CLASSES)
+	if(GetLinkerUEVersion() < VER_UE4_REMOVE_STATICMESH_MOBILITY_CLASSES)
 	{
 		static FName InterpActor_NAME(TEXT("InterpActor"));
 		static FName PhysicsActor_NAME(TEXT("PhysicsActor"));
@@ -184,20 +190,25 @@ void AStaticMeshActor::CheckForErrors()
 		TArray<FOverlapResult> Overlaps;
 		GetWorld()->OverlapMultiByChannel(Overlaps, GetActorLocation(), FQuat::Identity, ECC_Pawn, FCollisionShape::MakeSphere(1.f), SphereParams);
 
-		for ( int32 OverlapIdx=0; OverlapIdx<Overlaps.Num(); OverlapIdx++ )
+		for ( const FOverlapResult& Overlap : Overlaps )
 		{
-			AStaticMeshActor *A = Cast<AStaticMeshActor>(Overlaps[OverlapIdx].GetActor());
-			if ( A && (A != this) && (A->GetActorLocation() - GetActorLocation()).IsNearlyZero() && A->StaticMeshComponent
-				&& (A->StaticMeshComponent->GetStaticMesh() == StaticMeshComponent->GetStaticMesh()) && (A->GetActorRotation() == GetActorRotation())
-				&& (A->StaticMeshComponent->GetRelativeScale3D() == StaticMeshComponent->GetRelativeScale3D()) )
+			if (Overlap.OverlapObjectHandle.IsValid() && Overlap.OverlapObjectHandle != this && Overlap.OverlapObjectHandle.DoesRepresentClass(AStaticMeshActor::StaticClass()) &&
+				(Overlap.OverlapObjectHandle.GetLocation() - GetActorLocation()).IsNearlyZero() &&
+				(Overlap.OverlapObjectHandle.GetRotation() == GetActorRotation()))
 			{
-				FFormatNamedArguments Arguments;
-				Arguments.Add(TEXT("ActorName0"), FText::FromString(GetName()));
-				Arguments.Add(TEXT("ActorName1"), FText::FromString(A->GetName()));
-				MapCheck.Warning()
-					->AddToken(FUObjectToken::Create(this))
-					->AddToken(FTextToken::Create(FText::Format( LOCTEXT( "MapCheck_Message_SameLocation", "{ActorName0} is in the same location as {ActorName1}" ), Arguments ) ))
-					->AddToken(FMapErrorToken::Create(FMapErrors::SameLocation));
+				AStaticMeshActor* A = Overlap.OverlapObjectHandle.FetchActor<AStaticMeshActor>();
+				check(A);
+
+				if (A->StaticMeshComponent && (A->StaticMeshComponent->GetStaticMesh() == StaticMeshComponent->GetStaticMesh()) && (A->StaticMeshComponent->GetRelativeScale3D() == StaticMeshComponent->GetRelativeScale3D()))
+				{
+					FFormatNamedArguments Arguments;
+						Arguments.Add(TEXT("ActorName0"), FText::FromString(GetName()));
+						Arguments.Add(TEXT("ActorName1"), FText::FromString(A->GetName()));
+						MapCheck.Warning()
+						->AddToken(FUObjectToken::Create(this))
+						->AddToken(FTextToken::Create(FText::Format(LOCTEXT("MapCheck_Message_SameLocation", "{ActorName0} is in the same location as {ActorName1}"), Arguments)))
+						->AddToken(FMapErrorToken::Create(FMapErrors::SameLocation));
+				}
 			}
 		}
 
@@ -239,4 +250,5 @@ void AStaticMeshActor::CheckForErrors()
 #endif // WITH_EDITOR
 
 #undef LOCTEXT_NAMESPACE
+
 

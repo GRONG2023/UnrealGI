@@ -2,9 +2,18 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-
+#include "Containers/StringFwd.h"
+#include "Containers/UnrealString.h"
+#include "HAL/Platform.h"
 #include "Misc/StringBuilder.h"
+#include "Serialization/Archive.h"
+#include "Serialization/StructuredArchive.h"
+#include "Templates/TypeHash.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+
+class FOutputDevice;
+class UObject;
 
 /**
  * A primary asset type, represented as an FName internally and implicitly convertible back and forth
@@ -13,11 +22,16 @@
 struct FPrimaryAssetType
 {
 	/** Convert from FName */
-	FPrimaryAssetType() {}
+	FPrimaryAssetType() = default;
 	FPrimaryAssetType(FName InName) : Name(InName) {}
 	FPrimaryAssetType(EName InName) : Name(FName(InName)) {}
 	FPrimaryAssetType(const WIDECHAR* InName) : Name(FName(InName)) {}
 	FPrimaryAssetType(const ANSICHAR* InName) : Name(FName(InName)) {}
+
+	FPrimaryAssetType(const FPrimaryAssetType&) = default;
+	FPrimaryAssetType(FPrimaryAssetType&&) = default;
+	FPrimaryAssetType& operator=(const FPrimaryAssetType&) = default;
+	FPrimaryAssetType& operator=(FPrimaryAssetType&&) = default;
 
 	/** Convert to FName */
 	operator FName&() { return Name; }
@@ -37,12 +51,6 @@ struct FPrimaryAssetType
 	bool operator!=(const FPrimaryAssetType& Other) const
 	{
 		return Name != Other.Name;
-	}
-
-	FPrimaryAssetType& operator=(const FPrimaryAssetType& Other)
-	{
-		Name = Other.Name;
-		return *this;
 	}
 
 	/** Returns true if this is a valid Type */
@@ -73,6 +81,16 @@ struct FPrimaryAssetType
 		return GetTypeHash(Key.Name);
 	}
 
+	bool LexicalLess(const FPrimaryAssetType& Other) const
+	{
+		return Name.LexicalLess(Other.Name);
+	}
+
+	bool FastLess(const FPrimaryAssetType& Other) const
+	{
+		return Name.FastLess(Other.Name);
+	}
+
 private:
 	friend struct Z_Construct_UScriptStruct_FPrimaryAssetType_Statics;
 
@@ -95,9 +113,10 @@ struct FPrimaryAssetId
 	/** Static names to represent the AssetRegistry tags for the above data */
 	static COREUOBJECT_API const FName PrimaryAssetTypeTag;
 	static COREUOBJECT_API const FName PrimaryAssetNameTag;
+	/** AssetRegistry tag used to store primary asset display name (optional) */
+	static COREUOBJECT_API const FName PrimaryAssetDisplayNameTag;
 
-	FPrimaryAssetId() {}
-
+	FPrimaryAssetId() = default;
 	FPrimaryAssetId(FPrimaryAssetType InAssetType, FName InAssetName)
 		: PrimaryAssetType(InAssetType), PrimaryAssetName(InAssetName)
 	{}
@@ -113,6 +132,11 @@ struct FPrimaryAssetId
 		: FPrimaryAssetId(ParseTypeAndName(TypeAndName))
 	{}
 
+	FPrimaryAssetId(const FPrimaryAssetId&) = default;
+	FPrimaryAssetId(FPrimaryAssetId&&) = default;
+	FPrimaryAssetId& operator=(const FPrimaryAssetId&) = default;
+	FPrimaryAssetId& operator=(FPrimaryAssetId&&) = default;
+
 	/** Returns true if this is a valid identifier */
 	bool IsValid() const
 	{
@@ -124,7 +148,7 @@ struct FPrimaryAssetId
 	{
 		TStringBuilder<256> Builder;
 		AppendString(Builder);
-		return FString(Builder.Len(), Builder.GetData());
+		return FString::ConstructFromPtrSize(Builder.GetData(), Builder.Len());
 	}
 
 	/** Appends to the given builder the string version of this identifier in Type:Name format */
@@ -154,11 +178,11 @@ struct FPrimaryAssetId
 		return PrimaryAssetType != Other.PrimaryAssetType || PrimaryAssetName != Other.PrimaryAssetName;
 	}
 
-	FPrimaryAssetId& operator=(const FPrimaryAssetId& Other)
+	FORCEINLINE friend FArchive& operator<<(FArchive& Ar, FPrimaryAssetId& Other)
 	{
-		PrimaryAssetType = Other.PrimaryAssetType;
-		PrimaryAssetName = Other.PrimaryAssetName;
-		return *this;
+        Ar << Other.PrimaryAssetType;
+		Ar << Other.PrimaryAssetName;
+		return Ar;
 	}
 
 	/** UStruct Overrides */
@@ -179,3 +203,7 @@ struct FPrimaryAssetId
 };
 
 COREUOBJECT_API FStringBuilderBase& operator<<(FStringBuilderBase& Builder, const FPrimaryAssetId& Id);
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

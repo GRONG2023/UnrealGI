@@ -4,6 +4,7 @@
 #include "NavigationSystem.h"
 #include "Modules/ModuleManager.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavArea)
 
 UNavArea::UNavArea(const FObjectInitializer& ObjectInitializer) 
 	: Super(ObjectInitializer)
@@ -18,11 +19,7 @@ UNavArea::UNavArea(const FObjectInitializer& ObjectInitializer)
 
 void UNavArea::FinishDestroy()
 {
-	if (HasAnyFlags(RF_ClassDefaultObject)
-#if WITH_HOT_RELOAD
-		&& !GIsHotReload
-#endif // WITH_HOT_RELOAD
-		)
+	if (HasAnyFlags(RF_ClassDefaultObject) && !IsReloadActive())
 	{
 		UNavigationSystemV1::RequestAreaUnregistering(GetClass());
 	}
@@ -44,16 +41,6 @@ void UNavArea::PostInitProperties()
 
 void UNavArea::RegisterArea()
 {
-	if (HasAnyFlags(RF_ClassDefaultObject) && 
-		!HasAnyFlags(RF_NeedInitialization)  // Don't register BP Area that has still not finished loaded their properties, it was also try again to register later via UNavArea::PostLoad()
-#if WITH_HOT_RELOAD
-		&& !GIsHotReload
-#endif // WITH_HOT_RELOAD
-		)
-	{
-		UNavigationSystemV1::RequestAreaRegistering(GetClass());
-	}
-
 	if (!SupportedAgents.IsInitialized())
 	{
 		SupportedAgents.bSupportsAgent0 = bSupportsAgent0;
@@ -73,6 +60,14 @@ void UNavArea::RegisterArea()
 		SupportedAgents.bSupportsAgent14 = bSupportsAgent14;
 		SupportedAgents.bSupportsAgent15 = bSupportsAgent15;
 		SupportedAgents.MarkInitialized();
+	}
+
+	if (HasAnyFlags(RF_ClassDefaultObject) && 
+		!HasAnyFlags(RF_NeedInitialization)  // Don't register BP Area that has still not finished loaded their properties, it was also try again to register later via UNavArea::PostLoad()
+		&& !IsReloadActive()
+		)
+	{
+		UNavigationSystemV1::RequestAreaRegistering(GetClass());
 	}
 }
 
@@ -111,18 +106,18 @@ void UNavArea::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEven
 {
 	static const FName NAME_DefaultCost = GET_MEMBER_NAME_CHECKED(UNavArea, DefaultCost);
 	static const FName NAME_FixedAreaEnteringCost = GET_MEMBER_NAME_CHECKED(UNavArea, FixedAreaEnteringCost);
+	static const FName NAME_SupportedAgents = GET_MEMBER_NAME_CHECKED(UNavArea, SupportedAgents);
 
 	Super::PostEditChangeProperty(PropertyChangedEvent);
 
-	if (HasAnyFlags(RF_ClassDefaultObject)
-#if WITH_HOT_RELOAD
-		&& !GIsHotReload
-#endif // WITH_HOT_RELOAD
-		)
+	if (HasAnyFlags(RF_ClassDefaultObject) && !IsReloadActive())
 	{
 		const FName PropertyName = (PropertyChangedEvent.Property != nullptr) ? PropertyChangedEvent.Property->GetFName() : NAME_None;
+		const FName MemberPropertyName = (PropertyChangedEvent.MemberProperty != nullptr) ? PropertyChangedEvent.MemberProperty->GetFName() : NAME_None;
+
 		if (PropertyName == NAME_DefaultCost
-			|| PropertyName == NAME_FixedAreaEnteringCost)
+			|| PropertyName == NAME_FixedAreaEnteringCost
+			|| MemberPropertyName == NAME_SupportedAgents)
 		{
 			UNavigationSystemV1::RequestAreaUnregistering(GetClass());
 			RegisterArea();
@@ -130,3 +125,4 @@ void UNavArea::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEven
 	}
 }
 #endif // WITH_EDITOR
+

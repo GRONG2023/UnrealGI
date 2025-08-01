@@ -7,6 +7,8 @@
 #include "Engine/Blueprint.h"
 #include "Editor/WidgetCompilerLog.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ListViewBase)
+
 #define LOCTEXT_NAMESPACE "UMG"
 
 UListViewBase::UListViewBase(const FObjectInitializer& ObjectInitializer)
@@ -14,7 +16,7 @@ UListViewBase::UListViewBase(const FObjectInitializer& ObjectInitializer)
 	, EntryWidgetPool(*this)
 {
 	bIsVariable = true;
-	Clipping = EWidgetClipping::ClipToBounds;
+	SetClipping(EWidgetClipping::ClipToBounds);
 }
 
 #if WITH_EDITOR
@@ -88,9 +90,28 @@ void UListViewBase::SetScrollbarVisibility(ESlateVisibility InVisibility)
 	}
 }
 
+UMG_API void UListViewBase::SetIsPointerScrollingEnabled(bool bInIsPointerScrollingEnabled)
+{
+	bIsPointerScrollingEnabled = bInIsPointerScrollingEnabled;
+	if (MyTableViewBase)
+	{
+		MyTableViewBase->SetIsPointerScrollingEnabled(bInIsPointerScrollingEnabled);
+	}
+}
+
 const TArray<UUserWidget*>& UListViewBase::GetDisplayedEntryWidgets() const
 { 
 	return EntryWidgetPool.GetActiveWidgets(); 
+}
+
+float UListViewBase::GetScrollOffset() const
+{
+	if (MyTableViewBase.IsValid())
+	{
+		return MyTableViewBase->GetScrollOffset();
+	}
+
+	return 0.0f;
 }
 
 TSharedRef<SWidget> UListViewBase::RebuildWidget()
@@ -101,7 +122,8 @@ TSharedRef<SWidget> UListViewBase::RebuildWidget()
 		ErrorText = LOCTEXT("Error_MissingEntryWidgetClass", "No EntryWidgetClass specified on this list.\nEven if doing custom stuff, this is always required as a fallback.");
 	}
 #if WITH_EDITOR
-	else
+	// if the BP was cooked already, then the ClassGeneratedBy will be null, so nothing to check
+	else if (!EntryWidgetClass->bCooked)
 	{
 		UBlueprint* EntryWidgetBP = Cast<UBlueprint>(EntryWidgetClass->ClassGeneratedBy);
 		if (!EntryWidgetBP)
@@ -123,6 +145,10 @@ TSharedRef<SWidget> UListViewBase::RebuildWidget()
 
 	MyTableViewBase = RebuildListWidget();
 	MyTableViewBase->SetIsScrollAnimationEnabled(bEnableScrollAnimation);
+	MyTableViewBase->SetEnableTouchAnimatedScrolling(bInEnableTouchAnimatedScrolling);
+	MyTableViewBase->SetIsRightClickScrollingEnabled(bEnableRightClickScrolling);
+	MyTableViewBase->SetIsTouchScrollingEnabled(bEnableTouchScrolling);
+	MyTableViewBase->SetIsPointerScrollingEnabled(bIsPointerScrollingEnabled);
 	MyTableViewBase->SetFixedLineScrollOffset(bEnableFixedLineOffset ? TOptional<double>(FixedLineScrollOffset) : TOptional<double>());
 	MyTableViewBase->SetWheelScrollMultiplier(GetGlobalScrollAmount() * WheelScrollMultiplier);
 
@@ -145,6 +171,11 @@ void UListViewBase::SynchronizeProperties()
 	if (MyTableViewBase)
 	{
 		MyTableViewBase->SetIsScrollAnimationEnabled(bEnableScrollAnimation);
+		MyTableViewBase->SetEnableTouchAnimatedScrolling(bInEnableTouchAnimatedScrolling);
+		MyTableViewBase->SetIsRightClickScrollingEnabled(bEnableRightClickScrolling);
+		MyTableViewBase->SetIsTouchScrollingEnabled(bEnableTouchScrolling);
+		MyTableViewBase->SetIsPointerScrollingEnabled(bIsPointerScrollingEnabled);
+		MyTableViewBase->SetAllowOverscroll(AllowOverscroll ? EAllowOverscroll::Yes : EAllowOverscroll::No);
 		MyTableViewBase->SetFixedLineScrollOffset(bEnableFixedLineOffset ? TOptional<double>(FixedLineScrollOffset) : TOptional<double>());
 		MyTableViewBase->SetWheelScrollMultiplier(GetGlobalScrollAmount() * WheelScrollMultiplier);
 	}
@@ -188,6 +219,7 @@ void UListViewBase::HandleRowReleased(const TSharedRef<ITableRow>& Row)
 		{
 			GeneratedEntriesToAnnounce.Remove(EntryWidget);
 			OnEntryWidgetReleased().Broadcast(*EntryWidget);
+			NativeOnEntryReleased(EntryWidget);
 			BP_OnEntryReleased.Broadcast(EntryWidget);
 		}
 	}
@@ -218,6 +250,7 @@ void UListViewBase::HandleAnnounceGeneratedEntries()
 		if (EntryWidget.IsValid())
 		{
 			OnEntryWidgetGenerated().Broadcast(*EntryWidget);
+			NativeOnEntryGenerated(EntryWidget.Get());
 			BP_OnEntryGenerated.Broadcast(EntryWidget.Get());
 		}
 	}
@@ -225,3 +258,4 @@ void UListViewBase::HandleAnnounceGeneratedEntries()
 }
 
 #undef LOCTEXT_NAMESPACE
+

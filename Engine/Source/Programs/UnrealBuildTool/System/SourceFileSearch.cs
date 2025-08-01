@@ -1,19 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
-using System.Text;
 using System.IO;
-using System.Diagnostics;
 using System.Linq;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
 	static class SourceFileSearch
 	{
 		// Certain file types should never be added to project files. These extensions must all be lowercase.
-		static readonly string[] DefaultExcludedFileSuffixes = new string[] 
+		static readonly string[] DefaultExcludedFileSuffixes = new string[]
 		{
 			".vcxproj",				// Visual Studio project files
 			".vcxproj.filters",		// Visual Studio filter file
@@ -32,13 +30,15 @@ namespace UnrealBuildTool
 		};
 
 		// Default directory names to exclude. Must be lowercase.
-		static readonly string[] DefaultExcludedDirectorySuffixes = new string[] 
+		static readonly string[] DefaultExcludedDirectorySuffixes = new string[]
 		{
-			Path.DirectorySeparatorChar + "intermediate"
+			Path.DirectorySeparatorChar + "intermediate",
+			Path.DirectorySeparatorChar + "source" + Path.DirectorySeparatorChar + "thirdparty",
+			Path.DirectorySeparatorChar + "third_party",
 		};
 
 		/// Finds mouse source files
-		public static List<FileReference> FindModuleSourceFiles(FileReference ModuleRulesFile, bool SearchSubdirectories = true, HashSet<DirectoryReference> SearchedDirectories = null)
+		public static List<FileReference> FindModuleSourceFiles(FileReference ModuleRulesFile, bool SearchSubdirectories = true, HashSet<DirectoryReference>? SearchedDirectories = null)
 		{
 			// The module's "base directory" is simply the directory where its xxx.Build.cs file is stored.  We'll always
 			// harvest source files for this module in this base directory directory and all of its sub-directories.
@@ -52,7 +52,7 @@ namespace UnrealBuildTool
 		/// <param name="SubdirectoryNamesToExclude">Directory base names to ignore when searching subdirectories.  Can be null.</param>
 		/// <param name="SearchSubdirectories">True to include subdirectories, otherwise we only search the list of base directories</param>
 		/// <param name="SearchedDirectories">If non-null, is updated with a list of the directories searched</param>
-		public static List<FileReference> FindFiles(DirectoryReference DirectoryToSearch, List<string> SubdirectoryNamesToExclude = null, bool SearchSubdirectories = true, HashSet<DirectoryReference> SearchedDirectories = null)
+		public static List<FileReference> FindFiles(DirectoryReference DirectoryToSearch, List<string>? SubdirectoryNamesToExclude = null, bool SearchSubdirectories = true, HashSet<DirectoryReference>? SearchedDirectories = null)
 		{
 			// Build a list of directory names that we don't want to search under. We always ignore intermediate directories.
 			string[] ExcludedDirectorySuffixes;
@@ -78,14 +78,14 @@ namespace UnrealBuildTool
 			return FoundFiles;
 		}
 
-		static void FindFilesInternal(DirectoryReference Directory, string[] ExcludedDirectorySuffixes, List<FileReference> FoundFiles, HashSet<DirectoryReference> SearchedDirectories)
+		static void FindFilesInternal(DirectoryReference Directory, string[] ExcludedDirectorySuffixes, List<FileReference> FoundFiles, HashSet<DirectoryReference>? SearchedDirectories)
 		{
-			if(SearchedDirectories != null)
+			if (SearchedDirectories != null)
 			{
 				SearchedDirectories.Add(Directory);
 			}
 
-			foreach (FileReference File in DirectoryReference.EnumerateFiles(Directory))
+			foreach (FileReference File in DirectoryLookupCache.EnumerateFiles(Directory))
 			{
 				if (ShouldInclude(File, DefaultExcludedFileSuffixes))
 				{
@@ -94,11 +94,11 @@ namespace UnrealBuildTool
 			}
 		}
 
-		static void FindFilesInternalRecursive(DirectoryReference Directory, string[] ExcludedDirectorySuffixes, List<FileReference> FoundFiles, HashSet<DirectoryReference> SearchedDirectories)
+		static void FindFilesInternalRecursive(DirectoryReference Directory, string[] ExcludedDirectorySuffixes, List<FileReference> FoundFiles, HashSet<DirectoryReference>? SearchedDirectories)
 		{
 			FindFilesInternal(Directory, ExcludedDirectorySuffixes, FoundFiles, SearchedDirectories);
 
-			foreach (DirectoryReference SubDirectory in DirectoryReference.EnumerateDirectories(Directory))
+			foreach (DirectoryReference SubDirectory in DirectoryLookupCache.EnumerateDirectories(Directory))
 			{
 				if (ShouldInclude(SubDirectory, ExcludedDirectorySuffixes))
 				{
@@ -114,7 +114,7 @@ namespace UnrealBuildTool
 			{
 				return false;
 			}
-			
+
 			foreach (string ExcludedSuffix in ExcludedSuffixes)
 			{
 				if (Reference.FullName.EndsWith(ExcludedSuffix, FileSystemReference.Comparison))

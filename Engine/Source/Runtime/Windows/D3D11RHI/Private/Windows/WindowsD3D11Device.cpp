@@ -5,64 +5,47 @@
 =============================================================================*/
 #include "Misc/EngineVersion.h"
 #include "D3D11RHIPrivate.h"
+#include "HAL/FileManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/EngineVersion.h"
 #include "Windows/AllowWindowsPlatformTypes.h"
 #include "Windows/WindowsPlatformCrashContext.h"
-	#include <delayimp.h>
-	#if !PLATFORM_HOLOLENS
-	#include "nvapi.h"
-	#include "nvShaderExtnEnums.h"
-	#include "amd_ags.h"
+#include <delayimp.h>
+	#if WITH_NVAPI
+		#include "nvapi.h"
+		#include "nvShaderExtnEnums.h"
+	#endif
+	#if WITH_AMD_AGS
+		#include "amd_ags.h"
 	#endif
 #include "Windows/HideWindowsPlatformTypes.h"
 
 #include "HardwareInfo.h"
-#include "Runtime/HeadMountedDisplay/Public/IHeadMountedDisplayModule.h"
+#include "IHeadMountedDisplayModule.h"
 #include "GenericPlatform/GenericPlatformDriver.h"			// FGPUDriverInfo
 #include "GenericPlatform/GenericPlatformCrashContext.h"
-THIRD_PARTY_INCLUDES_START
-#include "dxgi1_3.h"
-#include "dxgi1_4.h"
-#include "dxgi1_6.h"
-THIRD_PARTY_INCLUDES_END
 #include "RHIValidation.h"
-#include "HAL/ExceptionHandling.h"
+#include "RHIUtilities.h"
+#include "HDRHelper.h"
+#include "GlobalShader.h"
 
 #if NV_AFTERMATH
 bool GDX11NVAfterMathEnabled = false;
 bool GNVAftermathModuleLoaded = false;
 bool GDX11NVAfterMathMarkers = false;
-#endif
 
-#if INTEL_METRICSDISCOVERY
-bool GDX11IntelMetricsDiscoveryEnabled = false;
+float GDX11NVAfterMathDumpWaitTime = 10.0f;
+static FAutoConsoleVariableRef CVarDX12NVAfterMathDumpWaitTime(
+	TEXT("r.DX11NVAfterMathDumpWaitTime"),
+	GDX11NVAfterMathDumpWaitTime,
+	TEXT("Amount of time to wait for NV Aftermath to finish processing GPU crash dumps."),
+	ECVF_Default
+);
 #endif
 
 FD3D11DynamicRHI*	GD3D11RHI = nullptr;
 
-extern bool D3D11RHI_ShouldCreateWithD3DDebug();
-extern bool D3D11RHI_ShouldAllowAsyncResourceCreation();
-
-static int D3D11RHI_PreferAdapterVendor()
-{
-	if (FParse::Param(FCommandLine::Get(), TEXT("preferAMD")))
-	{
-		return 0x1002;
-	}
-
-	if (FParse::Param(FCommandLine::Get(), TEXT("preferIntel")))
-	{
-		return 0x8086;
-	}
-
-	if (FParse::Param(FCommandLine::Get(), TEXT("preferNvidia")))
-	{
-		return 0x10DE;
-	}
-
-	return -1;
-}
+bool D3D11RHI_ShouldAllowAsyncResourceCreation();
 
 static bool D3D11RHI_AllowSoftwareFallback()
 {
@@ -84,21 +67,30 @@ struct AmdAgsInfo
 static AmdAgsInfo AmdInfo;
 #endif
 
-#if INTEL_EXTENSIONS
-// Filled in during InitD3DDevice if IsRHIDeviceIntel
-struct IntelD3D11Extensions
+TAutoConsoleVariable<int32> GD3D11DebugCvar(
+	TEXT("r.D3D11.EnableD3DDebug"),
+	0,
+	TEXT("0 to disable d3ddebug layer (default)\n")
+	TEXT("1 to enable error logging (-d3ddebug) \n")
+	TEXT("2 to enable error & warning logging (-d3dlogwarnings)\n")
+	TEXT("3 to enable breaking on errors & warnings (-d3dbreakonwarning)\n")
+	TEXT("4 to enable CONTINUING on errors (-d3dcontinueonerrors)\n"),
+	ECVF_RenderThreadSafe | ECVF_ReadOnly);
+
+bool D3D11_ShouldLogD3DDebugWarnings()
 {
-	INTC::D3D11_EXTENSION_FUNCS_01000001 D3D11ExtensionFuncs;
+	return GD3D11DebugCvar.GetValueOnAnyThread() > 1;
+}
 
-	INTC::ExtensionInfo ExtensionInfo;
-	INTC::ExtensionAppInfo ExtensionAppInfo;
+bool D3D11_ShouldBreakOnD3DDebugErrors()
+{
+	return GD3D11DebugCvar.GetValueOnAnyThread() > 0 && GD3D11DebugCvar.GetValueOnAnyThread() != 4;
+}
 
-	INTC::PFNINTCDX11EXT_D3D11CREATEDEVICEEXTENSIONCONTEXT1 CreateDeviceExtensionContext;
-	INTC::PFNINTCDX11EXT_D3D11DESTROYDEVICEEXTENSIONCONTEXT DestroyDeviceExtensionContext;
-	INTC::PFNINTCDX11EXT_D3D11GETSUPPORTEDVERSIONS GetSupportedVersions;
-};
-static IntelD3D11Extensions IntelExtensions;
-#endif // INTEL_EXTENSIONS
+bool D3D11_ShouldBreakOnD3DDebugWarnings()
+{
+	return GD3D11DebugCvar.GetValueOnAnyThread() > 3;
+}
 
 static TAutoConsoleVariable<int32> CVarAMDUseMultiThreadedDevice(
 	TEXT("r.AMDD3D11MultiThreadedDevice"),
@@ -120,14 +112,6 @@ static TAutoConsoleVariable<int32> CVarNVidiaTimestampWorkaround(
 	TEXT("If true we disable timestamps on pre-maxwell hardware (workaround for driver bug)\n"),
 	ECVF_Default);
 
-int32 GDX11ForcedGPUs = -1;
-static FAutoConsoleVariableRef CVarDX11NumGPUs(
-	TEXT("r.DX11NumForcedGPUs"),
-	GDX11ForcedGPUs,
-	TEXT("Num Forced GPUs."),
-	ECVF_Default
-	);
-
 /**
  * Console variables used by the D3D11 RHI device.
  */
@@ -143,7 +127,7 @@ namespace RHIConsoleVariables
 
 static void FD3D11DumpLiveObjects()
 {
-	if (D3D11RHI_ShouldCreateWithD3DDebug())
+	if (GRHIGlobals.IsDebugLayerEnabled)
 	{
 		TRefCountPtr<ID3D11Debug> DebugDevice = nullptr;
 		VERIFYD3D11RESULT_EX(GD3D11RHI->GetDevice()->QueryInterface(__uuidof(ID3D11Debug), (void**)DebugDevice.GetInitReference()), GD3D11RHI->GetDevice());
@@ -169,10 +153,109 @@ FAutoConsoleCommand FD3DDumpLiveObjectsCommand
 	FConsoleCommandDelegate::CreateStatic(&FD3D11DumpLiveObjects)
 );
 
+static bool CheckD3D11StoredMessages()
+{
+	bool bResult = false;
+
+	TRefCountPtr<ID3D11Debug> DebugDevice = nullptr;
+	VERIFYD3D11RESULT_EX(GD3D11RHI->GetDevice()->QueryInterface(__uuidof(ID3D11Debug), (void**)DebugDevice.GetInitReference()), GD3D11RHI->GetDevice());
+	if (DebugDevice)
+	{
+		TRefCountPtr<ID3D11InfoQueue> d3dInfoQueue;
+		if (SUCCEEDED(GD3D11RHI->GetDevice()->QueryInterface(__uuidof(ID3D11InfoQueue), (void**)d3dInfoQueue.GetInitReference())))
+		{
+			D3D11_MESSAGE* d3dMessage = nullptr;
+			SIZE_T AllocateSize = 0;
+
+			static bool bBreakOnWarning = FParse::Param(FCommandLine::Get(), TEXT("d3dbreakonwarning"));
+
+			int StoredMessageCount = d3dInfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+			for (int MessageIndex = 0; MessageIndex < StoredMessageCount; MessageIndex++)
+			{
+				SIZE_T MessageLength = 0;
+				HRESULT hr = d3dInfoQueue->GetMessage(MessageIndex, nullptr, &MessageLength);
+
+				// realloc the message
+				if (MessageLength > AllocateSize)
+				{
+					if (d3dMessage)
+					{
+						FMemory::Free(d3dMessage);
+						d3dMessage = nullptr;
+						AllocateSize = 0;
+					}
+
+					d3dMessage = (D3D11_MESSAGE*)FMemory::Malloc(MessageLength);
+					AllocateSize = MessageLength;
+				}
+
+				if (d3dMessage)
+				{
+					// get the actual message data from the queue
+					hr = d3dInfoQueue->GetMessage(MessageIndex, d3dMessage, &MessageLength);
+
+					switch (d3dMessage->Severity)
+					{
+					case D3D11_MESSAGE_SEVERITY_CORRUPTION:
+					case D3D11_MESSAGE_SEVERITY_ERROR:
+						{
+							UE_LOG(LogD3D11RHI, Error, TEXT("[D3DDebug] %s"), ANSI_TO_TCHAR(d3dMessage->pDescription));
+							bResult = true;
+							break;
+						}
+					case D3D11_MESSAGE_SEVERITY_WARNING:
+						{
+							UE_LOG(LogD3D11RHI, Warning, TEXT("[D3DDebug] %s"), ANSI_TO_TCHAR(d3dMessage->pDescription));
+							if (bBreakOnWarning)
+							{
+								bResult = true;
+							}
+							break;
+						}
+					default:
+						{
+							UE_LOG(LogD3D11RHI, Log, TEXT("[D3DDebug] %s"), ANSI_TO_TCHAR(d3dMessage->pDescription));
+						}
+					}
+				}
+			}
+			d3dInfoQueue->ClearStoredMessages();
+			if (AllocateSize > 0)
+			{
+				FMemory::Free(d3dMessage);
+			}
+		}
+	}
+
+	return bResult;
+}
+
+static LONG __stdcall D3D11VectoredExceptionHandler(EXCEPTION_POINTERS* InInfo)
+{
+	// Only handle D3D error codes here
+	if (InInfo->ExceptionRecord->ExceptionCode == _FACDXGI)
+	{
+		if (CheckD3D11StoredMessages())
+		{
+			if (FPlatformMisc::IsDebuggerPresent())
+			{
+				// when we get here, then it means that BreakOnSeverity was set for this error message, so request the debug break here as well
+				// when the debugger is attached
+				UE_DEBUG_BREAK();
+			}
+		}
+
+		// Handles the exception
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+
+	// continue searching
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 /** This function is used as a SEH filter to catch only delay load exceptions. */
 static bool IsDelayLoadException(PEXCEPTION_POINTERS ExceptionPointers)
 {
-#if WINVER > 0x502	// Windows SDK 7.1 doesn't define VcppException
 	switch(ExceptionPointers->ExceptionRecord->ExceptionCode)
 	{
 	case VcppException(ERROR_SEVERITY_ERROR, ERROR_MOD_NOT_FOUND):
@@ -181,9 +264,6 @@ static bool IsDelayLoadException(PEXCEPTION_POINTERS ExceptionPointers)
 	default:
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
-#else
-	return EXCEPTION_EXECUTE_HANDLER;
-#endif
 }
 
 static bool bIsQuadBufferStereoEnabled = false;
@@ -201,12 +281,8 @@ static void SafeCreateDXGIFactory(IDXGIFactory1** DXGIFactory1, bool bWithDebug)
 	__try
 	{
 		bool bQuadBufferStereoRequested = FParse::Param(FCommandLine::Get(), TEXT("quad_buffer_stereo"));
-
-#if PLATFORM_HOLOLENS
-		bool bIsWin8OrNewer = true;
-#else
 		bool bIsWin8OrNewer = FPlatformMisc::VerifyWindowsVersion(8, 0);
-#endif
+
 		if (bIsWin8OrNewer && (bQuadBufferStereoRequested || bWithDebug))
 		{
 			// CreateDXGIFactory2 is only available on Win8.1+, find it if it exists
@@ -258,9 +334,7 @@ static void SafeCreateDXGIFactory(IDXGIFactory1** DXGIFactory1, bool bWithDebug)
  */
 static D3D_FEATURE_LEVEL GetMinAllowedD3DFeatureLevel()
 {
-	// Default to 11.0
-	D3D_FEATURE_LEVEL AllowedFeatureLevel = D3D_FEATURE_LEVEL_11_0;
-	return AllowedFeatureLevel;
+	return D3D_FEATURE_LEVEL_11_0;
 }
 
 /**
@@ -269,9 +343,7 @@ static D3D_FEATURE_LEVEL GetMinAllowedD3DFeatureLevel()
  */
 static D3D_FEATURE_LEVEL GetMaxAllowedD3DFeatureLevel()
 {
-	// Default to 11.0
-	D3D_FEATURE_LEVEL AllowedFeatureLevel = D3D_FEATURE_LEVEL_11_0;
-	return AllowedFeatureLevel;
+	return D3D_FEATURE_LEVEL_11_1;
 }
 
 /**
@@ -284,7 +356,7 @@ static bool SafeTestD3D11CreateDevice(IDXGIAdapter* Adapter,D3D_FEATURE_LEVEL Mi
 	ID3D11DeviceContext* D3DDeviceContext = nullptr;
 	uint32 DeviceFlags = D3D11_CREATE_DEVICE_SINGLETHREADED;
 	// Use a debug device if specified on the command line.
-	if(D3D11RHI_ShouldCreateWithD3DDebug())
+	if(GRHIGlobals.IsDebugLayerEnabled)
 	{
 		DeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
 	}
@@ -355,11 +427,7 @@ static bool SafeTestD3D11CreateDevice(IDXGIAdapter* Adapter,D3D_FEATURE_LEVEL Mi
 		// Log any reason for failure to create test device. Extra debug help.
 		VERIFYD3D11RESULT_NOEXIT(Result);
 
-#if PLATFORM_HOLOLENS
-		bool bIsWin10 = true;
-#else
 		bool bIsWin10 = FPlatformMisc::VerifyWindowsVersion(10, 0);
-#endif
 
 		// Fatal error on 0x887A002D
 		if (DXGI_ERROR_SDK_COMPONENT_MISSING == Result && bIsWin10)
@@ -376,17 +444,6 @@ static bool SafeTestD3D11CreateDevice(IDXGIAdapter* Adapter,D3D_FEATURE_LEVEL Mi
 	return false;
 }
 
-// Display gamut and chromaticities
-// Note: Must be kept in sync with CVars and Tonemapping shaders
-enum EDisplayGamut
-{
-	DG_Rec709,
-	DG_DCI_P3,
-	DG_Rec2020,
-	DG_ACES,
-	DG_ACEScg
-};
-
 struct DisplayChromacities
 {
 	float RedX, RedY;
@@ -397,14 +454,14 @@ struct DisplayChromacities
 
 const DisplayChromacities DisplayChromacityList[] =
 {
-	{ 0.64000f, 0.33000f, 0.30000f, 0.60000f, 0.15000f, 0.06000f, 0.31270f, 0.32900f }, // DG_Rec709
-	{ 0.68000f, 0.32000f, 0.26500f, 0.69000f, 0.15000f, 0.06000f, 0.31270f, 0.32900f }, // DG_DCI-P3 D65
-	{ 0.70800f, 0.29200f, 0.17000f, 0.79700f, 0.13100f, 0.04600f, 0.31270f, 0.32900f }, // DG_Rec2020
-	{ 0.73470f, 0.26530f, 0.00000f, 1.00000f, 0.00010f,-0.07700f, 0.32168f, 0.33767f }, // DG_ACES
-	{ 0.71300f, 0.29300f, 0.16500f, 0.83000f, 0.12800f, 0.04400f, 0.32168f, 0.33767f }, // DG_ACEScg
+	{ 0.64000f, 0.33000f, 0.30000f, 0.60000f, 0.15000f, 0.06000f, 0.31270f, 0.32900f }, // EDisplayColorGamut::sRGB_D65
+	{ 0.68000f, 0.32000f, 0.26500f, 0.69000f, 0.15000f, 0.06000f, 0.31270f, 0.32900f }, // EDisplayColorGamut::DCIP3_D65
+	{ 0.70800f, 0.29200f, 0.17000f, 0.79700f, 0.13100f, 0.04600f, 0.31270f, 0.32900f }, // EDisplayColorGamut::Rec2020_D65
+	{ 0.73470f, 0.26530f, 0.00000f, 1.00000f, 0.00010f,-0.07700f, 0.32168f, 0.33767f }, // EDisplayColorGamut::ACES_D60
+	{ 0.71300f, 0.29300f, 0.16500f, 0.83000f, 0.12800f, 0.04400f, 0.32168f, 0.33767f }, // EDisplayColorGamut::ACEScg_D60
 };
 
-static void SetHDRMonitorModeNVIDIA(uint32 IHVDisplayIndex, bool bEnableHDR, EDisplayGamut DisplayGamut, float MaxOutputNits, float MinOutputNits, float MaxCLL, float MaxFALL)
+static void SetHDRMonitorModeNVIDIA(uint32 IHVDisplayIndex, bool bEnableHDR, EDisplayColorGamut DisplayGamut, float MaxOutputNits, float MinOutputNits, float MaxCLL, float MaxFALL)
 {
 #ifdef NVAPI_INTERFACE
 	NvAPI_Status NvStatus = NVAPI_OK;
@@ -428,7 +485,7 @@ static void SetHDRMonitorModeNVIDIA(uint32 IHVDisplayIndex, bool bEnableHDR, EDi
 			HDRColorData.static_metadata_descriptor_id = NV_STATIC_METADATA_TYPE_1;
 			HDRColorData.hdrMode = bEnableHDR ? NV_HDR_MODE_UHDBD : NV_HDR_MODE_OFF;
 
-			const DisplayChromacities& Chroma = DisplayChromacityList[DisplayGamut];
+			const DisplayChromacities& Chroma = DisplayChromacityList[(int32)DisplayGamut];
 
 			HDRColorData.mastering_display_data.displayPrimary_x0 = NvU16(Chroma.RedX * 50000.0f);
 			HDRColorData.mastering_display_data.displayPrimary_y0 = NvU16(Chroma.RedY * 50000.0f);
@@ -457,7 +514,7 @@ static void SetHDRMonitorModeNVIDIA(uint32 IHVDisplayIndex, bool bEnableHDR, EDi
 #endif //NVAPI_INTERFACE
 }
 
-static void SetHDRMonitorModeAMD(uint32 IHVDisplayIndex, bool bEnableHDR, EDisplayGamut DisplayGamut, float MaxOutputNits, float MinOutputNits, float MaxCLL, float MaxFALL)
+static void SetHDRMonitorModeAMD(uint32 IHVDisplayIndex, bool bEnableHDR, EDisplayColorGamut DisplayGamut, float MaxOutputNits, float MinOutputNits, float MaxCLL, float MaxFALL)
 {
 #ifdef AMD_AGS_API
 	const int32 AmdHDRDeviceIndex = (IHVDisplayIndex & 0xffff0000) >> 16;
@@ -469,7 +526,7 @@ static void SetHDRMonitorModeAMD(uint32 IHVDisplayIndex, bool bEnableHDR, EDispl
 	const AGSDeviceInfo& DeviceInfo = AmdInfo.AmdGpuInfo.devices[AmdHDRDeviceIndex];
 	const AGSDisplayInfo& DisplayInfo = DeviceInfo.displays[AmdHDRDisplayIndex];
 
-	if (DisplayInfo.displayFlags & (AGS_DISPLAYFLAG_HDR10 | AGS_DISPLAYFLAG_DOLBYVISION))
+	if (DisplayInfo.HDR10 != 0 || DisplayInfo.dolbyVision != 0)
 	{
 		AGSDisplaySettings HDRDisplaySettings;
 		FMemory::Memzero(&HDRDisplaySettings, sizeof(HDRDisplaySettings));
@@ -478,7 +535,7 @@ static void SetHDRMonitorModeAMD(uint32 IHVDisplayIndex, bool bEnableHDR, EDispl
 
 		if (bEnableHDR)
 		{
-			const DisplayChromacities& Chroma = DisplayChromacityList[DisplayGamut];
+			const DisplayChromacities& Chroma = DisplayChromacityList[(int32)DisplayGamut];
 			HDRDisplaySettings.chromaticityRedX   = Chroma.RedX;
 			HDRDisplaySettings.chromaticityRedY   = Chroma.RedY;
 			HDRDisplaySettings.chromaticityGreenX = Chroma.GreenX;
@@ -507,14 +564,12 @@ static void SetHDRMonitorModeAMD(uint32 IHVDisplayIndex, bool bEnableHDR, EDispl
 /** Enable HDR meta data transmission */
 void FD3D11DynamicRHI::EnableHDR()
 {
-	static const auto CVarHDRColorGamut = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.HDR.Display.ColorGamut"));
-	static const auto CVarHDROutputDevice = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.HDR.Display.OutputDevice"));
-
 	if ( GRHISupportsHDROutput && IsHDREnabled() )
 	{
-		const int32 OutputDevice = CVarHDROutputDevice->GetValueOnAnyThread();
+		const EDisplayOutputFormat OutputDevice = HDRGetDefaultDisplayOutputFormat();
+		const EDisplayColorGamut DisplayGamut = HDRGetDefaultDisplayColorGamut();
 
-		const float DisplayMaxOutputNits = (OutputDevice == 4 || OutputDevice == 6) ? 2000.f : 1000.f;
+		const float DisplayMaxOutputNits = HDRGetDisplayMaximumLuminance();
 		const float DisplayMinOutputNits = 0.0f;	// Min output of the display
 		const float DisplayMaxCLL = 0.0f;			// Max content light level in lumens (0.0 == unknown)
 		const float DisplayFALL = 0.0f;				// Frame average light level (0.0 == unknown)
@@ -524,7 +579,7 @@ void FD3D11DynamicRHI::EnableHDR()
 			SetHDRMonitorModeNVIDIA(
 				HDRDetectedDisplayIHVIndex,
 				true,
-				EDisplayGamut(CVarHDRColorGamut->GetValueOnAnyThread()),
+				DisplayGamut,
 				DisplayMaxOutputNits,
 				DisplayMinOutputNits,
 				DisplayMaxCLL,
@@ -535,7 +590,7 @@ void FD3D11DynamicRHI::EnableHDR()
 			SetHDRMonitorModeAMD(
 				HDRDetectedDisplayIHVIndex,
 				true,
-				EDisplayGamut(CVarHDRColorGamut->GetValueOnAnyThread()),
+				DisplayGamut,
 				DisplayMaxOutputNits,
 				DisplayMinOutputNits,
 				DisplayMaxCLL,
@@ -564,7 +619,7 @@ void FD3D11DynamicRHI::ShutdownHDR()
 			SetHDRMonitorModeNVIDIA(
 				HDRDetectedDisplayIHVIndex,
 				false,
-				DG_Rec709,
+				EDisplayColorGamut::sRGB_D65,
 				DisplayMaxOutputNits,
 				DisplayMinOutputNits,
 				DisplayMaxCLL,
@@ -575,7 +630,7 @@ void FD3D11DynamicRHI::ShutdownHDR()
 			SetHDRMonitorModeAMD(
 				HDRDetectedDisplayIHVIndex,
 				false,
-				DG_Rec709,
+				EDisplayColorGamut::sRGB_D65,
 				DisplayMaxOutputNits,
 				DisplayMinOutputNits,
 				DisplayMaxCLL,
@@ -588,14 +643,63 @@ void FD3D11DynamicRHI::ShutdownHDR()
 	}
 }
 
-static bool SupportsHDROutput(FD3D11DynamicRHI* D3DRHI)
+bool FD3D11DynamicRHI::SetupDisplayHDRMetaData()
 {
-	check(D3DRHI && D3DRHI->GetDevice());
-	ID3D11Device* Direct3DDevice = D3DRHI->GetDevice();
+	check(GetDevice());
 
 	// Default to primary display
-	D3DRHI->SetHDRDetectedDisplayIndices(0, 0);
+	SetHDRDetectedDisplayIndices(0, 0);
 	
+	DisplayList.Empty();
+
+#if WITH_EDITOR
+	// Determines if any displays support HDR
+	bool bSupportsHDROutput = false;
+	{
+		IDXGIAdapter* DXGIAdapter = Adapter.DXGIAdapter;
+		if (!DXGIAdapter)
+		{
+			return false;
+		}
+
+		for (uint32 DisplayIndex = 0; true; ++DisplayIndex)
+		{
+			TRefCountPtr<IDXGIOutput> DXGIOutput;
+			if (S_OK != DXGIAdapter->EnumOutputs(DisplayIndex, DXGIOutput.GetInitReference()))
+			{
+				break;
+			}
+
+			TRefCountPtr<IDXGIOutput6> Output6;
+			if (SUCCEEDED(DXGIOutput->QueryInterface(IID_PPV_ARGS(Output6.GetInitReference()))))
+			{
+				DXGI_OUTPUT_DESC1 OutputDesc;
+				VERIFYD3D11RESULT(Output6->GetDesc1(&OutputDesc));
+
+				// Check for HDR support on the display.
+				const bool bDisplaySupportsHDROutput = (OutputDesc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+				if (bDisplaySupportsHDROutput)
+				{
+					UE_LOG(LogD3D11RHI, Log, TEXT("HDR output is supported on adapter %i, display %u:"), 0, DisplayIndex);
+					UE_LOG(LogD3D11RHI, Log, TEXT("\t\tMinLuminance = %f"), OutputDesc.MinLuminance);
+					UE_LOG(LogD3D11RHI, Log, TEXT("\t\tMaxLuminance = %f"), OutputDesc.MaxLuminance);
+					UE_LOG(LogD3D11RHI, Log, TEXT("\t\tMaxFullFrameLuminance = %f"), OutputDesc.MaxFullFrameLuminance);
+
+					bSupportsHDROutput = true;
+				}
+
+				FDisplayInformation DisplayInformation{};
+				DisplayInformation.bHDRSupported = bDisplaySupportsHDROutput;
+				const RECT& DisplayCoords = OutputDesc.DesktopCoordinates;
+				DisplayInformation.DesktopCoordinates = FIntRect(DisplayCoords.left, DisplayCoords.top, DisplayCoords.right, DisplayCoords.bottom);
+				DisplayList.Add(DisplayInformation);
+			}
+		}
+	}
+
+	return bSupportsHDROutput;
+#else
+
 	// Grab the adapter
 	TRefCountPtr<IDXGIDevice> DXGIDevice;
 	VERIFYD3D11RESULT(Direct3DDevice->QueryInterface(IID_IDXGIDevice, (void**)DXGIDevice.GetInitReference()));
@@ -607,6 +711,7 @@ static bool SupportsHDROutput(FD3D11DynamicRHI* D3DRHI)
 	uint32 ForcedDisplayIndex = 0;
 	bool bForcedDisplay = FParse::Value(FCommandLine::Get(), TEXT("FullscreenDisplay="), ForcedDisplayIndex);
 
+	bool bSupportsHDROutput = false;
 	for (; true; ++DisplayIndex)
 	{
 		TRefCountPtr<IDXGIOutput> DXGIOutput;
@@ -623,13 +728,17 @@ static bool SupportsHDROutput(FD3D11DynamicRHI* D3DRHI)
 
 		DXGI_OUTPUT_DESC OutputDesc;
 		DXGIOutput->GetDesc(&OutputDesc);
-		
+		FDisplayInformation DisplayInformation{};
+		const RECT& DisplayCoords = OutputDesc.DesktopCoordinates;
+		DisplayInformation.DesktopCoordinates = FIntRect(DisplayCoords.left, DisplayCoords.top, DisplayCoords.right, DisplayCoords.bottom);
+		DisplayInformation.bHDRSupported = false;
+
 		if (IsRHIDeviceNVIDIA())
 		{
 #ifdef NVAPI_INTERFACE
 			NvU32 DisplayId = 0;
 
-			// Technically, the DeviceName is a WCHAR however, UE4 makes the assumption elsewhere that TCHAR == WCHAR on Windows
+			// Technically, the DeviceName is a WCHAR however, UE makes the assumption elsewhere that TCHAR == WCHAR on Windows
 			NvAPI_Status Status = NvAPI_DISP_GetDisplayIdByDisplayName(TCHAR_TO_ANSI(OutputDesc.DeviceName), &DisplayId);
 
 			if (Status == NVAPI_OK)
@@ -640,12 +749,14 @@ static bool SupportsHDROutput(FD3D11DynamicRHI* D3DRHI)
 
 				if (NVAPI_OK == NvAPI_Disp_GetHdrCapabilities(DisplayId, &HdrCapabilities))
 				{		
-					if (HdrCapabilities.isST2084EotfSupported)
+					// we're only choosing the first supported HDR monitor
+					if (HdrCapabilities.isST2084EotfSupported && !bSupportsHDROutput)
 					{
 						UE_LOG(LogD3D11RHI, Log, TEXT("HDR output is supported on display %i (NvId: 0x%x)."), DisplayIndex, DisplayId);
-						D3DRHI->SetHDRDetectedDisplayIndices(DisplayIndex, DisplayId);
-						return true;
+						SetHDRDetectedDisplayIndices(DisplayIndex, DisplayId);
+						bSupportsHDROutput = true;
 					}
+					DisplayInformation.bHDRSupported = HdrCapabilities.isST2084EotfSupported;
 				}
 			}
 			else if (Status != NVAPI_ERROR && Status != NVAPI_NVIDIA_DEVICE_NOT_FOUND)
@@ -670,12 +781,14 @@ static bool SupportsHDROutput(FD3D11DynamicRHI* D3DRHI)
 					{
 						// AGS has flags for HDR10 and Dolby Vision instead of a flag for the ST2084 transfer function.
 						// Both HDR10 and Dolby Vision use the ST2084 EOTF.
-						if (DisplayInfo.displayFlags & (AGS_DISPLAYFLAG_HDR10 | AGS_DISPLAYFLAG_DOLBYVISION))
+						bool DisplaySupportsHDR = (DisplayInfo.HDR10 != 0 || DisplayInfo.dolbyVision != 0);
+						if (DisplaySupportsHDR && !bSupportsHDROutput)
 						{
 							UE_LOG(LogD3D11RHI, Log, TEXT("HDR output is supported on display %i (AMD Device: 0x%x, Display: 0x%x)."), DisplayIndex, AMDDeviceIndex, AMDDisplayIndex);
-							D3DRHI->SetHDRDetectedDisplayIndices(DisplayIndex, (uint32)(AMDDeviceIndex << 16) | (uint32)AMDDisplayIndex);
-							return true;
+							SetHDRDetectedDisplayIndices(DisplayIndex, (uint32)(AMDDeviceIndex << 16) | (uint32)AMDDisplayIndex);
+							bSupportsHDROutput = true;
 						}
+						DisplayInformation.bHDRSupported = DisplaySupportsHDR;
 					}
 				}
 			}
@@ -685,9 +798,11 @@ static bool SupportsHDROutput(FD3D11DynamicRHI* D3DRHI)
 		{
 			// Not yet implemented
 		}
+		DisplayList.Add(DisplayInformation);
 	}
 
-	return false;
+	return bSupportsHDROutput;
+#endif
 }
 
 static bool IsDeviceOverclocked()
@@ -775,8 +890,13 @@ void FD3D11DynamicRHIModule::StartupModule()
 	{
 		// Note - can't check device type here, we'll check for that before actually initializing Aftermath
 
-		FString AftermathBinariesRoot = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/NVIDIA/NVaftermath/Win64/");
-		if (LoadLibraryW(*(AftermathBinariesRoot + "GFSDK_Aftermath_Lib.x64.dll")) == nullptr)
+		const FString AftermathBinariesRoot = FPaths::EngineDir() / TEXT("Binaries/ThirdParty/NVIDIA/NVaftermath/Win64/");
+
+		FPlatformProcess::PushDllDirectory(*AftermathBinariesRoot);
+		void* Handle = FPlatformProcess::GetDllHandle(TEXT("GFSDK_Aftermath_Lib.x64.dll"));
+		FPlatformProcess::PopDllDirectory(*AftermathBinariesRoot);
+
+		if (Handle == nullptr)
 		{
 			UE_LOG(LogD3D11RHI, Warning, TEXT("Failed to load GFSDK_Aftermath_Lib.x64.dll"));
 			GNVAftermathModuleLoaded = false;
@@ -802,11 +922,9 @@ bool FD3D11DynamicRHIModule::IsSupported()
 		FindAdapter();
 	}
 
-	// The hardware must support at least 10.0 (usually 11_0, 10_0 or 10_1).
+	// The hardware must support at least 11_0.
 	return ChosenAdapter.IsValid()
-		&& ChosenAdapter.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_9_1
-		&& ChosenAdapter.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_9_2
-		&& ChosenAdapter.MaxSupportedFeatureLevel != D3D_FEATURE_LEVEL_9_3;
+		&& ChosenAdapter.MaxSupportedFeatureLevel >= D3D_FEATURE_LEVEL_11_0;
 }
 
 
@@ -862,7 +980,7 @@ void FD3D11DynamicRHIModule::FindAdapter()
 
 	// Try to create the DXGIFactory1.  This will fail if we're not running Vista SP2 or higher.
 	TRefCountPtr<IDXGIFactory1> DXGIFactory1;
-	SafeCreateDXGIFactory(DXGIFactory1.GetInitReference(), D3D11RHI_ShouldCreateWithD3DDebug());
+	SafeCreateDXGIFactory(DXGIFactory1.GetInitReference(), GRHIGlobals.IsDebugLayerEnabled);
 	if(!DXGIFactory1)
 	{
 		return;
@@ -884,7 +1002,7 @@ void FD3D11DynamicRHIModule::FindAdapter()
 	int32 CVarExplicitAdapterValue = HmdGraphicsAdapterLuid == 0 ? (CVarGraphicsAdapter ? CVarGraphicsAdapter->GetValueOnGameThread() : -1) : -2;
 	FParse::Value(FCommandLine::Get(), TEXT("graphicsadapter="), CVarExplicitAdapterValue);
 
-	const bool bFavorNonIntegrated = CVarExplicitAdapterValue == -1;
+	const bool bFavorDiscreteAdapter = CVarExplicitAdapterValue == -1;
 
 	TRefCountPtr<IDXGIAdapter> TempAdapter;
 	D3D_FEATURE_LEVEL MinAllowedFeatureLevel = GetMinAllowedD3DFeatureLevel();
@@ -893,16 +1011,16 @@ void FD3D11DynamicRHIModule::FindAdapter()
 	UE_LOG(LogD3D11RHI, Log, TEXT("D3D11 min allowed feature level: %s"), GetFeatureLevelString(MinAllowedFeatureLevel));
 	UE_LOG(LogD3D11RHI, Log, TEXT("D3D11 max allowed feature level: %s"), GetFeatureLevelString(MaxAllowedFeatureLevel));
 
-	FD3D11Adapter FirstWithoutIntegratedAdapter;
+	FD3D11Adapter PreferredAdapter;
+	FD3D11Adapter BestMemoryAdapter;
+	FD3D11Adapter FirstDiscreteAdapter;
 	FD3D11Adapter FirstAdapter;
 
-	bool bIsAnyAMD = false;
-	bool bIsAnyIntel = false;
-	bool bIsAnyNVIDIA = false;
+	SIZE_T BestDedicatedMemory = 0;
 
 	UE_LOG(LogD3D11RHI, Log, TEXT("D3D11 adapters:"));
 
-	int PreferredVendor = D3D11RHI_PreferAdapterVendor();
+	const EGpuVendorId PreferredVendor = RHIGetPreferredAdapterVendor();
 	bool bAllowSoftwareFallback = D3D11RHI_AllowSoftwareFallback();
 
 
@@ -934,12 +1052,22 @@ void FD3D11DynamicRHIModule::FindAdapter()
 		// Check that if adapter supports D3D11.
 		if(TempAdapter)
 		{
+			UE_LOG(LogD3D11RHI, Log, TEXT("Testing D3D11 Adapter %u:"), AdapterIndex);
+			DXGI_ADAPTER_DESC AdapterDesc;
+			if (HRESULT DescResult = TempAdapter->GetDesc(&AdapterDesc); FAILED(DescResult))
+			{
+				UE_LOG(LogD3D11RHI, Warning, TEXT("Failed to get description for adapter %u."), AdapterIndex);
+			}
+			else
+			{
+				LogDXGIAdapterDesc(AdapterDesc);
+			}
+
 			D3D_FEATURE_LEVEL ActualFeatureLevel = (D3D_FEATURE_LEVEL)0;
 			if(SafeTestD3D11CreateDevice(TempAdapter,MinAllowedFeatureLevel,MaxAllowedFeatureLevel,&ActualFeatureLevel))
 			{
 				// Log some information about the available D3D11 adapters.
-				DXGI_ADAPTER_DESC AdapterDesc;
-				VERIFYD3D11RESULT(TempAdapter->GetDesc(&AdapterDesc));
+				
 				uint32 OutputCount = CountAdapterOutputs(TempAdapter);
 
 				UE_LOG(LogD3D11RHI, Log,
@@ -957,38 +1085,31 @@ void FD3D11DynamicRHIModule::FindAdapter()
 					AdapterDesc.VendorId
 					);
 
-				bool bIsAMD = AdapterDesc.VendorId == 0x1002;
-				bool bIsIntel = AdapterDesc.VendorId == 0x8086;
-				bool bIsNVIDIA = AdapterDesc.VendorId == 0x10DE;
-				bool bIsMicrosoft = AdapterDesc.VendorId == 0x1414;
-
-				if(bIsAMD) bIsAnyAMD = true;
-				if(bIsIntel) bIsAnyIntel = true;
-				if(bIsNVIDIA) bIsAnyNVIDIA = true;
+				const bool bIsWARP = RHIConvertToGpuVendorId(AdapterDesc.VendorId) == EGpuVendorId::Microsoft;
 
 				// Simple heuristic but without profiling it's hard to do better
 				bool bIsNonLocalMemoryPresent = false;
-				if (bIsIntel)
+				TRefCountPtr<IDXGIAdapter3> TempDxgiAdapter3;
+				DXGI_QUERY_VIDEO_MEMORY_INFO NonLocalVideoMemoryInfo;
+				if (SUCCEEDED(TempAdapter->QueryInterface(_uuidof(IDXGIAdapter3), (void**)TempDxgiAdapter3.GetInitReference())) &&
+					TempDxgiAdapter3.IsValid() && SUCCEEDED(TempDxgiAdapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &NonLocalVideoMemoryInfo)))
 				{
-					TRefCountPtr<IDXGIAdapter3> TempDxgiAdapter3;
-					DXGI_QUERY_VIDEO_MEMORY_INFO NonLocalVideoMemoryInfo;
-					if (SUCCEEDED(TempAdapter->QueryInterface(_uuidof(IDXGIAdapter3), (void**)TempDxgiAdapter3.GetInitReference())) &&
-						TempDxgiAdapter3.IsValid() && SUCCEEDED(TempDxgiAdapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &NonLocalVideoMemoryInfo)))
-					{
-						bIsNonLocalMemoryPresent = NonLocalVideoMemoryInfo.Budget != 0;
-					}
+					bIsNonLocalMemoryPresent = NonLocalVideoMemoryInfo.Budget != 0;
 				}
-				const bool bIsIntegrated = bIsIntel && !bIsNonLocalMemoryPresent;
+
+				// TODO: Using GPUDetect for Intel GPUs to check for integrated vs discrete status, pending GPUDetect update
+
+				const bool bIsIntegrated = !bIsNonLocalMemoryPresent;
 				// PerfHUD is for performance profiling
 				const bool bIsPerfHUD = !FCString::Stricmp(AdapterDesc.Description,TEXT("NVIDIA PerfHUD"));
 
-				FD3D11Adapter CurrentAdapter(TempAdapter, ActualFeatureLevel);
+				FD3D11Adapter CurrentAdapter(TempAdapter, ActualFeatureLevel, bIsWARP, bIsIntegrated);
 
 				// Add special check to support HMDs, which do not have associated outputs.
 				// To reject the software emulation, unless the cvar wants it.
 				// https://msdn.microsoft.com/en-us/library/windows/desktop/bb205075(v=vs.85).aspx#WARP_new_for_Win8
 				// Before we tested for no output devices but that failed where a laptop had a Intel (with output) and NVidia (with no output)
-				const bool bSkipSoftwareAdapter = bIsMicrosoft && !bAllowSoftwareFallback && CVarExplicitAdapterValue < 0 && HmdGraphicsAdapterLuid == 0;
+				const bool bSkipSoftwareAdapter = bIsWARP && !bAllowSoftwareFallback && CVarExplicitAdapterValue < 0 && HmdGraphicsAdapterLuid == 0;
 				
 				// we don't allow the PerfHUD adapter
 				const bool bSkipPerfHUDAdapter = bIsPerfHUD && !bAllowPerfHUD;
@@ -1001,22 +1122,33 @@ void FD3D11DynamicRHIModule::FindAdapter()
 				
 				const bool bSkipAdapter = bSkipSoftwareAdapter || bSkipPerfHUDAdapter || bSkipHmdGraphicsAdapter || bSkipExplicitAdapter;
 
-				if (!bSkipAdapter)
+				if (!bSkipAdapter && CurrentAdapter.IsValid())
 				{
-					if (!bIsIntegrated && !FirstWithoutIntegratedAdapter.IsValid())
+					if (PreferredVendor != EGpuVendorId::Unknown && PreferredVendor == RHIConvertToGpuVendorId(AdapterDesc.VendorId) && !PreferredAdapter.IsValid())
 					{
-						FirstWithoutIntegratedAdapter = CurrentAdapter;
+						PreferredAdapter = CurrentAdapter;
 					}
-					else if (PreferredVendor == AdapterDesc.VendorId && FirstWithoutIntegratedAdapter.IsValid())
+					
+					if (!bIsWARP && !CurrentAdapter.bIsIntegrated)
 					{
-						FirstWithoutIntegratedAdapter = CurrentAdapter;
+						if (!FirstDiscreteAdapter.IsValid())
+						{
+							FirstDiscreteAdapter = CurrentAdapter;
+						}
+
+						if (AdapterDesc.DedicatedVideoMemory > BestDedicatedMemory)
+						{
+							BestMemoryAdapter = CurrentAdapter;
+							BestDedicatedMemory = AdapterDesc.DedicatedVideoMemory;
+							if (PreferredVendor != EGpuVendorId::Unknown && PreferredVendor == RHIConvertToGpuVendorId(AdapterDesc.VendorId))
+							{
+								// Choose the best option of the preferred IHV devices
+								PreferredAdapter = BestMemoryAdapter;
+							}
+						}
 					}
 
 					if (!FirstAdapter.IsValid())
-					{
-						FirstAdapter = CurrentAdapter;
-					}
-					else if (PreferredVendor == AdapterDesc.VendorId && FirstAdapter.IsValid())
 					{
 						FirstAdapter = CurrentAdapter;
 					}
@@ -1033,12 +1165,21 @@ void FD3D11DynamicRHIModule::FindAdapter()
 		}
 	}
 
-	if(bFavorNonIntegrated)
+	if (bFavorDiscreteAdapter)
 	{
-		ChosenAdapter = FirstWithoutIntegratedAdapter;
-
-		// We assume Intel is integrated graphics (slower than discrete) than NVIDIA or AMD cards and rather take a different one
-		if(!ChosenAdapter.IsValid())
+		if (PreferredAdapter.IsValid())
+		{
+			ChosenAdapter = PreferredAdapter;
+		}
+		else if (BestMemoryAdapter.IsValid())
+		{
+			ChosenAdapter = BestMemoryAdapter;
+		}
+		else if (FirstDiscreteAdapter.IsValid())
+		{
+			ChosenAdapter = FirstDiscreteAdapter;
+		}
+		else
 		{
 			ChosenAdapter = FirstAdapter;
 		}
@@ -1057,21 +1198,20 @@ void FD3D11DynamicRHIModule::FindAdapter()
 	{
 		UE_LOG(LogD3D11RHI, Error, TEXT("Failed to choose a D3D11 Adapter."));
 	}
+
+	GRHIAdapterName = ChosenAdapter.DXGIAdapterDesc.Description;
+	GRHIVendorId = ChosenAdapter.DXGIAdapterDesc.VendorId;
+	GRHIDeviceId = ChosenAdapter.DXGIAdapterDesc.DeviceId;
+	GRHIDeviceRevision = ChosenAdapter.DXGIAdapterDesc.Revision;
+	GRHIDeviceIsIntegrated = ChosenAdapter.bIsIntegrated;
 }
 
 FDynamicRHI* FD3D11DynamicRHIModule::CreateRHI(ERHIFeatureLevel::Type RequestedFeatureLevel)
 {
-#if PLATFORM_HOLOLENS
-	GMaxRHIFeatureLevel = ERHIFeatureLevel::ES3_1;
-	GMaxRHIShaderPlatform = SP_PCD3D_ES3_1;
-#endif
-
 	IDXGIFactory1* DXGIFactory1;
 	VERIFYD3D11RESULT(ChosenAdapter.DXGIAdapter->GetParent(__uuidof(DXGIFactory1), reinterpret_cast<void**>(&DXGIFactory1)));
 
-	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES2_REMOVED] = SP_NumPlatforms;
 	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::ES3_1] = SP_PCD3D_ES3_1;
-	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM4_REMOVED] = SP_NumPlatforms;
 	GShaderPlatformForFeatureLevel[ERHIFeatureLevel::SM5] = SP_PCD3D_SM5;
 
 	ERHIFeatureLevel::Type PreviewFeatureLevel;
@@ -1083,13 +1223,13 @@ FDynamicRHI* FD3D11DynamicRHIModule::CreateRHI(ERHIFeatureLevel::Type RequestedF
 	else
 	{
 		GMaxRHIFeatureLevel = ERHIFeatureLevel::SM5;
-		if (RequestedFeatureLevel < ERHIFeatureLevel::Num)
+		if (RequestedFeatureLevel < ERHIFeatureLevel::SM6)
 		{
 			GMaxRHIFeatureLevel = RequestedFeatureLevel;
 		}
 	}
 
-	if (!ensure(GMaxRHIFeatureLevel < ERHIFeatureLevel::Num))
+	if (!ensure(GMaxRHIFeatureLevel < ERHIFeatureLevel::SM6))
 	{
 		GMaxRHIFeatureLevel = ERHIFeatureLevel::SM5;
 	}
@@ -1106,26 +1246,14 @@ FDynamicRHI* FD3D11DynamicRHIModule::CreateRHI(ERHIFeatureLevel::Type RequestedF
 	}
 #endif
 
+	FGenericCrashContext::SetEngineData(TEXT("RHI.IntegratedGPU"), ChosenAdapter.bIsIntegrated ? TEXT("true") : TEXT("false"));
+
 	return FinalRHI;
 }
 
 void FD3D11DynamicRHI::Init()
 {
 	InitD3DDevice();
-}
-
-void FD3D11DynamicRHI::PostInit()
-{
-	if (!FPlatformProperties::RequiresCookedData())
-	{
-		// Make sure all global shaders are complete at this point
-		extern RENDERCORE_API const int32 GlobalShaderMapId;
-
-		TArray<int32> ShaderMapIds;
-		ShaderMapIds.Add(GlobalShaderMapId);
-
-		GShaderCompilingManager->FinishCompilation(TEXT("Global"), ShaderMapIds);
-	}
 }
 
 bool FD3D11DynamicRHI::IsQuadBufferStereoEnabled()
@@ -1141,7 +1269,8 @@ void FD3D11DynamicRHI::DisableQuadBufferStereo()
 void FD3D11DynamicRHI::FlushPendingLogs()
 {
 #if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-	if (D3D11RHI_ShouldCreateWithD3DDebug())
+
+	if (GRHIGlobals.IsDebugLayerEnabled)
 	{
 		TRefCountPtr<ID3D11InfoQueue> InfoQueue = nullptr;
 		VERIFYD3D11RESULT_EX(Direct3DDevice->QueryInterface(IID_ID3D11InfoQueue, (void**)InfoQueue.GetInitReference()), Direct3DDevice);
@@ -1229,6 +1358,9 @@ void FD3D11DynamicRHI::StartNVAftermath()
 		Flags |= bEnableResources ? GFSDK_Aftermath_FeatureFlags_EnableResourceTracking : 0;
 		Flags |= bEnableAll ? GFSDK_Aftermath_FeatureFlags_Maximum : 0;
 
+		// @todo - GFSDK_Aftermath_FeatureFlags_EnableShaderErrorReporting is disabled to prevent TDRs until Nvidia fixes this
+		Flags &= ~GFSDK_Aftermath_FeatureFlags_EnableShaderErrorReporting;
+
 		GFSDK_Aftermath_Result Result = GFSDK_Aftermath_DX11_Initialize(
 			GFSDK_Aftermath_Version_API, (GFSDK_Aftermath_FeatureFlags)Flags, Direct3DDevice);
 
@@ -1258,6 +1390,8 @@ void FD3D11DynamicRHI::StartNVAftermath()
 			GDX11NVAfterMathMarkers = true;
 		}
 	}
+
+	FGenericCrashContext::SetEngineData(TEXT("RHI.Aftermath"), GDX11NVAfterMathEnabled ? TEXT("true") : TEXT("false"));
 }
 
 void FD3D11DynamicRHI::StopNVAftermath()
@@ -1294,19 +1428,20 @@ static void D3D11AftermathCrashCallback(const void* InGPUCrashDump, const uint32
 		GDynamicRHI->CheckGpuHeartbeat();
 	}
 
-	// Write out crash dump to project log dir - exception handling code will take care of copying it to the correct location
-	const FString GPUMiniDumpPath = FPaths::Combine(FPaths::ProjectLogDir(), FWindowsPlatformCrashContext::UE4GPUAftermathMinidumpName);
-
-	// Just use raw windows file routines for the GPU minidump (TODO: refactor to our own functions?)
-	HANDLE FileHandle = CreateFileW(*GPUMiniDumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-	if (FileHandle != INVALID_HANDLE_VALUE)
+	// If we have crash dump data then dump to disc
+	if (InGPUCrashDump)
 	{
-		WriteFile(FileHandle, InGPUCrashDump, InGPUCrashDumpSize, nullptr, nullptr);
-	}
-	CloseHandle(FileHandle);
+		// Write out crash dump to project log dir - exception handling code will take care of copying it to the correct location
+		const FString GpuMiniDumpPath = FPaths::Combine(FPaths::ProjectLogDir(), FWindowsPlatformCrashContext::UEGPUAftermathMinidumpName);
 
-	// Report the GPU crash which will raise the exception
-	ReportGPUCrash(TEXT("Aftermath GPU Crash dump Triggered"), 0);
+		UE_LOG(LogD3D11RHI, Error, TEXT("Aftermath: Writing Aftermath dump to: %s"), *GpuMiniDumpPath);
+
+		if (FArchive* Writer = IFileManager::Get().CreateFileWriter(*GpuMiniDumpPath))
+		{
+			Writer->Serialize((void*)InGPUCrashDump, InGPUCrashDumpSize);
+			Writer->Close();
+		}
+	}
 }
 
 void EnableNVAftermathCrashDumps()
@@ -1316,14 +1451,14 @@ void EnableNVAftermathCrashDumps()
 		static IConsoleVariable* GPUCrashDump = IConsoleManager::Get().FindConsoleVariable(TEXT("r.GPUCrashDump"));
 		if (FParse::Param(FCommandLine::Get(), TEXT("gpucrashdump")) || (GPUCrashDump && GPUCrashDump->GetInt()))
 		{
-
 			GFSDK_Aftermath_Result Result = GFSDK_Aftermath_EnableGpuCrashDumps(
 				GFSDK_Aftermath_Version_API,
 				GFSDK_Aftermath_GpuCrashDumpWatchedApiFlags_DX,
 				GFSDK_Aftermath_GpuCrashDumpFeatureFlags_Default,
-				D3D11AftermathCrashCallback,
+				&D3D11AftermathCrashCallback,
 				nullptr, //Shader debug callback
 				nullptr, // description callback
+				nullptr, // resolve marker callback
 				nullptr); // user data
 
 			if (Result == GFSDK_Aftermath_Result_Success)
@@ -1360,117 +1495,108 @@ void FD3D11DynamicRHI::StartIntelExtensions()
 		return;
 	}
 
-	HMODULE IntelDriverDLL = LoadLibraryA(ID3D11_UMD_DLL);
+	const INTCExtensionVersion AtomicsRequiredVersion = { 3, 4, 1 }; // version 3.4.1
+	const INTCExtensionVersion UAVOverlapRequiredVersion = { 1, 1, 0 };
 
-	if (IntelDriverDLL)
+	INTCExtensionVersion* SupportedExtensionsVersions = nullptr;
+	uint32_t SupportedExtensionsVersionCount = 0;
+	INTCExtensionInfo INTCExtensionInfo = {};
+
+	if (FAILED(INTC_LoadExtensionsLibrary(false)))
 	{
-		HMODULE IntelExtensionDLL = INTC::D3D11LoadIntelExtensionsLibrary(true);
+		UE_LOG(LogD3D11RHI, Log, TEXT("Failed to load Intel Extensions Library"));
+	}
 
-		if (IntelExtensionDLL)
+	if (SUCCEEDED(INTC_D3D11_GetSupportedVersions(Direct3DDevice, nullptr, &SupportedExtensionsVersionCount)))
+	{
+		SupportedExtensionsVersions = new INTCExtensionVersion[SupportedExtensionsVersionCount]{};
+	}
+
+	// Workaround for C6385, if we pass in SupportedExtensionsVersionCount again, the static analyzer thinks it may be different from the first call
+	uint32_t DummyCount = SupportedExtensionsVersionCount;
+	if (SUCCEEDED(INTC_D3D11_GetSupportedVersions(Direct3DDevice, SupportedExtensionsVersions, &DummyCount)) && SupportedExtensionsVersions != nullptr)
+	{
+		check(SupportedExtensionsVersionCount == DummyCount);
+		for (uint32_t i = 0; i < SupportedExtensionsVersionCount; i++)
 		{
-#pragma warning(push)
-#pragma warning(disable: 4191) // disable the "unsafe conversion from 'FARPROC' to 'blah'" warning
-			IntelExtensions.CreateDeviceExtensionContext = (INTC::PFNINTCDX11EXT_D3D11CREATEDEVICEEXTENSIONCONTEXT1)(GetProcAddress(IntelExtensionDLL, "D3D11CreateDeviceExtensionContext1"));
-			IntelExtensions.DestroyDeviceExtensionContext = (INTC::PFNINTCDX11EXT_D3D11DESTROYDEVICEEXTENSIONCONTEXT)(GetProcAddress(IntelExtensionDLL, "D3D11DestroyDeviceExtensionContext"));
-			IntelExtensions.GetSupportedVersions = (INTC::PFNINTCDX11EXT_D3D11GETSUPPORTEDVERSIONS)(GetProcAddress(IntelExtensionDLL, "D3D11GetSupportedVersions"));
-#pragma warning(pop)
-
-			if (IntelExtensions.CreateDeviceExtensionContext && IntelExtensions.DestroyDeviceExtensionContext && IntelExtensions.GetSupportedVersions)
+			if ((SupportedExtensionsVersions[i].HWFeatureLevel >= AtomicsRequiredVersion.HWFeatureLevel) &&
+				(SupportedExtensionsVersions[i].APIVersion >= AtomicsRequiredVersion.APIVersion) &&
+				(SupportedExtensionsVersions[i].Revision >= AtomicsRequiredVersion.Revision) &&
+				!GRHISupportsAtomicUInt64)
 			{
-				bool bRequiredVersionFound = false;
-				bool bEnabled = false;
+				UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions loaded requested version Atomics Version: %u.%u.%u"),
+					SupportedExtensionsVersions[i].HWFeatureLevel,
+					SupportedExtensionsVersions[i].APIVersion,
+					SupportedExtensionsVersions[i].Revision);
 
-				uint32 SupportedVersionCount = 0;
-				uint32* SupportedVersions = nullptr;
+				INTCExtensionInfo.RequestedExtensionVersion = SupportedExtensionsVersions[i];
+				GRHISupportsAtomicUInt64 = true;
+			}
 
-				IntelExtensions.ExtensionInfo.requestedExtensionVersion.Version.Major = 1;
-				IntelExtensions.ExtensionInfo.requestedExtensionVersion.Version.Minor = 0;
-				IntelExtensions.ExtensionInfo.requestedExtensionVersion.Version.Revision = 1;
+			if ((SupportedExtensionsVersions[i].HWFeatureLevel >= UAVOverlapRequiredVersion.HWFeatureLevel) &&
+				(SupportedExtensionsVersions[i].APIVersion >= UAVOverlapRequiredVersion.APIVersion) &&
+				(SupportedExtensionsVersions[i].Revision >= UAVOverlapRequiredVersion.Revision) &&
+				!bIntelSupportsUAVOverlap)
+			{
+				UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions loaded requested version for UAVOverlap: %u.%u.%u"),
+					SupportedExtensionsVersions[i].HWFeatureLevel,
+					SupportedExtensionsVersions[i].APIVersion,
+					SupportedExtensionsVersions[i].Revision);
 
-				if (SUCCEEDED(IntelExtensions.GetSupportedVersions(Direct3DDevice, &SupportedVersionCount, SupportedVersions)))
+				if (SupportedExtensionsVersions[i].HWFeatureLevel >= INTCExtensionInfo.RequestedExtensionVersion.HWFeatureLevel &&
+					SupportedExtensionsVersions[i].APIVersion >= INTCExtensionInfo.RequestedExtensionVersion.APIVersion &&
+					SupportedExtensionsVersions[i].Revision >= INTCExtensionInfo.RequestedExtensionVersion.Revision)
 				{
-					SupportedVersions = new uint32[SupportedVersionCount];
-					if (SUCCEEDED(IntelExtensions.GetSupportedVersions(Direct3DDevice, &SupportedVersionCount, SupportedVersions)))
-					{
-						for (uint32 i = 0; i < SupportedVersionCount; i++)
-						{
-							INTC::ExtensionVersion* SupportedVersion = (INTC::ExtensionVersion*)&SupportedVersions[i];
-
-							UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions support version Full=%d, Major=%d, Minor=%d, Revision=%d"), SupportedVersion->FullVersion, SupportedVersion->Version.Major, SupportedVersion->Version.Minor, SupportedVersion->Version.Revision);
-
-							if (IntelExtensions.ExtensionInfo.requestedExtensionVersion.FullVersion == SupportedVersion->FullVersion)
-							{
-								bRequiredVersionFound = true;
-								break;
-							}
-						}
-					}
+					INTCExtensionInfo.RequestedExtensionVersion = SupportedExtensionsVersions[i];
 				}
+				bIntelSupportsUAVOverlap = true;
+			}
 
-				if (SupportedVersions)
-				{
-					delete[] SupportedVersions;
-				}
-
-				if (!bRequiredVersionFound)
-				{
-					UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework version required is not supported"));
-					return;
-				}
-
-				IntelExtensions.ExtensionAppInfo.pEngineName = L"Unreal Engine";
-				IntelExtensions.ExtensionAppInfo.engineVersion = 4;
-
-				FMemory::Memset(&IntelExtensions.D3D11ExtensionFuncs, 0, sizeof(INTC::D3D11_EXTENSION_FUNCS_01000001));
-				IntelD3D11ExtensionFuncs = &IntelExtensions.D3D11ExtensionFuncs;
-
-				HRESULT hr = IntelExtensions.CreateDeviceExtensionContext(
-					Direct3DDevice,
-					&IntelExtensionContext,
-					(void**)&IntelD3D11ExtensionFuncs,
-					sizeof(INTC::D3D11_EXTENSION_FUNCS_01000001),
-					&IntelExtensions.ExtensionInfo,
-					&IntelExtensions.ExtensionAppInfo);
-
-				if (hr == S_OK)
-				{
-					if (IntelExtensions.ExtensionInfo.returnedExtensionVersion.FullVersion == IntelExtensions.ExtensionInfo.requestedExtensionVersion.FullVersion)
-					{
-						bEnabled = true;
-						UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework enabled"));
-					}
-					else
-					{
-						UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework version required is not supported"));
-					}
-				}
-				else if (hr == E_OUTOFMEMORY)
-				{
-					UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework not supported by driver"));
-				}
-				else if (hr == E_INVALIDARG)
-				{
-					UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework passed invalid creation arguments"));
-				}
-
-				if (!bEnabled)
-				{
-					StopIntelExtensions();
-				}
+			if (GRHISupportsAtomicUInt64 && bIntelSupportsUAVOverlap)
+			{
+				break;
 			}
 		}
-		else
-		{
-			UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework not found"));
-		}
+	}
+
+	check(IntelExtensionContext == nullptr);
+	INTCExtensionAppInfo AppInfo = {};
+	AppInfo.pEngineName = TEXT("Unreal Engine");
+	AppInfo.EngineVersion = 5;
+
+	HRESULT hr = INTC_D3D11_CreateDeviceExtensionContext(Direct3DDevice, &IntelExtensionContext, &INTCExtensionInfo, &AppInfo);
+	bool bEnabled = false;
+	if (SUCCEEDED(hr))
+	{
+		bEnabled = true;
+		UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework enabled"));
+	}
+	else if (hr == E_OUTOFMEMORY)
+	{
+		UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework not supported by driver"));
+	}
+	else if (hr == E_INVALIDARG)
+	{
+		UE_LOG(LogD3D11RHI, Log, TEXT("Intel Extensions Framework passed invalid creation arguments"));
+	}
+
+	if (!bEnabled)
+	{
+		GRHISupportsAtomicUInt64 = false;
+		StopIntelExtensions();
+	}
+
+	if (SupportedExtensionsVersions != nullptr)
+	{
+		delete[] SupportedExtensionsVersions;
 	}
 }
 
 void FD3D11DynamicRHI::StopIntelExtensions()
 {
-	if(IntelExtensionContext && IntelExtensions.DestroyDeviceExtensionContext && bAllowVendorDevice)
+	if(IntelExtensionContext && bAllowVendorDevice)
 	{
-		HRESULT hr = IntelExtensions.DestroyDeviceExtensionContext(&IntelExtensionContext);
+		HRESULT hr = INTC_DestroyDeviceExtensionContext(&IntelExtensionContext);
 
 		if (hr == S_OK)
 		{
@@ -1482,194 +1608,22 @@ void FD3D11DynamicRHI::StopIntelExtensions()
 		}
 
 		IntelExtensionContext = nullptr;
-		IntelD3D11ExtensionFuncs = nullptr;
 	}
 }
 #endif // INTEL_EXTENSIONS
-
-#if INTEL_METRICSDISCOVERY
-static int32 GetIntelDriverBuildNumber(const FString& VerStr)
-{
-	int32 LastDotPos, FirstDotPos;
-
-	// https://www.intel.com/content/www/us/en/support/articles/000005654/graphics.html
-	// Older Windows drivers follow 9.18.10.3310 where the last four digits are the driver number
-	// Newer Windows drivers follow 27.20.100.9466 where the last seven digits are the driver number
-	// Linux drivers follow 6000.0001 where the last four digits are the driver number. Not supported here
-
-	// Chop off the last 8 characters. On older drivers the first character will be a dot instead of a number
-	FString RightPart = VerStr.Right(8);
-	RightPart.FindChar(TEXT('.'), FirstDotPos);
-
-	if (FirstDotPos == 0)
-	{
-		// Old driver naming, use last four digits
-		if (VerStr.FindLastChar(TEXT('.'), LastDotPos) && FCString::IsNumeric(&VerStr[LastDotPos + 1]))
-		{
-			return FCString::Atoi(&VerStr[LastDotPos + 1]);
-		}
-	}
-	else
-	{
-		// New driver naming, use seven digits after removing dot
-		RightPart = RightPart.Replace(TEXT("."), TEXT(""));
-		if (FCString::IsNumeric(&RightPart[0]) && RightPart.Len() == 7)
-		{
-			return FCString::Atoi(&RightPart[0]);
-		}
-	}
-	return -1;
-}
-
-void FD3D11DynamicRHI::CreateIntelMetricsDiscovery()
-{
-	// Per Jeff from Intel: So far drivers >6323 are known working
-	if (IsRHIDeviceIntel() && GetIntelDriverBuildNumber(GRHIAdapterUserDriverVersion) > 6323)
-	{
-		IntelMetricsDiscoveryHandle = MakeUnique<Intel_MetricsDiscovery_ContextData>();
-
-		MDH_Context::Result Result;
-		Result = IntelMetricsDiscoveryHandle->MDHContext.Initialize();
-
-		if (Result != MDH_Context::Result::RESULT_OK)
-		{
-			UE_LOG(LogD3D11RHI, Log, TEXT("[IntelMetricsDiscovery] Failed to initialize context. Result=%08x"), Result);
-			GDX11IntelMetricsDiscoveryEnabled = false;
-			IntelMetricsDiscoveryHandle = nullptr;
-			return;
-		}
-
-		GDX11IntelMetricsDiscoveryEnabled = true;
-	}
-	else
-	{
-		GDX11IntelMetricsDiscoveryEnabled = false;
-	}
-}
-
-void FD3D11DynamicRHI::StartIntelMetricsDiscovery()
-{
-	bool bShouldStart = GDX11IntelMetricsDiscoveryEnabled
-		&& IntelMetricsDiscoveryHandle;
-
-	if (bShouldStart)
-	{
-		IntelMetricsDiscoveryHandle->MDConcurrentGroup = MDH_FindConcurrentGroup(IntelMetricsDiscoveryHandle->MDHContext.MDDevice, "OA");
-		IntelMetricsDiscoveryHandle->MDMetricSet = MDH_FindMetricSet(IntelMetricsDiscoveryHandle->MDConcurrentGroup, "RenderBasic");
-		auto GPUFreqValue = MDH_FindGlobalSymbol(IntelMetricsDiscoveryHandle->MDHContext.MDDevice, "GpuTimestampFrequency");
-		IntelMetricsDiscoveryHandle->GPUTimeIndex = MDH_FindMetric(IntelMetricsDiscoveryHandle->MDMetricSet, "GpuTime");
-
-		if (IntelMetricsDiscoveryHandle->GPUTimeIndex == UINT32_MAX ||
-			GPUFreqValue.ValueType == MetricsDiscovery::VALUE_TYPE_LAST)
-		{
-			UE_LOG(LogD3D11RHI, Log, TEXT("[IntelMetricsDiscovery] Failed to initialize metrics set"));
-			IntelMetricsDiscoveryHandle->MDHContext.Finalize();
-			GDX11IntelMetricsDiscoveryEnabled = false;
-			return;
-		}
-
-		if(!IntelMetricsDiscoveryHandle->MDHRangeMetrics.Initialize(IntelMetricsDiscoveryHandle->MDHContext.MDDevice,
-			IntelMetricsDiscoveryHandle->MDConcurrentGroup, IntelMetricsDiscoveryHandle->MDMetricSet, GetDevice(), 2))
-		{
-			UE_LOG(LogD3D11RHI, Log, TEXT("[IntelMetricsDiscovery] Failed to initialize range metrics"));
-			IntelMetricsDiscoveryHandle->MDHContext.Finalize();
-			GDX11IntelMetricsDiscoveryEnabled = false;
-			IntelMetricsDiscoveryHandle = nullptr;
-			return;
-		}
-
-		IntelMetricsDiscoveryHandle->bFrameBegun = false;
-
-		UE_LOG(LogD3D11RHI, Log, TEXT("[IntelMetricsDiscovery] Started"));
-	}
-}
-
-void FD3D11DynamicRHI::StopIntelMetricsDiscovery()
-{
-	bool bShouldStop = GDX11IntelMetricsDiscoveryEnabled
-		&& IntelMetricsDiscoveryHandle;
-
-	if (bShouldStop)
-	{
-		IntelMetricsDiscoveryHandle->MDHRangeMetrics.Finalize();
-		IntelMetricsDiscoveryHandle->MDHContext.Finalize();
-
-		UE_LOG(LogD3D11RHI, Log, TEXT("[IntelMetricsDiscovery] Stopped"));
-		GDX11IntelMetricsDiscoveryEnabled = false;
-		IntelMetricsDiscoveryHandle = nullptr;
-	}
-}
-
-void FD3D11DynamicRHI::IntelMetricsDicoveryBeginFrame()
-{
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_IntelMetricsDiscovery_BeginFrame);
-
-	bool bShouldBeginFrame = GDX11IntelMetricsDiscoveryEnabled
-		&& IntelMetricsDiscoveryHandle && !IntelMetricsDiscoveryHandle->bFrameBegun;
-
-	if (bShouldBeginFrame)
-	{
-		IntelMetricsDiscoveryHandle->ReportInUse = IntelMetricsDiscoveryHandle->ReportInUse == 1 ? 0 : 1;
-		IntelMetricsDiscoveryHandle->bFrameBegun = true;
-		IntelMetricsDiscoveryHandle->MDHRangeMetrics.BeginRange(GetDeviceContext(), IntelMetricsDiscoveryHandle->ReportInUse);
-	}
-}
-
-void FD3D11DynamicRHI::IntelMetricsDicoveryEndFrame()
-{
-	QUICK_SCOPE_CYCLE_COUNTER(STAT_IntelMetricsDiscovery_EndFrame);
-
-	bool bShouldEndFrame = GDX11IntelMetricsDiscoveryEnabled
-		&& IntelMetricsDiscoveryHandle && IntelMetricsDiscoveryHandle->bFrameBegun;
-
-	if (bShouldEndFrame)
-	{
-		IntelMetricsDiscoveryHandle->MDHRangeMetrics.EndRange(GetDeviceContext(), IntelMetricsDiscoveryHandle->ReportInUse);
-		IntelMetricsDiscoveryHandle->bFrameBegun = false;
-
-		static bool bFirstFrame = true;
-
-		if (!bFirstFrame)
-		{
-			uint32 ReportToGather = IntelMetricsDiscoveryHandle->ReportInUse == 1 ? 0 : 1;
-
-			IntelMetricsDiscoveryHandle->MDHRangeMetrics.GetRangeReports(GetDeviceContext(), ReportToGather, 1);
-			IntelMetricsDiscoveryHandle->MDHRangeMetrics.ExecuteRangeEquations(GetDeviceContext(), ReportToGather, 1);
-
-			auto GPUTime = IntelMetricsDiscoveryHandle->MDHRangeMetrics.ReportValues.GetValue(ReportToGather, IntelMetricsDiscoveryHandle->GPUTimeIndex).ValueUInt64;
-
-			uint64 CyclesPerMs = 0.001 / FPlatformTime::GetSecondsPerCycle();
-			uint64 GPUTimeMs = GPUTime / (1000 * 1000);
-			uint64 GPUCycles = GPUTimeMs * CyclesPerMs;
-
-			IntelMetricsDiscoveryHandle->LastGPUTime = GPUCycles;
-		}
-
-		if (bFirstFrame)
-		{
-			bFirstFrame = false;
-		}
-	}
-}
-
-double FD3D11DynamicRHI::IntelMetricsDicoveryGetGPUTime()
-{
-	return IntelMetricsDiscoveryHandle->LastGPUTime;
-}
-#endif // INTEL_METRICSDISCOVERY
 
 void FD3D11DynamicRHI::InitD3DDevice()
 {
 	check( IsInGameThread() );
 
-	// Wait for the rendering thread to go idle.
-	SCOPED_SUSPEND_RENDERING_THREAD(false);
-
-	// UE4 no longer supports clean-up and recovery on DEVICE_LOST.
+	// UE no longer supports clean-up and recovery on DEVICE_LOST.
 
 	// If we don't have a device yet, either because this is the first viewport, or the old device was removed, create a device.
 	if(!Direct3DDevice)
 	{
+		// Wait for the rendering thread to go idle.
+		FlushRenderingCommands();
+
 		UE_LOG(LogD3D11RHI, Log, TEXT("Creating new Direct3DDevice"));
 		check(!GIsRHIInitialized);
 
@@ -1684,7 +1638,28 @@ void FD3D11DynamicRHI::InitD3DDevice()
 		uint32 DeviceFlags = D3D11RHI_ShouldAllowAsyncResourceCreation() ? 0 : D3D11_CREATE_DEVICE_SINGLETHREADED;
 
 		// Use a debug device if specified on the command line.
-		const bool bWithD3DDebug = D3D11RHI_ShouldCreateWithD3DDebug();
+		if (FParse::Param(FCommandLine::Get(), TEXT("d3ddebug")) ||
+			FParse::Param(FCommandLine::Get(), TEXT("d3debug")) ||
+			FParse::Param(FCommandLine::Get(), TEXT("dxdebug")))
+		{
+			GD3D11DebugCvar->Set(1, ECVF_SetByCommandline);
+		}
+		if (FParse::Param(FCommandLine::Get(), TEXT("d3dlogwarnings")))
+		{
+			GD3D11DebugCvar->Set(2, ECVF_SetByCommandline);
+		}
+		if (FParse::Param(FCommandLine::Get(), TEXT("d3dbreakonwarning")))
+		{
+			GD3D11DebugCvar->Set(3, ECVF_SetByCommandline);
+		}
+		if (FParse::Param(FCommandLine::Get(), TEXT("d3dcontinueonerrors")))
+		{
+			GD3D11DebugCvar->Set(4, ECVF_SetByCommandline);
+		}
+		GRHIGlobals.IsDebugLayerEnabled = (GD3D11DebugCvar.GetValueOnAnyThread() > 0);
+
+		const bool bWithD3DDebug = GRHIGlobals.IsDebugLayerEnabled;
+		FGenericCrashContext::SetEngineData(TEXT("RHI.D3DDebug"), bWithD3DDebug ? TEXT("true") : TEXT("false"));
 
 		if (bWithD3DDebug)
 		{
@@ -1699,26 +1674,11 @@ void FD3D11DynamicRHI::InitD3DDevice()
 
 		GTexturePoolSize = 0;
 
-		GRHIAdapterName = Adapter.DXGIAdapterDesc.Description;
-		GRHIVendorId = Adapter.DXGIAdapterDesc.VendorId;
-		GRHIDeviceId = Adapter.DXGIAdapterDesc.DeviceId;
-		GRHIDeviceRevision = Adapter.DXGIAdapterDesc.Revision;
+		// turn off creation on other threads for NVidia since a driver heuristic will notice that and make the creation synchronous, and that is not desirable given that large number of shaders will still be created on a single thread
+		GRHISupportsMultithreadedShaderCreation = !IsRHIDeviceNVIDIA();
+		GRequiredRecursiveShaders = ERecursiveShader::Resolve | ERecursiveShader::Clear;
 
-		UE_LOG(LogD3D11RHI, Log, TEXT("    GPU DeviceId: 0x%x (for the marketing name, search the web for \"GPU Device Id\")"), 
-			Adapter.DXGIAdapterDesc.DeviceId);
-
-		// get driver version (todo: share with other RHIs)
-		{
-			FGPUDriverInfo GPUDriverInfo = FPlatformMisc::GetGPUDriverInfo(GRHIAdapterName);
-
-			GRHIAdapterUserDriverVersion = GPUDriverInfo.UserDriverVersion;
-			GRHIAdapterInternalDriverVersion = GPUDriverInfo.InternalDriverVersion;
-			GRHIAdapterDriverDate = GPUDriverInfo.DriverDate;
-
-			UE_LOG(LogD3D11RHI, Log, TEXT("    Adapter Name: %s"), *GRHIAdapterName);
-			UE_LOG(LogD3D11RHI, Log, TEXT("  Driver Version: %s (internal:%s, unified:%s)"), *GRHIAdapterUserDriverVersion, *GRHIAdapterInternalDriverVersion, *GPUDriverInfo.GetUnifiedDriverVersion());
-			UE_LOG(LogD3D11RHI, Log, TEXT("     Driver Date: %s"), *GRHIAdapterDriverDate);
-		}
+		UE_LOG(LogD3D11RHI, Log, TEXT("    GPU DeviceId: 0x%x (for the marketing name, search the web for \"GPU Device Id\")"), Adapter.DXGIAdapterDesc.DeviceId);
 
 		// Issue: 32bit windows doesn't report 64bit value, we take what we get.
 		FD3D11GlobalStats::GDedicatedVideoMemory = int64(Adapter.DXGIAdapterDesc.DedicatedVideoMemory);
@@ -1734,7 +1694,7 @@ void FD3D11DynamicRHI::InitD3DDevice()
 		TRefCountPtr<IDXGIAdapter3> DxgiAdapter3;
 		DXGI_QUERY_VIDEO_MEMORY_INFO LocalVideoMemoryInfo;
 		FD3D11GlobalStats::GTotalGraphicsMemory = 0;
-		if ( IsRHIDeviceIntel() )
+		if (Adapter.bIsIntegrated)
 		{
 			// It's all system memory.
 			FD3D11GlobalStats::GTotalGraphicsMemory = FD3D11GlobalStats::GDedicatedVideoMemory;
@@ -1798,10 +1758,10 @@ void FD3D11DynamicRHI::InitD3DDevice()
 #ifdef AMD_AGS_API
 		if (IsRHIDeviceAMD() && bAllowVendorDevice)
 		{
-			check(AmdAgsContext == NULL);
+			check(AmdAgsContext == nullptr);
 
 			// agsInit should be called before D3D device creation
-			if (agsInit(AGS_MAKE_VERSION(AMD_AGS_VERSION_MAJOR, AMD_AGS_VERSION_MINOR, AMD_AGS_VERSION_PATCH), nullptr, &AmdAgsContext, &AmdInfo.AmdGpuInfo) == AGS_SUCCESS)
+			if (agsInitialize(AGS_MAKE_VERSION(AMD_AGS_VERSION_MAJOR, AMD_AGS_VERSION_MINOR, AMD_AGS_VERSION_PATCH), nullptr, &AmdAgsContext, &AmdInfo.AmdGpuInfo) == AGS_SUCCESS)
 			{
 				AmdInfo.AmdAgsContext = AmdAgsContext;
 				bool bFoundMatchingDevice = false;
@@ -1824,7 +1784,7 @@ void FD3D11DynamicRHI::InitD3DDevice()
 				FMemory::Memzero(&AmdInfo, sizeof(AmdInfo));
 				// If agsInit returns anything but AGS_SUCCESS, the context pointer should be
 				// guaranteed to be NULL, but we'll set it here explicitly, just to be safe.
-				AmdAgsContext = NULL;
+				AmdAgsContext = nullptr;
 			}
 		}
 		else
@@ -1840,11 +1800,12 @@ void FD3D11DynamicRHI::InitD3DDevice()
 			DeviceFlags &= ~D3D11_CREATE_DEVICE_SINGLETHREADED;
 		}
 
-		uint32 AmdSupportedExtensionFlags = 0;
 		bool bDeviceCreated = false;
 #ifdef AMD_AGS_API
 		if (IsRHIDeviceAMD() && AmdAgsContext && bAllowVendorDevice)
 		{
+			uint32 AmdSupportedExtensionFlags = 0;
+
 			UE_LOG(LogD3D11RHI, Log, TEXT("Creating D3DDevice with AMD AGS, using adapter:"));
 			LogDXGIAdapterDesc(Adapter.DXGIAdapterDesc);
 
@@ -1857,7 +1818,7 @@ void FD3D11DynamicRHI::InitD3DDevice()
 				&FeatureLevel,
 				1,
 				D3D11_SDK_VERSION,
-				NULL
+				nullptr
 			};
 
 			// Engine registration can be disabled via console var. Also disable automatically if ShaderDevelopmentMode is on.
@@ -1869,8 +1830,7 @@ void FD3D11DynamicRHI::InitD3DDevice()
 
 			AGSDX11ExtensionParams AmdExtensionParams;
 			FMemory::Memzero(&AmdExtensionParams, sizeof(AmdExtensionParams));
-			// The AMD shader extensions are currently unused in UE4, but we have to set the associated UAV slot
-			// to something in the call below (default is 7, so just use that)
+			// Set the reserved UAV slot - matching the other vendor extensions.
 			AmdExtensionParams.uavSlot = 7;
 			// Disable old-style, "automatic" alternate-frame rendering (AFR) MGPU driver behavior
 			AmdExtensionParams.crossfireMode = AGS_CROSSFIRE_MODE_DISABLE;
@@ -1886,7 +1846,32 @@ void FD3D11DynamicRHI::InitD3DDevice()
 			AmdExtensionParams.pAppName = bDisableAppRegistration ? TEXT("") : FApp::GetProjectName();
 			AmdExtensionParams.appVersion = AGS_UNSPECIFIED_VERSION;
 
+			// agsDriverExtensionsDX11_CreateDevice will not check for the DriverStore if there is not already a D3D11 device
+			// initialized. In order to use AMF we require libraries to also be loaded from the driver store so we temporarily
+			// initialize a device here and destroy it once the agsDriverExtensionsDX11_CreateDevice is run.
+			ID3D11Device* D3DDevicePreload = nullptr;
+			ID3D11DeviceContext* D3DDeviceContextPreload = nullptr;
+
+			int32 NumAllowedFeatureLevels = 1;
+			D3D_FEATURE_LEVEL OutFeatureLevel = FeatureLevel;
+			HRESULT Result = D3D11CreateDevice(
+				Adapter.DXGIAdapter,
+				D3D_DRIVER_TYPE_UNKNOWN,
+				nullptr,
+				DeviceFlags,
+				&FeatureLevel,
+				NumAllowedFeatureLevels,
+				D3D11_SDK_VERSION,
+				&D3DDevicePreload,
+				&ActualFeatureLevel,
+				&D3DDeviceContextPreload);
+			if (FAILED(Result))
+			{
+				UE_LOG(LogD3D11RHI, Error, TEXT("Failed to load the AMD DriverStore library"));
+			}
+
 			AGSDX11ReturnedParams DeviceCreationReturnedParams;
+			FMemory::Memzero(&DeviceCreationReturnedParams, sizeof(DeviceCreationReturnedParams));
 			AGSReturnCode DeviceCreation =
 				agsDriverExtensionsDX11_CreateDevice(
 					AmdAgsContext,
@@ -1894,37 +1879,37 @@ void FD3D11DynamicRHI::InitD3DDevice()
 					&AmdExtensionParams,
 					&DeviceCreationReturnedParams);
 
+			// Destroy temporary device and context			
+			D3DDevicePreload->Release();
+			D3DDevicePreload = nullptr;
+
+			D3DDeviceContextPreload->Release();
+			D3DDeviceContextPreload = nullptr;
+
 			if (DeviceCreation == AGS_SUCCESS)
 			{
 				Direct3DDevice = DeviceCreationReturnedParams.pDevice;
-				ActualFeatureLevel = DeviceCreationReturnedParams.FeatureLevel;
+				ActualFeatureLevel = DeviceCreationReturnedParams.featureLevel;
 				Direct3DDeviceIMContext = DeviceCreationReturnedParams.pImmediateContext;
-				AmdSupportedExtensionFlags = DeviceCreationReturnedParams.extensionsSupported;
+				AmdSupportedExtensionFlags = *(uint32*)&DeviceCreationReturnedParams.extensionsSupported;
 				bDeviceCreated = true;
 				UE_LOG(LogD3D11RHI, Log, TEXT("Created device via AGS, feature level %s, supported extensions %x."), GetFeatureLevelString(ActualFeatureLevel), AmdSupportedExtensionFlags);
 			}
 			else
 			{
-				agsDeInit(AmdAgsContext);
-				AmdAgsContext = NULL;
+				agsDeInitialize(AmdAgsContext);
+				AmdAgsContext = nullptr;
 				AmdSupportedExtensionFlags = 0;
 				FMemory::Memzero(&AmdInfo, sizeof(AmdInfo));
-				GRHIDeviceIsAMDPreGCNArchitecture = false;				
+				GRHIDeviceIsAMDPreGCNArchitecture = false;
 				UE_LOG(LogD3D11RHI, Warning, TEXT("Failed to create device via AGS, code %d."), DeviceCreation);
 			}
 
-			GRHISupportsAtomicUInt64 = (AmdSupportedExtensionFlags & AGS_DX11_EXTENSION_INTRINSIC_ATOMIC_U64) != 0;
-			GSupportsDepthBoundsTest = (AmdSupportedExtensionFlags & AGS_DX11_EXTENSION_DEPTH_BOUNDS_TEST) != 0;
+			GRHISupportsAtomicUInt64 = DeviceCreationReturnedParams.extensionsSupported.intrinsics19 != 0;  // "intrinsics19" includes AtomicU64
+			GSupportsDepthBoundsTest = DeviceCreationReturnedParams.extensionsSupported.depthBoundsTest != 0;
 		}
 #endif //AMD_AGS_API
 
-#if INTEL_METRICSDISCOVERY
-		if (IsRHIDeviceIntel() && bAllowVendorDevice)
-		{
-			// Needs to be done before device creation
-			CreateIntelMetricsDiscovery();
-		}
-#endif
 		if (IsRHIDeviceNVIDIA())
 		{
 			// crash dump hooks need to be attached before device creation
@@ -1954,9 +1939,75 @@ void FD3D11DynamicRHI::InitD3DDevice()
 		// We should get the feature level we asked for as earlier we checked to ensure it is supported.
 		check(ActualFeatureLevel == FeatureLevel);
 
+		if (bWithD3DDebug)
+		{
+			TRefCountPtr<ID3D11InfoQueue> d3dInfoQueue;
+			if (SUCCEEDED(GD3D11RHI->GetDevice()->QueryInterface(__uuidof(ID3D11InfoQueue), (void**)d3dInfoQueue.GetInitReference())))
+			{
+				/* install callback */
+				ExceptionHandlerHandle = AddVectoredExceptionHandler(1, D3D11VectoredExceptionHandler);
+
+				/* filter messages */
+				const bool bLogWarnings = D3D11_ShouldBreakOnD3DDebugWarnings() || D3D11_ShouldLogD3DDebugWarnings();
+				D3D11_INFO_QUEUE_FILTER NewFilter;
+				FMemory::Memzero(&NewFilter, sizeof(NewFilter));
+
+				D3D11_MESSAGE_SEVERITY DenySeverity[] = { D3D11_MESSAGE_SEVERITY_INFO, D3D11_MESSAGE_SEVERITY_WARNING };
+				NewFilter.DenyList.NumSeverities = 1 + (bLogWarnings ? 0 : 1);
+				NewFilter.DenyList.pSeverityList = DenySeverity;
+
+
+				// Be sure to carefully comment the reason for any additions here!  Someone should be able to look at it later and get an idea of whether it is still necessary.
+				D3D11_MESSAGE_ID DenyIds[]  = {
+					// OMSETRENDERTARGETS_INVALIDVIEW - d3d will complain if depth and color targets don't have the exact same dimensions, but actually
+					//	if the color target is smaller then things are ok.  So turn off this error.  There is a manual check in FD3D11DynamicRHI::SetRenderTarget
+					//	that tests for depth smaller than color and MSAA settings to match.
+					D3D11_MESSAGE_ID_OMSETRENDERTARGETS_INVALIDVIEW, 
+
+					// QUERY_BEGIN_ABANDONING_PREVIOUS_RESULTS - The RHI exposes the interface to make and issue queries and a separate interface to use that data.
+					//		Currently there is a situation where queries are issued and the results may be ignored on purpose.  Filtering out this message so it doesn't
+					//		swarm the debug spew and mask other important warnings
+					D3D11_MESSAGE_ID_QUERY_BEGIN_ABANDONING_PREVIOUS_RESULTS,
+					D3D11_MESSAGE_ID_QUERY_END_ABANDONING_PREVIOUS_RESULTS,
+
+					// D3D11_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT - This is a warning that gets triggered if you use a null vertex declaration,
+					//       which we want to do when the vertex shader is generating vertices based on ID.
+					D3D11_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT,
+
+					// D3D11_MESSAGE_ID_DEVICE_DRAW_INDEX_BUFFER_TOO_SMALL - This warning gets triggered by Slate draws which are actually using a valid index range.
+					//		The invalid warning seems to only happen when VS 2012 is installed.  Reported to MS.  
+					//		There is now an assert in DrawIndexedPrimitive to catch any valid errors reading from the index buffer outside of range.
+					D3D11_MESSAGE_ID_DEVICE_DRAW_INDEX_BUFFER_TOO_SMALL,
+
+					// D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET - This warning gets triggered by shadow depth rendering because the shader outputs
+					//		a color but we don't bind a color render target. That is safe as writes to unbound render targets are discarded.
+					//		Also, batched elements triggers it when rendering outside of scene rendering as it outputs to the GBuffer containing normals which is not bound.
+					(D3D11_MESSAGE_ID)3146081, // D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET,
+
+					// Spams constantly as we change the debug name on rendertargets that get reused.
+					D3D11_MESSAGE_ID_SETPRIVATEDATA_CHANGINGPARAMS, 
+				};
+
+				NewFilter.DenyList.NumIDs = sizeof(DenyIds)/sizeof(D3D11_MESSAGE_ID);
+				NewFilter.DenyList.pIDList = (D3D11_MESSAGE_ID*)&DenyIds;
+
+				d3dInfoQueue->PushStorageFilter(&NewFilter);
+
+				/* ensure callback is called */
+				d3dInfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_CORRUPTION, D3D11_ShouldBreakOnD3DDebugErrors());
+				d3dInfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR, D3D11_ShouldBreakOnD3DDebugErrors());
+				if (bLogWarnings)
+				{
+					d3dInfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, D3D11_ShouldBreakOnD3DDebugWarnings());
+				}
+			}
+		}
+
+		GRHIPersistentThreadGroupCount = 1440; // TODO: Revisit based on vendor/adapter/perf query
+
 		StateCache.Init(Direct3DDeviceIMContext);
 
-#if (UE_BUILD_SHIPPING && WITH_EDITOR) && PLATFORM_WINDOWS && !PLATFORM_64BITS
+#if (UE_BUILD_SHIPPING && WITH_EDITOR) && !PLATFORM_64BITS
 		// Disable PIX for windows in the shipping editor builds
 		D3DPERF_SetOptions(1);
 #endif
@@ -1971,6 +2022,8 @@ void FD3D11DynamicRHI::InitD3DDevice()
 		{
 			GRHISupportsAsyncTextureCreation = false;
 		}
+
+		GRHISupportsMultithreadedResources = GRHISupportsAsyncTextureCreation;
 
 #ifdef NVAPI_INTERFACE
 
@@ -2007,16 +2060,6 @@ void FD3D11DynamicRHI::InitD3DDevice()
 
 		CACHE_NV_AFTERMATH_ENABLED();
 
-		if (GRHISupportsAtomicUInt64)
-		{
-			UE_LOG(LogD3D11RHI, Log, TEXT("RHI has support for 64 bit atomics"));
-		}
-		else
-		{
-			UE_LOG(LogD3D11RHI, Log, TEXT("RHI does not have support for 64 bit atomics"));
-		}
-
-#if PLATFORM_WINDOWS
 		IUnknown* RenderDoc;
 		IID RenderDocID;
 		if (SUCCEEDED(IIDFromString(L"{A7AA6116-9C8D-4BBA-9083-B4D816B71B78}", &RenderDocID)))
@@ -2038,40 +2081,6 @@ void FD3D11DynamicRHI::InitD3DDevice()
 			// Running under Intel GPA, so enable capturing mode
 			GDynamicRHI->EnableIdealGPUCaptureOptions(true);
 		}
-#endif
-
-
-#if WITH_SLI
-		GNumAlternateFrameRenderingGroups = 1;
-
-#ifdef NVAPI_INTERFACE
-		if (!bRenderDoc && IsRHIDeviceNVIDIA())
-		{
-			NV_GET_CURRENT_SLI_STATE SLICaps;
-			FMemory::Memzero(SLICaps);
-			SLICaps.version = NV_GET_CURRENT_SLI_STATE_VER;
-			NvAPI_Status SLIStatus = NvAPI_D3D_GetCurrentSLIState(Direct3DDevice, &SLICaps);
-			if (SLIStatus == NVAPI_OK)
-			{
-				if (SLICaps.numAFRGroups > 1)
-				{
-					GNumAlternateFrameRenderingGroups = SLICaps.numAFRGroups;
-					UE_LOG(LogD3D11RHI, Log, TEXT("Detected %i SLI GPUs Setting GNumAlternateFrameRenderingGroups to: %i."), SLICaps.numAFRGroups, GNumAlternateFrameRenderingGroups);
-				}
-			}
-			else
-			{
-				UE_LOG(LogD3D11RHI, Log, TEXT("NvAPI_D3D_GetCurrentSLIState failed: 0x%x"), (int32)SLIStatus);
-			}
-		}
-#endif //NVAPI_INTERFACE
-
-		if (GDX11ForcedGPUs > 0)
-		{
-			GNumAlternateFrameRenderingGroups = GDX11ForcedGPUs;
-			UE_LOG(LogD3D11RHI, Log, TEXT("r.DX11NumForcedGPUs forcing GNumAlternateFrameRenderingGroups to: %i "), GDX11ForcedGPUs);
-		}
-#endif // WITH_SLI
 
 		if (IsRHIDeviceNVIDIA())
 		{
@@ -2089,96 +2098,27 @@ void FD3D11DynamicRHI::InitD3DDevice()
 		}
 #endif // INTEL_EXTENSIONS
 
-#if INTEL_METRICSDISCOVERY
-		if (IsRHIDeviceIntel() && bAllowVendorDevice)
+		if (GRHISupportsAtomicUInt64)
 		{
-			StartIntelMetricsDiscovery();
-
-			if (GDX11IntelMetricsDiscoveryEnabled)
-			{
-				GRHISupportsDynamicResolution = true;
-				GRHISupportsFrameCyclesBubblesRemoval = true;
-			}
+			UE_LOG(LogD3D11RHI, Log, TEXT("RHI has support for 64 bit atomics"));
 		}
-#endif // INTEL_METRICSDISCOVERY
+		else
+		{
+			UE_LOG(LogD3D11RHI, Log, TEXT("RHI does not have support for 64 bit atomics"));
+		}
 
 		// Disable the RHI thread by default for devices that will likely suffer in performance
-		if (IsRHIDeviceIntel() || FPlatformMisc::NumberOfCores() < 4)
+		if (Adapter.bIsIntegrated || FPlatformMisc::NumberOfCores() < 4)
 		{
 			GRHISupportsRHIThread = false;
 		}
 
 		SetupAfterDeviceCreation();
-
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
-		// Add some filter outs for known debug spew messages (that we don't care about)
-		if(DeviceFlags & D3D11_CREATE_DEVICE_DEBUG)
-		{
-			TRefCountPtr<ID3D11InfoQueue> InfoQueue;
-			VERIFYD3D11RESULT_EX(Direct3DDevice->QueryInterface( IID_ID3D11InfoQueue, (void**)InfoQueue.GetInitReference()), Direct3DDevice);
-			if (InfoQueue)
-			{
-				D3D11_INFO_QUEUE_FILTER NewFilter;
-				FMemory::Memzero(&NewFilter,sizeof(NewFilter));
-
-				// Turn off info msgs as these get really spewy
-				D3D11_MESSAGE_SEVERITY DenySeverity = D3D11_MESSAGE_SEVERITY_INFO;
-				NewFilter.DenyList.NumSeverities = 1;
-				NewFilter.DenyList.pSeverityList = &DenySeverity;
-
-				// Be sure to carefully comment the reason for any additions here!  Someone should be able to look at it later and get an idea of whether it is still necessary.
-				D3D11_MESSAGE_ID DenyIds[]  = {
-					// OMSETRENDERTARGETS_INVALIDVIEW - d3d will complain if depth and color targets don't have the exact same dimensions, but actually
-					//	if the color target is smaller then things are ok.  So turn off this error.  There is a manual check in FD3D11DynamicRHI::SetRenderTarget
-					//	that tests for depth smaller than color and MSAA settings to match.
-					D3D11_MESSAGE_ID_OMSETRENDERTARGETS_INVALIDVIEW, 
-
-					// QUERY_BEGIN_ABANDONING_PREVIOUS_RESULTS - The RHI exposes the interface to make and issue queries and a separate interface to use that data.
-					//		Currently there is a situation where queries are issued and the results may be ignored on purpose.  Filtering out this message so it doesn't
-					//		swarm the debug spew and mask other important warnings
-					D3D11_MESSAGE_ID_QUERY_BEGIN_ABANDONING_PREVIOUS_RESULTS,
-					D3D11_MESSAGE_ID_QUERY_END_ABANDONING_PREVIOUS_RESULTS,
-
-					// D3D11_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT - This is a warning that gets triggered if you use a null vertex declaration,
-					//       which we want to do when the vertex shader is generating vertices based on ID.
-					D3D11_MESSAGE_ID_CREATEINPUTLAYOUT_EMPTY_LAYOUT,
-
-					// D3D11_MESSAGE_ID_DEVICE_DRAW_INDEX_BUFFER_TOO_SMALL - This warning gets triggered by Slate draws which are actually using a valid index range.
-					//		The invalid warning seems to only happen when VS 2012 is installed.  Reported to MS.  
-					//		There is now an assert in DrawIndexedPrimitive to catch any valid errors reading from the index buffer outside of range.
-					D3D11_MESSAGE_ID_DEVICE_DRAW_INDEX_BUFFER_TOO_SMALL,
-
-					// D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET - This warning gets triggered by shadow depth rendering because the shader outputs
-					//		a color but we don't bind a color render target. That is safe as writes to unbound render targets are discarded.
-					//		Also, batched elements triggers it when rendering outside of scene rendering as it outputs to the GBuffer containing normals which is not bound.
-					(D3D11_MESSAGE_ID)3146081, // D3D11_MESSAGE_ID_DEVICE_DRAW_RENDERTARGETVIEW_NOT_SET,
-
-					// Spams constantly as we change the debug name on rendertargets that get reused.
-					D3D11_MESSAGE_ID_SETPRIVATEDATA_CHANGINGPARAMS, 
-				};
-
-				NewFilter.DenyList.NumIDs = sizeof(DenyIds)/sizeof(D3D11_MESSAGE_ID);
-				NewFilter.DenyList.pIDList = (D3D11_MESSAGE_ID*)&DenyIds;
-
-				InfoQueue->PushStorageFilter(&NewFilter);
-
-				// Break on D3D debug errors.
-				InfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_ERROR,true);
-
-				// Enable this to break on a specific id in order to quickly get a callstack
-				//InfoQueue->SetBreakOnID(D3D11_MESSAGE_ID_DEVICE_DRAW_CONSTANT_BUFFER_TOO_SMALL, true);
-
-				if (FParse::Param(FCommandLine::Get(),TEXT("d3dbreakonwarning")))
-				{
-					InfoQueue->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING,true);
-				}
-			}
-		}
+		GRHISupportsHDROutput = SetupDisplayHDRMetaData();
+#if !WITH_EDITOR
+		// cooked game D3D11 still needs to rely on vendor extensions to trigger HDR, which will then require exclusive fullscreen state / special RT formats
+		GRHIHDRNeedsVendorExtensions = true;
 #endif
-		
-		{
-			GRHISupportsHDROutput = SupportsHDROutput(this);
-		}
 
 		// Add device overclock state to crash context
 		const bool bIsGPUOverclocked = IsDeviceOverclocked();
@@ -2189,10 +2129,9 @@ void FD3D11DynamicRHI::InitD3DDevice()
 		GRHISupportsTextureStreaming = true;
 		GRHISupportsFirstInstance = true;
 		GRHINeedsExtraDeletionLatency = false;
+		GRHISupportsEfficientUploadOnResourceCreation = true;
 
-		// Command lists need the validation RHI context if enabled, so call the global scope version of RHIGetDefaultContext() and RHIGetDefaultAsyncComputeContext().
-		GRHICommandList.GetImmediateCommandList().SetContext(::RHIGetDefaultContext());
-		GRHICommandList.GetImmediateAsyncComputeCommandList().SetComputeContext(::RHIGetDefaultAsyncComputeContext());
+		GRHICommandList.GetImmediateCommandList().InitializeImmediateContexts();
 
 		// Now that the driver extensions have been initialized, turn on UAV overlap for the first time.
 		EnableUAVOverlap();
@@ -2226,6 +2165,16 @@ void FD3D11DynamicRHI::RHIPerFrameRHIFlushComplete()
 		}
 	}
 #endif
+
+	for (int32 Frequency = 0; Frequency < SF_NumStandardFrequencies; ++Frequency)
+	{
+		DirtyUniformBuffers[Frequency] = 0;
+
+		for (int32 BindIndex = 0; BindIndex < MAX_UNIFORM_BUFFERS_PER_SHADER_STAGE; ++BindIndex)
+		{
+			BoundUniformBuffers[Frequency][BindIndex] = nullptr;
+		}
+	}
 }
 
 /**
@@ -2333,66 +2282,70 @@ bool FD3D11DynamicRHI::RHIGetAvailableResolutions(FScreenResolutionArray& Resolu
 			continue;
 		}
 
-		// It's still invalid to "succeed" and be given no modes.
-		checkf(NumModes > 0, TEXT("No display modes found for DXGI_FORMAT_R8G8B8A8_UNORM or DXGI_FORMAT_B8G8R8A8_UNORM formats!"));
-
-		DXGI_MODE_DESC* ModeList = new DXGI_MODE_DESC[ NumModes ];
-		VERIFYD3D11RESULT(Output->GetDisplayModeList(Format, 0, &NumModes, ModeList));
-
-		for(uint32 m = 0;m < NumModes;m++)
+		if (NumModes > 0)
 		{
-			CA_SUPPRESS(6385);
-			if (((int32)ModeList[m].Width >= MinAllowableResolutionX) &&
-				((int32)ModeList[m].Width <= MaxAllowableResolutionX) &&
-				((int32)ModeList[m].Height >= MinAllowableResolutionY) &&
-				((int32)ModeList[m].Height <= MaxAllowableResolutionY)
-				)
+			DXGI_MODE_DESC* ModeList = new DXGI_MODE_DESC[NumModes];
+			VERIFYD3D11RESULT(Output->GetDisplayModeList(Format, 0, &NumModes, ModeList));
+
+			for (uint32 m = 0; m < NumModes; m++)
 			{
-				bool bAddIt = true;
-				if (bIgnoreRefreshRate == false)
+				CA_SUPPRESS(6385);
+				if (((int32)ModeList[m].Width >= MinAllowableResolutionX) &&
+					((int32)ModeList[m].Width <= MaxAllowableResolutionX) &&
+					((int32)ModeList[m].Height >= MinAllowableResolutionY) &&
+					((int32)ModeList[m].Height <= MaxAllowableResolutionY)
+					)
 				{
-					if (((int32)ModeList[m].RefreshRate.Numerator < MinAllowableRefreshRate * ModeList[m].RefreshRate.Denominator) ||
-						((int32)ModeList[m].RefreshRate.Numerator > MaxAllowableRefreshRate * ModeList[m].RefreshRate.Denominator)
-						)
+					bool bAddIt = true;
+					if (bIgnoreRefreshRate == false)
 					{
-						continue;
-					}
-				}
-				else
-				{
-					// See if it is in the list already
-					for (int32 CheckIndex = 0; CheckIndex < Resolutions.Num(); CheckIndex++)
-					{
-						FScreenResolutionRHI& CheckResolution = Resolutions[CheckIndex];
-						if ((CheckResolution.Width == ModeList[m].Width) &&
-							(CheckResolution.Height == ModeList[m].Height))
+						if (((int32)ModeList[m].RefreshRate.Numerator < MinAllowableRefreshRate * ModeList[m].RefreshRate.Denominator) ||
+							((int32)ModeList[m].RefreshRate.Numerator > MaxAllowableRefreshRate * ModeList[m].RefreshRate.Denominator)
+							)
 						{
-							// Already in the list...
-							bAddIt = false;
-							break;
+							continue;
 						}
 					}
-				}
+					else
+					{
+						// See if it is in the list already
+						for (int32 CheckIndex = 0; CheckIndex < Resolutions.Num(); CheckIndex++)
+						{
+							FScreenResolutionRHI& CheckResolution = Resolutions[CheckIndex];
+							if ((CheckResolution.Width == ModeList[m].Width) &&
+								(CheckResolution.Height == ModeList[m].Height))
+							{
+								// Already in the list...
+								bAddIt = false;
+								break;
+							}
+						}
+					}
 
-				if (bAddIt)
-				{
-					// Add the mode to the list
-					int32 Temp2Index = Resolutions.AddZeroed();
-					FScreenResolutionRHI& ScreenResolution = Resolutions[Temp2Index];
+					if (bAddIt)
+					{
+						// Add the mode to the list
+						int32 Temp2Index = Resolutions.AddZeroed();
+						FScreenResolutionRHI& ScreenResolution = Resolutions[Temp2Index];
 
-					ScreenResolution.Width = ModeList[m].Width;
-					ScreenResolution.Height = ModeList[m].Height;
-					ScreenResolution.RefreshRate = ModeList[m].RefreshRate.Numerator / ModeList[m].RefreshRate.Denominator;
+						ScreenResolution.Width = ModeList[m].Width;
+						ScreenResolution.Height = ModeList[m].Height;
+						ScreenResolution.RefreshRate = ModeList[m].RefreshRate.Numerator / ModeList[m].RefreshRate.Denominator;
+					}
 				}
 			}
-		}
 
-		delete[] ModeList;
+			delete[] ModeList;
+		}
+		else
+		{
+			UE_LOG(LogD3D11RHI, Warning, TEXT("No display modes found for the standard format DXGI_FORMAT_R8G8B8A8_UNORM!"));
+		}
 
 		++CurrentOutput;
 
 	// TODO: Cap at 1 for default output
 	} while(CurrentOutput < 1); //-V654
 
-	return true;
+	return Resolutions.Num() > 0;
 }

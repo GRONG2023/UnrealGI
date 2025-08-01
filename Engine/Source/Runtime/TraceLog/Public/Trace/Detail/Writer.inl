@@ -4,27 +4,28 @@
 
 #if UE_TRACE_ENABLED
 
+namespace UE {
 namespace Trace {
 namespace Private {
 
 ////////////////////////////////////////////////////////////////////////////////
 struct FWriteBuffer
 {
-	uint32						Overflow;
-	uint16						Size;
-	uint16						ThreadId;
+	uint8						Overflow[8];
 	uint64						PrevTimestamp;
 	FWriteBuffer* __restrict	NextThread;
-	FWriteBuffer* __restrict	NextBuffer;
+	FWriteBuffer* volatile		NextBuffer;
 	uint8* __restrict			Cursor;
 	uint8* __restrict volatile	Committed;
 	uint8* __restrict			Reaped;
-	UPTRINT volatile			EtxOffset;
+	int32 volatile				EtxOffset;
+	uint16						Size;
+	uint16						ThreadId;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 TRACELOG_API uint64				TimeGetTimestamp();
-TRACELOG_API FWriteBuffer*		Writer_NextBuffer(int32);
+TRACELOG_API FWriteBuffer*		Writer_NextBuffer();
 TRACELOG_API FWriteBuffer*		Writer_GetBuffer();
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -46,5 +47,6 @@ inline uint64 Writer_GetTimestamp(FWriteBuffer* Buffer)
 
 } // namespace Private
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED

@@ -6,6 +6,8 @@
 
 #pragma once
 
+// IWYU pragma: begin_keep
+
 #include "Misc/MonolithicHeaderBoilerplate.h"
 MONOLITHIC_HEADER_BOILERPLATE()
 
@@ -70,7 +72,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "BatchedElements.h"
 #include "MeshBatch.h"
 #include "SceneUtils.h"
-#include "TessellationRendering.h"
 #include "MeshParticleVertexFactory.h"
 #include "ParticleHelper.h"
 #include "Distributions.h"
@@ -114,7 +115,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "GameFramework/HUD.h"
-#include "Atmosphere/AtmosphericFog.h"
 #include "Engine/ExponentialHeightFog.h"
 #include "GameFramework/GameSession.h"
 #include "GameFramework/GameState.h"
@@ -164,7 +164,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "GameFramework/RotatingMovementComponent.h"
 #include "Components/PawnNoiseEmitterComponent.h"
 #include "PhysicsEngine/PhysicsHandleComponent.h"
-#include "Atmosphere/AtmosphericFogComponent.h"
 #include "Sound/SoundAttenuation.h"
 #include "Components/ChildActorComponent.h"
 #include "Components/DecalComponent.h"
@@ -208,8 +207,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "Animation/AnimSequenceBase.h"
 #include "AlphaBlend.h"
 #include "Animation/AnimBlueprintGeneratedClass.h"
-#include "Camera/CameraAnim.h"
-#include "Camera/CameraAnimInst.h"
 #include "Camera/CameraModifier.h"
 #include "Camera/CameraShakeBase.h"
 #include "Camera/CameraModifier_CameraShake.h"
@@ -334,3 +331,5 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "TimerManager.h"
 #include "SlateCore.h"
 #include "SlateBasics.h"
+
+// IWYU pragma: end_keep

@@ -4,13 +4,14 @@
 
 #include "AnimNode_SkeletalControlBase.h"
 #include "CCDIK.h"
+#include "EngineDefines.h"
 #include "AnimNode_CCDIK.generated.h"
 
 /**
 *	Controller which implements the CCDIK IK approximation algorithm
 */
 USTRUCT()
-struct ANIMGRAPHRUNTIME_API FAnimNode_CCDIK : public FAnimNode_SkeletalControlBase
+struct FAnimNode_CCDIK : public FAnimNode_SkeletalControlBase
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -56,20 +57,20 @@ private:
 	TArray<float> RotationLimitPerJoints;
 
 public:
-	FAnimNode_CCDIK();
+	ANIMGRAPHRUNTIME_API FAnimNode_CCDIK();
 
 	// FAnimNode_Base interface
-	virtual void GatherDebugData(FNodeDebugData& DebugData) override;
+	ANIMGRAPHRUNTIME_API virtual void GatherDebugData(FNodeDebugData& DebugData) override;
 	// End of FAnimNode_Base interface
 
 	// FAnimNode_SkeletalControlBase interface
-	virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
-	virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void EvaluateSkeletalControl_AnyThread(FComponentSpacePoseContext& Output, TArray<FBoneTransform>& OutBoneTransforms) override;
+	ANIMGRAPHRUNTIME_API virtual bool IsValidToEvaluate(const USkeleton* Skeleton, const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
 
 private:
 	// FAnimNode_SkeletalControlBase interface
-	virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
+	ANIMGRAPHRUNTIME_API virtual void InitializeBoneReferences(const FBoneContainer& RequiredBones) override;
 	// End of FAnimNode_SkeletalControlBase interface
 
 	// Convenience function to get current (pre-translation iteration) component space location of bone by bone index
@@ -79,10 +80,10 @@ private:
 
 public:
 #if WITH_EDITOR
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#if UE_ENABLE_DEBUG_DRAWING
 	TArray<FVector> DebugLines;
-#endif // #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+#endif // #if UE_ENABLE_DEBUG_DRAWING
 	// resize rotation limit array based on set up
-	void ResizeRotationLimitPerJoints(int32 NewSize);
+	ANIMGRAPHRUNTIME_API void ResizeRotationLimitPerJoints(int32 NewSize);
 #endif
 };

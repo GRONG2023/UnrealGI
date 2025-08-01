@@ -2,13 +2,14 @@
 
 #pragma once
 #include "KismetSystemLibrary.h"
+#include "Engine/HitResult.h"
 #include "GameplayStaticsTypes.generated.h"
 
 // Trace option to SuggestProjectileVelocity functions.
 UENUM()
 namespace ESuggestProjVelocityTraceOption
 {
-	enum Type
+	enum Type : int
 	{
 		DoNotTrace,
 		TraceFullPath,
@@ -56,7 +57,7 @@ struct FPredictProjectilePathParams
 
 	// Actors to ignore when tracing with collision.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=PredictProjectilePathParams, AdvancedDisplay)
-	TArray<AActor*> ActorsToIgnore;
+	TArray<TObjectPtr<AActor>> ActorsToIgnore;
 
 	// Determines size of each sub-step in the simulation (chopping up MaxSimTime). Recommended between 10 to 30 depending on desired quality versus performance.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=PredictProjectilePathParams, AdvancedDisplay)

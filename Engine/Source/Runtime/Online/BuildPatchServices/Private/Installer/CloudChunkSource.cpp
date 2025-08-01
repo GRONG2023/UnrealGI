@@ -17,6 +17,7 @@
 #include "Installer/MessagePump.h"
 #include "Common/StatsCollector.h"
 #include "Interfaces/IBuildInstaller.h"
+#include "Interfaces/IBuildInstallerSharedContext.h"
 #include "BuildPatchUtil.h"
 #include "Installer/Statistics/DownloadServiceStatistics.h"
 
@@ -106,7 +107,7 @@ namespace BuildPatchServices
 			FDownloadDelegates(FCloudChunkSource& InCloudChunkSource);
 
 		public:
-			void OnDownloadProgress(int32 RequestId, int32 BytesSoFar);
+			void OnDownloadProgress(int32 RequestId, uint64 BytesSoFar);
 			void OnDownloadComplete(int32 RequestId, const FDownloadRef& Download);
 
 		private:
@@ -145,14 +146,17 @@ namespace BuildPatchServices
 		virtual void SetUnavailableChunksCallback(TFunction<void(TSet<FGuid>)> Callback) override;
 		// IChunkSource interface end.
 
+		// ICloudChunkSource interface begin.
+		virtual void ThreadRun() override;
+		// ICloudChunkSource interface end.
+
 	private:
 		void EnsureAquiring(const FGuid& DataId);
 		const FString& GetCloudRoot(int32 RetryNum) const;
 		float GetRetryDelay(int32 RetryNum);
 		EBuildPatchDownloadHealth GetDownloadHealth(bool bIsDisconnected, float ChunkSuccessRate);
 		FGuid GetNextTask(const TMap<FGuid, FTaskInfo>& TaskInfos, const TMap<int32, FGuid>& InFlightDownloads, const TSet<FGuid>& TotalRequiredChunks, const TSet<FGuid>& PriorityRequests, const TSet<FGuid>& FailedDownloads, const TSet<FGuid>& Stored, TArray<FGuid>& DownloadQueue, EBuildPatchDownloadHealth DownloadHealth);
-		void ThreadRun();
-		void OnDownloadProgress(int32 RequestId, int32 BytesSoFar);
+		void OnDownloadProgress(int32 RequestId, uint64 BytesSoFar);
 		void OnDownloadComplete(int32 RequestId, const FDownloadRef& Download);
 
 	private:
@@ -168,7 +172,9 @@ namespace BuildPatchServices
 		ICloudChunkSourceStat* CloudChunkSourceStat;
 		IBuildManifestSet* ManifestSet;
 		const TSet<FGuid> InitialDownloadSet;
+		TPromise<void> Promise;
 		TFuture<void> Future;
+		IBuildInstallerThread* Thread = nullptr;
 		FDownloadProgressDelegate OnDownloadProgressDelegate;
 		FDownloadCompleteDelegate OnDownloadCompleteDelegate;
 
@@ -203,7 +209,7 @@ namespace BuildPatchServices
 	{
 	}
 
-	void FCloudChunkSource::FDownloadDelegates::OnDownloadProgress(int32 RequestId, int32 BytesSoFar)
+	void FCloudChunkSource::FDownloadDelegates::OnDownloadProgress(int32 RequestId, uint64 BytesSoFar)
 	{
 		CloudChunkSource.OnDownloadProgress(RequestId, BytesSoFar);
 	}
@@ -234,7 +240,9 @@ namespace BuildPatchServices
 		, CloudChunkSourceStat(InCloudChunkSourceStat)
 		, ManifestSet(InManifestSet)
 		, InitialDownloadSet(MoveTemp(InInitialDownloadSet))
+		, Promise()
 		, Future()
+		, Thread(nullptr)
 		, OnDownloadProgressDelegate(FDownloadProgressDelegate::CreateThreadSafeSP(DownloadDelegates, &FDownloadDelegates::OnDownloadProgress))
 		, OnDownloadCompleteDelegate(FDownloadCompleteDelegate::CreateThreadSafeSP(DownloadDelegates, &FDownloadDelegates::OnDownloadComplete))
 		, CyclesAtLastData(0)
@@ -246,14 +254,25 @@ namespace BuildPatchServices
 		, RequestedDownloads()
 		, DownloadCount(InDownloadConnectionCount)
 	{
-		TFunction<void()> Task = [this]() { return ThreadRun(); };
-		Future = Async(EAsyncExecution::Thread, MoveTemp(Task));
+		Future = Promise.GetFuture();
+		if (Configuration.bRunOwnThread)
+		{
+			check(Configuration.SharedContext);
+			Thread = Configuration.SharedContext->CreateThread();
+			Thread->RunTask([this]() { ThreadRun(); });
+		}
 	}
 
 	FCloudChunkSource::~FCloudChunkSource()
 	{
 		bShouldAbort = true;
 		Future.Wait();
+
+		if (Thread)
+		{
+			Configuration.SharedContext->ReleaseThread(Thread);
+			Thread = nullptr;
+		}
 	}
 
 	void FCloudChunkSource::SetPaused(bool bInIsPaused)
@@ -394,7 +413,7 @@ namespace BuildPatchServices
 				TFunction<bool(const FGuid&)> RemovePredicate = [&TaskInfos, &FailedDownloads, &Stored](const FGuid& ChunkId) { return TaskInfos.Contains(ChunkId) || FailedDownloads.Contains(ChunkId) || Stored.Contains(ChunkId); };
 				DownloadQueue.RemoveAll(RemovePredicate);
 				// Clamp to configured max.
-				DownloadQueue.SetNum(FMath::Min(DownloadQueue.Num(), Configuration.PreFetchMaximum), false);
+				DownloadQueue.SetNum(FMath::Min(DownloadQueue.Num(), Configuration.PreFetchMaximum), EAllowShrinking::No);
 				// Reverse so the array is a stack for popping.
 				Algo::Reverse(DownloadQueue);
 			}
@@ -402,8 +421,7 @@ namespace BuildPatchServices
 			// Return the next chunk in the queue
 			if (DownloadQueue.Num() > 0)
 			{
-				const bool bAllowShrinking = false;
-				return DownloadQueue.Pop(bAllowShrinking);
+				return DownloadQueue.Pop(EAllowShrinking::No);
 			}
 		}
 
@@ -431,10 +449,8 @@ namespace BuildPatchServices
 
 		// Chunk Uri Processing
 		typedef TTuple<FGuid, FChunkUriResponse> FGuidUriResponse;
-		typedef TQueue<FGuidUriResponse> FGuidUriResponseQueue;
-		TSharedRef<FGuidUriResponseQueue, ESPMode::ThreadSafe> ChunkUriResponsesRef = MakeShareable(new FGuidUriResponseQueue());
-		TWeakPtr<FGuidUriResponseQueue, ESPMode::ThreadSafe> WeakChunkUriResponses = ChunkUriResponsesRef;
-		FGuidUriResponseQueue& ChunkUriResponses = ChunkUriResponsesRef.Get();
+		typedef TQueue<FGuidUriResponse, EQueueMode::Mpsc> FGuidUriResponseQueue; // use Mpsc, message pump callback may be on this thread or message pump thread
+		TSharedRef<FGuidUriResponseQueue> ChunkUriResponsesRef = MakeShared<FGuidUriResponseQueue>();
 		TSet<FGuid> RequestedChunkUris;
 		TMap<FGuid, FChunkUriResponse> ChunkUris;
 
@@ -472,7 +488,10 @@ namespace BuildPatchServices
 				}
 			}
 			// Select the next X chunks that are for downloading, so we can request URIs.
-			TFunction<bool(const FGuid&)> SelectPredicate = [&TotalRequiredChunks, &RequestedChunkUris](const FGuid& ChunkId) { return TotalRequiredChunks.Contains(ChunkId) && !RequestedChunkUris.Contains(ChunkId); };
+			TFunction<bool(const FGuid&)> SelectPredicate = [&TotalRequiredChunks, &RequestedChunkUris](const FGuid& ChunkId) 
+			{ 
+				return TotalRequiredChunks.Contains(ChunkId) && !RequestedChunkUris.Contains(ChunkId); 
+			};
 			TArray<FGuid> ChunkUrisToRequest = ChunkReferenceTracker->SelectFromNextReferences(Configuration.PreFetchMaximum, SelectPredicate);
 			for (const FGuid& ChunkUriToRequest : ChunkUrisToRequest)
 			{
@@ -481,21 +500,17 @@ namespace BuildPatchServices
 
 				const FTaskInfo* Info = TaskInfos.Find(ChunkUriToRequest);
 				ChunkUriRequest.CloudDirectory = GetCloudRoot(Info ? Info->RetryNum : 0 );
-				ChunkUriRequest.RelativePath = ManifestSet->GetDataFilename(TEXT(""), ChunkUriToRequest);
+				ChunkUriRequest.RelativePath = ManifestSet->GetDataFilename(ChunkUriToRequest);
 				ChunkUriRequest.RelativePath.RemoveFromStart(TEXT("/"));
 
-				MessagePump->SendRequest(ChunkUriRequest, [WeakChunkUriResponses, ChunkUriToRequest](FChunkUriResponse Response)
+				MessagePump->SendRequest(ChunkUriRequest, [ChunkUriResponsesRef, ChunkUriToRequest](FChunkUriResponse Response)
 				{
-					TSharedPtr<FGuidUriResponseQueue, ESPMode::ThreadSafe> ChunkUriResponsesPtr = WeakChunkUriResponses.Pin();
-					if (ChunkUriResponsesPtr.IsValid())
-					{
-						ChunkUriResponsesPtr->Enqueue(FGuidUriResponse(ChunkUriToRequest, MoveTemp(Response)));
-					}
+					ChunkUriResponsesRef->Enqueue(FGuidUriResponse(ChunkUriToRequest, MoveTemp(Response)));
 				});
 			}
 			// Process new chunk uri responses.
 			FGuidUriResponse ChunkUriResponse;
-			while (ChunkUriResponses.Dequeue(ChunkUriResponse))
+			for (FGuidUriResponseQueue& ChunkUriResponses = ChunkUriResponsesRef.Get(); ChunkUriResponses.Dequeue(ChunkUriResponse);)
 			{
 				ChunkUris.Add(MoveTemp(ChunkUriResponse.Get<0>()), MoveTemp(ChunkUriResponse.Get<1>()));
 			}
@@ -576,11 +591,13 @@ namespace BuildPatchServices
 					else
 					{
 						CloudChunkSourceStat->OnDownloadCorrupt(DownloadId, TaskInfo.UrlUsed, LoadResult);
+						UE_LOG(LogCloudChunkSource, Error, TEXT("CORRUPT: %s"), *TaskInfo.UrlUsed);
 					}
 				}
 				else
 				{
 					CloudChunkSourceStat->OnDownloadFailed(DownloadId, TaskInfo.UrlUsed);
+					UE_LOG(LogCloudChunkSource, Error, TEXT("FAILED: %s"), *TaskInfo.UrlUsed);
 				}
 
 				// Handle failed
@@ -705,13 +722,25 @@ namespace BuildPatchServices
 			Platform->Sleep(0.01f);
 		}
 
+		// Abandon in flight downloads if should abort.
+		if (bShouldAbort)
+		{
+			for (const TPair<int32, FGuid>& InFlightDownload : InFlightDownloads)
+			{
+				DownloadService->RequestAbandon(InFlightDownload.Key);
+			}
+		}
+
 		// Provide final stat values.
 		CloudChunkSourceStat->OnDownloadHealthUpdated(TrackedDownloadHealth);
 		CloudChunkSourceStat->OnSuccessRateUpdated(ChunkSuccessRate.GetOverall());
 		CloudChunkSourceStat->OnActiveRequestCountUpdated(0);
+
+		// The promise should always be set, even if not needed as destruction of an unset promise will assert.
+		Promise.SetValue();
 	}
 
-	void FCloudChunkSource::OnDownloadProgress(int32 RequestId, int32 BytesSoFar)
+	void FCloudChunkSource::OnDownloadProgress(int32 RequestId, uint64 BytesSoFar)
 	{
 		FPlatformAtomics::InterlockedExchange(&CyclesAtLastData, FStatsCollector::GetCycles());
 	}
@@ -724,6 +753,8 @@ namespace BuildPatchServices
 
 	ICloudChunkSource* FCloudChunkSourceFactory::Create(FCloudSourceConfig Configuration, IPlatform* Platform, IChunkStore* ChunkStore, IDownloadService* DownloadService, IChunkReferenceTracker* ChunkReferenceTracker, IChunkDataSerialization* ChunkDataSerialization, IMessagePump* MessagePump, IInstallerError* InstallerError, IDownloadConnectionCount* ConnectionCount, ICloudChunkSourceStat* CloudChunkSourceStat, IBuildManifestSet* ManifestSet, TSet<FGuid> InitialDownloadSet)
 	{
+		UE_LOG(LogCloudChunkSource, Verbose, TEXT("FCloudChunkSourceFactory::Create for %d roots"), Configuration.CloudRoots.Num());
+
 		check(Platform != nullptr);
 		check(ChunkStore != nullptr);
 		check(DownloadService != nullptr);

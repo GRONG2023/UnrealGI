@@ -1,19 +1,15 @@
 ﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 using System;
-using System.Collections.Generic;
 using System.Drawing;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
 namespace UnrealGameSync
 {
 	class ErrorPanel : StatusPanel, IMainWindowTabPanel
 	{
-		public ErrorPanel(UserSelectedProjectSettings InSelectedProject)
+		public ErrorPanel(UserSelectedProjectSettings inSelectedProject)
 		{
-			SelectedProject = InSelectedProject;
+			SelectedProject = inSelectedProject;
 			SetProjectLogo(Properties.Resources.DefaultErrorLogo, false);
 		}
 
@@ -58,15 +54,9 @@ namespace UnrealGameSync
 		{
 		}
 
-		public Color? TintColor
-		{
-			get { return null; }
-		}
+		public Color? TintColor => null;
 
-		public Tuple<TaskbarState, float> DesiredTaskbarState
-		{
-			get { return Tuple.Create(TaskbarState.Normal, 0.0f); }
-		}
+		public Tuple<TaskbarState, float> DesiredTaskbarState => Tuple.Create(TaskbarState.Normal, 0.0f);
 
 		public UserSelectedProjectSettings SelectedProject
 		{

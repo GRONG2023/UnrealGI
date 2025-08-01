@@ -6,7 +6,6 @@ using System.Runtime.InteropServices;
 
 namespace DatasmithSolidworks
 {
-    [ComVisible(false)]
     public class FVec3
     {
         public float X = 0f;
@@ -59,9 +58,29 @@ namespace DatasmithSolidworks
 			Z = (float)Data[2];
         }
 
-        public override bool Equals(object InObj)
+        public static bool operator ==(FVec3 A, FVec3 B)
         {
-            return base.Equals(InObj);
+	        if (ReferenceEquals(A, B))
+	        {
+				return true;
+	        }
+
+	        if (A is null || B is null)
+	        {
+		        return false;
+	        }
+
+	        return A.X == B.X && A.Y == B.Y && A.Z == B.Z;
+        }
+
+        public static bool operator !=(FVec3 A, FVec3 B)
+        {
+	        return !(A == B);
+        }
+
+        public override bool Equals(object Obj)
+        {
+            return Obj is FVec3 Other && this == Other;
         }
 
         public override int GetHashCode()
@@ -108,19 +127,6 @@ namespace DatasmithSolidworks
                 (X == float.NaN) ? 0.0f : X,
                 (Y == float.NaN) ? 0.0f : Y,
                 (Z == float.NaN) ? 0.0f : Z);
-        }
-
-        public static bool operator !=(FVec3 A, FVec3 B)
-        {
-            return !(A == B);
-        }
-
-        public static bool operator ==(FVec3 V1, FVec3 V2)
-        {
-            return 
-				MathUtils.Equals(V1.X, V2.X) && 
-				MathUtils.Equals(V1.Y, V2.Y) &&
-				MathUtils.Equals(V1.Z, V2.Z);
         }
 
         public static bool operator <(FVec3 V1, FVec3 V2)
@@ -180,6 +186,11 @@ namespace DatasmithSolidworks
         public static FVec3 operator -(FVec3 V, FVec3 M)
         {
             return new FVec3(V.X - M.X, V.Y - M.Y, V.Z - M.Z);
+        }
+
+        public static FVec3 operator -(FVec3 V)
+        {
+	        return new FVec3(-V.X, -V.Y, -V.Z);
         }
 
         public static FVec3 operator +(FVec3 V, float M)

@@ -7,7 +7,9 @@
 #include "Widgets/SBoxPanel.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "RenderUtils.h"
+#include "RenderingThread.h"
 #include "Modules/ModuleManager.h"
+#include "AnimatedRange.h"
 #include "Audio.h"
 #include "Sound/SoundBase.h"
 #include "Sound/SoundWave.h"
@@ -15,13 +17,13 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Layout/SBox.h"
 #include "SequencerSectionPainter.h"
-#include "EditorStyleSet.h"
+#include "MVVM/ViewModels/SequencerEditorViewModel.h"
+#include "Styling/AppStyle.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Sound/SoundCue.h"
 #include "UnrealEdGlobals.h"
 #include "Tracks/MovieSceneAudioTrack.h"
 #include "Sections/MovieSceneAudioSection.h"
-#include "CommonMovieSceneTools.h"
 #include "AudioDevice.h"
 #include "Sound/SoundNodeWavePlayer.h"
 #include "Sound/SoundNodeDialoguePlayer.h"
@@ -29,15 +31,15 @@
 #include "AudioDecompress.h"
 #include "IContentBrowserSingleton.h"
 #include "ContentBrowserModule.h"
-#include "SequencerUtilities.h"
-#include "AssetRegistryModule.h"
-#include "MatineeImportTools.h"
-#include "Matinee/InterpTrackSound.h"
+#include "MVVM/Views/ViewUtilities.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ISectionLayoutBuilder.h"
+#include "MovieSceneToolHelpers.h"
+#include "Dialogs/Dialogs.h"
 
 #include "DragAndDrop/AssetDragDropOp.h"
 #include "Misc/QualifiedFrameTime.h"
-
+#include "TimeToPixel.h"
 
 #define LOCTEXT_NAMESPACE "FAudioTrackEditor"
 
@@ -172,6 +174,9 @@ private:
 	void GenerateSpline(int32 NumChannels, int32 SamplePositionOffset);
 
 private:
+
+	void DestroyTexture();
+
 	/** The section we are visualizing */
 	UMovieSceneSection& Section;
 
@@ -238,19 +243,34 @@ FAudioThumbnail::FAudioThumbnail(UMovieSceneSection& InSection, TRange<float> Dr
 
 FAudioThumbnail::~FAudioThumbnail()
 {
-	if (ShouldRender())
-	{
-		BeginReleaseResource( Texture );
-
-		FlushRenderingCommands();
-	}
-
-	if (Texture) 
-	{
-		delete Texture;
-	}
+	DestroyTexture();
 }
 
+void
+FAudioThumbnail::DestroyTexture()
+{
+	if (Texture)
+	{
+		// UE-114425: Defer the destroy until the next tick to work around the RHI getting destroyed before the render command completes.
+		FSlateTexture2DRHIRef* InTexture = Texture;
+
+		Texture = nullptr;
+
+		GEditor->GetTimerManager()->SetTimerForNextTick([this, InTexture]()
+		{
+			ENQUEUE_RENDER_COMMAND(DestroyTexture)(
+				[InTexture](FRHICommandList& RHICmdList)
+				{
+					if (InTexture)
+					{
+						InTexture->ReleaseResource();
+						delete InTexture;
+					}
+				}
+			);
+		});
+	}
+}
 
 FIntPoint FAudioThumbnail::GetSize() const {return FIntPoint(TextureSize, Section.GetTypedOuter<UMovieSceneAudioTrack>()->GetRowHeight());}
 FSlateShaderResource* FAudioThumbnail::GetViewportRenderTargetTexture() const {return Texture;}
@@ -310,6 +330,12 @@ void FAudioThumbnail::GenerateWaveformPreview(TArray<uint8>& OutData, TRange<flo
 	check(SoundWave);
 	
 	check(SoundWave->NumChannels == 1 || SoundWave->NumChannels == 2);
+
+	// If this SoundWave is generated procedurally, it's not possible to render a thumbnail.
+	if (SoundWave->bProcedural)
+	{
+		return;
+	}
 
 	uint32 SampleRate;
 	uint16 NumChannels;
@@ -606,7 +632,7 @@ void FAudioThumbnail::SampleAudio(int32 NumChannels, const int16* LookupData, in
 			int32 DataPoint = LookupData[Index + ChannelIndex];
 			int32 Sample = FMath::Clamp(FMath::TruncToInt(FMath::Abs(DataPoint) / 32768.f * MaxAmplitude), 0, MaxAmplitude - 1);
 
-			NewSample.RMS += FMath::Pow(Sample, 2);
+			NewSample.RMS += FMath::Pow(Sample, 2.f);
 			NewSample.Peak = FMath::Max(NewSample.Peak, Sample);
 			++NewSample.NumSamples;
 		}
@@ -644,9 +670,18 @@ UMovieSceneSection* FAudioSection::GetSectionObject()
 FText FAudioSection::GetSectionTitle() const
 {
 	UMovieSceneAudioSection* AudioSection = Cast<UMovieSceneAudioSection>(&Section);
-	if (AudioSection && AudioSection->GetSound())
+	if (AudioSection)
 	{
-		return FText::FromString(AudioSection->GetSound()->GetName());
+		if (AudioSection->GetSound())
+		{
+			// Return the asset name if it exists
+			return FText::FromString(AudioSection->GetSound()->GetName());
+		}
+		else
+		{
+			// There is no asset during record so return empty string
+			return FText();
+		}
 	}
 	
 	return NSLOCTEXT("FAudioSection", "NoAudioTitleName", "No Audio");
@@ -689,9 +724,13 @@ FText FAudioSection::GetSectionToolTip() const
 	return FText::GetEmpty();
 }
 
-float FAudioSection::GetSectionHeight() const
+float FAudioSection::GetSectionHeight(const UE::Sequencer::FViewDensityInfo& ViewDensity) const
 {
-	return Section.GetTypedOuter<UMovieSceneAudioTrack>()->GetRowHeight();
+	if (UMovieSceneAudioTrack* Track = Section.GetTypedOuter<UMovieSceneAudioTrack>())
+	{
+		return Track->GetRowHeight();
+	}
+	return ISequencerSection::GetSectionHeight(ViewDensity);
 }
 
 int32 FAudioSection::OnPaintSection( FSequencerSectionPainter& Painter ) const
@@ -704,7 +743,7 @@ int32 FAudioSection::OnPaintSection( FSequencerSectionPainter& Painter ) const
 		FSlateDrawElement::MakeViewport(
 			Painter.DrawElements,
 			++LayerId,
-			Painter.SectionGeometry.ToPaintGeometry(FVector2D(StoredXOffset, 0), FVector2D(StoredXSize, GetSectionHeight() + 8.f)),
+			Painter.SectionGeometry.ToPaintGeometry(FVector2f(StoredXSize, StoredSectionHeight), FSlateLayoutTransform(FVector2f(StoredXOffset, 0))),
 			WaveformThumbnail,
 			(Painter.bParentEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect) | ESlateDrawEffect::NoGamma,
 			FLinearColor::White
@@ -715,7 +754,7 @@ int32 FAudioSection::OnPaintSection( FSequencerSectionPainter& Painter ) const
 
 	const FTimeToPixel& TimeToPixelConverter = Painter.GetTimeConverter();
 
-	static const FSlateBrush* GenericDivider = FEditorStyle::GetBrush("Sequencer.GenericDivider");
+	static const FSlateBrush* GenericDivider = FAppStyle::GetBrush("Sequencer.GenericDivider");
 
 	if (!Section.HasStartFrame() || !Section.HasEndFrame())
 	{
@@ -769,6 +808,20 @@ int32 FAudioSection::OnPaintSection( FSequencerSectionPainter& Painter ) const
 
 void FAudioSection::Tick( const FGeometry& AllottedGeometry, const FGeometry& ParentGeometry, const double InCurrentTime, const float InDeltaTime )
 {
+	// Defer regenerating waveforms if playing or scrubbing
+	TSharedPtr<ISequencer> SequencerPin = Sequencer.Pin();
+	if (!SequencerPin.IsValid())
+	{
+		return;
+	}
+	
+	EMovieScenePlayerStatus::Type PlaybackState = SequencerPin->GetPlaybackStatus();
+
+	if (PlaybackState == EMovieScenePlayerStatus::Playing || PlaybackState == EMovieScenePlayerStatus::Scrubbing)
+	{
+		return;
+	}
+
 	UMovieSceneAudioSection* AudioSection = Cast<UMovieSceneAudioSection>(&Section);
 	UMovieSceneTrack* Track = Section.GetTypedOuter<UMovieSceneTrack>();
 
@@ -802,18 +855,14 @@ void FAudioSection::Tick( const FGeometry& AllottedGeometry, const FGeometry& Pa
 			!FMath::IsNearlyEqual(DrawRange.GetUpperBoundValue(), StoredDrawRange.GetUpperBoundValue()) ||
 			XOffset != StoredXOffset || XSize != StoredXSize || Track->GetColorTint() != StoredColor ||
 			StoredSoundWave != SoundWave ||
-			StoredSectionHeight != GetSectionHeight() ||
+			StoredSectionHeight != GetSectionHeight(SequencerPin->GetViewModel()->GetViewDensity()) ||
 			StoredStartOffset != AudioSection->GetStartOffset() ||
 			bStoredLooping != AudioSection->GetLooping())
 		{
 			float DisplayScale = XSize / DrawRange.Size<float>();
 
 			// Use the view range if possible, as it's much more stable than using the texture size and draw range
-			TSharedPtr<ISequencer> SequencerPin = Sequencer.Pin();
-			if (SequencerPin.IsValid())
-			{
-				DisplayScale = SequencerPin->GetViewRange().Size<float>() / ParentGeometry.GetLocalSize().X;
-			}
+			DisplayScale = SequencerPin->GetViewRange().Size<float>() / ParentGeometry.GetLocalSize().X;	
 
 			RegenerateWaveforms(DrawRange, XOffset, XSize, Track->GetColorTint(), DisplayScale);
 			StoredSoundWave = SoundWave;
@@ -879,13 +928,18 @@ void FAudioSection::SlipSection(FFrameNumber SlipTime)
 void FAudioSection::RegenerateWaveforms(TRange<float> DrawRange, int32 XOffset, int32 XSize, const FColor& ColorTint, float DisplayScale)
 {
 	UMovieSceneAudioSection* AudioSection = Cast<UMovieSceneAudioSection>(&Section);
+	TSharedPtr<ISequencer> SequencerPin = Sequencer.Pin();
+	if (!SequencerPin)
+	{
+		return;
+	}
 
 	StoredDrawRange = DrawRange;
 	StoredXOffset = XOffset;
 	StoredXSize = XSize;
 	StoredColor = ColorTint;
 	StoredStartOffset = AudioSection->GetStartOffset();
-	StoredSectionHeight = GetSectionHeight();
+	StoredSectionHeight = GetSectionHeight(SequencerPin->GetViewModel()->GetViewDensity());
 	bStoredLooping = AudioSection->GetLooping();
 
 	if (DrawRange.IsDegenerate() || DrawRange.IsEmpty() || AudioSection->GetSound() == NULL)
@@ -908,6 +962,20 @@ FAudioTrackEditor::~FAudioTrackEditor()
 {
 }
 
+void FAudioTrackEditor::OnInitialize()
+{
+	RegisterMovieSceneChangedDelegate();
+}
+
+void FAudioTrackEditor::OnRelease()
+{
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+	if (SequencerPtr.IsValid() && MovieSceneChangedDelegate.IsValid())
+	{
+		SequencerPtr->OnMovieSceneDataChanged().Remove(MovieSceneChangedDelegate);
+		MovieSceneChangedDelegate.Reset();
+	}
+}
 
 TSharedRef<ISequencerTrackEditor> FAudioTrackEditor::CreateTrackEditor( TSharedRef<ISequencer> InSequencer )
 {
@@ -919,8 +987,8 @@ void FAudioTrackEditor::BuildAddTrackMenu(FMenuBuilder& MenuBuilder)
 {
 	MenuBuilder.AddMenuEntry(
 		LOCTEXT("AddTrack", "Audio Track"),
-		LOCTEXT("AddTooltip", "Adds a new master audio track that can play sounds."),
-		FSlateIcon(FEditorStyle::GetStyleSetName(), "Sequencer.Tracks.Audio"),
+		LOCTEXT("AddTooltip", "Adds a new audio track that can play sounds."),
+		FSlateIcon(FAppStyle::GetAppStyleSetName(), "Sequencer.Tracks.Audio"),
 		FUIAction(
 			FExecuteAction::CreateRaw(this, &FAudioTrackEditor::HandleAddAudioTrackMenuEntryExecute)
 		)
@@ -952,39 +1020,9 @@ bool FAudioTrackEditor::SupportsSequence(UMovieSceneSequence* InSequence) const
 }
 
 
-void CopyInterpSoundTrack(TSharedRef<ISequencer> Sequencer, UInterpTrackSound* MatineeSoundTrack, UMovieSceneAudioTrack* AudioTrack)
-{
-	if (FMatineeImportTools::CopyInterpSoundTrack(MatineeSoundTrack, AudioTrack))
-	{
-		Sequencer.Get().NotifyMovieSceneDataChanged( EMovieSceneDataChangeType::MovieSceneStructureItemAdded );
-	}
-}
-
-void FAudioTrackEditor::BuildTrackContextMenu( FMenuBuilder& MenuBuilder, UMovieSceneTrack* Track )
-{
-	UInterpTrackSound* MatineeSoundTrack = nullptr;
-	for ( UObject* CopyPasteObject : GUnrealEd->MatineeCopyPasteBuffer )
-	{
-		MatineeSoundTrack = Cast<UInterpTrackSound>( CopyPasteObject );
-		if ( MatineeSoundTrack != nullptr )
-		{
-			break;
-		}
-	}
-	UMovieSceneAudioTrack* AudioTrack = Cast<UMovieSceneAudioTrack>( Track );
-	MenuBuilder.AddMenuEntry(
-		NSLOCTEXT( "Sequencer", "PasteMatineeSoundTrack", "Paste Matinee Sound Track" ),
-		NSLOCTEXT( "Sequencer", "PasteMatineeSoundTrackTooltip", "Pastes keys from a Matinee sound track into this track." ),
-		FSlateIcon(),
-		FUIAction(
-		FExecuteAction::CreateStatic( &CopyInterpSoundTrack, GetSequencer().ToSharedRef(), MatineeSoundTrack, AudioTrack ),
-		FCanExecuteAction::CreateLambda( [=]()->bool { return MatineeSoundTrack != nullptr && MatineeSoundTrack->Sounds.Num() > 0 && AudioTrack != nullptr; } ) ) );
-}
-
-
 const FSlateBrush* FAudioTrackEditor::GetIconBrush() const
 {
-	return FEditorStyle::GetBrush("Sequencer.Tracks.Audio");
+	return FAppStyle::GetBrush("Sequencer.Tracks.Audio");
 }
 
 bool FAudioTrackEditor::IsResizable(UMovieSceneTrack* InTrack) const
@@ -999,19 +1037,14 @@ void FAudioTrackEditor::Resize(float NewSize, UMovieSceneTrack* InTrack)
 	{
 		AudioTrack->Modify();
 
-		int32 MaxNumRows = 1;
-		for (UMovieSceneSection* Section : AudioTrack->GetAllSections())
-		{
-			MaxNumRows = FMath::Max(MaxNumRows, Section->GetRowIndex() + 1);
-		}
-
+		const int32 MaxNumRows = AudioTrack->GetMaxRowIndex() + 1;
 		AudioTrack->SetRowHeight(FMath::RoundToInt(NewSize) / MaxNumRows);
 	}
 }
 
 bool FAudioTrackEditor::OnAllowDrop(const FDragDropEvent& DragDropEvent, FSequencerDragDropParams& DragDropParams)
 {
-	if (!DragDropParams.Track->IsA(UMovieSceneAudioTrack::StaticClass()))
+	if (!DragDropParams.Track.IsValid() || !DragDropParams.Track.Get()->IsA(UMovieSceneAudioTrack::StaticClass()))
 	{
 		return false;
 	}
@@ -1023,13 +1056,30 @@ bool FAudioTrackEditor::OnAllowDrop(const FDragDropEvent& DragDropEvent, FSequen
 		return false;
 	}
 	
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+	if (!SequencerPtr)
+	{
+		return false;
+	}
+
+	UMovieSceneSequence* FocusedSequence = SequencerPtr->GetFocusedMovieSceneSequence();
+	if (!FocusedSequence)
+	{
+		return false;
+	}
+
 	TSharedPtr<FAssetDragDropOp> DragDropOp = StaticCastSharedPtr<FAssetDragDropOp>( Operation );
 
 	for (const FAssetData& AssetData : DragDropOp->GetAssets())
 	{
+		if (!MovieSceneToolHelpers::IsValidAsset(FocusedSequence, AssetData))
+		{
+			continue;
+		}
+
 		if (USoundBase* Sound = Cast<USoundBase>(AssetData.GetAsset()))
 		{
-			FFrameRate TickResolution = GetSequencer()->GetFocusedTickResolution();
+			FFrameRate TickResolution = SequencerPtr->GetFocusedTickResolution();
 			FFrameNumber LengthInFrames = TickResolution.AsFrameNumber(Sound->GetDuration());
 			DragDropParams.FrameRange = TRange<FFrameNumber>(DragDropParams.FrameNumber, DragDropParams.FrameNumber + LengthInFrames);
 			return true;
@@ -1042,7 +1092,7 @@ bool FAudioTrackEditor::OnAllowDrop(const FDragDropEvent& DragDropEvent, FSequen
 
 FReply FAudioTrackEditor::OnDrop(const FDragDropEvent& DragDropEvent, const FSequencerDragDropParams& DragDropParams)
 {
-	if (!DragDropParams.Track->IsA(UMovieSceneAudioTrack::StaticClass()))
+	if (!DragDropParams.Track.IsValid() || !DragDropParams.Track.Get()->IsA(UMovieSceneAudioTrack::StaticClass()))
 	{
 		return FReply::Unhandled();
 	}
@@ -1054,6 +1104,18 @@ FReply FAudioTrackEditor::OnDrop(const FDragDropEvent& DragDropEvent, const FSeq
 		return FReply::Unhandled();
 	}
 	
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+	if (!SequencerPtr)
+	{
+		return FReply::Unhandled();
+	}
+
+	UMovieSceneSequence* FocusedSequence = SequencerPtr->GetFocusedMovieSceneSequence();
+	if (!FocusedSequence)
+	{
+		return FReply::Unhandled();
+	}
+
 	UMovieSceneAudioTrack* AudioTrack = Cast<UMovieSceneAudioTrack>(DragDropParams.Track);
 
 	const FScopedTransaction Transaction(LOCTEXT("DropAssets", "Drop Assets"));
@@ -1065,6 +1127,11 @@ FReply FAudioTrackEditor::OnDrop(const FDragDropEvent& DragDropEvent, const FSeq
 	bool bAnyDropped = false;
 	for (const FAssetData& AssetData : DragDropOp->GetAssets())
 	{
+		if (!MovieSceneToolHelpers::IsValidAsset(FocusedSequence, AssetData))
+		{
+			continue;
+		}
+
 		USoundBase* Sound = Cast<USoundBase>(AssetData.GetAsset());
 
 		if (Sound)
@@ -1072,7 +1139,7 @@ FReply FAudioTrackEditor::OnDrop(const FDragDropEvent& DragDropEvent, const FSeq
 			if (DragDropParams.TargetObjectGuid.IsValid())
 			{
 				TArray<TWeakObjectPtr<>> OutObjects;
-				for (TWeakObjectPtr<> Object : GetSequencer()->FindObjectsInCurrentSequence(DragDropParams.TargetObjectGuid))
+				for (TWeakObjectPtr<> Object : SequencerPtr->FindObjectsInCurrentSequence(DragDropParams.TargetObjectGuid))
 				{
 					OutObjects.Add(Object);
 				}
@@ -1081,7 +1148,7 @@ FReply FAudioTrackEditor::OnDrop(const FDragDropEvent& DragDropEvent, const FSeq
 			}
 			else
 			{
-				AnimatablePropertyChanged(FOnKeyProperty::CreateRaw(this, &FAudioTrackEditor::AddNewMasterSound, Sound, AudioTrack, DragDropParams.RowIndex));
+				AnimatablePropertyChanged(FOnKeyProperty::CreateRaw(this, &FAudioTrackEditor::AddNewSound, Sound, AudioTrack, DragDropParams.RowIndex));
 			}
 
 			bAnyDropped = true;
@@ -1101,16 +1168,7 @@ TSharedRef<ISequencerSection> FAudioTrackEditor::MakeSectionInterface( UMovieSce
 
 TSharedPtr<SWidget> FAudioTrackEditor::BuildOutlinerEditWidget(const FGuid& ObjectBinding, UMovieSceneTrack* Track, const FBuildEditWidgetParams& Params)
 {
-	// Create a container edit box
-	return SNew(SHorizontalBox)
-
-	// Add the audio combo box
-	+ SHorizontalBox::Slot()
-	.AutoWidth()
-	.VAlign(VAlign_Center)
-	[
-		FSequencerUtilities::MakeAddButton(LOCTEXT("AudioText", "Audio"), FOnGetContent::CreateSP(this, &FAudioTrackEditor::BuildAudioSubMenu, FOnAssetSelected::CreateRaw(this, &FAudioTrackEditor::OnAudioAssetSelected, Track), FOnAssetEnterPressed::CreateRaw(this, &FAudioTrackEditor::OnAudioAssetEnterPressed, Track)), Params.NodeIsHovered, GetSequencer())
-	];
+	return UE::Sequencer::MakeAddButton(LOCTEXT("AudioText", "Audio"), FOnGetContent::CreateSP(this, &FAudioTrackEditor::BuildAudioSubMenu, FOnAssetSelected::CreateRaw(this, &FAudioTrackEditor::OnAudioAssetSelected, Track), FOnAssetEnterPressed::CreateRaw(this, &FAudioTrackEditor::OnAudioAssetEnterPressed, Track)), Params.ViewModel);
 }
 
 bool FAudioTrackEditor::HandleAssetAdded(UObject* Asset, const FGuid& TargetObjectGuid)
@@ -1135,7 +1193,7 @@ bool FAudioTrackEditor::HandleAssetAdded(UObject* Asset, const FGuid& TargetObje
 		else
 		{
 			int32 RowIndex = INDEX_NONE;
-			AnimatablePropertyChanged( FOnKeyProperty::CreateRaw(this, &FAudioTrackEditor::AddNewMasterSound, Sound, DummyTrack, RowIndex));
+			AnimatablePropertyChanged( FOnKeyProperty::CreateRaw(this, &FAudioTrackEditor::AddNewSound, Sound, DummyTrack, RowIndex));
 		}
 
 		return true;
@@ -1144,7 +1202,7 @@ bool FAudioTrackEditor::HandleAssetAdded(UObject* Asset, const FGuid& TargetObje
 }
 
 
-FKeyPropertyResult FAudioTrackEditor::AddNewMasterSound( FFrameNumber KeyTime, USoundBase* Sound, UMovieSceneAudioTrack* AudioTrack, int32 RowIndex )
+FKeyPropertyResult FAudioTrackEditor::AddNewSound( FFrameNumber KeyTime, USoundBase* Sound, UMovieSceneAudioTrack* AudioTrack, int32 RowIndex )
 {
 	FKeyPropertyResult KeyPropertyResult;
 
@@ -1156,11 +1214,11 @@ FKeyPropertyResult FAudioTrackEditor::AddNewMasterSound( FFrameNumber KeyTime, U
 
 	FocusedMovieScene->Modify();
 
-	FFindOrCreateMasterTrackResult<UMovieSceneAudioTrack> TrackResult;
+	FFindOrCreateRootTrackResult<UMovieSceneAudioTrack> TrackResult;
 	TrackResult.Track = AudioTrack;
 	if (!AudioTrack)
 	{
-		TrackResult = FindOrCreateMasterTrack<UMovieSceneAudioTrack>();
+		TrackResult = FindOrCreateRootTrack<UMovieSceneAudioTrack>();
 		AudioTrack = TrackResult.Track;
 	}
 
@@ -1252,7 +1310,7 @@ void FAudioTrackEditor::HandleAddAudioTrackMenuEntryExecute()
 	const FScopedTransaction Transaction(NSLOCTEXT("Sequencer", "AddAudioTrack_Transaction", "Add Audio Track"));
 	FocusedMovieScene->Modify();
 	
-	auto NewTrack = FocusedMovieScene->AddMasterTrack<UMovieSceneAudioTrack>();
+	auto NewTrack = FocusedMovieScene->AddTrack<UMovieSceneAudioTrack>();
 	ensure(NewTrack);
 
 	NewTrack->SetDisplayName(LOCTEXT("AudioTrackName", "Audio"));
@@ -1271,11 +1329,13 @@ void FAudioTrackEditor::HandleAddAttachedAudioTrackMenuEntryExecute(FMenuBuilder
 
 TSharedRef<SWidget> FAudioTrackEditor::BuildAudioSubMenu(FOnAssetSelected OnAssetSelected, FOnAssetEnterPressed OnAssetEnterPressed)
 {
+	UMovieSceneSequence* Sequence = GetSequencer() ? GetSequencer()->GetFocusedMovieSceneSequence() : nullptr;
+
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
-	TArray<FName> ClassNames;
-	ClassNames.Add(USoundBase::StaticClass()->GetFName());
-	TSet<FName> DerivedClassNames;
-	AssetRegistryModule.Get().GetDerivedClassNames(ClassNames, TSet<FName>(), DerivedClassNames);
+	TArray<FTopLevelAssetPath> ClassNames;
+	ClassNames.Add(USoundBase::StaticClass()->GetClassPathName());
+	TSet<FTopLevelAssetPath> DerivedClassNames;
+	AssetRegistryModule.Get().GetDerivedClassNames(ClassNames, TSet<FTopLevelAssetPath>(), DerivedClassNames);
 
 	FMenuBuilder MenuBuilder(true, nullptr);
 
@@ -1284,11 +1344,14 @@ TSharedRef<SWidget> FAudioTrackEditor::BuildAudioSubMenu(FOnAssetSelected OnAsse
 		AssetPickerConfig.OnAssetSelected = OnAssetSelected;
 		AssetPickerConfig.OnAssetEnterPressed = OnAssetEnterPressed;
 		AssetPickerConfig.bAllowNullSelection = false;
+		AssetPickerConfig.bAddFilterUI = true;
 		AssetPickerConfig.InitialAssetViewType = EAssetViewType::List;
-		for (auto ClassName : DerivedClassNames)
+		for (FTopLevelAssetPath ClassName : DerivedClassNames)
 		{
-			AssetPickerConfig.Filter.ClassNames.Add(ClassName);
+			AssetPickerConfig.Filter.ClassPaths.Add(ClassName);
 		}
+		AssetPickerConfig.SaveSettingsName = TEXT("SequencerAssetPicker");
+		AssetPickerConfig.AdditionalReferencingAssets.Add(FAssetData(Sequence));
 	}
 
 	FContentBrowserModule& ContentBrowserModule = FModuleManager::Get().LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
@@ -1367,7 +1430,165 @@ void FAudioTrackEditor::OnAttachedAudioEnterPressed(const TArray<FAssetData>& As
 	}
 }
 
+void FAudioTrackEditor::RegisterMovieSceneChangedDelegate()
+{
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+	if (SequencerPtr.IsValid())
+	{
+		if (SequenceContainsAudioTrack(SequencerPtr->GetRootMovieSceneSequence()))
+		{
+			// This sequence already has an audio track. Don't install the delegate.
+			return;
+		}
+	
+		// Add delegate for scene data change events
+		MovieSceneChangedDelegate = SequencerPtr->OnMovieSceneDataChanged().AddSP(this, &FAudioTrackEditor::OnMovieSceneDataChanged);
+	}
+}
 
+void FAudioTrackEditor::OnMovieSceneDataChanged(EMovieSceneDataChangeType InChangeType)
+{
+	if (InChangeType == EMovieSceneDataChangeType::MovieSceneStructureItemAdded)
+	{
+		if (CheckSequenceClockSource())
+		{
+			// The user has been notified, remove the delegate
+			TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+			if (SequencerPtr.IsValid() && MovieSceneChangedDelegate.IsValid())
+			{
+				SequencerPtr->OnMovieSceneDataChanged().Remove(MovieSceneChangedDelegate);
+				MovieSceneChangedDelegate.Reset();
+			}
+		}
+	}
+}
 
+bool FAudioTrackEditor::SequenceContainsAudioTrack(const UMovieSceneSequence* InSequence)
+{
+	if (!InSequence)
+	{
+		return false;
+	}
+
+	if (UMovieScene* MovieScene = InSequence->GetMovieScene())
+	{
+		for (const UMovieSceneTrack* Track : MovieScene->GetTracks())
+		{
+			if (Cast<UMovieSceneAudioTrack>(Track))
+			{
+				return true;
+			}
+
+			const UMovieSceneSubTrack* SubTrack = Cast<UMovieSceneSubTrack>(Track);
+			if (!SubTrack)
+			{
+				continue;
+			}
+
+			for (const UMovieSceneSection* Section : SubTrack->GetAllSections())
+			{
+				const UMovieSceneSubSection* SubSection = Cast<UMovieSceneSubSection>(Section);
+				if (!SubSection)
+				{
+					continue;
+				}
+
+				UMovieSceneSequence* SubSequence = SubSection->GetSequence();
+				if (!SubSequence)
+				{
+					continue;
+				}
+				else
+				{
+					if (SequenceContainsAudioTrack(SubSequence))
+					{
+						return true;
+					}
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+bool FAudioTrackEditor::CheckSequenceClockSource()
+{
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+	UMovieSceneSequence* RootSequence = SequencerPtr.IsValid() ? SequencerPtr->GetRootMovieSceneSequence() : nullptr;
+
+	if (RootSequence)
+	{
+		if (UMovieScene* MovieScene = RootSequence->GetMovieScene())
+		{
+			const bool bHasAudioTrack = SequenceContainsAudioTrack(RootSequence);
+			const bool bIsUsingAudioClock = (MovieScene->GetClockSource() == EUpdateClockSource::Audio);
+
+			if (bIsUsingAudioClock)
+			{
+				// If sequence is already using audio clock, we're done
+				return true;
+			} 
+			else if (bHasAudioTrack)
+			{
+				if (!MovieScene->IsReadOnly())
+				{
+					PromptUserForClockSource();
+				}
+
+				// Only prompt once per sequencer instance to avoid dialog thrashing
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+void FAudioTrackEditor::PromptUserForClockSource()
+{
+	FSuppressableWarningDialog::FSetupInfo SetupInfo(
+		LOCTEXT("AutoSelectAudioClockSource_Message", "It is recommended to use the audio clock as the clock source when working with audio tracks in sequencer for improved synchronization between animation and audio. Would you like to switch the clock source now?"),
+		LOCTEXT("AutoSelectAudioClockSource_Title", "Use Audio Clock Source?"),
+		TEXT("AutoSelectAudioClockSource_SuppressDialog"));
+
+	SetupInfo.ConfirmText = LOCTEXT("AutoSelectAudioClockSource_ConfirmText", "Yes");
+	SetupInfo.CancelText = LOCTEXT("AutoSelectAudioClockSource_CancelText", "No");
+	SetupInfo.CheckBoxText = LOCTEXT("AutoSelectAudioClockSource_CheckBoxText", "Don't show this again");
+	SetupInfo.bDefaultToSuppressInTheFuture = false;
+	SetupInfo.DialogMode = FSuppressableWarningDialog::EMode::PersistUserResponse;
+	
+	FSuppressableWarningDialog SwitchToAudioClockSourceDialog(SetupInfo);
+	FSuppressableWarningDialog::EResult Result = SwitchToAudioClockSourceDialog.ShowModal();
+
+	if (Result == FSuppressableWarningDialog::Confirm)
+	{
+		// Configure this sequence's clock source to use the audio clock
+		SetClockSoureToAudioClock();
+	}
+}
+
+void FAudioTrackEditor::SetClockSoureToAudioClock()
+{
+	TSharedPtr<ISequencer> SequencerPtr = GetSequencer();
+	if (SequencerPtr.IsValid())
+	{
+		UMovieSceneSequence* RootSequence = SequencerPtr->GetRootMovieSceneSequence();
+		UMovieScene* MovieScene = RootSequence ? RootSequence->GetMovieScene() : nullptr;
+
+		if (MovieScene)
+		{
+			if (MovieScene->GetClockSource() != EUpdateClockSource::Audio && !MovieScene->IsReadOnly())
+			{
+				FScopedTransaction ScopedTransaction(LOCTEXT("SetClockSoureToAudioClock", "Set Clock Source"));
+
+				MovieScene->Modify();
+				MovieScene->SetClockSource(EUpdateClockSource::Audio);
+
+				SequencerPtr->ResetTimeController();
+			}
+		}
+	}
+}
 
 #undef LOCTEXT_NAMESPACE

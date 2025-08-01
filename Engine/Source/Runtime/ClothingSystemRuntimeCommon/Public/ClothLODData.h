@@ -7,16 +7,26 @@
 
 /** Common Cloth LOD representation for all clothing assets. */
 USTRUCT()
-struct CLOTHINGSYSTEMRUNTIMECOMMON_API FClothLODDataCommon
+struct FClothLODDataCommon
 {
 	GENERATED_BODY()
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS  // For CollisionData
+	FClothLODDataCommon() = default;
+	FClothLODDataCommon(const FClothLODDataCommon&) = default;
+	FClothLODDataCommon(FClothLODDataCommon&&) = default;
+	~FClothLODDataCommon() = default;
+	FClothLODDataCommon& operator=(const FClothLODDataCommon&) = default;
+	FClothLODDataCommon& operator=(FClothLODDataCommon&&) = default;
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 	// Raw phys mesh data
 	UPROPERTY(EditAnywhere, Category = SimMesh)
 	FClothPhysicalMeshData PhysicalMeshData;
 
 	// Collision primitive and convex data for clothing collisions
-	UPROPERTY(EditAnywhere, Category = Collision)
+	UE_DEPRECATED(5.2, "This property is no longer supported. Use Physics Asset instead.")
+	UPROPERTY(EditAnywhere, Category = Collision, Meta = (DeprecatedProperty, DeprecationMessage = "This property is no longer supported. Use Physics Asset instead."))
 	FClothCollisionData CollisionData;
 
 	// Whether to use multiple triangles to interpolate from simulated cloth mesh to render mesh
@@ -27,6 +37,10 @@ struct CLOTHINGSYSTEMRUNTIMECOMMON_API FClothLODDataCommon
 	UPROPERTY()
 	float SkinningKernelRadius = 100.0f;
 
+	// Whether to enable smooth transition from skinned mesh to clothed mesh.
+	UPROPERTY()
+	bool bSmoothTransition = false;
+
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
 	TArray<FClothParameterMask_Legacy> ParameterMasks_DEPRECATED;
@@ -36,11 +50,11 @@ struct CLOTHINGSYSTEMRUNTIMECOMMON_API FClothLODDataCommon
 	TArray<FPointWeightMap> PointWeightMaps;
 
 	// Get all available parameter masks for the specified target
-	void GetParameterMasksForTarget(const uint8 InTarget, TArray<FPointWeightMap*>& OutMasks);
+	CLOTHINGSYSTEMRUNTIMECOMMON_API void GetParameterMasksForTarget(const uint8 InTarget, TArray<FPointWeightMap*>& OutMasks);
 #endif // WITH_EDITORONLY_DATA
 #if WITH_EDITOR
 	/** Copy \c ParameterMasks to corresponding targets in \c ClothPhysicalMeshData. */
-	void PushWeightsToMesh();
+	CLOTHINGSYSTEMRUNTIMECOMMON_API void PushWeightsToMesh();
 #endif
 
 	// Skinning data for transitioning from a higher detail LOD to this one
@@ -50,7 +64,7 @@ struct CLOTHINGSYSTEMRUNTIMECOMMON_API FClothLODDataCommon
 	TArray<FMeshToMeshVertData> TransitionDownSkinData;
 
 	// Custom serialize for transition
-	bool Serialize(FArchive& Ar);
+	CLOTHINGSYSTEMRUNTIMECOMMON_API bool Serialize(FArchive& Ar);
 };
 
 template<>

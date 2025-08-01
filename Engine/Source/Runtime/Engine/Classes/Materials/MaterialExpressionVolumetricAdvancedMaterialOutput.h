@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Materials/MaterialExpressionCustomOutput.h"
 #include "UObject/ObjectMacros.h"
+#include "Shader/ShaderTypes.h"
 #include "MaterialExpressionVolumetricAdvancedMaterialOutput.generated.h"
 
 /** Material output expression for writing advanced volumetric material properties. */
@@ -60,8 +61,8 @@ class UMaterialExpressionVolumetricAdvancedMaterialOutput : public UMaterialExpr
 	UPROPERTY(EditAnywhere, Category = "Phase")
 	bool PerSamplePhaseEvaluation;
 
-	/** How many octave to use for the multiple-scattering approximation. This makes the shader more expensive so try to only a single octave. 0 means single scattering only. */
-	UPROPERTY(EditAnywhere, Category = "Multi-Scattering", meta = (UIMin = 0, UIMax = 2, ClampMin = 0, ClampMax = 2))
+	/** How many octave to use for the multiple-scattering approximation. This makes the shader more expensive so you should only use 0 or 1 for better performance, and tweak multiple scattering parameters accordingly. 0 means single scattering only. The maximum value is 2 (expenssive). */
+	UPROPERTY(EditAnywhere, Category = "Multi-Scattering", meta = (UIMin = 0, UIMax = 1, ClampMin = 0, ClampMax = 2))
 	uint32 MultiScatteringApproximationOctaveCount;
 
 	/** Only used if MultiScatteringContribution is not hooked up. Multi-scattering approximation: represents how much contribution each successive octave will add. Valid range is [0,1], from low to high contribution */
@@ -88,6 +89,10 @@ class UMaterialExpressionVolumetricAdvancedMaterialOutput : public UMaterialExpr
 	UPROPERTY(EditAnywhere, Category = "Options")
 	bool bRayMarchVolumeShadow;
 
+	/** Set whether multiple scattering contribution entry is clamped in [0,1] or not. When disabled, the artist is in charge for ensuring the visual remain in a reasonable brighness range.*/
+	UPROPERTY(EditAnywhere, Category = "Options")
+	bool bClampMultiScatteringContribution;
+
 public:
 #if WITH_EDITOR
 	//~ Begin UMaterialExpression Interface
@@ -98,6 +103,9 @@ public:
 	bool GetEvaluatePhaseOncePerSample() const;
 	uint32 GetMultiScatteringApproximationOctaveCount() const;
 
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
+	virtual UE::Shader::EValueType GetCustomOutputType(int32 OutputIndex) const override;
+
 #endif
 
 	//~ Begin UMaterialExpressionCustomOutput Interface
@@ -107,4 +115,31 @@ public:
 	//~ End UMaterialExpressionCustomOutput Interface
 };
 
+/** USed to help the cloud system to fast skip empty space areas when ray marching. */
+UCLASS(MinimalAPI, collapsecategories, hidecategories = Object)
+class UMaterialExpressionVolumetricCloudEmptySpaceSkippingOutput : public UMaterialExpressionCustomOutput
+{
+	GENERATED_UCLASS_BODY()
 
+	/** ContainsMatter must be 1 when the volume is occupied by any matter. This is for the tracing to later not miss it. Otherwise it can be 0 to accelerate the tracing by skipping that area. */
+	UPROPERTY(meta = (RequiredInput = "false", ToolTip = "Specify 0 if no matter (cloud or participating media) can be found within the area, otherwise should be set > 0."))
+	FExpressionInput ContainsMatter;
+
+public:
+#if WITH_EDITOR
+	//~ Begin UMaterialExpression Interface
+	virtual int32 Compile(class FMaterialCompiler* Compiler, int32 OutputIndex) override;
+	virtual void GetCaption(TArray<FString>& OutCaptions) const override;
+	virtual uint32 GetOutputType(int32 OutputIndex) override;
+	//~ End UMaterialExpression Interface
+
+	virtual bool GenerateHLSLExpression(FMaterialHLSLGenerator& Generator, UE::HLSLTree::FScope& Scope, int32 OutputIndex, UE::HLSLTree::FExpression const*& OutExpression) const override;
+	virtual UE::Shader::EValueType GetCustomOutputType(int32 OutputIndex) const override;
+#endif
+
+	//~ Begin UMaterialExpressionCustomOutput Interface
+	virtual int32 GetNumOutputs() const override;
+	virtual FString GetFunctionName() const override;
+	virtual FString GetDisplayName() const override;
+	//~ End UMaterialExpressionCustomOutput Interface
+};

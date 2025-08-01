@@ -4,6 +4,8 @@
 #include "ClothConfig_Legacy.h"
 #include "ClothConfigNvCustomVersion.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ClothConfigNv)
+
 FClothConstraintSetupNv::FClothConstraintSetupNv()
 	: Stiffness(1.0f)
 	, StiffnessMultiplier(1.0f)
@@ -139,13 +141,3 @@ bool UClothConfigNv::MigrateTo(FClothConfig_Legacy& ClothConfig) const
 	return true;
 }
 
-
-bool UClothConfigNv::UseSelfCollisions() const
-{
-	return SelfCollisionRadius > 0.0f && SelfCollisionStiffness > 0.0f;
-}
-
-float UClothConfigNv::NeedsSelfCollisionIndices() const
-{
-	return UseSelfCollisions() ? SelfCollisionRadius * SelfCollisionCullScale : 0.0f;
-}

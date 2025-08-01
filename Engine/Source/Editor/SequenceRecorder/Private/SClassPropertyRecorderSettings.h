@@ -2,13 +2,22 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "IDetailPropertyExtensionHandler.h"
 #include "Input/Reply.h"
-#include "Widgets/SWidget.h"
+#include "Internationalization/Text.h"
+#include "Styling/SlateTypes.h"
+#include "Templates/SharedPointer.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/SCompoundWidget.h"
-#include "PropertyHandle.h"
-#include "IDetailPropertyExtensionHandler.h"
+
+class FDetailWidgetRow;
+class FName;
+class IDetailLayoutBuilder;
+class IPropertyHandle;
+class IPropertyTypeCustomizationUtils;
+class UClass;
+struct FPropertyAndParent;
 
 class SClassPropertyRecorderSettings : public SCompoundWidget, public IDetailPropertyExtensionHandler
 {
@@ -41,7 +50,7 @@ private:
 
 	/** IDetailPropertyExtensionHandler interface */
 	virtual bool IsPropertyExtendable(const UClass* InObjectClass, const class IPropertyHandle& PropertyHandle) const override;
-	virtual TSharedRef<SWidget> GenerateExtensionWidget(const IDetailLayoutBuilder& InDetailLayoutBuilder, const UClass* InObjectClass, TSharedPtr<IPropertyHandle> PropertyHandle) override;
+	virtual void ExtendWidgetRow(FDetailWidgetRow& InWidgetRow, const IDetailLayoutBuilder& InDetailLayoutBuilder, const UClass* InObjectClass, TSharedPtr<IPropertyHandle> PropertyHandle) override;
 
 private:
 	/** Handle to the property we are editing */

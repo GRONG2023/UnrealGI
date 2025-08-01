@@ -1,8 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SDeviceBrowserFilterBar.h"
+#include "Widgets/Browser/SDeviceBrowserFilterBar.h"
 
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "PlatformInfo.h"
 #include "SlateOptMacros.h"
 #include "Widgets/Images/SImage.h"
@@ -50,14 +50,14 @@ void SDeviceBrowserFilterBar::Construct(const FArguments& InArgs, TSharedRef<FDe
 
 	// callback for generating a row widget for the platform filter list
 	auto PlatformListViewGenerateRow = [this](TSharedPtr<FDeviceBrowserFilterEntry> PlatformEntry, const TSharedRef<STableViewBase>& OwnerTable) -> TSharedRef<ITableRow> {
-		const PlatformInfo::FPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(PlatformEntry->PlatformLookup);
+		const PlatformInfo::FTargetPlatformInfo* const PlatformInfo = PlatformInfo::FindPlatformInfo(PlatformEntry->PlatformLookup);
 
 		return SNew(STableRow<TSharedPtr<FString> >, OwnerTable)
 			.Content()
 			[
 				SNew(SCheckBox)
 				.IsChecked_Lambda(
-					[=]() -> ECheckBoxState {
+					[this, PlatformEntry]() -> ECheckBoxState {
 						return Filter->IsPlatformEnabled(PlatformEntry->PlatformName)
 							? ECheckBoxState::Checked
 							: ECheckBoxState::Unchecked;
@@ -65,7 +65,7 @@ void SDeviceBrowserFilterBar::Construct(const FArguments& InArgs, TSharedRef<FDe
 				)
 				.Padding(FMargin(6.0, 2.0))
 				.OnCheckStateChanged_Lambda(
-					[=](ECheckBoxState CheckState) {
+					[this, PlatformEntry](ECheckBoxState CheckState) {
 						Filter->SetPlatformEnabled(PlatformEntry->PlatformName, CheckState == ECheckBoxState::Checked);
 					}
 				)
@@ -77,11 +77,11 @@ void SDeviceBrowserFilterBar::Construct(const FArguments& InArgs, TSharedRef<FDe
 						.AutoWidth()
 						[
 							SNew(SBox)
-								.WidthOverride(24)
-								.HeightOverride(24)
+								.WidthOverride(24.f)
+								.HeightOverride(24.f)
 								[
 									SNew(SImage)
-									.Image((PlatformInfo) ? FEditorStyle::GetBrush(PlatformInfo->GetIconStyleName(PlatformInfo::EPlatformIconSize::Normal)) : FStyleDefaults::GetNoBrush())
+									.Image((PlatformInfo) ? FAppStyle::GetBrush(PlatformInfo->GetIconStyleName(EPlatformIconSize::Normal)) : FStyleDefaults::GetNoBrush())
 								]
 						]
 
@@ -92,7 +92,7 @@ void SDeviceBrowserFilterBar::Construct(const FArguments& InArgs, TSharedRef<FDe
 						[
 							SNew(STextBlock)
 								.Text_Lambda(
-									[=]() -> FText {
+									[this, PlatformEntry]() -> FText {
 										return FText::Format(LOCTEXT("PlatformListRowFmt", "{0} ({1})"), FText::FromString(PlatformEntry->PlatformName), FText::AsNumber(Filter->GetServiceCountPerPlatform(PlatformEntry->PlatformName)));
 									}
 								)
@@ -113,22 +113,20 @@ void SDeviceBrowserFilterBar::Construct(const FArguments& InArgs, TSharedRef<FDe
 			[
 				// platform filter
 				SNew(SComboButton)
-					.ComboButtonStyle(FEditorStyle::Get(), "ToolbarComboButton")
-					.ForegroundColor(FLinearColor::White)
-					.ButtonContent()
-					[
-						SNew(STextBlock)
-						.TextStyle(FEditorStyle::Get(), "Launcher.Filters.Text")
-						.Text(LOCTEXT("PlatformFiltersComboButtonText", "Platform Filters"))
-					]
-					.ContentPadding(0.0f)
-					.MenuContent()
-					[
-						SAssignNew(PlatformListView, SListView<TSharedPtr<FDeviceBrowserFilterEntry> >)
-							.ItemHeight(24.0f)
-							.ListItemsSource(&Filter->GetFilteredPlatforms())
-							.OnGenerateRow_Lambda(PlatformListViewGenerateRow)
-					]
+				.ButtonContent()
+				[
+					SNew(STextBlock)
+					.Font(FAppStyle::Get().GetFontStyle("NormalBold"))
+					.Text(LOCTEXT("PlatformFiltersComboButtonText", "Platform Filters"))
+				]
+				.ContentPadding(0.0f)
+				.MenuContent()
+				[
+					SAssignNew(PlatformListView, SListView<TSharedPtr<FDeviceBrowserFilterEntry> >)
+					.ItemHeight(24.0f)
+					.ListItemsSource(&Filter->GetFilteredPlatforms())
+					.OnGenerateRow_Lambda(PlatformListViewGenerateRow)
+				]
 			]
 
 		+ SHorizontalBox::Slot()

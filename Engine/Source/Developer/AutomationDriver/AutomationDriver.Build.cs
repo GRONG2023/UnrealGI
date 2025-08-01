@@ -6,21 +6,6 @@ public class AutomationDriver : ModuleRules
 {
     public AutomationDriver(ReadOnlyTargetRules Target) : base(Target)
     {
-        PublicIncludePaths.AddRange(
-            new string[] {
-				"Developer/AutomationDriver/Public",
-            }
-        );
-
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Developer/AutomationDriver/Private",
-                "Developer/AutomationDriver/Private/Locators",
-                "Developer/AutomationDriver/Private/Specs",
-                "Developer/AutomationDriver/Private/MetaData",
-            }
-        );
-
         PrivateDependencyModuleNames.AddRange(
             new string[] {
                 "Core",

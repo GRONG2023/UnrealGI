@@ -20,19 +20,19 @@ class AVectorFieldVolume : public AActor
 
 private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = VectorFieldVolume, meta = (AllowPrivateAccess = "true"))
-	class UVectorFieldComponent* VectorFieldComponent;
+	TObjectPtr<class UVectorFieldComponent> VectorFieldComponent;
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 #endif
 
 public:
 	/** Returns VectorFieldComponent subobject **/
-	ENGINE_API class UVectorFieldComponent* GetVectorFieldComponent() const { return VectorFieldComponent; }
+	class UVectorFieldComponent* GetVectorFieldComponent() const { return VectorFieldComponent; }
 #if WITH_EDITORONLY_DATA
 	/** Returns SpriteComponent subobject **/
-	ENGINE_API UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
+	UBillboardComponent* GetSpriteComponent() const { return SpriteComponent; }
 #endif
 };
 

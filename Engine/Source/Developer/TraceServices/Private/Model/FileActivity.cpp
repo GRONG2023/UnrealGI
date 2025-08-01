@@ -5,7 +5,7 @@
 #include "AnalysisServicePrivate.h"
 #include <limits>
 
-namespace Trace
+namespace TraceServices
 {
 
 FFileActivityProvider::FFileActivityProvider(IAnalysisSession& InSession)
@@ -53,9 +53,9 @@ const ITable<FFileActivity>& FFileActivityProvider::GetFileActivityTable() const
 
 uint32 FFileActivityProvider::GetFileIndex(const TCHAR* Path)
 {
-	uint32 FileIndex = Files.Num();
+	uint32 FileIndex = static_cast<uint32>(Files.Num());
 	FFileInfoInternal& FileInfo = Files.PushBack();
-	FileInfo.FileInfo.Id = Files.Num() - 1;
+	FileInfo.FileInfo.Id = FileIndex;
 	FileInfo.FileInfo.Path = Session.StoreString(Path);
 	FileInfo.ActivityTimeline = MakeShared<TimelineInternal>(Session.GetLinearAllocator());
 	return FileIndex;
@@ -79,6 +79,8 @@ uint64 FFileActivityProvider::BeginActivity(uint32 FileIndex, EFileActivityType 
 	FileActivity.ThreadId = ThreadId;
 	FileActivity.Failed = false;
 	FileActivity.ActivityType = Type;
+	FileActivity.FileHandle = uint64(-1);
+	FileActivity.ReadWriteHandle = uint64(-1);
 	return FileInfo.ActivityTimeline->AppendBeginEvent(Time, &FileActivity);
 }
 
@@ -89,6 +91,27 @@ void FFileActivityProvider::EndActivity(uint32 FileIndex, uint64 ActivityIndex, 
 	Activity->ActualSize = ActualSize;
 	Activity->EndTime = Time;
 	Activity->Failed = Failed;
+}
+
+void FFileActivityProvider::SetActivityFileHandle(uint32 FileIndex, uint64 ActivityIndex, uint64 FileHandle)
+{
+	FFileInfoInternal& FileInfo = Files[FileIndex];
+	FFileActivity* Activity = FileInfo.ActivityTimeline->GetEvent(ActivityIndex);
+	Activity->FileHandle = FileHandle;
+}
+
+void FFileActivityProvider::SetActivityReadWriteHandle(uint32 FileIndex, uint64 ActivityIndex, uint64 ReadWriteHandle)
+{
+	FFileInfoInternal& FileInfo = Files[FileIndex];
+	FFileActivity* Activity = FileInfo.ActivityTimeline->GetEvent(ActivityIndex);
+	Activity->ReadWriteHandle = ReadWriteHandle;
+}
+
+void FFileActivityProvider::CheckActivityReadWriteHandle(uint32 FileIndex, uint64 ActivityIndex, uint64 ReadWriteHandle)
+{
+	FFileInfoInternal& FileInfo = Files[FileIndex];
+	FFileActivity* Activity = FileInfo.ActivityTimeline->GetEvent(ActivityIndex);
+	check(Activity->ReadWriteHandle == ReadWriteHandle);
 }
 
 const TCHAR* FFileActivityProvider::GetFilePath(uint32 FileIndex) const
@@ -112,4 +135,4 @@ const TCHAR* GetFileActivityTypeString(EFileActivityType ActivityType)
 	return TEXT("Invalid");
 }
 
-}
+} // namespace TraceServices

@@ -1,18 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Slate/SGameLayerManager.h"
-#include "Widgets/SOverlay.h"
+#include "Engine/GameViewportClient.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/World.h"
 #include "Slate/SceneViewport.h"
-#include "EngineGlobals.h"
 #include "SceneView.h"
-#include "Engine/Engine.h"
 #include "Types/NavigationMetaData.h"
 #include "Engine/GameEngine.h"
 #include "Engine/UserInterfaceSettings.h"
 #include "GeneralProjectSettings.h"
 #include "Input/HittestGrid.h"
 #include "Widgets/LayerManager/STooltipPresenter.h"
+#include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SDPIScaler.h"
 #include "Widgets/Layout/SPopup.h"
 #include "Widgets/Layout/SWindowTitleBarArea.h"
@@ -20,6 +20,9 @@
 #include "Types/InvisibleToWidgetReflectorMetaData.h"
 #include "Framework/Application/SlateApplication.h"
 
+#ifndef UE_SLATE_WITH_GAMELAYER_CANVAS_VISIBILITY_COMMANDS
+	#define UE_SLATE_WITH_GAMELAYER_CANVAS_VISIBILITY_COMMANDS !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && WITH_SLATE_DEBUGGING
+#endif
 
 /* SGameLayerManager interface
  *****************************************************************************/
@@ -36,6 +39,50 @@ static FAutoConsoleVariableRef CVarEnablePerUserHitTesting(
 	TEXT("Toggles between widgets mapping to a user id and requring a matching user id from an input event or allowing all users to interact with widget"),
 	FConsoleVariableDelegate::CreateStatic(&HandlePerUserHitTestingToggled)
 );
+
+#if UE_SLATE_WITH_GAMELAYER_CANVAS_VISIBILITY_COMMANDS
+namespace CanvasVisibility
+{
+	static TArray<SGameLayerManager*> GameLayerManagerInstances;
+	static bool ViewportSlotVisibilityConsoleValue = true;
+	static bool DebugCanvasVisibilityConsoleValue = true;
+	static bool PlayerCanvasVisibilityConsoleValue = true;
+	static bool CanvasVisibilityCVarOnChangedBound = false;
+
+	enum class CanvasType
+	{
+		PlayerCanvas,
+		DebugCanvas,
+		Viewport,
+		AllCanvases
+	};
+}
+
+static FAutoConsoleVariableRef CVarShowViewportSlot(
+	TEXT("Slate.GameLayer.ViewportSlotVisible"),
+	CanvasVisibility::ViewportSlotVisibilityConsoleValue,
+	TEXT("Show/Hide the slot on viewport"),
+	ECVF_Cheat
+);
+static FAutoConsoleVariableRef CVarShowDebugCanvas(
+	TEXT("Slate.GameLayer.DebugCanvasVisible"),
+	CanvasVisibility::DebugCanvasVisibilityConsoleValue,
+	TEXT("Show/Hide the debug canvas."),
+	ECVF_Cheat
+);
+static FAutoConsoleVariableRef CVarShowPlayerCanvas(
+	TEXT("Slate.GameLayer.PlayerCanvasVisible"),
+	CanvasVisibility::PlayerCanvasVisibilityConsoleValue,
+	TEXT("Show/Hide the player canvas."),
+	ECVF_Cheat
+);
+static TAutoConsoleVariable<bool> CVarShowAllCanvases(
+	TEXT("Slate.GameLayer.AllCanvasesVisible"),
+	true,
+	TEXT("Show/Hide the viewport slot, player canvas, and debug canvas."),
+	ECVF_Cheat
+);
+#endif
 
 SGameLayerManager::SGameLayerManager()
 :	DefaultWindowTitleBarHeight(64.0f)
@@ -73,19 +120,22 @@ void SGameLayerManager::Construct(const SGameLayerManager::FArguments& InArgs)
 
 			+ SVerticalBox::Slot()
 			[
-				SNew(SOverlay)
+				SAssignNew(WindowOverlay, SOverlay)
 
-				+ SOverlay::Slot()
+				+ SOverlay::Slot(static_cast<int32>(EGameLayerOrder::Player))
 				[
 					SAssignNew(PlayerCanvas, SCanvas)
 				]
 
-				+ SOverlay::Slot()
+				+ SOverlay::Slot(static_cast<int32>(EGameLayerOrder::Viewport))
 				[
-					InArgs._Content.Widget
+					SAssignNew(ViewportSlotContainer, SBox)
+					[
+						InArgs._Content.Widget
+					]
 				]
 
-				+ SOverlay::Slot()
+				+ SOverlay::Slot(static_cast<int32>(EGameLayerOrder::TitleBar))
 				[
 					SNew(SVerticalBox)
 
@@ -99,14 +149,14 @@ void SGameLayerManager::Construct(const SGameLayerManager::FArguments& InArgs)
 					]
 				]
 
-				+ SOverlay::Slot()
+				+ SOverlay::Slot(static_cast<int32>(EGameLayerOrder::Tooltip))
 				[
 					SNew(SPopup)
 					[
 						SAssignNew(TooltipPresenter, STooltipPresenter)
 					]
 				]
-				+ SOverlay::Slot()
+				+ SOverlay::Slot(static_cast<int32>(EGameLayerOrder::Debug))
 				[
 					SAssignNew(DebugCanvas, SDebugCanvas)
 					.SceneViewport(InArgs._SceneViewport)
@@ -143,8 +193,56 @@ void SGameLayerManager::Construct(const SGameLayerManager::FArguments& InArgs)
 	TitleBarAreaVerticalBox->SetRequestToggleFullscreenCallback(FSimpleDelegate::CreateSP(this, &SGameLayerManager::RequestToggleFullscreen));
 
 	SetWindowTitleBarState(nullptr, EWindowTitleBarMode::Overlay, false, false, false);
-
+	
 	bIsGameUsingBorderlessWindow = GetDefault<UGeneralProjectSettings>()->bUseBorderlessWindow && PLATFORM_WINDOWS;
+
+#if UE_SLATE_WITH_GAMELAYER_CANVAS_VISIBILITY_COMMANDS
+	CanvasVisibility::GameLayerManagerInstances.Add(this);
+	if (!CanvasVisibility::CanvasVisibilityCVarOnChangedBound)
+	{
+		auto ShowHUD = [](IConsoleVariable* Variable, CanvasVisibility::CanvasType CanvasType)
+		{
+			bool bVisible = Variable->GetBool();
+			for (int32 Index = 0; Index < CanvasVisibility::GameLayerManagerInstances.Num(); ++Index)
+			{
+				if (SGameLayerManager* GameManagerInstance = CanvasVisibility::GameLayerManagerInstances[Index])
+				{
+					switch (CanvasType)
+					{
+					case CanvasVisibility::CanvasType::PlayerCanvas:
+						GameManagerInstance->ShowPlayerCanvas(bVisible);
+						break;
+					case CanvasVisibility::CanvasType::DebugCanvas:
+						GameManagerInstance->ShowDebugCanvas(bVisible);
+						break;
+					case CanvasVisibility::CanvasType::Viewport:
+						GameManagerInstance->ShowViewportSlot(bVisible);
+						break;
+					case CanvasVisibility::CanvasType::AllCanvases:
+						GameManagerInstance->ShowViewportSlot(bVisible);
+						GameManagerInstance->ShowDebugCanvas(bVisible);
+						GameManagerInstance->ShowPlayerCanvas(bVisible);
+						CanvasVisibility::ViewportSlotVisibilityConsoleValue = bVisible;
+						CanvasVisibility::PlayerCanvasVisibilityConsoleValue = bVisible;
+						CanvasVisibility::DebugCanvasVisibilityConsoleValue = bVisible;
+						break;
+					default:
+						break;
+					}
+				}
+			};
+		};
+		CVarShowAllCanvases->AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda(ShowHUD, CanvasVisibility::CanvasType::AllCanvases));
+		CVarShowPlayerCanvas->AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda(ShowHUD, CanvasVisibility::CanvasType::PlayerCanvas));
+		CVarShowDebugCanvas->AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda(ShowHUD, CanvasVisibility::CanvasType::DebugCanvas));
+		CVarShowViewportSlot->AsVariable()->SetOnChangedCallback(FConsoleVariableDelegate::CreateLambda(ShowHUD, CanvasVisibility::CanvasType::Viewport));
+		CanvasVisibility::CanvasVisibilityCVarOnChangedBound = true;
+	}
+
+	ShowViewportSlot(CanvasVisibility::ViewportSlotVisibilityConsoleValue);
+	ShowDebugCanvas(CanvasVisibility::DebugCanvasVisibilityConsoleValue);
+	ShowPlayerCanvas(CanvasVisibility::PlayerCanvasVisibilityConsoleValue);
+#endif
 }
 
 void SGameLayerManager::SetSceneViewport(FSceneViewport* InSceneViewport)
@@ -156,6 +254,11 @@ void SGameLayerManager::SetSceneViewport(FSceneViewport* InSceneViewport)
 FGeometry SGameLayerManager::GetViewportWidgetHostGeometry() const
 {
 	return WidgetHost->GetTickSpaceGeometry();
+}
+
+FGeometry SGameLayerManager::GetViewportWidgetHostPaintGeometry() const
+{
+	return WidgetHost->GetPaintSpaceGeometry();
 }
 
 FGeometry SGameLayerManager::GetPlayerWidgetHostGeometry(ULocalPlayer* Player) const
@@ -183,8 +286,7 @@ void SGameLayerManager::NotifyPlayerRemoved(int32 PlayerIndex, ULocalPlayer* Rem
 void SGameLayerManager::AddWidgetForPlayer(ULocalPlayer* Player, TSharedRef<SWidget> ViewportContent, const int32 ZOrder)
 {
 	TSharedPtr<FPlayerLayer> PlayerLayer = FindOrCreatePlayerLayer(Player);
-	
-	// NOTE: Returns FSimpleSlot but we're ignoring here.  Could be used for alignment though.
+
 	PlayerLayer->Widget->AddSlot(ZOrder)
 	[
 		ViewportContent
@@ -277,6 +379,21 @@ void SGameLayerManager::ClearWidgets()
 	SetWindowTitleBarState(nullptr, EWindowTitleBarMode::Overlay, false, false, false);
 }
 
+void SGameLayerManager::AddGameLayer(TSharedRef<SWidget> ViewportContent, int32 ZOrder)
+{
+	ensure(!WindowOverlay->HasSlotWithZOrder(ZOrder));
+
+	WindowOverlay->AddSlot(ZOrder)
+	[
+		ViewportContent
+	];
+}
+
+void SGameLayerManager::RemoveGameLayer(TSharedRef<SWidget> ViewportContent)
+{
+	WindowOverlay->RemoveSlot(ViewportContent);
+}
+
 void SGameLayerManager::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	//if (AllottedGeometry != CachedGeometry)
@@ -289,7 +406,20 @@ void SGameLayerManager::Tick(const FGeometry& AllottedGeometry, const double InC
 int32 SGameLayerManager::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle, bool bParentEnabled) const
 {
 	SCOPED_NAMED_EVENT_TEXT("Paint: Game UI", FColor::Green);
+#if WITH_EDITOR
+	if (GIntraFrameDebuggingGameThread)
+	{
+		// When BP debugging, do not paint the PIE game.
+		//It may trigger other BP code and while it's in a Debugging state the BP will not execute.
+		//It may also tick widgets that may already be ticking.
+		// ie. [A] SMyWidget::Tick() => BPEvent => BP Breakpoint => FApplication::EnterDebuggingMode() => while( SWindow::Paint() => SMyWidget::Tick() ) => End of the first [A] SMyWidget::Tick
+		return FMath::Max(GetPersistentState().OutgoingLayerId, LayerId);
+	}
+#endif
+
+	OutDrawElements.SetIsInGameLayer(true);
 	const int32 ResultLayer = SCompoundWidget::OnPaint(Args, AllottedGeometry, MyCullingRect, OutDrawElements, LayerId, InWidgetStyle, bParentEnabled);
+	OutDrawElements.SetIsInGameLayer(false);
 	return ResultLayer;
 }
 
@@ -320,14 +450,8 @@ float SGameLayerManager::GetGameViewportDPIScale() const
 		return 1;
 	}
 
-	const auto UserInterfaceSettings = GetDefault<UUserInterfaceSettings>(UUserInterfaceSettings::StaticClass());
-
-	if (UserInterfaceSettings == nullptr)
-	{
-		return 1;
-	}
-
-	FIntPoint ViewportSize = Viewport->GetSize();
+	const UUserInterfaceSettings* UserInterfaceSettings = GetDefault<UUserInterfaceSettings>();
+	const FIntPoint ViewportSize = Viewport->GetSize();
 	float GameUIScale;
 
 	if (bUseScaledDPI)
@@ -497,8 +621,7 @@ void SGameLayerManager::AddOrUpdatePlayerLayers(const FGeometry& AllottedGeometr
 
 	if (CachedInverseDPIScale != InverseDPIScale)
 	{
-		InvalidatePrepass();
-		Invalidate(EInvalidateWidget::Layout);
+		Invalidate(EInvalidateWidget::Prepass);
 		CachedInverseDPIScale = InverseDPIScale;
 	}
 
@@ -525,8 +648,8 @@ void SGameLayerManager::AddOrUpdatePlayerLayers(const FGeometry& AllottedGeometr
 				Size.Y -= WindowTitleBarVerticalBox->GetDesiredSize().Y;
 			}
 
-			PlayerLayer->Slot->Size(Size);
-			PlayerLayer->Slot->Position(Position);
+			PlayerLayer->Slot->SetSize(Size);
+			PlayerLayer->Slot->SetPosition(Position);
 		}
 	}
 }
@@ -537,7 +660,7 @@ bool SGameLayerManager::GetNormalizeRect(ULocalPlayer* LocalPlayer, FVector2D& O
 	if ( LocalPlayer )
 	{
 		FSceneViewProjectionData ProjectionData;
-		if (LocalPlayer->GetProjectionData(LocalPlayer->ViewportClient->Viewport, eSSP_FULL, ProjectionData))
+		if (LocalPlayer->GetProjectionData(LocalPlayer->ViewportClient->Viewport, ProjectionData))
 		{
 			const FIntRect ViewRect = ProjectionData.GetViewRect();
 			const FIntRect ConstrainedViewRect = ProjectionData.GetConstrainedViewRect();
@@ -631,4 +754,26 @@ void SGameLayerManager::RequestToggleFullscreen()
 	{
 		GEngine->DeferredCommands.Add(TEXT("TOGGLE_FULLSCREEN"));
 	}
+}
+
+void SGameLayerManager::ShowPlayerCanvas(bool bIsVisible)
+{
+	PlayerCanvas->SetVisibility(bIsVisible ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed);
+}
+
+void SGameLayerManager::ShowDebugCanvas(bool bIsVisible)
+{
+	DebugCanvas->SetVisibility(bIsVisible ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed);
+}
+
+void SGameLayerManager::ShowViewportSlot(bool bIsVisible)
+{
+	ViewportSlotContainer->SetVisibility(bIsVisible ? EVisibility::SelfHitTestInvisible : EVisibility::Collapsed);
+}
+
+SGameLayerManager::~SGameLayerManager() 
+{
+#if UE_SLATE_WITH_GAMELAYER_CANVAS_VISIBILITY_COMMANDS
+	CanvasVisibility::GameLayerManagerInstances.RemoveSingleSwap(this);
+#endif
 }

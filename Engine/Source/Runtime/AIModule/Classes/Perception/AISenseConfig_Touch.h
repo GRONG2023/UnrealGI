@@ -9,10 +9,14 @@
 #include "Perception/AISenseConfig.h"
 #include "AISenseConfig_Touch.generated.h"
 
-UCLASS(meta = (DisplayName = "AI Touch config"))
-class AIMODULE_API UAISenseConfig_Touch : public UAISenseConfig
+UCLASS(meta = (DisplayName = "AI Touch config"), MinimalAPI)
+class UAISenseConfig_Touch : public UAISenseConfig
 {
 	GENERATED_UCLASS_BODY()
-public:	
-	virtual TSubclassOf<UAISense> GetSenseImplementation() const override;
+public:
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Sense", config)
+	FAISenseAffiliationFilter DetectionByAffiliation = {true, true, true};
+	
+	AIMODULE_API virtual TSubclassOf<UAISense> GetSenseImplementation() const override;
 };

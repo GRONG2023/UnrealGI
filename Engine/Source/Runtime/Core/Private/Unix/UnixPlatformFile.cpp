@@ -7,10 +7,12 @@
 #include "Containers/LruCache.h"
 #include "Logging/LogMacros.h"
 #include "Misc/Paths.h"
+#include "Async/MappedFileHandle.h"
 #include <sys/file.h>
+#include <sys/mman.h>
 
 #include "HAL/PlatformFileCommon.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUnixPlatformFile, Log, All);
 
@@ -32,9 +34,9 @@ namespace
 		}
 
 		return FFileStatData(
-			UnixEpoch + FTimespan::FromSeconds(FileInfo.st_ctime), 
-			UnixEpoch + FTimespan::FromSeconds(FileInfo.st_atime), 
-			UnixEpoch + FTimespan::FromSeconds(FileInfo.st_mtime), 
+			UnixEpoch + FTimespan::FromSeconds(static_cast<double>(FileInfo.st_ctime)),
+			UnixEpoch + FTimespan::FromSeconds(static_cast<double>(FileInfo.st_atime)),
+			UnixEpoch + FTimespan::FromSeconds(static_cast<double>(FileInfo.st_mtime)),
 			FileSize,
 			bIsDirectory,
 			!(FileInfo.st_mode & S_IWUSR)
@@ -83,7 +85,10 @@ static FUnixFileRegistry GFileRegistry;
  */
 class CORE_API FFileHandleUnix : public FRegisteredFileHandle
 {
-	enum {READWRITE_SIZE = SSIZE_MAX};
+	// https://man7.org/linux/man-pages/man2/write.2.html
+	// On Linux, write() (and similar system calls) will transfer at most 0x7ffff000 (2,147,479,552) bytes,
+	// returning the number of bytes actually transferred.  (This is true on both 32-bit and 64-bit systems.)
+	enum {READWRITE_SIZE = 0x7ffff000};
 
 	FORCEINLINE bool IsValid()
 	{
@@ -141,6 +146,12 @@ public:
 	{
 		check(NewPosition >= 0);
 
+		// Avoid allowing for a negative NewPosition as this will set FileOffset which is returned in Tell blindly
+		if (NewPosition < 0)
+		{
+			return false;
+		}
+
 		if (!FileOpenAsWrite)
 		{
 			FileOffset = NewPosition >= FileSize ? FileSize - 1 : NewPosition;
@@ -156,6 +167,13 @@ public:
 	virtual bool SeekFromEnd(int64 NewPositionRelativeToEnd = 0) override
 	{
 		check(NewPositionRelativeToEnd <= 0);
+
+		// Avoid allowing a relative position to set less then the size of the file
+		// lseek handles this negative but we return FileOffset blindly which could be used incorrectly
+		if (NewPositionRelativeToEnd < (-FileSize))
+		{
+			return false;
+		}
 
 		if (!FileOpenAsWrite)
 		{
@@ -173,9 +191,19 @@ public:
 	{
 		struct FScopedReadTracker
 		{
-			FScopedReadTracker(FFileHandleUnix& InHandle) : Handle(InHandle) { GFileRegistry.TrackStartRead(&Handle); }
-			~FScopedReadTracker() { GFileRegistry.TrackEndRead(&Handle); }
+			FScopedReadTracker(FFileHandleUnix& InHandle) : Handle(InHandle) 
+			{ 
+				bSuccess = GFileRegistry.TrackStartRead(&Handle);
+			}
+			~FScopedReadTracker() 
+			{
+				if (bSuccess)
+				{
+					GFileRegistry.TrackEndRead(&Handle); 
+				}
+			}
 			FFileHandleUnix& Handle;
+			bool bSuccess = false;
 		};
 
 		check(IsValid());
@@ -183,6 +211,11 @@ public:
 		{
 			// Handle virtual file handles (only in read mode, write mode doesn't use the file handle registry)
 			FScopedReadTracker ScopedReadTracker(*this);
+			if (!ScopedReadTracker.bSuccess)
+			{
+				return false;
+			}
+
 			FScopedDiskUtilizationTracker Tracker(BytesToRead, FileOffset);
 
 			// seek to the offset on seek? this matches console behavior more closely
@@ -210,12 +243,13 @@ public:
 			check(BytesToWrite >= 0);
 			int64 ThisSize = FMath::Min<int64>(READWRITE_SIZE, BytesToWrite);
 			check(Source);
-			if (write(FileHandle, Source, ThisSize) != ThisSize)
+			int64 WrittenSize = write(FileHandle, Source, ThisSize);
+			if (WrittenSize == -1)
 			{
 				return false;
 			}
-			Source += ThisSize;
-			BytesToWrite -= ThisSize;
+			Source += WrittenSize;
+			BytesToWrite -= WrittenSize;
 		}
 		return true;
 	}
@@ -259,6 +293,12 @@ private:
 	{
 		check(IsValid());
 		int64 BytesRead = 0;
+
+		if (BytesToRead < 0)
+		{
+			return 0;
+		}
+
 		while (BytesToRead)
 		{
 			check(BytesToRead >= 0);
@@ -308,7 +348,6 @@ private:
 	// track if file is open for write
 	bool FileOpenAsWrite;
 
-	friend class FReadaheadCache;
 	friend class FUnixFileRegistry;
 };
 
@@ -336,6 +375,8 @@ namespace
 		virtual const FileEntry* Find(const FString& Key) = 0;
 		virtual void AddEntry(const FString& Key, const FString& Elem) = 0;
 		virtual void Invalidate(const FString& Key) = 0;
+		virtual void Lock() = 0;
+		virtual void Unlock() = 0;
 	};
 
 	class FileMapCacheDummy : public FileMapCache
@@ -351,6 +392,12 @@ namespace
 
 		void Invalidate(const FString& Key) override
 		{ }
+
+		void Lock() override
+		{ }
+
+		void Unlock() override
+		{ }
 	};
 
 	class FileMapCacheDefault : public FileMapCache
@@ -363,20 +410,27 @@ namespace
 
 		const FileEntry* Find(const FString& Key) override
 		{
-			FScopeLock ScopeLock(&Mutex);
 			return Cache.FindAndTouch(Key);
 		}
 
 		void AddEntry(const FString& Key, const FString& Elem) override
 		{
-			FScopeLock ScopeLock(&Mutex);
 			Cache.Add(Key, {Elem, Elem.IsEmpty(), FPlatformTime::Seconds()});
 		}
 
 		void Invalidate(const FString& Key) override
 		{
-			FScopeLock ScopeLock(&Mutex);
 			Cache.Remove(Key);
+		}
+
+		void Lock() override
+		{
+			Mutex.Lock();
+		}
+
+		void Unlock() override
+		{
+			Mutex.Unlock();
 		}
 
 	private:
@@ -572,6 +626,7 @@ public:
 		else
 		{
 			FileMapCache& Cache = GetFileMapCache();
+			UE::TScopeLock Lock(Cache);
 			const FileEntry* Entry = Cache.Find(PossiblyWrongFilename);
 
 			if (Entry != nullptr)
@@ -680,6 +735,98 @@ public:
 
 FUnixFileMapper GCaseInsensMapper;
 
+class FUnixMappedFileRegion final : public IMappedFileRegion
+{
+public:
+	class FUnixMappedFileHandle* Parent;
+	const uint8* AlignedPtr;
+	uint64 AlignedSize;
+	FUnixMappedFileRegion(const uint8* InMappedPtr, const uint8* InAlignedPtr, size_t InMappedSize, uint64 InAlignedSize, const FString& InDebugFilename, size_t InDebugOffsetIntoFile, FUnixMappedFileHandle* InParent)
+		: IMappedFileRegion(InMappedPtr, InMappedSize, InDebugFilename, InDebugOffsetIntoFile)
+		, Parent(InParent)
+		, AlignedPtr(InAlignedPtr)
+		, AlignedSize(InAlignedSize)
+	{
+	}
+
+	virtual ~FUnixMappedFileRegion();
+};
+
+static SIZE_T FileMappingAlignment = FPlatformMemory::GetConstants().PageSize;
+
+class FUnixMappedFileHandle final : public IMappedFileHandle
+{
+public:
+	FUnixMappedFileHandle(int InFileHandle, int64 FileSize, const FString& InFilename)
+		: IMappedFileHandle(FileSize)
+		, MappedPtr(nullptr)
+		, Filename(InFilename)
+		, NumOutstandingRegions(0)
+		, FileHandle(InFileHandle)
+	{
+	}
+
+	virtual ~FUnixMappedFileHandle() override
+	{
+		check(!NumOutstandingRegions); // can't delete the file before you delete all outstanding regions
+		close(FileHandle);
+	}
+
+	virtual IMappedFileRegion* MapRegion(int64 Offset = 0, int64 BytesToMap = MAX_int64, bool bPreloadHint = false) override
+	{
+		LLM_PLATFORM_SCOPE(ELLMTag::PlatformMMIO);
+		check(Offset < GetFileSize()); // don't map zero bytes and don't map off the end of the file
+		BytesToMap = FMath::Min<int64>(BytesToMap, GetFileSize() - Offset);
+		check(BytesToMap > 0); // don't map zero bytes
+
+		const int64 AlignedOffset = AlignDown(Offset, FileMappingAlignment);
+		//File mapping can extend beyond file size. It's OK, kernel will just fill any leftover page data with zeros
+		const int64 AlignedSize = Align(BytesToMap + Offset - AlignedOffset, FileMappingAlignment);
+
+		int Flags = MAP_PRIVATE;
+		if (bPreloadHint)
+		{
+			Flags |= MAP_POPULATE;
+		}
+
+		const uint8* AlignedMapPtr = static_cast<const uint8*>(mmap(nullptr, AlignedSize, PROT_READ, Flags, FileHandle, AlignedOffset));
+		if (AlignedMapPtr == MAP_FAILED || AlignedMapPtr == nullptr)
+		{
+			UE_LOG(LogUnixPlatformFile, Warning, TEXT("Failed to map memory %s, error is %d"), *Filename, errno);
+			return nullptr;
+		}
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelAlloc(ELLMTracker::Platform, AlignedMapPtr, AlignedSize));
+
+		// create a mapping for this range
+		const uint8* MapPtr = AlignedMapPtr + Offset - AlignedOffset;
+		FUnixMappedFileRegion* Result = new FUnixMappedFileRegion(MapPtr, AlignedMapPtr, BytesToMap, AlignedSize, Filename, Offset, this);
+		NumOutstandingRegions++;
+		return Result;
+	}
+
+	void UnMap(const FUnixMappedFileRegion* Region)
+	{
+		LLM_PLATFORM_SCOPE(ELLMTag::PlatformMMIO);
+		check(NumOutstandingRegions > 0);
+		NumOutstandingRegions--;
+
+		LLM_IF_ENABLED(FLowLevelMemTracker::Get().OnLowLevelFree(ELLMTracker::Platform, Region->AlignedPtr));
+		const int Res = munmap(const_cast<uint8*>(Region->AlignedPtr), Region->AlignedSize);
+		checkf(Res == 0, TEXT("Failed to unmap, error is %d, errno is %d [params: %x, %d]"), Res, errno, MappedPtr, GetFileSize());
+	}
+
+private:
+	const uint8* MappedPtr;
+	FString Filename;
+	int32 NumOutstandingRegions;
+	int FileHandle;
+};
+
+FUnixMappedFileRegion::~FUnixMappedFileRegion()
+{
+	Parent->UnMap(this);
+}
+
 /**
  * Unix File I/O implementation
 **/
@@ -756,7 +903,11 @@ bool FUnixPlatformFile::DeleteFile(const TCHAR* Filename)
 		return false;
 	}
 
-	GetFileMapCache().Invalidate(IntendedFilename);
+	{
+		FileMapCache& Cache = GetFileMapCache();
+		UE::TScopeLock Lock(Cache);
+		Cache.Invalidate(IntendedFilename);
+	}
 
 	// removing mapped file is too dangerous
 	if (IntendedFilename != CaseSensitiveFilename)
@@ -794,7 +945,11 @@ bool FUnixPlatformFile::MoveFile(const TCHAR* To, const TCHAR* From)
 		return false;
 	}
 
-	GetFileMapCache().Invalidate(IntendedFilename);
+	{
+		FileMapCache& Cache = GetFileMapCache();
+		UE::TScopeLock Lock(Cache);
+		Cache.Invalidate(IntendedFilename);
+	}
 
 	int32 Result = rename(TCHAR_TO_UTF8(*CaseSensitiveFilename), TCHAR_TO_UTF8(*NormalizeFilename(To, true)));
 	if (Result == -1 && errno == EXDEV)
@@ -882,7 +1037,7 @@ void FUnixPlatformFile::SetTimeStamp(const TCHAR* Filename, const FDateTime Date
 	// change the modification time only
 	struct utimbuf Times;
 	Times.actime = FileInfo.st_atime;
-	Times.modtime = (DateTime - UnixEpoch).GetTotalSeconds();
+	Times.modtime = static_cast<__time_t>((DateTime - UnixEpoch).GetTotalSeconds());
 	utime(TCHAR_TO_UTF8(*CaseSensitiveFilename), &Times);
 }
 
@@ -921,6 +1076,28 @@ FString FUnixPlatformFile::GetFilenameOnDisk(const TCHAR* Filename)
 */
 }
 
+ESymlinkResult FUnixPlatformFile::IsSymlink(const TCHAR* Filename)
+{
+	FString CaseSensitiveFilename;
+	FString NormalizedFilename = NormalizeFilename(Filename, false);
+#if !UNIX_PLATFORM_FILE_SPEEDUP_FILE_OPERATIONS
+	if (!GCaseInsensMapper.MapCaseInsensitiveFile(NormalizedFilename, CaseSensitiveFilename))
+	{
+		// could not find the file
+		return ESymlinkResult::NonSymlink;
+	}
+#else
+	CaseSensitiveFilename = NormalizedFilename;
+#endif
+
+	struct stat FileInfo;
+	if(stat(TCHAR_TO_UTF8(*CaseSensitiveFilename), &FileInfo) != -1 && S_ISLNK(FileInfo.st_mode))
+	{
+		return ESymlinkResult::Symlink;
+	}
+	return ESymlinkResult::NonSymlink;
+}
+
 IFileHandle* FUnixPlatformFile::OpenRead(const TCHAR* Filename, bool bAllowWrite)
 {
 	// let the file registry manage read files
@@ -941,7 +1118,11 @@ IFileHandle* FUnixPlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, b
 	}
 
 	// We may have cached this as an invalid file, so lets just remove a newly created file from the cache
-	GetFileMapCache().Invalidate(FString(Filename));
+	{
+		FileMapCache& Cache = GetFileMapCache();
+		UE::TScopeLock Lock(Cache);
+		Cache.Invalidate(FString(Filename));
+	}
 
 	// create directories if needed.
 	if (!CreateDirectoriesFromPath(Filename))
@@ -953,9 +1134,13 @@ IFileHandle* FUnixPlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, b
 	int32 Handle = open(TCHAR_TO_UTF8(*NormalizeFilename(Filename, true)), Flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH);
 	if (Handle != -1)
 	{
+		// Due to dotnet not allowing any files marked as LOCK_EX to be opened for read only or copied, this allows us to
+		// to disable the locking mechanics. https://github.com/dotnet/runtime/issues/34126
+		extern bool GAllowExclusiveLockOnWrite;
+
 		// mimic Windows "exclusive write" behavior (we don't use FILE_SHARE_WRITE) by locking the file.
 		// note that the (non-mandatory) "lock" will be removed by itself when the last file descriptor is close()d
-		if (flock(Handle, LOCK_EX | LOCK_NB) == -1)
+		if (GAllowExclusiveLockOnWrite && (flock(Handle, LOCK_EX | LOCK_NB) == -1))
 		{
 			// if locked, consider operation a failure
 			if (EAGAIN == errno || EWOULDBLOCK == errno)
@@ -988,9 +1173,37 @@ IFileHandle* FUnixPlatformFile::OpenWrite(const TCHAR* Filename, bool bAppend, b
 		return FileHandleUnix;
 	}
 
-	int ErrNo = errno;
+	const int ErrNo = errno;
 	UE_LOG_UNIX_FILE(Warning, TEXT( "open('%s', Flags=0x%08X) failed: errno=%d (%s)" ), *NormalizeFilename(Filename, true), Flags, ErrNo, UTF8_TO_TCHAR(strerror(ErrNo)));
 	return nullptr;
+}
+
+IMappedFileHandle* FUnixPlatformFile::OpenMapped(const TCHAR* Filename)
+{
+	const FString NormalizedFilename = NormalizeFilename(Filename, false);
+
+	constexpr int Flags = O_RDONLY;
+	const int32 Handle = open(TCHAR_TO_UTF8(*NormalizedFilename), Flags);
+	if (Handle == -1)
+	{
+		const int ErrNo = errno;
+		UE_LOG_UNIX_FILE(Warning, TEXT("open('%s', Flags=0x%08X) failed: errno=%d (%s)"), *NormalizedFilename, Flags, ErrNo, UTF8_TO_TCHAR(strerror(ErrNo)));
+
+		return nullptr;
+	}
+	
+	struct stat FileInfo;
+	FileInfo.st_size = -1;
+	const int StatResult = fstat(Handle, &FileInfo);
+	if (StatResult == -1)
+	{
+		const int ErrNo = errno;
+		UE_LOG_UNIX_FILE(Warning, TEXT("stat('%s', Flags=0x%08X) failed: errno=%d (%s)"), *NormalizedFilename, Flags, ErrNo, UTF8_TO_TCHAR(strerror(ErrNo)));
+
+		return nullptr;
+	}
+	
+	return new FUnixMappedFileHandle(Handle, FileInfo.st_size, NormalizedFilename); 
 }
 
 bool FUnixPlatformFile::DirectoryExists(const TCHAR* Directory)
@@ -1017,7 +1230,13 @@ bool FUnixPlatformFile::DirectoryExists(const TCHAR* Directory)
 
 bool FUnixPlatformFile::CreateDirectory(const TCHAR* Directory)
 {
-	return mkdir(TCHAR_TO_UTF8(*NormalizeFilename(Directory, true)), 0775) == 0 || (errno == EEXIST);
+	FString NormalizedPath = NormalizeFilename(Directory, true);
+	if (!CreateDirectoriesFromPath(*NormalizedPath))
+	{
+		return false;
+	}
+
+	return mkdir(TCHAR_TO_UTF8(*NormalizedPath), 0775) == 0 || (errno == EEXIST);
 }
 
 bool FUnixPlatformFile::DeleteDirectory(const TCHAR* Directory)
@@ -1034,7 +1253,11 @@ bool FUnixPlatformFile::DeleteDirectory(const TCHAR* Directory)
 	CaseSensitiveFilename = IntendedFilename;
 #endif
 
-	GetFileMapCache().Invalidate(IntendedFilename);
+	{
+		FileMapCache& Cache = GetFileMapCache();
+		UE::TScopeLock Lock(Cache);
+		GetFileMapCache().Invalidate(IntendedFilename);
+	}
 
 	// removing mapped directory is too dangerous
 	if (IntendedFilename != CaseSensitiveFilename)
@@ -1092,7 +1315,7 @@ bool FUnixPlatformFile::IterateDirectory(const TCHAR* Directory, FDirectoryVisit
 			}
 		}
 
-		return Visitor.Visit(*(DirectoryStr / UnicodeEntryName), bIsDirectory);
+		return Visitor.CallShouldVisitAndVisit(*(DirectoryStr / UnicodeEntryName), bIsDirectory);
 	});
 }
 
@@ -1109,7 +1332,7 @@ bool FUnixPlatformFile::IterateDirectoryStat(const TCHAR* Directory, FDirectoryS
 		const FString AbsoluteUnicodeName = NormalizedDirectoryStr / UnicodeEntryName;	
 		if (stat(TCHAR_TO_UTF8(*AbsoluteUnicodeName), &FileInfo) != -1)
 		{
-			return Visitor.Visit(*(DirectoryStr / UnicodeEntryName), UnixStatToUEFileData(FileInfo));
+			return Visitor.CallShouldVisitAndVisit(*(DirectoryStr / UnicodeEntryName), UnixStatToUEFileData(FileInfo));
 		}
 
 		return true;
@@ -1126,7 +1349,7 @@ bool FUnixPlatformFile::IterateDirectoryCommon(const TCHAR* Directory, const TFu
 	{
 		Result = true;
 		struct dirent* Entry;
-		while ((Entry = readdir(Handle)) != NULL)
+		while (Result && (Entry = readdir(Handle)) != NULL)
 		{
 			if (FCString::Strcmp(UTF8_TO_TCHAR(Entry->d_name), TEXT(".")) && FCString::Strcmp(UTF8_TO_TCHAR(Entry->d_name), TEXT("..")))
 			{
@@ -1134,6 +1357,21 @@ bool FUnixPlatformFile::IterateDirectoryCommon(const TCHAR* Directory, const TFu
 			}
 		}
 		closedir(Handle);
+	}
+	return Result;
+}
+
+bool FUnixPlatformFile::CopyFile(const TCHAR* To, const TCHAR* From, EPlatformFileRead ReadFlags, EPlatformFileWrite WriteFlags)
+{
+	bool Result = IPlatformFile::CopyFile(To, From, ReadFlags, WriteFlags);
+	if (Result)
+	{
+		struct stat FileInfo;
+		if (stat(TCHAR_TO_UTF8(*NormalizeFilename(From, false)), &FileInfo) == 0)
+		{
+			FileInfo.st_mode |= S_IWUSR;
+			chmod(TCHAR_TO_UTF8(*NormalizeFilename(To, true)), FileInfo.st_mode);
+		}
 	}
 	return Result;
 }

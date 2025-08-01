@@ -9,6 +9,9 @@
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/PlayerState.h"
 #include "EngineUtils.h"
+#include "Engine/DemoNetDriver.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(GameStateBase)
 
 DEFINE_LOG_CATEGORY(LogGameState);
 
@@ -34,6 +37,8 @@ AGameStateBase::AGameStateBase(const FObjectInitializer& ObjectInitializer)
 
 	SumServerWorldTimeSecondsDelta = 0.0;
 	NumServerWorldTimeSecondsDeltas = 0;
+
+	NetPriority = 10.f;	// We need to prioritize updates to ensure that game state transitions reliably occur on the clients.
 }
 
 const AGameModeBase* AGameStateBase::GetDefaultGameMode() const
@@ -136,7 +141,7 @@ void AGameStateBase::RemovePlayerState(APlayerState* PlayerState)
 	}
 }
 
-float AGameStateBase::GetServerWorldTimeSeconds() const
+double AGameStateBase::GetServerWorldTimeSeconds() const
 {
 	UWorld* World = GetWorld();
 	if (World)
@@ -144,7 +149,7 @@ float AGameStateBase::GetServerWorldTimeSeconds() const
 		return World->GetTimeSeconds() + ServerWorldTimeSecondsDelta;
 	}
 
-	return 0.f;
+	return 0.;
 }
 
 void AGameStateBase::UpdateServerTimeSeconds()
@@ -152,7 +157,7 @@ void AGameStateBase::UpdateServerTimeSeconds()
 	UWorld* World = GetWorld();
 	if (World)
 	{
-		ReplicatedWorldTimeSeconds = World->GetTimeSeconds();
+		ReplicatedWorldTimeSecondsDouble = World->GetTimeSeconds();
 	}
 }
 
@@ -161,11 +166,29 @@ void AGameStateBase::OnRep_ReplicatedWorldTimeSeconds()
 	UWorld* World = GetWorld();
 	if (World)
 	{
-		const float ServerWorldTimeDelta = ReplicatedWorldTimeSeconds - World->GetTimeSeconds();
+		const UDemoNetDriver* DemoNetDriver = World ? World->GetDemoNetDriver() : nullptr;
+
+		// Support old replays.
+		if (DemoNetDriver && DemoNetDriver->IsPlaying() && (DemoNetDriver->GetPlaybackEngineNetworkProtocolVersion() < FEngineNetworkCustomVersion::GameStateReplicatedTimeAsDouble))
+		{
+			PRAGMA_DISABLE_DEPRECATION_WARNINGS
+			ReplicatedWorldTimeSecondsDouble = ReplicatedWorldTimeSeconds;
+			PRAGMA_ENABLE_DEPRECATION_WARNINGS
+			OnRep_ReplicatedWorldTimeSecondsDouble();
+		}
+	}
+}
+
+void AGameStateBase::OnRep_ReplicatedWorldTimeSecondsDouble()
+{
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		const double ServerWorldTimeDelta = ReplicatedWorldTimeSecondsDouble - World->GetTimeSeconds();
 
 		// Accumulate the computed server world delta
 		SumServerWorldTimeSecondsDelta += ServerWorldTimeDelta;
-		NumServerWorldTimeSecondsDeltas += 1.0;
+		NumServerWorldTimeSecondsDeltas += 1;
 
 		// Reset the accumulated values to ensure that we remain representative of the current delta
 		if (NumServerWorldTimeSecondsDeltas > 250)
@@ -210,7 +233,7 @@ bool AGameStateBase::HasBegunPlay() const
 	UWorld* World = GetWorld();
 	if (World)
 	{
-		return World->bBegunPlay;
+		return World->GetBegunPlay();
 	}
 
 	return false;
@@ -249,8 +272,15 @@ void AGameStateBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 	DOREPLIFETIME( AGameStateBase, SpectatorClass );
 
 	DOREPLIFETIME_CONDITION( AGameStateBase, GameModeClass,	COND_InitialOnly );
+	DOREPLIFETIME( AGameStateBase, ReplicatedWorldTimeSecondsDouble );
 
-	DOREPLIFETIME( AGameStateBase, ReplicatedWorldTimeSeconds );
+	FDoRepLifetimeParams Params;
+	Params.bIsPushBased = true;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	// ReplicatedWorldTimeSeconds is still 'replicated' to support old replays, however this variable does not change value on the server now and is never dirtyed.
+	DOREPLIFETIME_WITH_PARAMS_FAST(AGameStateBase, ReplicatedWorldTimeSeconds, Params);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
 	DOREPLIFETIME( AGameStateBase, bReplicatedHasBegunPlay );
 }
 
@@ -268,3 +298,4 @@ APlayerState* AGameStateBase::GetPlayerStateFromUniqueNetId(const FUniqueNetIdWr
 
 	return nullptr;
 }
+

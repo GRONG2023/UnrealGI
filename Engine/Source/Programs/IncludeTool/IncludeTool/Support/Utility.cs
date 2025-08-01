@@ -1,5 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
+using EpicGames.Core;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -27,7 +28,7 @@ namespace IncludeTool.Support
 			foreach(string SearchPath in Environment.GetEnvironmentVariable("PATH").Split(Path.PathSeparator))
 			{
 				FileReference CandidateLocation = FileReference.Combine(new DirectoryReference(SearchPath), "p4.exe");
-				if(CandidateLocation.Exists())
+				if(FileReference.Exists(CandidateLocation))
 				{
 					Location = CandidateLocation;
 					return true;
@@ -72,8 +73,7 @@ namespace IncludeTool.Support
 		public static string ComputeDigest(string Text)
 		{
 			byte[] Data = Encoding.Unicode.GetBytes(Text);
-			SHA1Managed Hasher = new SHA1Managed();
-			return FormatSHA(Hasher.ComputeHash(Data));
+			return FormatSHA(SHA1.Create().ComputeHash(Data));
 		}
 
 		/// <summary>
@@ -84,8 +84,7 @@ namespace IncludeTool.Support
 		public static string ComputeDigest(FileReference FileLocation)
 		{
 			byte[] Data = File.ReadAllBytes(FileLocation.FullName);
-			SHA1Managed Hasher = new SHA1Managed();
-			return FormatSHA(Hasher.ComputeHash(Data));
+			return FormatSHA(SHA1.Create().ComputeHash(Data));
 		}
 
 		/// <summary>
@@ -336,6 +335,12 @@ namespace IncludeTool.Support
 			string CompilerVersionString = DetermineClangVersionDir(CompilerFullPath);
 			if (!String.IsNullOrEmpty(CompilerVersionString))
 			{
+				// starting with 16.x clang includes are in a directory named only after its major version
+				int Major = System.Version.Parse(CompilerVersionString).Major;
+				if (Major >= 16)
+				{
+					CompilerVersionString = System.Version.Parse(CompilerVersionString).Major.ToString();
+				}
 				ExtraSystemIncludePaths.Add(DirectoryReference.Combine(SysRootDir, "lib", "clang", CompilerVersionString, "include"));
 			}
 			ExtraSystemIncludePaths.Add(DirectoryReference.Combine(InputDir, "Engine", "Source", "ThirdParty", "Linux", "LibCxx", "include", "c++", "v1"));

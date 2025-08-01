@@ -2,35 +2,40 @@
 
 #include "Components/ScrollBar.h"
 #include "UObject/EditorObjectVersion.h"
+#include "Styling/DefaultStyleCache.h"
+#include "Styling/UMGCoreStyle.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ScrollBar)
 
 #define LOCTEXT_NAMESPACE "UMG"
 
 /////////////////////////////////////////////////////
 // UScrollBar
 
-static FScrollBarStyle* DefaultScrollBarStyle = nullptr;
-
 UScrollBar::UScrollBar(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bIsVariable = false;
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	bAlwaysShowScrollbar = true;
 	bAlwaysShowScrollbarTrack = true;
 	Orientation = Orient_Vertical;
 	Thickness = FVector2D(16.0f, 16.0f);
 	Padding = FMargin(2.0f);
 
-	if (DefaultScrollBarStyle == nullptr)
-	{
-		// HACK: THIS SHOULD NOT COME FROM CORESTYLE AND SHOULD INSTEAD BE DEFINED BY ENGINE TEXTURES/PROJECT SETTINGS
-		DefaultScrollBarStyle = new FScrollBarStyle(FCoreStyle::Get().GetWidgetStyle<FScrollBarStyle>("Scrollbar"));
-
-		// Unlink UMG default colors from the editor settings colors.
-		DefaultScrollBarStyle->UnlinkColors();
-	}
+	WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetRuntime().GetScrollBarStyle();
 	
-	WidgetStyle = *DefaultScrollBarStyle;
+#if WITH_EDITOR 
+	if (IsEditorWidget())
+	{
+		WidgetStyle = UE::Slate::Private::FDefaultStyleCache::GetEditor().GetScrollBarStyle();
+
+		// The CDO isn't an editor widget and thus won't use the editor style, call post edit change to mark difference from CDO
+		PostEditChange();
+	}
+#endif // WITH_EDITOR
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void UScrollBar::ReleaseSlateResources(bool bReleaseChildren)
@@ -42,6 +47,7 @@ void UScrollBar::ReleaseSlateResources(bool bReleaseChildren)
 
 TSharedRef<SWidget> UScrollBar::RebuildWidget()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MyScrollBar = SNew(SScrollBar)
 		.Style(&WidgetStyle)
 		.AlwaysShowScrollbar(bAlwaysShowScrollbar)
@@ -49,7 +55,7 @@ TSharedRef<SWidget> UScrollBar::RebuildWidget()
 		.Orientation(Orientation)
 		.Thickness(Thickness)
 		.Padding(Padding);
-
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	//SLATE_EVENT(FOnUserScrolled, OnUserScrolled)
 
 	return MyScrollBar.ToSharedRef();
@@ -79,39 +85,107 @@ void UScrollBar::Serialize(FArchive& Ar)
 	const bool bDeprecateThickness = Ar.IsLoading() && Ar.CustomVer(FEditorObjectVersion::GUID) < FEditorObjectVersion::ScrollBarThicknessChange;
 	if (bDeprecateThickness)
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		// Set Thickness property to previous default value.
 		Thickness.Set(12.0f, 12.0f);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 
 	Super::Serialize(Ar);
 
 	if (bDeprecateThickness)
 	{
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 		// Implicit padding of 2 was removed, so Thickness value must be incremented by 4.
 		Thickness += FVector2D(4.0f, 4.0f);
-	}
-}
-
-void UScrollBar::PostLoad()
-{
-	Super::PostLoad();
-
-	if ( GetLinkerUE4Version() < VER_UE4_DEPRECATE_UMG_STYLE_ASSETS )
-	{
-		if ( Style_DEPRECATED != nullptr )
-		{
-			const FScrollBarStyle* StylePtr = Style_DEPRECATED->GetStyle<FScrollBarStyle>();
-			if ( StylePtr != nullptr )
-			{
-				WidgetStyle = *StylePtr;
-			}
-
-			Style_DEPRECATED = nullptr;
-		}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	}
 }
 
 #endif // if WITH_EDITORONLY_DATA
+
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+
+const FScrollBarStyle& UScrollBar::GetWidgetStyle() const
+{
+	return WidgetStyle;
+}
+void UScrollBar::SetWidgetStyle(const FScrollBarStyle& InWidgetStyle)
+{
+	WidgetStyle = InWidgetStyle;
+	if (MyScrollBar.IsValid())
+	{
+		MyScrollBar->SetStyle(&InWidgetStyle);
+	}
+}
+
+bool UScrollBar::IsAlwaysShowScrollbar() const
+{
+	return bAlwaysShowScrollbar;
+}
+
+void UScrollBar::SetAlwaysShowScrollbar(bool bNewValue)
+{
+	bAlwaysShowScrollbar = bNewValue;
+	if (MyScrollBar.IsValid())
+	{
+		MyScrollBar->SetScrollBarAlwaysVisible(bAlwaysShowScrollbar);
+	}
+}
+
+bool UScrollBar::IsAlwaysShowScrollbarTrack() const
+{
+	return bAlwaysShowScrollbarTrack;
+}
+
+void UScrollBar::SetAlwaysShowScrollbarTrack(bool bNewValue)
+{
+	bAlwaysShowScrollbarTrack = bNewValue;
+	if (MyScrollBar.IsValid())
+	{
+		MyScrollBar->SetScrollBarTrackAlwaysVisible(bAlwaysShowScrollbarTrack);
+	}
+}
+
+EOrientation UScrollBar::GetOrientation() const
+{
+	return Orientation;
+}
+
+FVector2D UScrollBar::GetThickness() const
+{
+	return Thickness;
+}
+
+void UScrollBar::SetThickness(const FVector2D& InThickness)
+{
+	Thickness = InThickness;
+	if (MyScrollBar.IsValid())
+	{
+		MyScrollBar->SetThickness(Thickness);
+	}
+}
+
+FMargin UScrollBar::GetPadding() const
+{
+	return Padding;
+}
+
+void UScrollBar::SetPadding(const FMargin& InPadding)
+{
+	Padding = InPadding;
+	if (MyScrollBar.IsValid())
+	{
+		MyScrollBar->SetPadding(InPadding);
+	}
+}
+
+void UScrollBar::InitOrientation(EOrientation InOrientation)
+{
+	ensureMsgf(!MyScrollBar.IsValid(), TEXT("The widget is already created."));
+	Orientation = InOrientation;
+}
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 
 #if WITH_EDITOR
 
@@ -125,3 +199,4 @@ const FText UScrollBar::GetPaletteCategory()
 /////////////////////////////////////////////////////
 
 #undef LOCTEXT_NAMESPACE
+

@@ -302,18 +302,21 @@ public:
 	bool IsBasePose(FName PoseName) const;
 
 private:
+	void UpdateSelectedPoseWithCurrent();
+
+	void AddPoseWithCurrent();
+	void AddPoseWithReference();
 
 	void BindCommands();
 	void RestartPreviewComponent();
 
 	/** Handler for context menus */
-	TSharedPtr<SWidget> OnGetContextMenuContent() const;
+	TSharedPtr<SWidget> OnGetContextMenuContent();
 	/** Handler for curve list context menu*/
 	TSharedPtr<SWidget> OnGetContextMenuContentForCurveList() const;
 	/** Called when list double-clicked */
-	void OnListDoubleClick(TSharedPtr<FDisplayedPoseInfo> InItem);
-
-
+	void OnListDoubleClick(TSharedPtr<FDisplayedPoseInfo> InItem);	
+	bool IsNewPoseNameValid(FText& OutReason) const;
 	/**
 	* Clears and rebuilds the table, according to an optional search string
 	*
@@ -355,6 +358,8 @@ private:
 	/** A list of animation curve. Used by the PoseListView. */
 	TArray< TSharedPtr<FDisplayedCurveInfo> > CurveList;
 
+	FName NewPoseName;
+
 	/** Current text typed into NameFilterBox */
 	FText FilterText;
 
@@ -372,6 +377,7 @@ private:
 };
 //////////////////////////////////////////////////////////////////////////
 // SPoseEditor
+
 
 /** Overall animation sequence editing widget */
 class SPoseEditor : public SAnimEditorBase

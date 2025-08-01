@@ -12,10 +12,12 @@
 #include "Widgets/SWindow.h"
 #include "Animation/Skeleton.h"
 #include "Animation/AnimationAsset.h"
-#include "Editor/ContentBrowser/Public/IContentBrowserSingleton.h"
-#include "Editor/ContentBrowser/Public/ContentBrowserModule.h"
-#include "Developer/AssetTools/Public/IAssetTools.h"
-#include "Developer/AssetTools/Public/AssetToolsModule.h"
+#include "IContentBrowserSingleton.h"
+#include "ContentBrowserModule.h"
+#include "IAssetTools.h"
+#include "AssetToolsModule.h"
+#include "Engine/SkeletalMesh.h"
+#include "UObject/SoftObjectPtr.h"
 
 class FMenuBuilder;
 class UAnimBlueprint;
@@ -24,6 +26,8 @@ class UAnimSequence;
 class UEdGraph;
 class UPoseWatch;
 class UEdGraphNode;
+class UAnimBlueprintGeneratedClass;
+class UAnimGraphNode_Base;
 
 /** dialog to prompt users to decide an animation asset name */
 class SCreateAnimationAssetDlg : public SWindow
@@ -84,7 +88,7 @@ struct FAnimationCompressionSelectionDialogConfig
 };
 
 /** Dialog to prompt user to select an animation compression settings asset. */
-class UNREALED_API SAnimationCompressionSelectionDialog : public SCompoundWidget
+class SAnimationCompressionSelectionDialog : public SCompoundWidget
 {
 public:
 	/** Called from the Dialog when an asset has been selected. */
@@ -94,13 +98,13 @@ public:
 
 	SLATE_END_ARGS()
 
-	SAnimationCompressionSelectionDialog();
-	virtual ~SAnimationCompressionSelectionDialog();
+	UNREALED_API SAnimationCompressionSelectionDialog();
+	UNREALED_API virtual ~SAnimationCompressionSelectionDialog();
 
-	virtual void Construct(const FArguments& InArgs, const FAnimationCompressionSelectionDialogConfig& InConfig);
+	UNREALED_API virtual void Construct(const FArguments& InArgs, const FAnimationCompressionSelectionDialogConfig& InConfig);
 
 	/** Sets the delegate handler for when an open operation is committed */
-	void SetOnAssetSelected(const FOnAssetSelected& InHandler);
+	UNREALED_API void SetOnAssetSelected(const FOnAssetSelected& InHandler);
 
 private:
 	void DoSelectAsset(const FAssetData& SelectedAsset);
@@ -135,10 +139,11 @@ namespace AnimationEditorUtils
 {
 	UNREALED_API FAssetData CreateModalAnimationCompressionSelectionDialog(const FAnimationCompressionSelectionDialogConfig& InConfig);
 
-	UNREALED_API void CreateAnimationAssets(const TArray<TWeakObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, TSubclassOf<UAnimationAsset> AssetClass, const FString& InPrefix, FAnimAssetCreated AssetCreated, UObject* NameBaseObject = nullptr, bool bDoNotShowNameDialog = false);
+	UNREALED_API void CreateAnimationAssets(const TArray<TSoftObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, TSubclassOf<UAnimationAsset> AssetClass, const FString& InPrefix, FAnimAssetCreated AssetCreated, UObject* NameBaseObject = nullptr, bool bDoNotShowNameDialog = false, bool bAllowReplaceExisting = false);
 	
 	UNREALED_API void CreateNewAnimBlueprint(TArray<TWeakObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser);
-	UNREALED_API void FillCreateAssetMenu(FMenuBuilder& MenuBuilder, const TArray<TWeakObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser=true);
+	UNREALED_API void CreateNewAnimBlueprint(TArray<TSoftObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser);
+	UNREALED_API void FillCreateAssetMenu(FMenuBuilder& MenuBuilder, const TArray<TSoftObjectPtr<UObject>>& SkeletonsOrSkeletalMeshes, FAnimAssetCreated AssetCreated, bool bInContentBrowser=true);
 	UNREALED_API void CreateUniqueAssetName(const FString& InBasePackageName, const FString& InSuffix, FString& OutPackageName, FString& OutAssetName);
 
 	/** Applies the animation compression codecs to the sequence list with optional override settings */
@@ -192,24 +197,32 @@ namespace AnimationEditorUtils
 	// Is the supplied UEdGraph an Animation Graph
 	UNREALED_API bool IsAnimGraph(UEdGraph* Graph);
 
+	int32 GetPoseWatchNodeLinkID(UPoseWatch* PoseWatch, OUT UAnimBlueprintGeneratedClass*& AnimBPGenClass);
 	UNREALED_API void SetPoseWatch(UPoseWatch* PoseWatch, UAnimBlueprint* AnimBlueprintIfKnown = nullptr);
 	UNREALED_API UPoseWatch* FindPoseWatchForNode(const UEdGraphNode* Node, UAnimBlueprint* AnimBlueprintIfKnown=nullptr);
-	UNREALED_API void MakePoseWatchForNode(UAnimBlueprint* AnimBlueprint, UEdGraphNode* Node, FColor PoseWatchColour);
+	UNREALED_API UPoseWatch* MakePoseWatchForNode(UAnimBlueprint* AnimBlueprint, UEdGraphNode* Node);
 	UNREALED_API void RemovePoseWatch(UPoseWatch* PoseWatch, UAnimBlueprint* AnimBlueprintIfKnown=nullptr);
-	UNREALED_API void UpdatePoseWatchColour(UPoseWatch* PoseWatch, FColor NewPoseWatchColour);
+	UNREALED_API void RemovePoseWatchFromNode(UEdGraphNode* Node, UAnimBlueprint* AnimBlueprint);
+	UNREALED_API void RemovePoseWatchesFromGraph(UAnimBlueprint* AnimBlueprint, class UEdGraph* Graph);
+
+	// Delegate fired when a pose watch is added or removed
+	DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPoseWatchesChanged, UAnimBlueprint* /*InAnimBlueprint*/, UEdGraphNode* /*InNode*/);
+	UNREALED_API FOnPoseWatchesChanged& OnPoseWatchesChanged();
+
+	UNREALED_API void SetupDebugLinkedAnimInstances(UAnimBlueprint* InAnimBlueprint, UObject* InRootObjectBeingDebugged);
 
 	//////////////////////////////////////////////////////////////////////////////////////////
 
 	template <typename TFactory, typename T>
-	void ExecuteNewAnimAsset(TArray<TWeakObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, const FString InSuffix, FAnimAssetCreated AssetCreated, bool bInContentBrowser)
+	void ExecuteNewAnimAsset(TArray<TSoftObjectPtr<UObject>> SkeletonsOrSkeletalMeshes, const FString InSuffix, FAnimAssetCreated AssetCreated, bool bInContentBrowser, bool bAllowReplaceExisting)
 	{
 		if(bInContentBrowser && SkeletonsOrSkeletalMeshes.Num() == 1)
 		{
 			USkeletalMesh* SkeletalMesh = nullptr;
-			USkeleton* Skeleton = Cast<USkeleton>(SkeletonsOrSkeletalMeshes[0].Get());
+			USkeleton* Skeleton = Cast<USkeleton>(SkeletonsOrSkeletalMeshes[0].LoadSynchronous());
 			if (Skeleton == nullptr)
 			{
-				SkeletalMesh = CastChecked<USkeletalMesh>(SkeletonsOrSkeletalMeshes[0].Get());
+				SkeletalMesh = CastChecked<USkeletalMesh>(SkeletonsOrSkeletalMeshes[0].LoadSynchronous());
 				Skeleton = SkeletalMesh->GetSkeleton();
 			}
 
@@ -244,7 +257,7 @@ namespace AnimationEditorUtils
 							{
 								ObjectToDelete->ClearFlags(RF_Standalone | RF_Public);
 								ObjectToDelete->RemoveFromRoot();
-								ObjectToDelete->MarkPendingKill();
+								ObjectToDelete->MarkAsGarbage();
 							}
 							CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
 						}
@@ -254,7 +267,10 @@ namespace AnimationEditorUtils
 		}
 		else
 		{
-			CreateAnimationAssets(SkeletonsOrSkeletalMeshes, T::StaticClass(), InSuffix, AssetCreated);
+			UObject* NameBaseObject = nullptr;
+			const bool bDoNotShowNameDialog = false;
+
+			CreateAnimationAssets(SkeletonsOrSkeletalMeshes, T::StaticClass(), InSuffix, AssetCreated, NameBaseObject, bDoNotShowNameDialog, bAllowReplaceExisting);
 		}
 	}
 } // namespace AnimationEditorUtils

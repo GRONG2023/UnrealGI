@@ -7,6 +7,7 @@
 #include "Rendering/RenderingCommon.h"
 #include "SlateGlobals.h"
 #include "RHI.h"
+#include "RHICommandList.h"
 #include "RenderResource.h"
 #include "Containers/ResourceArray.h"
 
@@ -33,7 +34,7 @@ public:
 
 		if ( IsInRenderingThread() )
 		{
-			InitResource();
+			InitResource(FRHICommandListImmediate::Get());
 		}
 		else
 		{
@@ -54,7 +55,7 @@ public:
 	}
 
 	/** Initializes the vertex buffers RHI resource. */
-	virtual void InitDynamicRHI()
+	virtual void InitRHI(FRHICommandListBase& RHICmdList)
 	{
 		if( !IsValidRef(VertexBufferRHI) )
 		{
@@ -62,8 +63,8 @@ public:
 	
 			SetBufferSize(MinBufferSize);
 
-			FRHIResourceCreateInfo CreateInfo;
-			VertexBufferRHI = RHICreateVertexBuffer( MinBufferSize, BUF_Dynamic, CreateInfo );
+			FRHIResourceCreateInfo CreateInfo(TEXT("SlateElementVertices"));
+			VertexBufferRHI = RHICmdList.CreateVertexBuffer( MinBufferSize, BUF_Dynamic, CreateInfo );
 
 			// Ensure the vertex buffer could be created
 			check(IsValidRef(VertexBufferRHI));
@@ -71,7 +72,7 @@ public:
 	}
 
 	/** Releases the vertex buffers RHI resource. */
-	virtual void ReleaseDynamicRHI()
+	virtual void ReleaseRHI()
 	{
 		VertexBufferRHI.SafeRelease();
 		SetBufferSize(0);
@@ -122,7 +123,7 @@ private:
 	void ResizeBuffer( int32 NewSizeBytes )
 	{
 		QUICK_SCOPE_CYCLE_COUNTER(Slate_RTResizeBuffer);
-		checkSlow( IsInRenderingThread() );
+		FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
 
 		int32 FinalSize = FMath::Max( NewSizeBytes, MinBufferSize );
 
@@ -130,8 +131,8 @@ private:
 		{
 			VertexBufferRHI.SafeRelease();
 
-			FRHIResourceCreateInfo CreateInfo;
-			VertexBufferRHI = RHICreateVertexBuffer(FinalSize, BUF_Dynamic, CreateInfo);
+			FRHIResourceCreateInfo CreateInfo(TEXT("SlateElementVertices"));
+			VertexBufferRHI = RHICmdList.CreateVertexBuffer(FinalSize, BUF_Dynamic, CreateInfo);
 
 			check(IsValidRef(VertexBufferRHI));
 
@@ -171,15 +172,15 @@ public:
 	~FSlateStencilClipVertexBuffer() {};
 
 	/** Initializes the vertex buffers RHI resource. */
-	virtual void InitDynamicRHI()
+	virtual void InitRHI(FRHICommandListBase& RHICmdList)
 	{
 		if (!IsValidRef(VertexBufferRHI))
 		{
 			static FStencilBufferResourceArray ResourceArray;
 
-			FRHIResourceCreateInfo CreateInfo;
+			FRHIResourceCreateInfo CreateInfo(TEXT("SlateStencilClipVertexBuffer"));
 			CreateInfo.ResourceArray = &ResourceArray;
-			VertexBufferRHI = RHICreateVertexBuffer(ResourceArray.GetResourceDataSize(), BUF_Static, CreateInfo);
+			VertexBufferRHI = RHICmdList.CreateVertexBuffer(ResourceArray.GetResourceDataSize(), BUF_Static, CreateInfo);
 
 			// Ensure the vertex buffer could be created
 			check(IsValidRef(VertexBufferRHI));
@@ -187,7 +188,7 @@ public:
 	}
 
 	/** Releases the vertex buffers RHI resource. */
-	virtual void ReleaseDynamicRHI()
+	virtual void ReleaseRHI()
 	{
 		VertexBufferRHI.SafeRelease();
 	}

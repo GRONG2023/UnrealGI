@@ -1,16 +1,30 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Commandlets/GatherTextFromMetadataCommandlet.h"
+
+#include "Commandlets/Commandlet.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/InternationalizationManifest.h"
+#include "Internationalization/LocKeyFuncs.h"
+#include "LocTextHelper.h"
+#include "Logging/LogCategory.h"
+#include "Logging/LogMacros.h"
+#include "Logging/LogVerbosity.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "SourceCodeNavigation.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "Trace/Detail/Channel.h"
 #include "UObject/Class.h"
 #include "UObject/Package.h"
-#include "UObject/UnrealType.h"
-#include "Misc/Paths.h"
-#include "Misc/PackageName.h"
-#include "Modules/ModuleManager.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
-#include "UObject/PropertyIterator.h"
-#include "SourceCodeNavigation.h"
+#include "UObject/UnrealType.h"
+
+class UObject;
 
 DEFINE_LOG_CATEGORY_STATIC(LogGatherTextFromMetaDataCommandlet, Log, All);
 
@@ -20,6 +34,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogGatherTextFromMetaDataCommandlet, Log, All);
 UGatherTextFromMetaDataCommandlet::UGatherTextFromMetaDataCommandlet(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
+}
+
+bool UGatherTextFromMetaDataCommandlet::ShouldRunInPreview(const TArray<FString>& Switches, const TMap<FString, FString>& ParamVals) const
+{
+	const FString* GatherType = ParamVals.Find(UGatherTextCommandletBase::GatherTypeParam);
+	// If the param is not specified, it is assumed that both source and assets are to be gathered 
+	return !GatherType || *GatherType == TEXT("Metadata") || *GatherType == TEXT("All");
 }
 
 int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
@@ -105,7 +126,7 @@ int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
 
 	FGatherTextDelegates::GetAdditionalGatherPaths.Broadcast(GatherManifestHelper->GetTargetName(), IncludePathFilters, ExcludePathFilters);
 
-	// Get whether we should gather editor-only data. Typically only useful for the localization of UE4 itself.
+	// Get whether we should gather editor-only data. Typically only useful for the localization of UE itself.
 	if (!GetBoolFromConfig(*SectionName, TEXT("ShouldGatherFromEditorOnlyData"), ShouldGatherFromEditorOnlyData, GatherTextConfigPath))
 	{
 		ShouldGatherFromEditorOnlyData = false;
@@ -158,7 +179,7 @@ int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
 				else
 				{
 					const FFieldClass* FieldClass = FFieldClass::GetNameToFieldClassMap().FindRef(*FieldTypeStr);
-					const UClass* UFieldClass = FindObject<UClass>(ANY_PACKAGE, *FieldTypeStr);
+					const UClass* UFieldClass = FindFirstObject<UClass>(*FieldTypeStr, EFindFirstObjectOptions::None, ELogVerbosity::Warning, TEXT("Looking for field types to include or exclude in GatherTextFromMetadata commandlet"));
 					if (!FieldClass && !UFieldClass)
 					{
 						UE_LOG(LogGatherTextFromMetaDataCommandlet, Warning, TEXT("Field Type %s was not found (from %s in section %s). Did you forget a ModulesToPreload entry?"), *FieldTypeStr, InConfigKey, *SectionName);
@@ -190,26 +211,32 @@ int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
 			TArray<FString> FieldOwnerTypeStrs;
 			GetStringArrayFromConfig(*SectionName, InConfigKey, FieldOwnerTypeStrs, GatherTextConfigPath);
 
-			TArray<const UStruct*> AllFieldOwnerTypes;
-			GetObjectsOfClass(UClass::StaticClass(), (TArray<UObject*>&)AllFieldOwnerTypes, false);
-			GetObjectsOfClass(UScriptStruct::StaticClass(), (TArray<UObject*>&)AllFieldOwnerTypes, false);
+			TArray<const UStruct*> AllFieldOwnerClassTypes;
+			TArray<const UStruct*> AllFieldOwnerScriptStructTypes;
+			GetObjectsOfClass(UClass::StaticClass(), (TArray<UObject*>&)AllFieldOwnerClassTypes, false);
+			GetObjectsOfClass(UScriptStruct::StaticClass(), (TArray<UObject*>&)AllFieldOwnerScriptStructTypes, false);
 
 			for (const FString& FieldOwnerTypeStr : FieldOwnerTypeStrs)
 			{
 				const bool bIsWildcard = FieldOwnerTypeStr.GetCharArray().Contains(TEXT('*')) || FieldOwnerTypeStr.GetCharArray().Contains(TEXT('?'));
 				if (bIsWildcard)
 				{
-					for (const UStruct* FieldOwnerType : AllFieldOwnerTypes)
+					auto AddFieldOwnersMatchingWildcard = [&FieldOwnerTypeStr, &OutFieldOwnerTypes](const TArray<const UStruct*>& AllFieldOwnerTypes)
 					{
-						if (FieldOwnerType->GetName().MatchesWildcard(FieldOwnerTypeStr))
+						for (const UStruct* FieldOwnerType : AllFieldOwnerTypes)
 						{
-							OutFieldOwnerTypes.Add(FieldOwnerType);
+							if (FieldOwnerType->GetName().MatchesWildcard(FieldOwnerTypeStr))
+							{
+								OutFieldOwnerTypes.Add(FieldOwnerType);
+							}
 						}
-					}
+					};
+					AddFieldOwnersMatchingWildcard(AllFieldOwnerClassTypes);
+					AddFieldOwnersMatchingWildcard(AllFieldOwnerScriptStructTypes);
 				}
 				else
 				{
-					const UStruct* FieldOwnerType = FindObject<UStruct>(ANY_PACKAGE, *FieldOwnerTypeStr);
+					const UStruct* FieldOwnerType = FindFirstObject<UStruct>(*FieldOwnerTypeStr, EFindFirstObjectOptions::EnsureIfAmbiguous);
 					if (!FieldOwnerType)
 					{
 						UE_LOG(LogGatherTextFromMetaDataCommandlet, Warning, TEXT("Field Owner Type %s was not found (from %s in section %s). Did you forget a ModulesToPreload entry?"), *FieldOwnerTypeStr, InConfigKey, *SectionName);
@@ -220,6 +247,11 @@ int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
 					if (const UClass* FieldOwnerClass = Cast<UClass>(FieldOwnerType))
 					{
 						GetDerivedClasses(FieldOwnerClass, (TArray<UClass*>&)OutFieldOwnerTypes);
+					}
+					if (FieldOwnerType == UScriptStruct::StaticClass())
+					{
+						// Structs don't have a catch-all base, so we allow ScriptStruct to mean "all struct types"
+						OutFieldOwnerTypes.Append(AllFieldOwnerScriptStructTypes);
 					}
 				}
 			}
@@ -232,12 +264,7 @@ int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
 	FGatherParameters Arguments;
 	GetStringArrayFromConfig(*SectionName, TEXT("InputKeys"), Arguments.InputKeys, GatherTextConfigPath);
 	GetStringArrayFromConfig(*SectionName, TEXT("OutputNamespaces"), Arguments.OutputNamespaces, GatherTextConfigPath);
-	TArray<FString> OutputKeys;
-	GetStringArrayFromConfig(*SectionName, TEXT("OutputKeys"), OutputKeys, GatherTextConfigPath);
-	for(const auto& OutputKey : OutputKeys)
-	{
-		Arguments.OutputKeys.Add(FText::FromString(OutputKey));
-	}
+	GetStringArrayFromConfig(*SectionName, TEXT("OutputKeys"), Arguments.OutputKeys, GatherTextConfigPath);
 
 	// Execute gather.
 	GatherTextFromUObjects(IncludePathFilters, ExcludePathFilters, Arguments);
@@ -251,7 +278,7 @@ int32 UGatherTextFromMetaDataCommandlet::Main( const FString& Params )
 		FText OutError;
 		if (!GatherManifestHelper->AddDependency(ManifestDependency, &OutError))
 		{
-			UE_LOG(LogGatherTextFromMetaDataCommandlet, Error, TEXT("The GatherTextFromMetaData commandlet couldn't load the specified manifest dependency: '%'. %s"), *ManifestDependency, *OutError.ToString());
+			UE_LOG(LogGatherTextFromMetaDataCommandlet, Error, TEXT("The GatherTextFromMetaData commandlet couldn't load the specified manifest dependency: '%s'. %s"), *ManifestDependency, *OutError.ToString());
 			return -1;
 		}
 	}
@@ -283,7 +310,7 @@ void UGatherTextFromMetaDataCommandlet::GatherTextFromUObjects(const TArray<FStr
 		check(!SourceFilePath.IsEmpty());
 
 		const FFuzzyPathMatcher::EPathMatch PathMatch = FuzzyPathMatcher.TestPath(SourceFilePath);
-		if (PathMatch != FFuzzyPathMatcher::Included)
+		if (PathMatch != FFuzzyPathMatcher::EPathMatch::Included)
 		{
 			continue;
 		}
@@ -298,7 +325,7 @@ void UGatherTextFromMetaDataCommandlet::GatherTextFromField(UField* Field, const
 	// For structs, also gather the new non-object field values.
 	if (UStruct* Struct = Cast<UStruct>(Field))
 	{
-		for (TFieldIterator<FField> FieldIt(Struct); FieldIt; ++FieldIt)
+		for (TFieldIterator<FField> FieldIt(Struct, EFieldIterationFlags::None); FieldIt; ++FieldIt)
 		{
 			GatherTextFromField(*FieldIt, Arguments, InPlatformName);
 		}
@@ -325,20 +352,20 @@ void UGatherTextFromMetaDataCommandlet::GatherTextFromField(UField* Field, const
 
 				for (int32 j = 0; j < Arguments.InputKeys.Num(); ++j)
 				{
-					FFormatNamedArguments PatternArguments;
-					PatternArguments.Add(TEXT("FieldPath"), FText::FromString(Enum->GetFullGroupName(false) + TEXT(".") + Enum->GetNameStringByIndex(i)));
+					FStringFormatNamedArguments PatternArguments;
+					PatternArguments.Add(TEXT("FieldPath"), Enum->GetFullGroupName(false) + TEXT(".") + Enum->GetNameStringByIndex(i));
 
 					if (Enum->HasMetaData(*Arguments.InputKeys[j], i))
 					{
 						const FString& MetaDataValue = Enum->GetMetaData(*Arguments.InputKeys[j], i);
 						if (!MetaDataValue.IsEmpty())
 						{
-							PatternArguments.Add(TEXT("MetaDataValue"), FText::FromString(MetaDataValue));
+							PatternArguments.Add(TEXT("MetaDataValue"), MetaDataValue);
 
 							const FString Namespace = Arguments.OutputNamespaces[j];
 							FLocItem LocItem(MetaDataValue);
 							FManifestContext Context;
-							Context.Key = FText::Format(Arguments.OutputKeys[j], PatternArguments).ToString();
+							Context.Key = FString::Format(*Arguments.OutputKeys[j], PatternArguments);
 							Context.SourceLocation = FString::Printf(TEXT("Meta-data for key %s of enum value %s of enum %s in %s"), *Arguments.InputKeys[j], *Enum->GetNameStringByIndex(i), *Enum->GetName(), *Enum->GetFullGroupName(true));
 							Context.PlatformName = InPlatformName;
 							GatherManifestHelper->AddSourceText(Namespace, LocItem, Context);
@@ -413,21 +440,21 @@ void UGatherTextFromMetaDataCommandlet::GatherTextFromFieldImpl(FieldType* Field
 {
 	for (int32 i = 0; i < Arguments.InputKeys.Num(); ++i)
 	{
-		FFormatNamedArguments PatternArguments;
-		PatternArguments.Add(TEXT("FieldPath"), FText::FromString(Field->GetFullGroupName(false)));
+		FStringFormatNamedArguments PatternArguments;
+		PatternArguments.Add(TEXT("FieldPath"), Field->GetFullGroupName(false));
 
 		if (Field->HasMetaData(*Arguments.InputKeys[i]))
 		{
 			const FString& MetaDataValue = Field->GetMetaData(*Arguments.InputKeys[i]);
 			if (!MetaDataValue.IsEmpty())
 			{
-				PatternArguments.Add(TEXT("MetaDataValue"), FText::FromString(MetaDataValue));
+				PatternArguments.Add(TEXT("MetaDataValue"), MetaDataValue);
 
 				const UStruct* FieldOwnerType = Field->GetOwnerStruct();
 				const FString Namespace = Arguments.OutputNamespaces[i];
 				FLocItem LocItem(MetaDataValue);
 				FManifestContext Context;
-				Context.Key = FText::Format(Arguments.OutputKeys[i], PatternArguments).ToString();
+				Context.Key = FString::Format(*Arguments.OutputKeys[i], PatternArguments);
 				Context.SourceLocation = FString::Printf(TEXT("Meta-data for key %s of member %s in %s (type: %s, owner: %s)"), *Arguments.InputKeys[i], *Field->GetName(), *Field->GetFullGroupName(true), *Field->GetClass()->GetName(), FieldOwnerType ? *FieldOwnerType->GetName() : TEXT("<null>"));
 				Context.PlatformName = InPlatformName;
 				GatherManifestHelper->AddSourceText(Namespace, LocItem, Context);

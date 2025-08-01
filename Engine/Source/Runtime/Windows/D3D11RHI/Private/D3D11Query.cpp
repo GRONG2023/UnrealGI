@@ -5,6 +5,23 @@
 =============================================================================*/
 
 #include "D3D11RHIPrivate.h"
+#include "RenderCore.h"
+
+float GD3D11AbsoluteTimeQueryTimeoutValue = 30.0f;
+static FAutoConsoleVariableRef CVarD3D11AbsoluteTimeQueryTimeoutValue(
+	TEXT("r.D3D11.AbsoluteTimeQueryTimeoutValue"),
+	GD3D11AbsoluteTimeQueryTimeoutValue,
+	TEXT("Set the timeout value, in seconds, to wait for a D3D11 absolute time query."),
+	ECVF_Default
+);
+
+float GD3D11QueryTimeoutValue = 5.0f;
+static FAutoConsoleVariableRef CVarD3D11QueryTimeoutValue(
+	TEXT("r.D3D11.QueryTimeoutValue"),
+	GD3D11QueryTimeoutValue,
+	TEXT("Set the timeout value, in seconds, to wait for a D3D11 query. This value does not apply to absolute time queries (which are controlled by r.D3D11.AbsoluteTimeQueryTimeoutValue)."),
+	ECVF_Default
+);
 
 class FD3D11RenderQueryBatcher final
 {
@@ -134,7 +151,7 @@ private:
 		: CurrentId(0)
 	{}
 
-	virtual ~FD3D11RenderQueryBatcher() = default;
+	~FD3D11RenderQueryBatcher() = default;
 };
 
 void D3D11RHIQueryBatcherPerFrameCleanup()
@@ -175,13 +192,6 @@ void FD3D11DynamicRHI::RHIEndOcclusionQueryBatch()
 {
 	checkf(ActualOcclusionQueriesInBatch <= RequestedOcclusionQueriesInBatch, TEXT("Expected %d total occlusion queries per RHIBeginOcclusionQueryBatch(); got %d total; this will break newer APIs"), RequestedOcclusionQueriesInBatch, ActualOcclusionQueriesInBatch);
 	RequestedOcclusionQueriesInBatch = 0;
-}
-
-FRenderQueryRHIRef FD3D11DynamicRHI::RHICreateRenderQuery_RenderThread(
-	class FRHICommandListImmediate& RHICmdList,
-	ERenderQueryType QueryType)
-{
-	return RHICreateRenderQuery(QueryType);
 }
 
 FRenderQueryRHIRef FD3D11DynamicRHI::RHICreateRenderQuery(ERenderQueryType QueryType)
@@ -262,7 +272,7 @@ void FD3D11DynamicRHI::RHIBeginRenderQuery(FRHIRenderQuery* QueryRHI)
 	{
 		++ActualOcclusionQueriesInBatch;
 		Query->bResultIsCached = false;
-		Direct3DDeviceIMContext->Begin(Query->Resource);
+		Direct3DDeviceIMContext->Begin(Query->Resource.GetReference());
 		FD3D11RenderQueryBatcher::Get().Add(QueryRHI);
 	}
 	else
@@ -288,24 +298,25 @@ void FD3D11DynamicRHI::RHIEndRenderQuery(FRHIRenderQuery* QueryRHI)
 bool FD3D11DynamicRHI::GetQueryData(ID3D11Query* Query, void* Data, SIZE_T DataSize, ERenderQueryType QueryType, bool bWait, bool bStallRHIThread)
 {
 #define SAFE_GET_QUERY_DATA \
-	if (bStallRHIThread) D3D11StallRHIThread(); \
-	Result = Direct3DDeviceIMContext->GetData(Query, Data, DataSize, 0); \
-	if (bStallRHIThread) D3D11UnstallRHIThread();
+	{ \
+		FScopedD3D11RHIThreadStaller StallRHIThread(bStallRHIThread); \
+		Result = Direct3DDeviceIMContext->GetData(Query, Data, DataSize, 0); \
+	}
 
 	// Request the data from the query.
 	HRESULT Result;
 	SAFE_GET_QUERY_DATA
 
-
 	// Isn't the query finished yet, and can we wait for it?
 	if ( Result == S_FALSE && bWait )
 	{
 		SCOPE_CYCLE_COUNTER( STAT_RenderQueryResultTime );
-		uint32 IdleStart = FPlatformTime::Cycles();
+		FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+
 		double StartTime = FPlatformTime::Seconds();
 		double TimeoutWarningLimit = 5.0;
 		// timer queries are used for Benchmarks which can stall a bit more
-		double TimeoutValue = (QueryType == RQT_AbsoluteTime) ? 30.0 : 0.5;
+		double TimeoutValue = (QueryType == RQT_AbsoluteTime) ? GD3D11AbsoluteTimeQueryTimeoutValue : GD3D11QueryTimeoutValue;
 
 		do
 		{
@@ -315,8 +326,6 @@ bool FD3D11DynamicRHI::GetQueryData(ID3D11Query* Query, void* Data, SIZE_T DataS
 			{
 				return true;
 			}
-
-
 
 			float DeltaTime = FPlatformTime::Seconds() - StartTime;
 			if(DeltaTime > TimeoutWarningLimit)
@@ -328,22 +337,14 @@ bool FD3D11DynamicRHI::GetQueryData(ID3D11Query* Query, void* Data, SIZE_T DataS
 
 			if(DeltaTime > TimeoutValue)
 			{
-				HRESULT DeviceRemovedReason = Direct3DDevice->GetDeviceRemovedReason();
-				UE_LOG(LogD3D11RHI, Log, TEXT("Timed out while waiting for GPU to catch up. (%.1f s) (ErrorCode %08x) (%08x)"), TimeoutValue, (uint32)Result, (uint32)DeviceRemovedReason);
-				if(FAILED(Result))
-				{
-					VERIFYD3D11RESULT_EX(Result, Direct3DDevice);
-				}
-				else if (QueryType == RQT_AbsoluteTime)
-				{
-					UE_LOG(LogD3D11RHI, Log, TEXT("GPU has hung or crashed, checking status."));
-					GPUProfilingData.CheckGpuHeartbeat(true);
-				}
+				UE_LOG(LogD3D11RHI, Log, TEXT("Timed out while waiting for GPU query. (Timeout %.1f s) (ErrorCode %08x)"), TimeoutValue, (uint32)Result);
+
+				// Check for GPU status and crash.
+				GPUProfilingData.CheckGpuHeartbeat(true);
+				VERIFYD3D11RESULT_EX(Result, Direct3DDevice);
 				return false;
 			}
 		} while ( Result == S_FALSE );
-		GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
-		GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
 	}
 
 	if( Result == S_OK )
@@ -389,19 +390,13 @@ void FD3D11EventQuery::WaitForCompletion()
 	{};
 }
 
-void FD3D11EventQuery::InitDynamicRHI()
+FD3D11EventQuery::FD3D11EventQuery(class FD3D11DynamicRHI* InD3DRHI):
+	D3DRHI(InD3DRHI)
 {
 	D3D11_QUERY_DESC QueryDesc;
 	QueryDesc.Query = D3D11_QUERY_EVENT;
 	QueryDesc.MiscFlags = 0;
 	VERIFYD3D11RESULT_EX(D3DRHI->GetDevice()->CreateQuery(&QueryDesc,Query.GetInitReference()), D3DRHI->GetDevice());
-
-	// Initialize the query by issuing an initial event.
-	IssueEvent();
-}
-void FD3D11EventQuery::ReleaseDynamicRHI()
-{
-	Query = NULL;
 }
 
 /*=============================================================================
@@ -458,9 +453,10 @@ void FD3D11BufferedGPUTiming::PlatformStaticInitialize(void* UserData)
 
 			D3D11_QUERY_DATA_TIMESTAMP_DISJOINT FreqQueryData;
 
-			D3D11StallRHIThread();
-			D3DResult = D3D11DeviceContext->GetData(FreqQuery, &FreqQueryData, sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT), 0);
-			D3D11UnstallRHIThread();
+			{
+				FScopedD3D11RHIThreadStaller StallRHIThread;
+				D3DResult = D3D11DeviceContext->GetData(FreqQuery, &FreqQueryData, sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT), 0);
+			}
 
 			double StartTime = FPlatformTime::Seconds();
 			while (D3DResult == S_FALSE && (FPlatformTime::Seconds() - StartTime) < 0.5f)
@@ -468,9 +464,8 @@ void FD3D11BufferedGPUTiming::PlatformStaticInitialize(void* UserData)
 				++DebugCounter;
 				FPlatformProcess::Sleep(0.005f);
 
-				D3D11StallRHIThread();
+				FScopedD3D11RHIThreadStaller StallRHIThread;
 				D3DResult = D3D11DeviceContext->GetData(FreqQuery, &FreqQueryData, sizeof(D3D11_QUERY_DATA_TIMESTAMP_DISJOINT), 0);
-				D3D11UnstallRHIThread();
 			}
 
 			if (D3DResult == S_OK)
@@ -609,7 +604,7 @@ void FD3D11DynamicRHI::RHICalibrateTimers()
 /**
  * Initializes all D3D resources and if necessary, the static variables.
  */
-void FD3D11BufferedGPUTiming::InitDynamicRHI()
+void FD3D11BufferedGPUTiming::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	StaticInitialize(D3DRHI, PlatformStaticInitialize);
 
@@ -643,7 +638,7 @@ void FD3D11BufferedGPUTiming::InitDynamicRHI()
 /**
  * Releases all D3D resources.
  */
-void FD3D11BufferedGPUTiming::ReleaseDynamicRHI()
+void FD3D11BufferedGPUTiming::ReleaseRHI()
 {
 	if ( StartTimestamps && EndTimestamps )
 	{
@@ -731,30 +726,15 @@ uint64 FD3D11BufferedGPUTiming::GetTiming(bool bGetCurrentResultsAndBlock)
 			// This really only happens if occlusion and frame sync event queries are disabled, otherwise those will block until the GPU catches up to 1 frame behind
 			const bool bBlocking = ( NumIssuedTimestamps == BufferSize ) || bGetCurrentResultsAndBlock;
 			const uint32 AsyncFlags = bBlocking ? 0 : D3D11_ASYNC_GETDATA_DONOTFLUSH;
-			uint32 IdleStart = FPlatformTime::Cycles();
-			double StartTimeoutTime = FPlatformTime::Seconds();
-
-			SCOPE_CYCLE_COUNTER( STAT_RenderQueryResultTime );
-			// If we are blocking, retry until the GPU processes the time stamp command
-			do 
 			{
-				D3DResult = D3DRHI->GetDeviceContext()->GetData( EndTimestamps[TimestampIndex], &EndTime, sizeof(EndTime), AsyncFlags );
+				FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+				double StartTimeoutTime = FPlatformTime::Seconds();
 
-				if ((FPlatformTime::Seconds() - StartTimeoutTime) > 0.5)
-				{
-					UE_LOG(LogD3D11RHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms)"));
-					return 0;
-				}
-			} while ( D3DResult == S_FALSE && bBlocking );
-			GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
-			GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
-			if ( D3DResult == S_OK )
-			{
-				IdleStart = FPlatformTime::Cycles();
-				StartTimeoutTime = FPlatformTime::Seconds();
+				SCOPE_CYCLE_COUNTER( STAT_RenderQueryResultTime );
+				// If we are blocking, retry until the GPU processes the time stamp command
 				do 
 				{
-					D3DResult = D3DRHI->GetDeviceContext()->GetData( StartTimestamps[TimestampIndex], &StartTime, sizeof(StartTime), AsyncFlags );
+					D3DResult = D3DRHI->GetDeviceContext()->GetData( EndTimestamps[TimestampIndex], &EndTime, sizeof(EndTime), AsyncFlags );
 
 					if ((FPlatformTime::Seconds() - StartTimeoutTime) > 0.5)
 					{
@@ -762,7 +742,24 @@ uint64 FD3D11BufferedGPUTiming::GetTiming(bool bGetCurrentResultsAndBlock)
 						return 0;
 					}
 				} while ( D3DResult == S_FALSE && bBlocking );
-				GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
+			}
+
+			if ( D3DResult == S_OK )
+			{
+				{
+					FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+					double StartTimeoutTime = FPlatformTime::Seconds();
+					do 
+					{
+						D3DResult = D3DRHI->GetDeviceContext()->GetData( StartTimestamps[TimestampIndex], &StartTime, sizeof(StartTime), AsyncFlags );
+
+						if ((FPlatformTime::Seconds() - StartTimeoutTime) > 0.5)
+						{
+							UE_LOG(LogD3D11RHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms)"));
+							return 0;
+						}
+					} while ( D3DResult == S_FALSE && bBlocking );
+				}
 
 				if ( D3DResult == S_OK && EndTime > StartTime )
 				{
@@ -814,7 +811,7 @@ D3D11_QUERY_DATA_TIMESTAMP_DISJOINT FD3D11DisjointTimeStampQuery::GetResult()
 	return DisjointQueryData;
 }
 
-void FD3D11DisjointTimeStampQuery::InitDynamicRHI()
+void FD3D11DisjointTimeStampQuery::InitRHI(FRHICommandListBase& RHICmdList)
 {
 	D3D11_QUERY_DESC QueryDesc;
 	QueryDesc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
@@ -823,7 +820,7 @@ void FD3D11DisjointTimeStampQuery::InitDynamicRHI()
 	VERIFYD3D11RESULT_EX(D3DRHI->GetDevice()->CreateQuery(&QueryDesc, DisjointQuery.GetInitReference()), D3DRHI->GetDevice());
 }
 
-void FD3D11DisjointTimeStampQuery::ReleaseDynamicRHI()
+void FD3D11DisjointTimeStampQuery::ReleaseRHI()
 {
 
 }

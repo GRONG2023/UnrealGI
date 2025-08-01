@@ -4,11 +4,15 @@
 
 #include "CoreTypes.h"
 #include "HAL/UnrealMemory.h"
-#include "Math/UnrealMathUtility.h"
 #include "Math/Color.h"
+#include "Math/MathFwd.h"
+#include "Math/UnrealMathSSE.h"
+#include "Math/UnrealMathUtility.h"
 #include "Math/Vector.h"
 #include "Math/Vector4.h"
 #include "Math/VectorRegister.h"
+
+class FArchive;
 
 //	Constants.
 extern CORE_API float NormalizationConstants[9];
@@ -55,7 +59,7 @@ public:
 		V[3] = V3;
 	}
 
-	explicit TSHVector(const FVector4& Vector)
+	explicit TSHVector(const FVector4f& Vector)
 	{
 		FMemory::Memzero(V,sizeof(V));
 
@@ -84,12 +88,12 @@ public:
 	/** Changed to float& from float to avoid LHS **/
 	friend FORCEINLINE TSHVector operator*(const TSHVector& A,const float& B)
 	{
-		const VectorRegister ReplicatedScalar = VectorLoadFloat1(&B);
+		const VectorRegister4Float ReplicatedScalar = VectorLoadFloat1(&B);
 
 		TSHVector Result;
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister MulResult = VectorMultiply(
+			VectorRegister4Float MulResult = VectorMultiply(
 				VectorLoadAligned(&A.V[BasisIndex * NumComponentsPerSIMDVector]),
 				ReplicatedScalar
 				);
@@ -102,12 +106,12 @@ public:
 	friend FORCEINLINE TSHVector operator/(const TSHVector& A,const float& Scalar)
 	{
 		const float B = (1.0f / Scalar);
-		const VectorRegister ReplicatedScalar = VectorLoadFloat1(&B);
+		const VectorRegister4Float ReplicatedScalar = VectorLoadFloat1(&B);
 
 		TSHVector Result;
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister MulResult = VectorMultiply(
+			VectorRegister4Float MulResult = VectorMultiply(
 				VectorLoadAligned(&A.V[BasisIndex * NumComponentsPerSIMDVector]),
 				ReplicatedScalar
 				);
@@ -122,7 +126,7 @@ public:
 		TSHVector Result;
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister AddResult = VectorAdd(
+			VectorRegister4Float AddResult = VectorAdd(
 				VectorLoadAligned(&A.V[BasisIndex * NumComponentsPerSIMDVector]),
 				VectorLoadAligned(&B.V[BasisIndex * NumComponentsPerSIMDVector])
 				);
@@ -138,7 +142,7 @@ public:
 		TSHVector Result;
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister SubResult = VectorSubtract(
+			VectorRegister4Float SubResult = VectorSubtract(
 				VectorLoadAligned(&A.V[BasisIndex * NumComponentsPerSIMDVector]),
 				VectorLoadAligned(&B.V[BasisIndex * NumComponentsPerSIMDVector])
 				);
@@ -151,7 +155,7 @@ public:
 	/** Dot product operator. */
 	friend FORCEINLINE float Dot(const TSHVector& A,const TSHVector& B)
 	{
-		VectorRegister ReplicatedResult = VectorZero();
+		VectorRegister4Float ReplicatedResult = VectorZero();
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
 			ReplicatedResult = VectorAdd(
@@ -174,7 +178,7 @@ public:
 	{
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister AddResult = VectorAdd(
+			VectorRegister4Float AddResult = VectorAdd(
 				VectorLoadAligned(&V[BasisIndex * NumComponentsPerSIMDVector]),
 				VectorLoadAligned(&B.V[BasisIndex * NumComponentsPerSIMDVector])
 				);
@@ -191,7 +195,7 @@ public:
 	{
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister SubResult = VectorSubtract(
+			VectorRegister4Float SubResult = VectorSubtract(
 				VectorLoadAligned(&V[BasisIndex * NumComponentsPerSIMDVector]),
 				VectorLoadAligned(&B.V[BasisIndex * NumComponentsPerSIMDVector])
 				);
@@ -208,11 +212,11 @@ public:
 	FORCEINLINE TSHVector& operator/=(const float& Scalar)
 	{
 		const float B = (1.0f/Scalar);
-		const VectorRegister ReplicatedScalar = VectorLoadFloat1(&B);
+		const VectorRegister4Float ReplicatedScalar = VectorLoadFloat1(&B);
 
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister MulResult = VectorMultiply(
+			VectorRegister4Float MulResult = VectorMultiply(
 				VectorLoadAligned(&V[BasisIndex * NumComponentsPerSIMDVector]),
 				ReplicatedScalar
 				);
@@ -227,11 +231,11 @@ public:
 	/** Now this avoids TSHVector * operator thus LHS on *this as well as Result and LHS **/
 	FORCEINLINE TSHVector& operator*=(const float& B)
 	{
-		const VectorRegister ReplicatedScalar = VectorLoadFloat1(&B);
+		const VectorRegister4Float ReplicatedScalar = VectorLoadFloat1(&B);
 
 		for(int32 BasisIndex = 0;BasisIndex < NumSIMDVectors;BasisIndex++)
 		{
-			VectorRegister MulResult = VectorMultiply(
+			VectorRegister4Float MulResult = VectorMultiply(
 				VectorLoadAligned(&V[BasisIndex * NumComponentsPerSIMDVector]),
 				ReplicatedScalar
 				);
@@ -260,7 +264,7 @@ public:
 	void Normalize()
 	{
 		const float Integral = CalcIntegral();
-		if(Integral > DELTA)
+		if(Integral > UE_DELTA)
 		{
 			*this /= Integral;
 		}
@@ -307,9 +311,9 @@ public:
 
 		// These formula are scaling factors for each SH band that convolve a SH with the circularly symmetric function
 		// max(0,cos(theta))
-		float L0 =					PI;
-		float L1 =					2 * PI / 3;
-		float L2 =					PI / 4;
+		float L0 =					UE_PI;
+		float L1 =					2 * UE_PI / 3;
+		float L2 =					UE_PI / 4;
 
 		// Multiply the coefficients in each band with the appropriate band scaling factor.
 		for(int32 BasisIndex = 0;BasisIndex < MaxSHBasis;BasisIndex++)
@@ -349,9 +353,9 @@ public:
 		// Multiply the result by the phi-dependent part of the SH bases.
 		// Skip this for X=0 and Y=0, because atan will be undefined and
 		// we know the Vector will be (0,0,+1) or (0,0,-1).
-		if (FMath::Abs(Vector.X) > KINDA_SMALL_NUMBER || FMath::Abs(Vector.Y) > KINDA_SMALL_NUMBER)
+		if (FMath::Abs(Vector.X) > UE_KINDA_SMALL_NUMBER || FMath::Abs(Vector.Y) > UE_KINDA_SMALL_NUMBER)
 		{
-			const float	Phi = FMath::Atan2(Vector.Y, Vector.X);
+			const float	Phi = (float)FMath::Atan2(Vector.Y, Vector.X);
 
 			for (int32 BandIndex = 1; BandIndex < TSHVector::MaxSHOrder; BandIndex++)
 			{
@@ -369,7 +373,7 @@ public:
 		// Multiply the result by the theta-dependent part of the SH bases.
 		for (int32 BasisIndex = 1; BasisIndex < TSHVector::MaxSHBasis; BasisIndex++)
 		{
-			Result.V[BasisIndex] *= LegendrePolynomial(BasisL[BasisIndex], FMath::Abs(BasisM[BasisIndex]), Vector.Z);
+			Result.V[BasisIndex] *= LegendrePolynomial(BasisL[BasisIndex], FMath::Abs(BasisM[BasisIndex]), (float)Vector.Z);
 		}
 
 		return Result;
@@ -379,7 +383,7 @@ public:
 	static TSHVector AmbientFunction()
 	{
 		TSHVector AmbientFunctionSH;
-		AmbientFunctionSH.V[0] = 1.0f / (2.0f * FMath::Sqrt(PI));
+		AmbientFunctionSH.V[0] = 1.0f / (2.0f * FMath::Sqrt(UE_PI));
 		return AmbientFunctionSH;
 	}
 
@@ -440,7 +444,7 @@ public:
 			float delta = -f / fd;
 			Lambda += delta;
 
-			if (FMath::Abs(delta) < KINDA_SMALL_NUMBER)
+			if (FMath::Abs(delta) < UE_KINDA_SMALL_NUMBER)
 			{
 				break;
 			}
@@ -457,9 +461,9 @@ inline TSHVector<2> TSHVector<2>::SHBasisFunction(const FVector& Vector)
 {
 	TSHVector<2> Result;
 	Result.V[0] = 0.282095f; 
-	Result.V[1] = -0.488603f * Vector.Y;
-	Result.V[2] = 0.488603f * Vector.Z;
-	Result.V[3] = -0.488603f * Vector.X;
+	Result.V[1] = -0.488603f * (float)Vector.Y;	// LWC_TODO: Precision loss
+	Result.V[2] = 0.488603f * (float)Vector.Z;
+	Result.V[3] = -0.488603f * (float)Vector.X;
 	return Result;
 }
 
@@ -469,16 +473,16 @@ inline TSHVector<3> TSHVector<3>::SHBasisFunction(const FVector& Vector)
 {
 	TSHVector<3> Result;
 	Result.V[0] = 0.282095f; 
-	Result.V[1] = -0.488603f * Vector.Y;
-	Result.V[2] = 0.488603f * Vector.Z;
-	Result.V[3] = -0.488603f * Vector.X;
+	Result.V[1] = -0.488603f * (float)Vector.Y;	// LWC_TODO: Precision loss
+	Result.V[2] = 0.488603f * (float)Vector.Z;
+	Result.V[3] = -0.488603f * (float)Vector.X;
 
 	FVector VectorSquared = Vector * Vector;
-	Result.V[4] = 1.092548f * Vector.X * Vector.Y;
-	Result.V[5] = -1.092548f * Vector.Y * Vector.Z;
-	Result.V[6] = 0.315392f * (3.0f * VectorSquared.Z - 1.0f);
-	Result.V[7] = -1.092548f * Vector.X * Vector.Z;
-	Result.V[8] = 0.546274f * (VectorSquared.X - VectorSquared.Y);
+	Result.V[4] = 1.092548f * float(Vector.X * Vector.Y);
+	Result.V[5] = -1.092548f * float(Vector.Y * Vector.Z);
+	Result.V[6] = 0.315392f * float(3.0f * VectorSquared.Z - 1.0f);
+	Result.V[7] = -1.092548f * float(Vector.X * Vector.Z);
+	Result.V[8] = 0.546274f * float(VectorSquared.X - VectorSquared.Y);
 	return Result;
 }
 

@@ -2,6 +2,7 @@
 
 #include "StreamingPauseRendering.h"
 #include "Layout/Margin.h"
+#include "ViewportClient.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "RenderingThread.h"
 #include "Modules/ModuleManager.h"
@@ -95,8 +96,10 @@ void FStreamingPauseRenderingModule::ShutdownModule()
 void FStreamingPauseRenderingModule::BeginStreamingPause( FViewport* GameViewport )
 {
 	// If a movie is already playing don't bother starting one
-	if(!GetMoviePlayer()->IsMovieCurrentlyPlaying())
+	if(GetMoviePlayer()->IsInitialized() && !GetMoviePlayer()->IsMovieCurrentlyPlaying() && IsMoviePlayerEnabled())
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FStreamingPauseRenderingModule::BeginStreamingPause);
+
 		check(GameViewport);
 
 		//Create the viewport widget and add a throbber.
@@ -130,7 +133,7 @@ void FStreamingPauseRenderingModule::BeginStreamingPause( FViewport* GameViewpor
 
 			SceneViewport->EnqueueBeginRenderFrame(false);
 
-			FCanvas Canvas(SceneViewport.Get(), nullptr, ViewportClient->GetWorld(), ViewportClient->GetWorld()->FeatureLevel);
+			FCanvas Canvas(SceneViewport.Get(), nullptr, ViewportClient->GetWorld(), ViewportClient->GetWorld()->GetFeatureLevel());
 			{
 				ViewportClient->Draw(SceneViewport.Get(), &Canvas);
 			}
@@ -161,12 +164,13 @@ void FStreamingPauseRenderingModule::BeginStreamingPause( FViewport* GameViewpor
 	}
 }
 
-
 void FStreamingPauseRenderingModule::EndStreamingPause()
 {
 	// Only wait for the movie to finish if we were the one to start it.
 	if(bMovieWasStarted)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(FStreamingPauseRenderingModule::EndStreamingPause);
+
 		//Stop rendering the loading screen and resume
 		GetMoviePlayer()->WaitForMovieToFinish();
 

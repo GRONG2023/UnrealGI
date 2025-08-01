@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "Blackboard/BlackboardKey.h"
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "UObject/ObjectMacros.h"
@@ -43,14 +44,12 @@ DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Num Templates"),STAT_AI_BehaviorTree
 DECLARE_DWORD_ACCUMULATOR_STAT_EXTERN(TEXT("Num Instances"),STAT_AI_BehaviorTree_NumInstances,STATGROUP_AIBehaviorTree, );
 DECLARE_MEMORY_STAT_EXTERN(TEXT("Instance memory"),STAT_AI_BehaviorTree_InstanceMemory,STATGROUP_AIBehaviorTree, AIMODULE_API);
 
-namespace FBlackboard
+#ifndef AI_BLACKBOARD_KEY_SIZE_8
+template <> struct TIsValidVariadicFunctionArg<FBlackboard::FKey>
 {
-	const FName KeySelf = TEXT("SelfActor");
-
-	typedef uint8 FKey;
-
-	const FKey InvalidKey = FKey(-1);
-}
+	enum { Value = true };
+};
+#endif
 
 enum class EBlackboardNotificationResult : uint8
 {
@@ -60,26 +59,33 @@ enum class EBlackboardNotificationResult : uint8
 
 // delegate defines
 DECLARE_DELEGATE_TwoParams(FOnBlackboardChange, const UBlackboardComponent&, FBlackboard::FKey /*key ID*/);
-DECLARE_DELEGATE_RetVal_TwoParams(EBlackboardNotificationResult, FOnBlackboardChangeNotification, const UBlackboardComponent&, FBlackboard::FKey /*key ID*/);
+
+// using "not checked" user policy (means race detection is disabled) because this delegate is stored in a TMultiMap and causes its reallocation
+// from inside delegate's execution. This is incompatible with race detection that needs to access the delegate instance after its execution
+using FOnBlackboardChangeNotification = TDelegate<EBlackboardNotificationResult(const UBlackboardComponent&, FBlackboard::FKey keyID), FNotThreadSafeNotCheckedDelegateUserPolicy>;
 
 namespace BTSpecialChild
 {
-	const int32 NotInitialized = -1;	// special value for child indices: needs to be initialized
-	const int32 ReturnToParent = -2;	// special value for child indices: return to parent node
+	inline constexpr int32 NotInitialized = -1;	// special value for child indices: needs to be initialized
+	inline constexpr int32 ReturnToParent = -2;	// special value for child indices: return to parent node
 	
-	const uint8 OwnedByComposite = MAX_uint8;	// special value for aux node's child index: owned by composite node instead of a task
+	inline constexpr uint8 OwnedByComposite = MAX_uint8;	// special value for aux node's child index: owned by composite node instead of a task
 }
 
 UENUM(BlueprintType)
 namespace EBTNodeResult
 {
 	// keep in sync with DescribeNodeResult()
-	enum Type
+	enum Type : int
 	{
-		Succeeded,		// finished as success
-		Failed,			// finished as failure
-		Aborted,		// finished aborting = failure
-		InProgress,		// not finished yet
+		// finished as success
+		Succeeded,
+		// finished as failure
+		Failed,
+		// finished aborting = failure
+		Aborted,
+		// not finished yet
+		InProgress,
 	};
 }
 
@@ -100,6 +106,12 @@ namespace EBTStopMode
 		Forced,
 	};
 }
+
+enum class EBTRestartMode : uint8
+{
+	ForceReevaluateRootNode, // (Default) will just request a new execution on the root node and any active nodes that gets re-added will not get CeaseRelevant/BecomeRelevant notification
+	CompleteRestart, // essentially equivalent to calling StopTree and then StartTree. Every active node is going to be removed and the execution started from the root
+};
 
 namespace EBTMemoryInit
 {
@@ -124,7 +136,7 @@ namespace EBTFlowAbortMode
 {
 	// keep in sync with DescribeFlowAbortMode()
 
-	enum Type
+	enum Type : int
 	{
 		None				UMETA(DisplayName="Nothing"),
 		LowerPriority		UMETA(DisplayName="Lower Priority"),
@@ -176,7 +188,7 @@ struct FBehaviorTreeParallelTask
 	/** additional mode data used for context switching */
 	EBTTaskStatus::Type Status;
 
-	FBehaviorTreeParallelTask() : TaskNode(NULL) {}
+	FBehaviorTreeParallelTask() : TaskNode(nullptr) {}
 	FBehaviorTreeParallelTask(const UBTTaskNode* InTaskNode, EBTTaskStatus::Type InStatus) : TaskNode(InTaskNode), Status(InStatus) {}
 
 	bool operator==(const FBehaviorTreeParallelTask& Other) const { return TaskNode == Other.TaskNode; }
@@ -221,7 +233,7 @@ struct FBehaviorTreeDebuggerInstance
 		FNodeFlowData() : ExecutionIndex(INDEX_NONE), bPassed(0), bTrigger(0), bDiscardedTrigger(0) {}
 	};
 
-	FBehaviorTreeDebuggerInstance() : TreeAsset(NULL), RootNode(NULL) {}
+	FBehaviorTreeDebuggerInstance() : TreeAsset(nullptr), RootNode(nullptr) {}
 
 	/** behavior tree asset */
 	UBehaviorTree* TreeAsset;
@@ -247,7 +259,7 @@ struct FBehaviorTreeDebuggerInstance
 /** debugger data about current execution step */
 struct FBehaviorTreeExecutionStep
 {
-	FBehaviorTreeExecutionStep() : TimeStamp(0.f), ExecutionStepId(InvalidExecutionId) {}
+	FBehaviorTreeExecutionStep() : TimeStamp(0.), ExecutionStepId(InvalidExecutionId) {}
 
 	/** subtree instance stack */
 	TArray<FBehaviorTreeDebuggerInstance> InstanceStack;
@@ -256,12 +268,15 @@ struct FBehaviorTreeExecutionStep
 	TMap<FName, FString> BlackboardValues;
 
 	/** Game world's time stamp of this step */
-	float TimeStamp;
+	double TimeStamp;
 
-	static constexpr int32 InvalidExecutionId = -1;
+	inline static constexpr int32 InvalidExecutionId = -1;
 
 	/** Id of execution step */
 	int32 ExecutionStepId;
+
+	/** If true, the behavior was paused in this execution step. */
+	bool bIsExecutionPaused = false;
 };
 
 /** identifier of subtree instance */
@@ -321,7 +336,16 @@ struct FBehaviorTreeInstance
 	FBTInstanceDeactivation DeactivationNotify;
 
 	AIMODULE_API FBehaviorTreeInstance();
+
+	UE_DEPRECATED(5.2, "Copying FBehaviorTreeInstance constructor has been deprecated in favor of move-constructor")
 	AIMODULE_API FBehaviorTreeInstance(const FBehaviorTreeInstance& Other);
+
+	UE_DEPRECATED(5.2, "Copying FBehaviorTreeInstance assignement operator has been deprecated in favor of move assignement operator")
+	FBehaviorTreeInstance& operator=(const FBehaviorTreeInstance& Other) = default;
+
+	AIMODULE_API FBehaviorTreeInstance(FBehaviorTreeInstance&& Other);
+	AIMODULE_API FBehaviorTreeInstance& operator=(FBehaviorTreeInstance&& Other);
+
 	AIMODULE_API FBehaviorTreeInstance(int32 MemorySize);
 	AIMODULE_API ~FBehaviorTreeInstance();
 
@@ -350,11 +374,17 @@ struct FBehaviorTreeInstance
 	/** get list of all active auxiliary nodes */
 	TArrayView<UBTAuxiliaryNode* const> GetActiveAuxNodes() const { return ActiveAuxNodes; }
 
-	/** add specified node to the active nodes list */
+	UE_DEPRECATED(5.4, "This function is deprecated. Please use version that takes UBehaviorTreeComponent.")
 	void AddToActiveAuxNodes(UBTAuxiliaryNode* AuxNode);
 
-	/** remove specified node from the active nodes list */
+	/** add specified node to the active nodes list */
+	void AddToActiveAuxNodes(UBehaviorTreeComponent& OwnerComp, UBTAuxiliaryNode* AuxNode);
+
+	UE_DEPRECATED(5.4, "This function is deprecated. Please use version that takes UBehaviorTreeComponent.")
 	void RemoveFromActiveAuxNodes(UBTAuxiliaryNode* AuxNode);
+
+	/** remove specified node from the active nodes list */
+	void RemoveFromActiveAuxNodes(UBehaviorTreeComponent& OwnerComp, UBTAuxiliaryNode* AuxNode);
 
 	/** remove all auxiliary nodes from active nodes list */
 	void ResetActiveAuxNodes();
@@ -392,6 +422,10 @@ protected:
 	void CleanupNodes(UBehaviorTreeComponent& OwnerComp, UBTCompositeNode& Node, EBTMemoryClear::Type CleanupType);
 
 private:
+	void AddToActiveAuxNodesImpl(UBTAuxiliaryNode* AuxNode);
+	void RemoveFromActiveAuxNodesImpl(UBTAuxiliaryNode* AuxNode);
+
+private:
 #if DO_ENSURE
 	/** debug flag to detect modifications to the array of nodes while iterating through it */
 	bool bIteratingNodes = false;
@@ -407,17 +441,19 @@ private:
 
 struct FBTNodeIndex
 {
+	static constexpr uint16 InvalidIndex = TNumericLimits<uint16>::Max(); // (This is also the same as INDEX_NONE assigned to IndexType!)
+
 	/** index of instance of stack */
 	uint16 InstanceIndex;
 
 	/** execution index within instance */
 	uint16 ExecutionIndex;
 
-	FBTNodeIndex() : InstanceIndex(MAX_uint16), ExecutionIndex(MAX_uint16) {}
+	FBTNodeIndex() : InstanceIndex(InvalidIndex), ExecutionIndex(InvalidIndex) {}
 	FBTNodeIndex(uint16 InInstanceIndex, uint16 InExecutionIndex) : InstanceIndex(InInstanceIndex), ExecutionIndex(InExecutionIndex) {}
 
 	bool TakesPriorityOver(const FBTNodeIndex& Other) const;
-	bool IsSet() const { return InstanceIndex < MAX_uint16; }
+	bool IsSet() const { return InstanceIndex < InvalidIndex; }
 
 	FORCEINLINE bool operator==(const FBTNodeIndex& Other) const { return Other.ExecutionIndex == ExecutionIndex && Other.InstanceIndex == InstanceIndex; }
 	FORCEINLINE bool operator!=(const FBTNodeIndex& Other) const { return !operator==(Other); }
@@ -462,12 +498,17 @@ struct FBehaviorTreeSearchUpdate
 	/** if set, this entry will be applied AFTER other are processed */
 	uint8 bPostUpdate : 1;
 
-	FBehaviorTreeSearchUpdate() : AuxNode(0), TaskNode(0), InstanceIndex(0), Mode(EBTNodeUpdateMode::Unknown), bPostUpdate(false) {}
-	FBehaviorTreeSearchUpdate(const UBTAuxiliaryNode* InAuxNode, uint16 InInstanceIndex, EBTNodeUpdateMode::Type InMode) :
-		AuxNode((UBTAuxiliaryNode*)InAuxNode), TaskNode(0), InstanceIndex(InInstanceIndex), Mode(InMode), bPostUpdate(false)
+	/** if set the action was unnecessary (Remove and was already inactive, Add and was already active) */
+	mutable uint8 bApplySkipped : 1;
+
+	FBehaviorTreeSearchUpdate() 
+		: AuxNode(0), TaskNode(0), InstanceIndex(0), Mode(EBTNodeUpdateMode::Unknown), bPostUpdate(false), bApplySkipped(false)
 	{}
-	FBehaviorTreeSearchUpdate(const UBTTaskNode* InTaskNode, uint16 InInstanceIndex, EBTNodeUpdateMode::Type InMode) :
-		AuxNode(0), TaskNode((UBTTaskNode*)InTaskNode), InstanceIndex(InInstanceIndex), Mode(InMode), bPostUpdate(false)
+	FBehaviorTreeSearchUpdate(const UBTAuxiliaryNode* InAuxNode, uint16 InInstanceIndex, EBTNodeUpdateMode::Type InMode)
+		: AuxNode((UBTAuxiliaryNode*)InAuxNode), TaskNode(0), InstanceIndex(InInstanceIndex), Mode(InMode), bPostUpdate(false), bApplySkipped(false)
+	{}
+	FBehaviorTreeSearchUpdate(const UBTTaskNode* InTaskNode, uint16 InInstanceIndex, EBTNodeUpdateMode::Type InMode)
+		: AuxNode(0), TaskNode((UBTTaskNode*)InTaskNode), InstanceIndex(InInstanceIndex), Mode(InMode), bPostUpdate(false), bApplySkipped(false)
 	{}
 };
 
@@ -572,7 +613,7 @@ struct FBehaviorTreePropertyMemory
 /** helper struct for defining types of allowed blackboard entries
  *  (e.g. only entries holding points and objects derived form actor class) */
 USTRUCT(BlueprintType)
-struct AIMODULE_API FBlackboardKeySelector
+struct FBlackboardKeySelector
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -582,7 +623,7 @@ struct AIMODULE_API FBlackboardKeySelector
 	/** array of allowed types with additional properties (e.g. uobject's base class) 
 	  * EditAnywhere is required for FBlackboardSelectorDetails::CacheBlackboardData() */
 	UPROPERTY(transient, EditAnywhere, BlueprintReadWrite, Category = Blackboard)
-	TArray<UBlackboardKeyType*> AllowedTypes;
+	TArray<TObjectPtr<UBlackboardKeyType>> AllowedTypes;
 
 	/** name of selected key */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = Blackboard)
@@ -594,73 +635,83 @@ struct AIMODULE_API FBlackboardKeySelector
 
 protected:
 	/** ID of selected key */
-	UPROPERTY(transient, EditInstanceOnly, BlueprintReadWrite, Category = Blackboard)
-	uint8 SelectedKeyID;
-	// SelectedKeyId type should be FBlackboard::FKey, but typedefs are not supported by UHT
-	static_assert(sizeof(uint8) == sizeof(FBlackboard::FKey), "FBlackboardKeySelector::SelectedKeyId should be of FBlackboard::FKey-compatible type.");
+	UPROPERTY(transient, EditInstanceOnly, BlueprintReadWrite, Category = Blackboard, meta = (ClampMin = "0", UIMin = "0"))
+	int32 SelectedKeyID;
 
 	// Requires BlueprintReadWrite so that blueprint creators (using MakeBlackboardKeySelector) can specify whether or not None is Allowed.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = Blackboard, Meta = (Tooltip = ""))
 	uint32 bNoneIsAllowedValue:1;
 
 	/** find initial selection. Called when None is not a valid option for this key selector */
-	void InitSelection(const UBlackboardData& BlackboardAsset);
+	AIMODULE_API void InitSelection(const UBlackboardData& BlackboardAsset);
 
 public:
 	/** find ID and class of selected key */
-	void ResolveSelectedKey(const UBlackboardData& BlackboardAsset);
+	AIMODULE_API void ResolveSelectedKey(const UBlackboardData& BlackboardAsset);
 		
 	void AllowNoneAsValue(bool bAllow) { bNoneIsAllowedValue = bAllow; }
 
-	FORCEINLINE FBlackboard::FKey GetSelectedKeyID() const { return SelectedKeyID; }
+	FORCEINLINE FBlackboard::FKey GetSelectedKeyID() const { return FBlackboard::FKey(IntCastChecked<uint16>(SelectedKeyID)); }
 
 	/** helper functions for setting basic filters */
-	void AddObjectFilter(UObject* Owner, FName PropertyName, TSubclassOf<UObject> AllowedClass);
-	void AddClassFilter(UObject* Owner, FName PropertyName, TSubclassOf<UObject> AllowedClass);
-	void AddEnumFilter(UObject* Owner, FName PropertyName, UEnum* AllowedEnum);
-	void AddNativeEnumFilter(UObject* Owner, FName PropertyName, const FString& AllowedEnumName);
-	void AddIntFilter(UObject* Owner, FName PropertyName);
-	void AddFloatFilter(UObject* Owner, FName PropertyName);
-	void AddBoolFilter(UObject* Owner, FName PropertyName);
-	void AddVectorFilter(UObject* Owner, FName PropertyName);
-	void AddRotatorFilter(UObject* Owner, FName PropertyName);
-	void AddStringFilter(UObject* Owner, FName PropertyName);
-	void AddNameFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddObjectFilter(UObject* Owner, FName PropertyName, TSubclassOf<UObject> AllowedClass);
+	AIMODULE_API void AddClassFilter(UObject* Owner, FName PropertyName, TSubclassOf<UObject> AllowedClass);
+	AIMODULE_API void AddEnumFilter(UObject* Owner, FName PropertyName, UEnum* AllowedEnum);
+	AIMODULE_API void AddNativeEnumFilter(UObject* Owner, FName PropertyName, const FString& AllowedEnumName);
+	AIMODULE_API void AddIntFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddFloatFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddBoolFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddVectorFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddRotatorFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddStringFilter(UObject* Owner, FName PropertyName);
+	AIMODULE_API void AddNameFilter(UObject* Owner, FName PropertyName);
 
-	FORCEINLINE bool IsNone() const { return bNoneIsAllowedValue && SelectedKeyID == FBlackboard::InvalidKey; }
-	FORCEINLINE bool IsSet() const { return SelectedKeyID != FBlackboard::InvalidKey; }
-	FORCEINLINE bool NeedsResolving() const { return SelectedKeyID == FBlackboard::InvalidKey && SelectedKeyName.IsNone() == false; }
+	FORCEINLINE bool IsNone() const { return bNoneIsAllowedValue && GetSelectedKeyID() == FBlackboard::InvalidKey; }
+	FORCEINLINE bool IsSet() const { return GetSelectedKeyID() != FBlackboard::InvalidKey; }
+	FORCEINLINE bool NeedsResolving() const { return GetSelectedKeyID() == FBlackboard::InvalidKey && SelectedKeyName.IsNone() == false; }
 	FORCEINLINE void InvalidateResolvedKey() { SelectedKeyID = FBlackboard::InvalidKey; }
 
 	friend FBlackboardDecoratorDetails;
-
-	UE_DEPRECATED(4.24, "This version of AddClassFilter is deprecated. Please provide AllowedClass as TSubclassOf<UObject>")
-	void AddClassFilter(UObject* Owner, FName PropertyName, TSubclassOf<UClass> AllowedClass);
 };
 
-UCLASS(Abstract)
-class AIMODULE_API UBehaviorTreeTypes : public UObject
+UCLASS(Abstract, MinimalAPI)
+class UBehaviorTreeTypes : public UObject
 {
 	GENERATED_BODY()
 
-	static FString BTLoggingContext;
+	static AIMODULE_API FString BTLoggingContext;
 
 public:
 
-	static FString DescribeNodeHelper(const UBTNode* Node);
+	static AIMODULE_API FString DescribeNodeHelper(const UBTNode* Node);
 
-	static FString DescribeNodeResult(EBTNodeResult::Type NodeResult);
-	static FString DescribeFlowAbortMode(EBTFlowAbortMode::Type FlowAbortMode);
-	static FString DescribeActiveNode(EBTActiveNode::Type ActiveNodeType);
-	static FString DescribeTaskStatus(EBTTaskStatus::Type TaskStatus);
-	static FString DescribeNodeUpdateMode(EBTNodeUpdateMode::Type UpdateMode);
+	static AIMODULE_API FString DescribeNodeResult(EBTNodeResult::Type NodeResult);
+	static AIMODULE_API FString DescribeFlowAbortMode(EBTFlowAbortMode::Type FlowAbortMode);
+	static AIMODULE_API FString DescribeActiveNode(EBTActiveNode::Type ActiveNodeType);
+	static AIMODULE_API FString DescribeTaskStatus(EBTTaskStatus::Type TaskStatus);
+	static AIMODULE_API FString DescribeNodeUpdateMode(EBTNodeUpdateMode::Type UpdateMode);
 
 	/** returns short name of object's class (BTTaskNode_Wait -> Wait) */
-	static FString GetShortTypeName(const UObject* Ob);
+	static AIMODULE_API FString GetShortTypeName(const UObject* Ob);
 	
 	static FString GetBTLoggingContext() { return BTLoggingContext; }
 	
 	// @param NewBTLoggingContext the object which name's will be added to some of the BT logging
 	// 	pass nullptr to clear
-	static void SetBTLoggingContext(const UBTNode* NewBTLoggingContext);
+	static AIMODULE_API void SetBTLoggingContext(const UBTNode* NewBTLoggingContext);
+};
+
+/** Helper struct to push a node as the new logging context and automatically reset the context on destruction. */
+struct FScopedBTLoggingContext
+{
+	FScopedBTLoggingContext() = delete;
+	explicit FScopedBTLoggingContext(const UBTNode* Context)
+	{
+		UBehaviorTreeTypes::SetBTLoggingContext(Context);
+	}
+
+	~FScopedBTLoggingContext()
+	{
+		UBehaviorTreeTypes::SetBTLoggingContext(nullptr);
+	}
 };

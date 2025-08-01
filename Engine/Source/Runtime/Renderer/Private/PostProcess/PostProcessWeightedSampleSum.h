@@ -11,7 +11,7 @@ struct FGaussianBlurInputs
 	const TCHAR* NameY = nullptr;
 
 	// The input texture to be filtered.
-	FScreenPassTexture Filter;
+	FScreenPassTextureSlice Filter;
 
 	// The input texture to be added after filtering.
 	FScreenPassTexture Additive;
@@ -20,12 +20,14 @@ struct FGaussianBlurInputs
 	FLinearColor TintColor;
 
 	// Controls the cross shape of the blur, in both X / Y directions. See r.Bloom.Cross.
-	FVector2D CrossCenterWeight = FVector2D::ZeroVector;
+	FVector2f CrossCenterWeight = FVector2f::ZeroVector;
 
 	// The filter kernel size in percentage of the screen.
 	float KernelSizePercent = 0.0f;
+
+	bool UseMirrorAddressMode = false;
 };
 
 using FGaussianBlurOutputs = FScreenPassTexture;
 
-FGaussianBlurOutputs AddGaussianBlurPass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FGaussianBlurInputs& Inputs);
+extern RENDERER_API FGaussianBlurOutputs AddGaussianBlurPass(FRDGBuilder& GraphBuilder, const FViewInfo& View, const FGaussianBlurInputs& Inputs);

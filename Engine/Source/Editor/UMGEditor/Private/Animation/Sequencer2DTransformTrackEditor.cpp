@@ -1,13 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/Sequencer2DTransformTrackEditor.h"
-#include "Animation/Sequencer2DTransformSection.h"
-#include "Slate/WidgetTransform.h"
-#include "ISectionLayoutBuilder.h"
-#include "IKeyArea.h"
 
+#include "Animation/MovieScene2DTransformSection.h"
 #include "Animation/MovieSceneUMGComponentTypes.h"
+#include "Animation/Sequencer2DTransformSection.h"
+#include "Channels/MovieSceneChannelHandle.h"
+#include "Channels/MovieSceneFloatChannel.h"
+#include "EntitySystem/MovieSceneDecompositionQuery.h"
+#include "EntitySystem/MovieSceneEntityIDs.h"
+#include "EntitySystem/MovieSceneEntitySystemLinker.h"
+#include "Evaluation/MovieSceneEvaluationTemplateInstance.h"
+#include "IKeyArea.h"
+#include "ISequencer.h"
+#include "ISequencerSection.h"
+#include "KeyPropertyParams.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "MovieSceneFwd.h"
+#include "MovieSceneSection.h"
+#include "MovieSceneTrack.h"
+#include "PropertyPath.h"
+#include "SequencerKeyParams.h"
+#include "Slate/WidgetTransform.h"
 #include "Systems/MovieScenePropertyInstantiator.h"
+#include "Templates/Casts.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/UnrealType.h"
+#include "UObject/WeakFieldPtr.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+
+class ISequencerTrackEditor;
+struct FMovieSceneChannel;
 
 FName F2DTransformTrackEditor::TranslationName( "Translation" );
 FName F2DTransformTrackEditor::ScaleName( "Scale" );
@@ -90,17 +120,17 @@ void F2DTransformTrackEditor::GenerateKeysFromPropertyChanged( const FPropertyCh
 			}
 		}
 	}
-
+	
 	FWidgetTransform CurrentTransform    = PropertyChangedParams.GetPropertyValue<FWidgetTransform>();
 	FWidgetTransform RecomposedTransform = RecomposeTransform(CurrentTransform, PropertyChangedParams.ObjectsThatChanged[0], SectionToKey);
 
-	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(0, RecomposedTransform.Translation.X, bKeyTranslationX));
-	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(1, RecomposedTransform.Translation.Y, bKeyTranslationY));
+	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel, float>(0, RecomposedTransform.Translation.X, bKeyTranslationX));
+	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel, float>(1, RecomposedTransform.Translation.Y, bKeyTranslationY));
 	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(2, RecomposedTransform.Angle,         bKeyAngle));
-	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(3, RecomposedTransform.Scale.X,       bKeyScaleX));
-	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(4, RecomposedTransform.Scale.Y,       bKeyScaleY));
-	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(5, RecomposedTransform.Shear.X,       bKeyShearX));
-	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel>(6, RecomposedTransform.Shear.Y,       bKeyShearY));
+	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel, float>(3, RecomposedTransform.Scale.X,       bKeyScaleX));
+	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel, float>(4, RecomposedTransform.Scale.Y,       bKeyScaleY));
+	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel, float>(5, RecomposedTransform.Shear.X,       bKeyShearX));
+	OutGeneratedKeys.Add(FMovieSceneChannelValueSetter::Create<FMovieSceneFloatChannel, float>(6, RecomposedTransform.Shear.Y,       bKeyShearY));
 }
 
 FWidgetTransform F2DTransformTrackEditor::RecomposeTransform(const FWidgetTransform& InTransform, UObject* AnimatedObject, UMovieSceneSection* Section)

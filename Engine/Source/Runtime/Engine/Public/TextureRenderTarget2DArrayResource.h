@@ -36,7 +36,7 @@ public:
 	 * Resources that need to initialize after a D3D device reset must implement this function.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void InitDynamicRHI() override;
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 
 	/**
 	 * Releases the dynamic RHI resource and/or RHI render target resources used by this resource.
@@ -44,7 +44,7 @@ public:
 	 * Resources that need to release before a D3D device reset must implement this function.
 	 * This is only called by the rendering thread.
 	 */
-	virtual void ReleaseDynamicRHI() override;
+	virtual void ReleaseRHI() override;
 
 	// FRenderTarget interface.
 
@@ -64,11 +64,6 @@ public:
 	virtual FIntPoint GetSizeXY() const override;
 
 	/**
-	 * @return TextureRHI for rendering
-	 */
-	FTexture2DArrayRHIRef GetTextureRHI() { return Texture2DArrayRHI; }
-
-	/**
 	 * @return UnorderedAccessView for rendering
 	 */
 	FUnorderedAccessViewRHIRef GetUnorderedAccessViewRHI() { return UnorderedAccessViewRHI; }
@@ -80,6 +75,9 @@ public:
 	*/
 	float GetDisplayGamma() const override;
 
+	// UE_DEPRECATED(5.4, "This using is there temporarily until the 2 deprecated ReadPixels 'overrides' are removed : they were hiding FRenderTarget's virtual functions")
+	using FRenderTarget::ReadPixels;
+
 	/**
 	* Copy the texels of a single depth slice of the 2d array into an array.
 	* @param OutImageData - float16 values will be stored in this array.
@@ -87,6 +85,7 @@ public:
 	* @param InRect - Rectangle of texels to copy.
 	* @return true if the read succeeded.
 	*/
+	UE_DEPRECATED(5.4, "Use FRenderTarget's ReadPixels, which is functionally equivalent")
 	ENGINE_API bool ReadPixels(TArray<FColor>& OutImageData, int32 InDepthSlice, FIntRect InRect = FIntRect(0, 0, 0, 0));
 
 	/**
@@ -96,6 +95,7 @@ public:
 	* @param InRect - Rectangle of texels to copy.
 	* @return true if the read succeeded.
 	*/
+	UE_DEPRECATED(5.4, "Use FRenderTarget's ReadFloat16Pixels, which is functionally equivalent")
 	ENGINE_API bool ReadPixels(TArray<FFloat16Color>& OutImageData, int32 InDepthSlice, FIntRect InRect = FIntRect(0, 0, 0, 0));
 
 protected:
@@ -111,9 +111,11 @@ private:
 	const class UTextureRenderTarget2DArray* Owner;
 
 	/** Represents the current render target (from one of the slices)*/
-	FTexture2DArrayRHIRef RenderTarget2DArrayRHI;
+	UE_DEPRECATED(5.1, "RenderTarget2DArrayRHI is deprecated. Use TextureRHI instead.")
+	FTextureRHIRef RenderTarget2DArrayRHI;
 	/** Texture resource used for rendering with and resolving to */
-	FTexture2DArrayRHIRef Texture2DArrayRHI;
+	UE_DEPRECATED(5.1, "Texture2DArrayRHI is deprecated. Use TextureRHI instead.")
+	FTextureRHIRef Texture2DArrayRHI;
 	/** Optional Unordered Access View for the resource, automatically created if bCanCreateUAV is true */
 	FUnorderedAccessViewRHIRef UnorderedAccessViewRHI;
 };

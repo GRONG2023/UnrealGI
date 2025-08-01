@@ -13,8 +13,13 @@ public class NetCore : ModuleRules
 			{
 				"Core",
 				"CoreUObject",
-				"TraceLog"
+				"TraceLog",
+				"NetCommon"
 			}
 		);
+
+		UnsafeTypeCastWarningLevel = WarningLevel.Error;
+
+		bAllowAutoRTFMInstrumentation = true;
 	}
 }

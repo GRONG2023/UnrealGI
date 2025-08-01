@@ -6,11 +6,20 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "UObject/Object.h"
 #include "Templates/Casts.h"
 #include "UObject/PersistentObjectPtr.h"
 #include "UObject/SoftObjectPath.h"
+
+/**
+ * TIsSoftObjectPointerType
+ * Trait for recognizing 'soft' (path-based) object pointer types
+ */
+template<typename T> 
+struct TIsSoftObjectPointerType
+{ 
+	enum { Value = false };
+};
 
 /**
  * FSoftObjectPtr is a type of weak pointer to a UObject, that also keeps track of the path to the object on disk.
@@ -22,24 +31,18 @@
 struct FSoftObjectPtr : public TPersistentObjectPtr<FSoftObjectPath>
 {
 public:	
-	/** Default constructor, will be null */
-	FORCEINLINE FSoftObjectPtr()
-	{
-	}
+	FORCEINLINE FSoftObjectPtr() = default;
+	FORCEINLINE FSoftObjectPtr(const FSoftObjectPtr& Other) = default;
+	FORCEINLINE FSoftObjectPtr(FSoftObjectPtr&& Other) = default;
+	FORCEINLINE ~FSoftObjectPtr() = default;
+	FORCEINLINE FSoftObjectPtr& operator=(const FSoftObjectPtr& Other) = default;
+	FORCEINLINE FSoftObjectPtr& operator=(FSoftObjectPtr&& Other) = default;
 
-	/** Construct from another soft pointer */
-	FORCEINLINE FSoftObjectPtr(const FSoftObjectPtr& Other)
-	{
-		(*this)=Other;
-	}
-
-	/** Construct from a soft object path */
 	explicit FORCEINLINE FSoftObjectPtr(const FSoftObjectPath& ObjectPath)
 		: TPersistentObjectPtr<FSoftObjectPath>(ObjectPath)
 	{
 	}
 
-	/** Construct from an object already in memory */
 	explicit FORCEINLINE FSoftObjectPtr(const UObject* Object)
 	{
 		(*this)=Object;
@@ -49,7 +52,7 @@ public:
 	UObject* LoadSynchronous() const
 	{
 		UObject* Asset = Get();
-		if (Asset == nullptr && IsPending())
+		if (Asset == nullptr && !IsNull())
 		{
 			ToSoftObjectPath().TryLoad();
 			
@@ -61,12 +64,6 @@ public:
 
 	/** Returns the StringObjectPath that is wrapped by this SoftObjectPtr */
 	FORCEINLINE const FSoftObjectPath& ToSoftObjectPath() const
-	{
-		return GetUniqueID();
-	}
-
-	UE_DEPRECATED(4.18, "ToStringReference was renamed to ToSoftObjectPath")
-	FORCEINLINE const FSoftObjectPath& ToStringReference() const
 	{
 		return GetUniqueID();
 	}
@@ -109,6 +106,7 @@ public:
 
 template <> struct TIsPODType<FSoftObjectPtr> { enum { Value = TIsPODType<TPersistentObjectPtr<FSoftObjectPath> >::Value }; };
 template <> struct TIsWeakPointerType<FSoftObjectPtr> { enum { Value = TIsWeakPointerType<TPersistentObjectPtr<FSoftObjectPath> >::Value }; };
+template <> struct TIsSoftObjectPointerType<FSoftObjectPtr> { enum { Value = true }; };
 
 /**
  * TSoftObjectPtr is templatized wrapper of the generic FSoftObjectPtr, it can be used in UProperties
@@ -120,10 +118,14 @@ struct TSoftObjectPtr
 	friend struct TSoftObjectPtr;
 
 public:
-	/** Default constructor, will be null */
-	FORCEINLINE TSoftObjectPtr()
-	{
-	}
+	using ElementType = T;
+	
+	FORCEINLINE TSoftObjectPtr() = default;
+	FORCEINLINE TSoftObjectPtr(const TSoftObjectPtr& Other) = default;
+	FORCEINLINE TSoftObjectPtr(TSoftObjectPtr&& Other) = default;
+	FORCEINLINE ~TSoftObjectPtr() = default;
+	FORCEINLINE TSoftObjectPtr& operator=(const TSoftObjectPtr& Other) = default;
+	FORCEINLINE TSoftObjectPtr& operator=(TSoftObjectPtr&& Other) = default;
 	
 	/** Construct from another soft pointer */
 	template <class U, class = decltype(ImplicitConv<T*>((U*)nullptr))>
@@ -143,6 +145,13 @@ public:
 	template <typename U>
 	FORCEINLINE TSoftObjectPtr(const U* Object)
 		: SoftObjectPtr(Object)
+	{
+	}
+
+	/** Construct from a TObjectPtr<U> which may or may not be in memory. */
+	template <typename U>
+	FORCEINLINE TSoftObjectPtr(const TObjectPtr<U> Object)
+		: SoftObjectPtr(Object.Get())
 	{
 	}
 
@@ -175,6 +184,14 @@ public:
 	FORCEINLINE TSoftObjectPtr& operator=(const U* Object)
 	{
 		SoftObjectPtr = Object;
+		return *this;
+	}
+
+	/** Copy from a TObjectPtr<U> which may or may not be in memory. */
+	template <typename U>
+	FORCEINLINE TSoftObjectPtr& operator=(const TObjectPtr<U> Object)
+	{
+		SoftObjectPtr = Object.Get();
 		return *this;
 	}
 
@@ -214,9 +231,9 @@ public:
 	 *
 	 * @param Other soft pointer to compare to
 	 */
-	FORCEINLINE friend bool operator==(const TSoftObjectPtr& Lhs, const TSoftObjectPtr& Rhs)
+	FORCEINLINE bool operator==(const TSoftObjectPtr& Rhs) const
 	{
-		return Lhs.SoftObjectPtr == Rhs.SoftObjectPtr;
+		return SoftObjectPtr == Rhs.SoftObjectPtr;
 	}
 
 	/**
@@ -225,20 +242,21 @@ public:
 	 *
 	 * @param Other soft pointer to compare to
 	 */
-	FORCEINLINE friend bool operator==(const TSoftObjectPtr& Lhs, TYPE_OF_NULLPTR)
+	FORCEINLINE bool operator==(TYPE_OF_NULLPTR) const
 	{
-		return Lhs.SoftObjectPtr == nullptr;
+		return SoftObjectPtr == nullptr;
 	}
 
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
 	/**
-	 * Compare soft pointers for equality
+	 * Compare soft pointers for inequality
 	 * Caution: Two soft pointers might not be equal to each other, but they both might return nullptr
 	 *
 	 * @param Other soft pointer to compare to
 	 */
-	FORCEINLINE friend bool operator==(TYPE_OF_NULLPTR, const TSoftObjectPtr& Rhs)
+	FORCEINLINE bool operator!=(const TSoftObjectPtr& Rhs) const
 	{
-		return nullptr == Rhs.SoftObjectPtr;
+		return SoftObjectPtr != Rhs.SoftObjectPtr;
 	}
 
 	/**
@@ -247,42 +265,18 @@ public:
 	 *
 	 * @param Other soft pointer to compare to
 	 */
-	FORCEINLINE friend bool operator!=(const TSoftObjectPtr& Lhs, const TSoftObjectPtr& Rhs)
+	FORCEINLINE bool operator!=(TYPE_OF_NULLPTR) const
 	{
-		return Lhs.SoftObjectPtr != Rhs.SoftObjectPtr;
+		return SoftObjectPtr != nullptr;
 	}
-
-	/**
-	 * Compare soft pointers for inequality
-	 * Caution: Two soft pointers might not be equal to each other, but they both might return nullptr
-	 *
-	 * @param Other soft pointer to compare to
-	 */
-	FORCEINLINE friend bool operator!=(const TSoftObjectPtr& Lhs, TYPE_OF_NULLPTR)
-	{
-		return Lhs.SoftObjectPtr != nullptr;
-	}
-
-	/**
-	 * Compare soft pointers for inequality
-	 * Caution: Two soft pointers might not be equal to each other, but they both might return nullptr
-	 *
-	 * @param Other soft pointer to compare to
-	 */
-	FORCEINLINE friend bool operator!=(TYPE_OF_NULLPTR, const TSoftObjectPtr& Rhs)
-	{
-		return nullptr != Rhs.SoftObjectPtr;
-	}
+#endif
 
 	/**
 	 * Dereference the soft pointer.
 	 *
 	 * @return nullptr if this object is gone or the lazy pointer was null, otherwise a valid UObject pointer
 	 */
-	FORCEINLINE T* Get() const
-	{
-		return dynamic_cast<T*>(SoftObjectPtr.Get());
-	}
+	T* Get() const;
 
 	/** Dereference the soft pointer */
 	FORCEINLINE T& operator*() const
@@ -346,12 +340,6 @@ public:
 		return SoftObjectPtr.GetUniqueID();
 	}
 
-	UE_DEPRECATED(4.18, "ToStringReference was renamed to ToSoftObjectPath")
-	FORCEINLINE const FSoftObjectPath& ToStringReference() const
-	{
-		return SoftObjectPtr.GetUniqueID();
-	}
-
 	/** Returns string representation of reference, in form /package/path.assetname */
 	FORCEINLINE FString ToString() const
 	{
@@ -377,23 +365,85 @@ public:
 	}
 
 	/** Hash function */
-	FORCEINLINE friend uint32 GetTypeHash(const TSoftObjectPtr<T>& Other)
+	FORCEINLINE uint32 GetPtrTypeHash() const
 	{
-		return GetTypeHash(static_cast<const TPersistentObjectPtr<FSoftObjectPath>&>(Other.SoftObjectPtr));
+		return GetTypeHash(static_cast<const TPersistentObjectPtr<FSoftObjectPath>&>(SoftObjectPtr));
 	}
 
-	friend FArchive& operator<<(FArchive& Ar, TSoftObjectPtr<T>& Other)
+	FORCEINLINE void Serialize(FArchive& Ar)
 	{
-		Ar << Other.SoftObjectPtr;
-		return Ar;
+		Ar << SoftObjectPtr;
 	}
 
 private:
 	FSoftObjectPtr SoftObjectPtr;
 };
 
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
+template<class T>
+FORCEINLINE bool operator==(TYPE_OF_NULLPTR, const TSoftObjectPtr<T>& Rhs)
+{
+	return Rhs == nullptr;
+}
+
+template<class T>
+FORCEINLINE bool operator!=(TYPE_OF_NULLPTR, const TSoftObjectPtr<T>& Rhs)
+{
+	return Rhs != nullptr;
+}
+
+template<class T>
+FORCEINLINE bool operator==(const T* Lhs, const TSoftObjectPtr<T>& Rhs)
+{
+	return Rhs == Lhs;
+}
+
+template<class T>
+FORCEINLINE bool operator!=(const T* Lhs, const TSoftObjectPtr<T>& Rhs)
+{
+	return Rhs != Lhs;
+}
+#endif
+
+/** Hash function */
+template<class T>
+FORCEINLINE uint32 GetTypeHash(const TSoftObjectPtr<T>& Ptr)
+{
+	return Ptr.GetPtrTypeHash();
+}
+
+template<class T>
+FArchive& operator<<(FArchive& Ar, TSoftObjectPtr<T>& Ptr)
+{
+	Ptr.Serialize(Ar);
+	return Ar;
+}
+
+
 template<class T> struct TIsPODType<TSoftObjectPtr<T> > { enum { Value = TIsPODType<FSoftObjectPtr>::Value }; };
 template<class T> struct TIsWeakPointerType<TSoftObjectPtr<T> > { enum { Value = TIsWeakPointerType<FSoftObjectPtr>::Value }; };
+template<class T> struct TIsSoftObjectPointerType<TSoftObjectPtr<T>> { enum { Value = TIsSoftObjectPointerType<FSoftObjectPtr>::Value }; };
+
+template <typename T>
+struct TCallTraits<TSoftObjectPtr<T>> : public TCallTraitsBase<TSoftObjectPtr<T>>
+{
+	using ConstPointerType = TSoftObjectPtr<const T>;
+};
+
+/** Utility to create a TSoftObjectPtr without specifying the type */
+template <class T>
+TSoftObjectPtr<std::remove_cv_t<T>> MakeSoftObjectPtr(T* Object)
+{
+	static_assert(std::is_base_of_v<UObject, T>, "Type must derive from UObject");
+	return TSoftObjectPtr<std::remove_cv_t<T>>(Object);
+}
+
+template <class T>
+TSoftObjectPtr<std::remove_cv_t<T>> MakeSoftObjectPtr(TObjectPtr<T> Object)
+{
+	static_assert(std::is_base_of_v<UObject, T>, "Type must derive from UObject");
+	return TSoftObjectPtr<std::remove_cv_t<T>>(ToRawPtr(Object));
+}
 
 /**
  * TSoftClassPtr is a templatized wrapper around FSoftObjectPtr that works like a TSubclassOf, it can be used in UProperties for blueprint subclasses
@@ -405,10 +455,14 @@ class TSoftClassPtr
 	friend class TSoftClassPtr;
 
 public:
-	/** Default constructor, will be null */
-	FORCEINLINE TSoftClassPtr()
-	{
-	}
+	using ElementType = TClass;
+	
+	FORCEINLINE TSoftClassPtr() = default;
+	FORCEINLINE TSoftClassPtr(const TSoftClassPtr& Other) = default;
+	FORCEINLINE TSoftClassPtr(TSoftClassPtr&& Other) = default;
+	FORCEINLINE ~TSoftClassPtr() = default;
+	FORCEINLINE TSoftClassPtr& operator=(const TSoftClassPtr& Other) = default;
+	FORCEINLINE TSoftClassPtr& operator=(TSoftClassPtr&& Other) = default;
 		
 	/** Construct from another soft pointer */
 	template <class TClassA, class = decltype(ImplicitConv<TClass*>((TClassA*)nullptr))>
@@ -475,21 +529,22 @@ public:
 	 *
 	 * @param Other soft pointer to compare to 
 	 */
-	FORCEINLINE friend bool operator==(const TSoftClassPtr& Lhs, const TSoftClassPtr& Rhs)
+	FORCEINLINE bool operator==(const TSoftClassPtr& Rhs) const
 	{
-		return Lhs.SoftObjectPtr == Rhs.SoftObjectPtr;
+		return SoftObjectPtr == Rhs.SoftObjectPtr;
 	}
-
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
 	/**  
 	 * Compare soft pointers for inequality
 	 * Caution: Two soft pointers might not be equal to each other, but they both might return nullptr
 	 *
 	 * @param Other soft pointer to compare to
 	 */
-	FORCEINLINE friend bool operator!=(const TSoftClassPtr& Lhs, const TSoftClassPtr& Rhs)
+	FORCEINLINE bool operator!=(const TSoftClassPtr& Rhs) const
 	{
-		return Lhs.SoftObjectPtr != Rhs.SoftObjectPtr;
+		return SoftObjectPtr != Rhs.SoftObjectPtr;
 	}
+#endif
 
 	/**  
 	 * Dereference the soft pointer
@@ -561,12 +616,6 @@ public:
 		return SoftObjectPtr.GetUniqueID();
 	}
 
-	UE_DEPRECATED(4.18, "ToStringReference was renamed to ToSoftObjectPath")
-	FORCEINLINE const FSoftObjectPath& ToStringReference() const
-	{
-		return SoftObjectPtr.GetUniqueID();
-	}
-
 	/** Returns string representation of reference, in form /package/path.assetname  */
 	FORCEINLINE FString ToString() const
 	{
@@ -592,9 +641,9 @@ public:
 	}
 
 	/** Hash function */
-	FORCEINLINE friend uint32 GetTypeHash(const TSoftClassPtr<TClass>& Other)
+	FORCEINLINE uint32 GetPtrTypeHash() const
 	{
-		return GetTypeHash(static_cast<const TPersistentObjectPtr<FSoftObjectPath>&>(Other.SoftObjectPtr));
+		return GetTypeHash(static_cast<const TPersistentObjectPtr<FSoftObjectPath>&>(SoftObjectPtr));
 	}
 
 	/** Synchronously load (if necessary) and return the asset object represented by this asset ptr */
@@ -609,10 +658,9 @@ public:
 		return Class;
 	}
 
-	friend FArchive& operator<<(FArchive& Ar, TSoftClassPtr<TClass>& Other)
+	inline void Serialize(FArchive& Ar)
 	{
-		Ar << static_cast<FSoftObjectPtr&>(Other.SoftObjectPtr);
-		return Ar;
+		Ar << static_cast<FSoftObjectPtr&>(SoftObjectPtr);
 	}
 
 private:
@@ -621,6 +669,27 @@ private:
 
 template <class T> struct TIsPODType<TSoftClassPtr<T> > { enum { Value = TIsPODType<FSoftObjectPtr>::Value }; };
 template <class T> struct TIsWeakPointerType<TSoftClassPtr<T> > { enum { Value = TIsWeakPointerType<FSoftObjectPtr>::Value }; };
+
+template <typename T>
+struct TCallTraits<TSoftClassPtr<T>> : public TCallTraitsBase<TSoftClassPtr<T>>
+{
+	using ConstPointerType = TSoftClassPtr<const T>;
+};
+
+/** Utility to create a TSoftObjectPtr without specifying the type */
+template <class T>
+TSoftClassPtr<std::remove_cv_t<T>> MakeSoftClassPtr(T* Object)
+{
+	static_assert(std::is_base_of_v<UClass, T>, "Type must derive from UClass");
+	return TSoftClassPtr<std::remove_cv_t<T>>(Object);
+}
+
+template <class T>
+TSoftClassPtr<std::remove_cv_t<T>> MakeSoftClassPtr(TObjectPtr<T> Object)
+{
+	static_assert(std::is_base_of_v<UClass, T>, "Type must derive from UClass");
+	return TSoftClassPtr<std::remove_cv_t<T>>(ToRawPtr(Object));
+}
 
 /** Fast non-alphabetical order that is only stable during this process' lifetime. */
 struct FSoftObjectPtrFastLess : private FSoftObjectPathFastLess
@@ -642,15 +711,47 @@ struct FSoftObjectPtrLexicalLess : private FSoftObjectPathLexicalLess
 	}
 };
 
-UE_DEPRECATED(4.18, "FAssetPtr was renamed to FSoftObjectPtr as it is not necessarily an asset")
-typedef FSoftObjectPtr FAssetPtr;
-
-// Not deprecating these yet as it will lead to too many warnings in games
-//UE_DEPRECATED(4.18, "TAssetPtr was renamed to TSoftObjectPtr as it is not necessarily an asset")
 template<class T=UObject>
-using TAssetPtr = TSoftObjectPtr<T>;
+using TAssetPtr UE_DEPRECATED(5.0, "TAssetPtr was renamed to TSoftObjectPtr as it is not necessarily an asset") = TSoftObjectPtr<T>;
 
-//UE_DEPRECATED(4.18, "TAssetSubclassOf was renamed to TSoftClassPtr")
 template<class TClass = UObject>
-using TAssetSubclassOf = TSoftClassPtr<TClass>;
+using TAssetSubclassOf UE_DEPRECATED(5.0, "TAssetSubclassOf was renamed to TSoftClassPtr") = TSoftClassPtr<TClass>;
 
+/** Not directly inlined on purpose so compiler have the option of not inlining it. (and it also works with extern template) */
+template<class T>
+T* TSoftObjectPtr<T>::Get() const
+{
+	return dynamic_cast<T*>(SoftObjectPtr.Get());
+}
+
+#if !PLATFORM_COMPILER_HAS_GENERATED_COMPARISON_OPERATORS
+template<class TClass>
+FORCEINLINE bool operator==(const UClass* Lhs, const TSoftClassPtr<TClass>& Rhs)
+{
+	return Rhs == Lhs;
+}
+
+template<class TClass>
+FORCEINLINE bool operator!=(const UClass* Lhs, const TSoftClassPtr<TClass>& Rhs)
+{
+	return Rhs != Lhs;
+}
+#endif
+
+/** Hash function */
+template<class TClass>
+FORCEINLINE uint32 GetTypeHash(const TSoftClassPtr<TClass>& Ptr)
+{
+	return Ptr.GetPtrTypeHash();
+}
+
+template<class TClass>
+FArchive& operator<<(FArchive& Ar, TSoftClassPtr<TClass>& Ptr)
+{
+	Ptr.Serialize(Ar);
+	return Ar;
+}
+
+#if UE_ENABLE_INCLUDE_ORDER_DEPRECATED_IN_5_2
+#include "CoreMinimal.h"
+#endif

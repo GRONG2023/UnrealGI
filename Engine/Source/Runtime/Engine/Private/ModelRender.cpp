@@ -4,33 +4,25 @@
 	ModelRender.cpp: Unreal model rendering
 =============================================================================*/
 
-#include "CoreMinimal.h"
-#include "Misc/Guid.h"
-#include "Stats/Stats.h"
-#include "EngineGlobals.h"
-#include "Engine/EngineTypes.h"
 #include "Engine/Level.h"
-#include "RHI.h"
-#include "RenderResource.h"
-#include "RawIndexBuffer.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "Engine/World.h"
 #include "PrimitiveViewRelevance.h"
-#include "Materials/MaterialInterface.h"
+#include "LightMap.h"
+#include "LightSceneProxy.h"
 #include "PrimitiveSceneProxy.h"
 #include "Engine/MapBuildDataRegistry.h"
 #include "Model.h"
-#include "MaterialShared.h"
+#include "MaterialDomain.h"
 #include "Materials/Material.h"
-#include "MeshBatch.h"
-#include "SceneManagement.h"
-#include "TessellationRendering.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "Engine/Engine.h"
-#include "Engine/LevelStreaming.h"
-#include "LevelUtils.h"
 #include "HModel.h"
 #include "Components/ModelComponent.h"
 #include "Engine/Brush.h"
-#include "UObject/RenderingObjectVersion.h"
 #include "Components/ModelComponent.h"
+#include "SceneInterface.h"
+#include "Hash/Blake3.h"
 
 namespace
 {
@@ -94,6 +86,18 @@ FArchive& operator<<(FArchive& Ar,FModelVertexBuffer& B)
 	return Ar;
 }
 
+#if WITH_EDITOR
+void UpdateHash(FBlake3& Builder, const FModelVertexBuffer& B)
+{
+	if (!B.Vertices.IsEmpty())
+	{
+		static_assert(alignof(FModelVertex) <= 1 || sizeof(FModelVertex) % alignof(FModelVertex) == 0, "We rely on zero padding in arrays");
+		checkf(B.Vertices.Num() < 2 || (int64)&B.Vertices[1] - (int64)&B.Vertices[0] == sizeof(B.Vertices[0]), TEXT("We rely on zero padding in arrays"));
+		Builder.Update(B.Vertices.GetData(), B.Vertices.Num() * sizeof(B.Vertices[0]));
+	}
+	// B.Buffers - Not needed, transient runtime rendering 
+}
+#endif
 /*-----------------------------------------------------------------------------
 UModelComponent
 -----------------------------------------------------------------------------*/
@@ -165,7 +169,7 @@ void UModelComponent::BuildRenderData()
 					{
 						for(int32 VertexIndex = 0; VertexIndex < Node.NumVertices; VertexIndex++)
 						{
-							Element.BoundingBox += TheModel->Points[TheModel->Verts[Node.iVertPool + VertexIndex].pVertex];
+							Element.BoundingBox += (FVector)TheModel->Points[TheModel->Verts[Node.iVertPool + VertexIndex].pVertex];
 						}
 
 						for(int32 VertexIndex = 2; VertexIndex < Node.NumVertices; VertexIndex++)
@@ -221,26 +225,26 @@ public:
 			FColor(157,149,223,255))
 #endif
 	{
-		ENQUEUE_RENDER_COMMAND(InitOrUpdateVertexBufferCmd)([VertexBuffer = &InComponent->GetModel()->VertexBuffer](FRHICommandList&)
+		ENQUEUE_RENDER_COMMAND(InitOrUpdateVertexBufferCmd)([VertexBuffer = &InComponent->GetModel()->VertexBuffer](FRHICommandList& RHICmdList)
 		{
 			if (!VertexBuffer->Buffers.PositionVertexBuffer.IsInitialized())
 			{
-				VertexBuffer->Buffers.PositionVertexBuffer.InitResource();
+				VertexBuffer->Buffers.PositionVertexBuffer.InitResource(RHICmdList);
 			}
 			else if (VertexBuffer->RefCount == 0)
 			{
 				// Only allow update when no other FModelSceneProxy's is using the vertex buffer
 				// otherwise their resources will become invalid
-				VertexBuffer->Buffers.PositionVertexBuffer.UpdateRHI();
+				VertexBuffer->Buffers.PositionVertexBuffer.UpdateRHI(RHICmdList);
 			}
 
 			if (!VertexBuffer->Buffers.StaticMeshVertexBuffer.IsInitialized())
 			{
-				VertexBuffer->Buffers.StaticMeshVertexBuffer.InitResource();
+				VertexBuffer->Buffers.StaticMeshVertexBuffer.InitResource(RHICmdList);
 			}
 			else if (VertexBuffer->RefCount == 0)
 			{
-				VertexBuffer->Buffers.StaticMeshVertexBuffer.UpdateRHI();
+				VertexBuffer->Buffers.StaticMeshVertexBuffer.UpdateRHI(RHICmdList);
 			}
 		});
 		InComponent->GetModel()->VertexBuffer.Buffers.InitModelVF(&VertexFactory);
@@ -256,26 +260,7 @@ public:
 			MaterialRelevance |= Element->GetMaterial()->GetRelevance(GetScene().GetFeatureLevel());
 		}
 
-		bGoodCandidateForCachedShadowmap = CacheShadowDepthsFromPrimitivesUsingWPO() || !MaterialRelevance.bUsesWorldPositionOffset;
-
-		bUsingWPOMaterial = !!MaterialRelevance.bUsesWorldPositionOffset;
-
-		// Try to find a color for level coloration.
-		UObject* ModelOuter = InComponent->GetModel()->GetOuter();
-		ULevel* Level = Cast<ULevel>( ModelOuter );
-		if ( Level )
-		{
-			ULevelStreaming* LevelStreaming = FLevelUtils::FindStreamingLevel( Level );
-			if ( LevelStreaming )
-			{
-				SetLevelColor(LevelStreaming->LevelColor);
-			}
-		}
-
-		// Get a color for property coloration.
-		FColor NewPropertyColor;
-		GEngine->GetPropertyColorationColor( (UObject*)InComponent, NewPropertyColor );
-		SetPropertyColor(NewPropertyColor);
+		bGoodCandidateForCachedShadowmap = CacheShadowDepthsFromPrimitivesUsingWPO() || (!MaterialRelevance.bUsesWorldPositionOffset && !MaterialRelevance.bUsesDisplacement);
 	}
 
 	~FModelSceneProxy()
@@ -517,7 +502,7 @@ public:
 		if (!HasViewDependentDPG())
 		{
 			// Determine the DPG the primitive should be drawn in.
-			uint8 PrimitiveDPG = GetStaticDepthPriorityGroup();
+			ESceneDepthPriorityGroup PrimitiveDPG = GetStaticDepthPriorityGroup();
 
 			PDI->ReserveMemoryForMeshes(Elements.Num());
 
@@ -538,7 +523,7 @@ public:
 					BatchElement.MaxVertexIndex = ModelElement.MaxVertexIndex;
 					BatchElement.VertexFactoryUserData = Elements[ElementIndex].GetVertexFactoryUniformBuffer();
 					MeshElement.Type = PT_TriangleList;
-					MeshElement.DepthPriorityGroup = PrimitiveDPG;
+					MeshElement.DepthPriorityGroup = (uint8)PrimitiveDPG;
 					MeshElement.LODIndex = 0;
 					const bool bValidIndexBuffer = !BatchElement.IndexBuffer || (BatchElement.IndexBuffer && BatchElement.IndexBuffer->IsInitialized() && BatchElement.IndexBuffer->IndexBufferRHI);
 					ensure(bValidIndexBuffer);
@@ -568,6 +553,7 @@ public:
 		}
 		Result.bShadowRelevance = IsShadowCast(View);
 		MaterialRelevance.SetPrimitiveViewRelevance(Result);
+		Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 		return Result;
 	}
 
@@ -694,12 +680,6 @@ private:
 
 			// Determine the material applied to the model element.
 			Material = InModelElement.Material;
-
-			if (RequiresAdjacencyInformation(Material, InVertexFactory->GetType(), InModelElement.Component->GetScene()->GetFeatureLevel()))
-			{
-				UE_LOG(LogModelComponent, Warning, TEXT("Material %s requires adjacency information because of Crack Free Displacement or PN Triangle Tesselation, which is not supported with model components. Falling back to DefaultMaterial."), *Material->GetName());
-				Material = nullptr;
-			}
 
 			// If there isn't an applied material, or if we need static lighting and it doesn't support it, fall back to the default material.
 			if(!Material || (bHasStaticLighting && !Material->CheckMaterialUsage(MATUSAGE_StaticLighting)))
@@ -870,7 +850,7 @@ FBoxSphereBounds UModelComponent::CalcBounds(const FTransform& LocalToWorld) con
 			FBspNode& Node = Model->Nodes[Nodes[NodeIndex]];
 			for(int32 VertexIndex = 0;VertexIndex < Node.NumVertices;VertexIndex++)
 			{
-				BoundingBox += Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex];
+				BoundingBox += (FVector)Model->Points[Model->Verts[Node.iVertPool + VertexIndex].pVertex];
 			}
 		}
 		return FBoxSphereBounds(BoundingBox.TransformBy(LocalToWorld));

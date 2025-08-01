@@ -7,13 +7,14 @@ StreamingTexture.h: Definitions of classes used for texture streaming.
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Engine/Texture2D.h"
+#include "Engine/StreamableRenderAsset.h"
+#include "Engine/TextureDefines.h"
 
 struct FRenderAssetStreamingManager;
 struct FRenderAssetStreamingSettings;
 
 /*-----------------------------------------------------------------------------
-	FStreamingRenderAsset, the streaming system's version of UTexture2D.
+	FStreamingRenderAsset, the streaming system's version of UStreamableRenderAsset.
 -----------------------------------------------------------------------------*/
 
 /** Self-contained structure to manage a streaming texture/mesh, possibly on a separate thread. */
@@ -65,8 +66,6 @@ struct FStreamingRenderAsset
 			return TEXT("StaticMesh");
 		case EStreamableRenderAssetType::SkeletalMesh:
 			return TEXT("SkeletalMesh");
-		case EStreamableRenderAssetType::LandscapeMeshMobile:
-			return TEXT("Landscape");
 		default:
 			return TEXT("Unkown");
 		}
@@ -117,7 +116,7 @@ struct FStreamingRenderAsset
 	float GetNormalizedScreenSize(int32 NumMips) const
 	{
 		check(IsMesh());
-		check(NumMips > 0 && (uint32)NumMips < UE_ARRAY_COUNT(LODScreenSizes));
+		check(NumMips > 0 && (uint32)NumMips <= UE_ARRAY_COUNT(LODScreenSizes));
 		return LODScreenSizes[NumMips - 1];
 	}
 
@@ -129,7 +128,7 @@ struct FStreamingRenderAsset
 	}
 
 	/** Init load order. Return wether this texture has any load/unload request */
-	bool UpdateLoadOrderPriority_Async(int32 MinMipForSplitRequest);
+	bool UpdateLoadOrderPriority_Async(const FRenderAssetStreamingSettings& Settings);
 
 	void UpdateOptionalMipsState_Async();
 	
@@ -154,9 +153,9 @@ struct FStreamingRenderAsset
 		return RenderAssetType != EStreamableRenderAssetType::Texture;
 	}
 
-	bool IsLandscapeMesh() const
+	bool IsMissingTooManyMips() const
 	{
-		return RenderAssetType == EStreamableRenderAssetType::LandscapeMeshMobile;
+		return bMissingTooManyMips;
 	}
 
 	FORCEINLINE int32 GetPerfectWantedMips() const { return FMath::Max<int32>(VisibleWantedMips,  HiddenWantedMips); }
@@ -167,7 +166,6 @@ struct FStreamingRenderAsset
 	{
 		// In editor, forced stream in should never have reduced mips as they can be edited.
 		return (IsMesh() || LODGroup != TEXTUREGROUP_HierarchicalLOD)
-			&& !IsLandscapeMesh()
 			&& !bIsTerrainTexture
 			&& !(bForceFullyLoadHeuristic && bIgnoreStreamingMipBias)
 			&& !(GIsEditor && bForceFullyLoadHeuristic); 
@@ -211,47 +209,48 @@ struct FStreamingRenderAsset
 		};
 	};
 
-	/** (2) Cached number of mip-maps in memory (including the base mip) */
-	int32			ResidentMips;
-	/** (2) Min number of mip-maps requested by the streaming system. */
-	int32			RequestedMips;
-	/** (2) Min mip to be requested by the streaming  */
-	int32			MinAllowedMips;
-	/** (2) Max mip to be requested by the streaming  */
-	int32			MaxAllowedMips;
 	/** (2) How much game time has elapsed since the texture was bound for rendering. Based on FApp::GetCurrentTime(). */
 	float			LastRenderTime;
-
 	/** (3) If non-zero, the most recent time an instance location was removed for this texture. */
 	double			InstanceRemovedTimestamp;
 	/** (3) Extra gameplay boost factor. Reset after every update. */
 	float			DynamicBoostFactor;
 
-	/** (4) How many mips are missing to satisfy ideal quality because of max size limitation. Used to prevent sacrificing mips that are already visually sacrificed. */
-	int32			NumMissingMips;
-	/** (4) Max wanted mips for visible instances.*/
-	int32			VisibleWantedMips;
-	/** (4) Wanted mips for non visible instances.*/
-	int32			HiddenWantedMips;
 	/** (4) Retention priority used to sacrifice mips when out of budget. */
 	int32			RetentionPriority;
 	/** (4) Normalized screen size. Only used by meshes. */
 	float			NormalizedScreenSize;
-	/** (4) The max allowed mips (based on Visible and Hidden wanted mips) in order to fit in budget. */
-	int32			BudgetedMips;
 	/** (4) The load request priority. */
 	int32			LoadOrderPriority;	
-	/** (4) The mip that will be requested. Note, that some texture are loaded using split requests, so that the first request can be smaller than budgeted mip. */
-	int32			WantedMips;
 	/** (4) A persistent bias applied to this texture. Increase whenever the streamer needs to make sacrifices to fit in budget */
 	int32			BudgetMipBias;
+	/** (2) LOD bias applied to no-ref meshes */
+	int32			NoRefLODBias;
+	/** (4) The mip that will be requested. Note, that some texture are loaded using split requests, so that the first request can be smaller than budgeted mip. */
+	int8			WantedMips;
 	/** (4) Number of LODs forced resident. Only used by meshes currently */
-	int32			NumForcedMips;
+	int8			NumForcedMips;
+	/** (2) Cached number of mip-maps in memory (including the base mip) */
+	int8			ResidentMips;
+	/** (2) Min number of mip-maps requested by the streaming system. */
+	int8			RequestedMips;
+	/** (2) Min mip to be requested by the streaming  */
+	int8			MinAllowedMips;
+	/** (2) Max mip to be requested by the streaming  */
+	int8			MaxAllowedMips;
+	/** (4) How many mips are missing to satisfy ideal quality because of max size limitation. Used to prevent sacrificing mips that are already visually sacrificed. */
+	int8			NumMissingMips;
+	/** (4) Max wanted mips for visible instances.*/
+	int8			VisibleWantedMips;
+	/** (4) Wanted mips for non visible instances.*/
+	int8			HiddenWantedMips;
+	/** (4) The max allowed mips (based on Visible and Hidden wanted mips) in order to fit in budget. */
+	int8			BudgetedMips;
 
 	/** (5) */
-	int32 CachedWantedMips;
+	int8 CachedWantedMips;
 	/** (5) */
-	int32 CachedVisibleWantedMips;
+	int8 CachedVisibleWantedMips;
 
 	/** (1) */
 	EStreamableRenderAssetType RenderAssetType;
@@ -259,27 +258,29 @@ struct FStreamingRenderAsset
 	EOptionalMipsState	OptionalMipsState;
 
 	/** (1) Whether the texture is loaded with higher priority. */
-	uint32			bLoadWithHigherPriority : 1;
+	uint8			bLoadWithHigherPriority : 1;
 	/** (1) Whether the texture should be forcibly fully loaded. */
-	uint32			bIsTerrainTexture : 1;
+	uint8			bIsTerrainTexture : 1;
 
 	/** (2) Whether the texture should be forcibly fully loaded. */
-	uint32			bForceFullyLoad : 1;
+	uint8			bForceFullyLoad : 1;
 	/** (2) Whether the texture resolution should be affected by the memory budget. Only effective when forced fully resident. */
-	uint32			bIgnoreStreamingMipBias : 1;
+	uint8			bIgnoreStreamingMipBias : 1;
 
 	/** (3) Wheter the streamer has streaming plans for this texture. */
-	uint32			bHasUpdatePending : 1;
+	uint8			bHasUpdatePending : 1;
 
 	/** (4) Same as force fully load, but takes into account component settings. */
-	uint32			bForceFullyLoadHeuristic : 1;
+	uint8			bForceFullyLoadHeuristic : 1;
 	/** (4) Whether this has not component referencing it. */
-	uint32			bUseUnkownRefHeuristic : 1;
+	uint8			bUseUnkownRefHeuristic : 1;
 	/** (4) Same as force fully load, but takes into account component settings. */
-	uint32			bLooksLowRes : 1;
+	uint8			bLooksLowRes : 1;
+	/** (4) Whether too many desired MIPs or LODs are missing. */
+	uint8			bMissingTooManyMips : 1;
 
 	/** (5) */
-	uint32			bCachedForceFullyLoadHeuristic : 1;
+	uint8			bCachedForceFullyLoadHeuristic : 1;
 
 	/** (5) */
 	TBitArray<>		LevelIndexUsage;

@@ -2,46 +2,89 @@
 
 
 #include "SKismetInspector.h"
-#include "UObject/UnrealType.h"
-#include "Widgets/Layout/SBorder.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/SBoxPanel.h"
-#include "Framework/Application/SlateApplication.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Text/SRichTextBlock.h"
-#include "Widgets/Layout/SBox.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
-#include "EdGraph/EdGraphNode.h"
+
+#include "BitmaskLiteralDetails.h"
+#include "BlueprintDetailsCustomization.h"
+#include "BlueprintEditor.h"
+#include "BlueprintEditorSettings.h"
+#include "BlueprintMemberReferenceCustomization.h"
+#include "BlueprintNamespaceUtilities.h"
 #include "Components/ActorComponent.h"
-#include "GameFramework/Actor.h"
-#include "Engine/Blueprint.h"
-#include "EdGraph/EdGraph.h"
-#include "Settings/EditorExperimentalSettings.h"
-#include "Kismet/KismetSystemLibrary.h"
 #include "Components/ChildActorComponent.h"
-#include "Engine/SCS_Node.h"
+#include "Containers/SparseArray.h"
+#include "Containers/UnrealString.h"
+#include "DetailsViewArgs.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphNode_Documentation.h"
 #include "EdGraphSchema_K2.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Blueprint.h"
+#include "Engine/MemberReference.h"
+#include "Engine/SCS_Node.h"
+#include "FormatTextDetails.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Text/TextLayout.h"
+#include "GameFramework/Actor.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "IDetailCustomization.h"
+#include "IDetailsView.h"
+#include "IStructureDetailsView.h"
+#include "Input/Events.h"
+#include "Internationalization/Internationalization.h"
 #include "K2Node.h"
-#include "K2Node_EditablePinBase.h"
+#include "K2Node_AddComponent.h" // for GetTemplateFromNode()
+#include "K2Node_BitmaskLiteral.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_EditablePinBase.h"
 #include "K2Node_FormatText.h"
+#include "K2Node_FunctionTerminator.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
-#include "K2Node_AddComponent.h" // for GetTemplateFromNode()
-#include "IDetailCustomization.h"
-#include "Editor.h"
-#include "PropertyEditorModule.h"
+#include "Kismet/KismetSystemLibrary.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/ComponentEditorUtils.h"	// For CanEditNativeComponent()
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyEditorDelegates.h"
+#include "PropertyEditorModule.h"
+#include "Settings/EditorExperimentalSettings.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/Casts.h"
+#include "Templates/SubclassOf.h"
+#include "Templates/UnrealTemplate.h"
+#include "Types/ISlateMetaData.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/SRichTextBlock.h"
+#include "Widgets/Text/STextBlock.h"
 
-#include "IDetailsView.h"
-
-#include "EdGraph/EdGraphNode_Documentation.h"
-#include "BlueprintDetailsCustomization.h"
-#include "K2Node_BitmaskLiteral.h"
-#include "BitmaskLiteralDetails.h"
-#include "FormatTextDetails.h"
+class FNotifyHook;
+class FStructOnScope;
+class IClassViewerFilter;
+class IDetailLayoutBuilder;
+class SDockTab;
+class SWidget;
+struct FGeometry;
 
 #define LOCTEXT_NAMESPACE "KismetInspector"
 
@@ -67,26 +110,26 @@ public:
 		ChildSlot
 		[
 			SNew(SBorder)
-			.BorderImage(FEditorStyle::Get().GetBrush("ToolPanel.GroupBorder"))
+			.BorderImage(FAppStyle::Get().GetBrush("ToolPanel.GroupBorder"))
 			[
 				SNew(SHorizontalBox)
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
 				.HAlign(HAlign_Center)
 				.VAlign(VAlign_Center)
-				.Padding(2)
+				.Padding(2.0f)
 				[
 					SNew(SImage)
-					.Image(FEditorStyle::Get().GetBrush("Icons.Warning"))
+					.Image(FAppStyle::Get().GetBrush("Icons.Warning"))
 				]
 				+ SHorizontalBox::Slot()
 					.VAlign(VAlign_Center)
-					.Padding(2)
+					.Padding(2.0f)
 					[
 						SNew(SRichTextBlock)
-						.DecoratorStyleSet(&FEditorStyle::Get())
+						.DecoratorStyleSet(&FAppStyle::Get())
 						.Justification(ETextJustify::Left)
-						.TextStyle(FEditorStyle::Get(), "DetailsView.BPMessageTextStyle")
+						.TextStyle(FAppStyle::Get(), "DetailsView.BPMessageTextStyle")
 						.Text(InArgs._WarningText)
 						.AutoWrapText(true)
 						+ SRichTextBlock::HyperlinkDecorator(TEXT("HyperlinkDecorator"), InArgs._OnHyperlinkClicked)
@@ -122,6 +165,7 @@ void SKismetInspector::Tick( const FGeometry& AllottedGeometry, const double InC
 		else
 		{
 			FKismetSelectionInfo SelectionInfo;
+			RefreshPropertyObjects.Remove(nullptr);
 			UpdateFromObjects(RefreshPropertyObjects, SelectionInfo, RefreshOptions);
 			RefreshPropertyObjects.Empty();
 		}
@@ -191,22 +235,23 @@ TSharedRef<SWidget> SKismetInspector::MakeContextualEditingWidget(struct FKismet
 			]
 		];
 
-		if (bShowPublicView)
-		{
-			ContextualEditingWidget->AddSlot()
-			.AutoHeight()
-			.VAlign( VAlign_Top )
+		ContextualEditingWidget->AddSlot()
+		.AutoHeight()
+		.VAlign(VAlign_Top)
+		[
+			SNew(SCheckBox)
+			.ToolTipText(LOCTEXT("TogglePublicView", "Toggle Public View"))
+			.IsChecked(this, &SKismetInspector::GetPublicViewCheckboxState)
+			.OnCheckStateChanged(this, &SKismetInspector::SetPublicViewCheckboxState)
 			[
-				SNew(SCheckBox)
-				.ToolTipText(LOCTEXT("TogglePublicView", "Toggle Public View"))
-				.IsChecked(this, &SKismetInspector::GetPublicViewCheckboxState)
-				.OnCheckStateChanged( this, &SKismetInspector::SetPublicViewCheckboxState)
-				[
-					SNew(STextBlock)
-					.Text(LOCTEXT("PublicViewCheckboxLabel", "Public View"))
-				]
-			];
-		}
+				SNew(STextBlock)
+				.Text(LOCTEXT("PublicViewCheckboxLabel", "Public View"))
+			]
+			.Visibility_Lambda([bShowPublicView = this->bShowPublicView]()
+			{
+				return bShowPublicView.Get() ? EVisibility::Visible : EVisibility::Hidden;
+			})
+		];
 	}
 
 	return ContextualEditingWidget;
@@ -238,6 +283,16 @@ bool SKismetInspector::IsSelected(UObject* Object) const
 const TArray< TWeakObjectPtr<UObject> >& SKismetInspector::GetSelectedObjects() const
 {
 	return SelectedObjects;
+}
+
+void SKismetInspector::AddReferencedObjects(FReferenceCollector& Collector)
+{
+	Collector.AddReferencedObjects(RefreshPropertyObjects);
+}
+
+FString SKismetInspector::GetReferencerName() const
+{
+	return TEXT("SKismetInspector");
 }
 
 FText SKismetInspector::GetContextualEditingWidgetTitle() const
@@ -343,8 +398,19 @@ void SKismetInspector::Construct(const FArguments& InArgs)
 		NotifyHook = Kismet2.Get();
 	}
 
-	FDetailsViewArgs::ENameAreaSettings NameAreaSettings = InArgs._HideNameArea ? FDetailsViewArgs::HideNameArea : FDetailsViewArgs::ObjectsUseNameArea;
-	FDetailsViewArgs DetailsViewArgs( /*bUpdateFromSelection=*/ false, /*bLockable=*/ false, /*bAllowSearch=*/ true, NameAreaSettings, /*bHideSelectionTip=*/ true, /*InNotifyHook=*/ NotifyHook, /*InSearchInitialKeyFocus=*/ false, /*InViewIdentifier=*/ InArgs._ViewIdentifier );
+	FDetailsViewArgs DetailsViewArgs;
+	DetailsViewArgs.NameAreaSettings = InArgs._HideNameArea ? FDetailsViewArgs::HideNameArea : FDetailsViewArgs::ObjectsUseNameArea;
+	DetailsViewArgs.bHideSelectionTip = true;
+	DetailsViewArgs.NotifyHook = NotifyHook;
+	DetailsViewArgs.ViewIdentifier = InArgs._ViewIdentifier;
+	if (Kismet2.IsValid())
+	{
+		TSharedPtr<IClassViewerFilter> ImportedClassFilter = Kismet2->GetImportedClassViewerFilter();
+		if (ImportedClassFilter.IsValid())
+		{
+			DetailsViewArgs.ClassViewerFilters.Add(ImportedClassFilter.ToSharedRef());
+		}
+	}
 
 	PropertyView = EditModule.CreateDetailView( DetailsViewArgs );
 		
@@ -363,7 +429,7 @@ void SKismetInspector::Construct(const FArguments& InArgs)
 		PropertyView->RegisterInstancedCustomPropertyLayout(UMulticastDelegatePropertyWrapper::StaticClass(), LayoutDelegateDetails);
 		
 		// Register function and variable details customization
-		FOnGetDetailCustomizationInstance LayoutGraphDetails = FOnGetDetailCustomizationInstance::CreateStatic(&FBlueprintGraphActionDetails::MakeInstance, MyBlueprint);
+		FOnGetDetailCustomizationInstance LayoutGraphDetails = FOnGetDetailCustomizationInstance::CreateStatic(&FBlueprintGraphActionDetails::MakeInstance, MyBlueprint, InArgs._ShowLocalVariables);
 		PropertyView->RegisterInstancedCustomPropertyLayout(UEdGraph::StaticClass(), LayoutGraphDetails);
 		PropertyView->RegisterInstancedCustomPropertyLayout(UK2Node_EditablePinBase::StaticClass(), LayoutGraphDetails);
 		PropertyView->RegisterInstancedCustomPropertyLayout(UK2Node_CallFunction::StaticClass(), LayoutGraphDetails);
@@ -372,6 +438,8 @@ void SKismetInspector::Construct(const FArguments& InArgs)
 		PropertyView->RegisterInstancedCustomPropertyLayout(UPropertyWrapper::StaticClass(), LayoutVariableDetails);
 		PropertyView->RegisterInstancedCustomPropertyLayout(UK2Node_VariableGet::StaticClass(), LayoutVariableDetails);
 		PropertyView->RegisterInstancedCustomPropertyLayout(UK2Node_VariableSet::StaticClass(), LayoutVariableDetails);
+
+		PropertyView->RegisterInstancedCustomPropertyTypeLayout(FMemberReference::StaticStruct()->GetFName(), FOnGetPropertyTypeCustomizationInstance::CreateStatic(&FBlueprintMemberReferenceDetails::MakeInstance, MyBlueprint));
 	}
 
 	if (Kismet2.IsValid() && Kismet2->IsEditingSingleBlueprint())
@@ -404,8 +472,8 @@ void SKismetInspector::Construct(const FArguments& InArgs)
 		.FillHeight(1.0f)
 		[
 			SAssignNew( ContextualEditingBorderWidget, SBorder )
-			.Padding(0)
-			.BorderImage( FEditorStyle::GetBrush("NoBorder") )
+			.Padding(0.0f)
+			.BorderImage( FAppStyle::GetBrush("NoBorder") )
 		]
 	];
 
@@ -424,7 +492,7 @@ void SKismetInspector::Construct(const FArguments& InArgs)
 	FDetailsViewArgs ViewArgs;
 	ViewArgs.bAllowSearch = false;
 	ViewArgs.bHideSelectionTip = false;
-	ViewArgs.bShowActorLabel = false;
+	ViewArgs.bShowObjectLabel = false;
 	ViewArgs.NotifyHook = NotifyHook;
 
 	StructureDetailsView = EditModule.CreateStructureDetailView(ViewArgs, StructureViewArgs, StructToDisplay, LOCTEXT("Struct", "Struct View"));
@@ -608,7 +676,8 @@ void SKismetInspector::UpdateFromObjects(const TArray<UObject*>& PropertyObjects
 	}
 
 	PropertyView->OnFinishedChangingProperties().Clear();
-	PropertyView->OnFinishedChangingProperties().Add( UserOnFinishedChangingProperties );
+	PropertyView->OnFinishedChangingProperties().Add(UserOnFinishedChangingProperties);
+	PropertyView->OnFinishedChangingProperties().AddSP(this, &SKismetInspector::OnFinishedChangingProperties);
 
 	// Proceed to update
 	SelectedObjects.Empty();
@@ -745,12 +814,17 @@ bool SKismetInspector::IsStructViewPropertyReadOnly(const struct FPropertyAndPar
 	return false;
 }
 
-bool SKismetInspector::IsAnyParentContainerSelected(const FPropertyAndParent& PropertyAndParent) const
+bool SKismetInspector::IsAnyParentOrContainerSelected(const FPropertyAndParent& PropertyAndParent) const
 {
 	for (const FProperty* CurrentProperty : PropertyAndParent.ParentProperties)
 	{
-		const FProperty* CurrentOuter = CurrentProperty->GetOwner<FProperty>();
+		if (SelectedObjectProperties.Find(const_cast<FProperty*>(CurrentProperty)))
+		{
+			return true;
+		}
 
+		// the property might be the Inner property of an array (or Key/Value of a map), so check if the outer property is selected
+		const FProperty* CurrentOuter = CurrentProperty->GetOwner<FProperty>();
 		if (CurrentOuter != nullptr && SelectedObjectProperties.Find(const_cast<FProperty*>(CurrentOuter)))
 		{
 			return true;
@@ -764,43 +838,66 @@ bool SKismetInspector::IsPropertyVisible( const FPropertyAndParent& PropertyAndP
 {
 	const FProperty& Property = PropertyAndParent.Property;
 
-
 	// If we are in 'instance preview' - hide anything marked 'disabled edit on instance'
 	if ((ECheckBoxState::Checked == PublicViewState) && Property.HasAnyPropertyFlags(CPF_DisableEditOnInstance))
 	{
 		return false;
 	}
 
-	bool bEditOnTemplateDisabled = Property.HasAnyPropertyFlags(CPF_DisableEditOnTemplate);
-	if (bEditOnTemplateDisabled)
+	// Only hide EditInstanceOnly properties if we are editing a CDO/archetype
+	bool bIsEditingTemplate = true;
+	for (const TWeakObjectPtr<UObject>& SelectedObject : SelectedObjects)
 	{
-		// Only hide properties if we are editing a CDO/archetype
-		for (const TWeakObjectPtr<UObject>& SelectedObject : SelectedObjects)
+		UObject* Object = SelectedObject.Get();
+		if (!Object || !Object->IsTemplate())
 		{
-			UObject* Object = SelectedObject.Get();
-			if (!Object->IsTemplate())
-			{
-				bEditOnTemplateDisabled = false;
-				break;
-			}
+			bIsEditingTemplate = false;
+			break;
 		}
 	}
 
-	if(const UClass* OwningClass = Property.GetOwner<UClass>())
+	if (bIsEditingTemplate)
 	{
-		const UBlueprint* BP = BlueprintEditorPtr.IsValid() ? BlueprintEditorPtr.Pin()->GetBlueprintObj() : nullptr;
-		const bool VariableAddedInCurentBlueprint = (OwningClass->ClassGeneratedBy == BP);
+		// check if the property (or any of its parent properties) was added by this blueprint
+		// this is necessary because of Instanced objects, which will have a different owning class yet are conceptually contained in this blueprint
+		bool bVariableAddedInCurrentBlueprint = false;
+		TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
+		const UBlueprint* Blueprint = BlueprintEditor.IsValid() ? BlueprintEditor->GetBlueprintObj() : nullptr;
 
-		// If we did not add this var, hide it!
-		if(!VariableAddedInCurentBlueprint)
+		auto WasAddedInThisBlueprint = [Blueprint](const FProperty* Property)
 		{
-			if (bEditOnTemplateDisabled || Property.GetBoolMetaData(FBlueprintMetadata::MD_Private))
+			if (const UClass* OwningClass = Property->GetOwnerClass())
+			{
+				return Blueprint && OwningClass->ClassGeneratedBy.Get() == Blueprint;
+			}
+			return false;
+		};
+		
+		bVariableAddedInCurrentBlueprint |= WasAddedInThisBlueprint(&Property);
+
+		for (const FProperty* Parent : PropertyAndParent.ParentProperties)
+		{
+			bVariableAddedInCurrentBlueprint |= WasAddedInThisBlueprint(Parent);
+		}
+
+		// if this property wasn't added in this blueprint, we want to filter it out if it (or any of its parents) are marked EditInstanceOnly or private
+		if (!bVariableAddedInCurrentBlueprint)
+		{
+			if (Property.HasAnyPropertyFlags(CPF_DisableEditOnTemplate) || Property.GetBoolMetaData(FBlueprintMetadata::MD_Private))
 			{
 				return false;
 			}
+
+			for (const FProperty* Parent : PropertyAndParent.ParentProperties)
+			{
+				if (Property.HasAnyPropertyFlags(CPF_DisableEditOnTemplate) || Parent->GetBoolMetaData(FBlueprintMetadata::MD_Private))
+				{
+					return false;
+				}
+			}
 		}
 	}
-
+	
 	// figure out if this Blueprint variable is an Actor variable
 	const FArrayProperty* ArrayProperty = CastField<const FArrayProperty>(&Property);
 	const FSetProperty* SetProperty = CastField<const FSetProperty>(&Property);
@@ -808,16 +905,16 @@ bool SKismetInspector::IsPropertyVisible( const FPropertyAndParent& PropertyAndP
 
 	const FProperty* TestProperty = ArrayProperty ? ArrayProperty->Inner : &Property;
 	const FObjectPropertyBase* ObjectProperty = CastField<const FObjectPropertyBase>(TestProperty);
-	bool bIsActorProperty = (ObjectProperty != nullptr && ObjectProperty->PropertyClass->IsChildOf(AActor::StaticClass()));
+	bool bIsActorProperty = (ObjectProperty != nullptr && ObjectProperty->PropertyClass && ObjectProperty->PropertyClass->IsChildOf(AActor::StaticClass()));
 
-	if (bEditOnTemplateDisabled && bIsActorProperty)
+	if (bIsEditingTemplate && Property.HasAnyPropertyFlags(CPF_DisableEditOnTemplate) && bIsActorProperty)
 	{
 		// Actor variables can't have default values (because Blueprint templates are library elements that can 
 		// bridge multiple levels and different levels might not have the actor that the default is referencing).
 		return false;
 	}
 
-	bool bIsComponent = (ObjectProperty != nullptr && ObjectProperty->PropertyClass->IsChildOf(UActorComponent::StaticClass()));
+	bool bIsComponent = (ObjectProperty != nullptr && ObjectProperty->PropertyClass && ObjectProperty->PropertyClass->IsChildOf(UActorComponent::StaticClass()));
 	if (!bShowComponents && bIsComponent)
 	{
 		// Don't show sub components properties, thats what selecting components in the component tree is for.
@@ -830,16 +927,9 @@ bool SKismetInspector::IsPropertyVisible( const FPropertyAndParent& PropertyAndP
 		// If the current property is selected, it is visible.
 		return true;
 	}
-	else if ( PropertyAndParent.ParentProperties.Num() > 0 && SelectedObjectProperties.Num() > 0 )
+	else if (PropertyAndParent.ParentProperties.Num() > 0 && SelectedObjectProperties.Num() > 0)
 	{
-		const FProperty* ParentProperty = PropertyAndParent.ParentProperties[0];
-
-		if ( SelectedObjectProperties.Find( const_cast<FProperty*>( ParentProperty ) ) )
-		{
-			// If its parent is selected, it should be visible
-			return true;
-		}
-		else if ( IsAnyParentContainerSelected(PropertyAndParent) )
+		if (IsAnyParentOrContainerSelected(PropertyAndParent))
 		{
 			return true;
 		}
@@ -857,7 +947,6 @@ bool SKismetInspector::IsPropertyVisible( const FPropertyAndParent& PropertyAndP
 			}
 		}
 	}
-
 
 	return SelectedObjectProperties.Num() == 0;
 }
@@ -898,13 +987,32 @@ bool SKismetInspector::IsPropertyEditingEnabled() const
 
 	for (const TWeakObjectPtr<UObject>& SelectedObject : SelectedObjects)
 	{
-		UActorComponent* Component = Cast<UActorComponent>(SelectedObject.Get());
-		if (Component && !CastChecked<UActorComponent>(Component->GetArchetype())->IsEditableWhenInherited() )
+		if (UActorComponent* Component = Cast<UActorComponent>(SelectedObject.Get()))
 		{
-			bIsEditable = false;
-			break;
+			if(!CastChecked<UActorComponent>(Component->GetArchetype())->IsEditableWhenInherited())
+			{
+				bIsEditable = false;
+				break;
+			}
+		}
+		else if(UEdGraphNode* EdGraphNode = Cast<UEdGraphNode>(SelectedObject.Get()))
+		{
+			if(UEdGraph* OuterGraph = EdGraphNode->GetGraph())
+			{
+				if(BlueprintEditorPtr.IsValid() && !BlueprintEditorPtr.Pin()->IsEditable(OuterGraph))
+				{
+					// Allow property editing on interface function graph terminator nodes (i.e. allow users to modify the interface function signature).
+					const bool bIsInterfaceGraphTerminatorNode = FBlueprintEditorUtils::IsInterfaceGraph(OuterGraph) && EdGraphNode->IsA<UK2Node_FunctionTerminator>();
+					if (!bIsInterfaceGraphTerminatorNode)
+					{
+						bIsEditable = false;
+						break;
+					}
+				}
+			}
 		}
 	}
+	
 	return bIsEditable && (!IsPropertyEditingEnabledDelegate.IsBound() || IsPropertyEditingEnabledDelegate.Execute());
 }
 
@@ -967,6 +1075,57 @@ void SKismetInspector::SetPublicViewCheckboxState( ECheckBoxState InIsChecked )
 	}
 	
 	BlueprintEditorPtr.Pin()->StartEditingDefaults();
+}
+
+void SKismetInspector::OnFinishedChangingProperties(const FPropertyChangedEvent& InPropertyChangedEvent)
+{
+	ImportNamespacesForPropertyValue(InPropertyChangedEvent.MemberProperty);
+}
+
+void SKismetInspector::ImportNamespacesForPropertyValue(const FProperty* InProperty) const
+{
+	if (!GetDefault<UBlueprintEditorSettings>()->bEnableNamespaceImportingFeatures)
+	{
+		return;
+	}
+
+	if (!InProperty || SelectedObjects.Num() == 0)
+	{
+		return;
+	}
+
+	TSharedPtr<FBlueprintEditor> BlueprintEditor = BlueprintEditorPtr.Pin();
+	if (BlueprintEditor.IsValid())
+	{
+		// Gather all namespace identifier strings associated with the property's value for each edited object.
+		TSet<FString> AssociatedNamespaces;
+		for (const TWeakObjectPtr<UObject>& SelectedObjectPtr : SelectedObjects)
+		{
+			if (const UObject* SelectedObject = SelectedObjectPtr.Get())
+			{
+				const UStruct* SelectedType = SelectedObject->GetClass();
+
+				// Ensure that the selected object type matches the property's owner.
+				// For example, a details customization may select an unrelated object
+				// and then customize each row with an external object reference. In
+				// those cases, the customization would need to handle this explicitly.
+				if (!InProperty->IsIn(SelectedType))
+				{
+					continue;
+				}
+
+				FBlueprintNamespaceUtilities::GetPropertyValueNamespaces(InProperty, SelectedObject, AssociatedNamespaces);
+			}
+		}
+
+		// Auto-import any namespace(s) associated with the property's value into the current editor context.
+		if (AssociatedNamespaces.Num() > 0)
+		{
+			FBlueprintEditor::FImportNamespaceExParameters Params;
+			Params.NamespacesToImport = MoveTemp(AssociatedNamespaces);
+			BlueprintEditor->ImportNamespaceEx(Params);
+		}
+	}
 }
 
 //////////////////////////////////////////////////////////////////////////

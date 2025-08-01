@@ -10,6 +10,7 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionTextureCoordinate.h"
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
+#include "MaterialShared.h"
 #include "TexturePaintHelpers.h"
 
 //////////////////////////////////////////////////////////////////////////
@@ -17,7 +18,7 @@
 
 void IMeshPaintGeometryAdapter::DefaultApplyOrRemoveTextureOverride(UMeshComponent* InMeshComponent, UTexture* SourceTexture, UTexture* OverrideTexture)
 {
-	const ERHIFeatureLevel::Type FeatureLevel = InMeshComponent->GetWorld()->FeatureLevel;
+	const ERHIFeatureLevel::Type FeatureLevel = InMeshComponent->GetWorld()->GetFeatureLevel();
 
 	// Check all the materials on the mesh to see if the user texture is there
 	int32 MaterialIndex = 0;
@@ -47,12 +48,10 @@ void IMeshPaintGeometryAdapter::DefaultQueryPaintableTextures(int32 MaterialInde
 		FPaintableTexture PaintableTexture;
 		// Find all the unique textures used in the top material level of the selected actor materials
 
-		const TArray<UMaterialExpression*>& Expressions = Material->GetMaterial()->Expressions;
-
 		// Only grab the textures from the top level of samples
-		for (auto ItExpressions = Expressions.CreateConstIterator(); ItExpressions; ItExpressions++)
+		for (UMaterialExpression* Expression : Material->GetMaterial()->GetExpressions())
 		{
-			UMaterialExpressionTextureBase* TextureBase = Cast<UMaterialExpressionTextureBase>(*ItExpressions);
+			UMaterialExpressionTextureBase* TextureBase = Cast<UMaterialExpressionTextureBase>(Expression);
 			if (TextureBase != NULL &&
 				TextureBase->Texture != NULL &&
 				!TextureBase->Texture->IsNormalMap() && 
@@ -65,7 +64,7 @@ void IMeshPaintGeometryAdapter::DefaultQueryPaintableTextures(int32 MaterialInde
 
 				// Texture Samples can have UV's specified, check the first node for whether it has a custom UV channel set. 
 				// We only check the first as the Mesh paint mode does not support painting with UV's modified in the shader.
-				UMaterialExpressionTextureSample* TextureSample = Cast<UMaterialExpressionTextureSample>(*ItExpressions);
+				UMaterialExpressionTextureSample* TextureSample = Cast<UMaterialExpressionTextureSample>(Expression);
 				if (TextureSample != NULL)
 				{
 					UMaterialExpressionTextureCoordinate* TextureCoords = Cast<UMaterialExpressionTextureCoordinate>(TextureSample->Coordinates.Expression);

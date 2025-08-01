@@ -15,8 +15,8 @@
 /**
  * Default physics settings.
  */
-UCLASS(config=Engine,defaultconfig,meta=(DisplayName="Physics"))
-class PHYSICSCORE_API UPhysicsSettingsCore: public UDeveloperSettings
+UCLASS(config=Engine,defaultconfig,meta=(DisplayName="Physics"), MinimalAPI)
+class UPhysicsSettingsCore: public UDeveloperSettings
 {
 	GENERATED_UCLASS_BODY()
 
@@ -43,6 +43,10 @@ class PHYSICSCORE_API UPhysicsSettingsCore: public UDeveloperSettings
 	/** Triangles from triangle meshes (BSP) with an area less than or equal to this value will be removed from physics collision data. Set to less than 0 to disable. */
 	UPROPERTY(config,EditAnywhere,AdvancedDisplay,meta = (ClampMin = "-1.0",UIMin = "-1.0",ClampMax = "10.0",UIMax = "10.0"),Category = Constants)
 	float TriangleMeshTriangleMinAreaThreshold;
+
+	/** If set to true, the scene will use enhanced determinism at the cost of a bit more resources. See eENABLE_ENHANCED_DETERMINISM to learn about the specifics */
+	UPROPERTY(config,EditAnywhere,Category = Simulation)
+	bool bEnableEnhancedDeterminism;
 
 	/** Enables shape sharing between sync and async scene for static rigid actors */
 	UPROPERTY(config,EditAnywhere,AdvancedDisplay,Category = Simulation)
@@ -118,12 +122,12 @@ class PHYSICSCORE_API UPhysicsSettingsCore: public UDeveloperSettings
 	UPROPERTY(config, EditAnywhere, Category = ChaosPhysics)
 	FChaosSolverConfiguration SolverOptions;
 
-	static UPhysicsSettingsCore* Get();
+	static PHYSICSCORE_API UPhysicsSettingsCore* Get();
 
-	virtual void PostInitProperties() override;
+	PHYSICSCORE_API virtual void PostInitProperties() override;
 
 protected:
-	static void SetDefaultSettings(UPhysicsSettingsCore* InSettings);
+	static PHYSICSCORE_API void SetDefaultSettings(UPhysicsSettingsCore* InSettings);
 
 private:
 	// Override default settings.

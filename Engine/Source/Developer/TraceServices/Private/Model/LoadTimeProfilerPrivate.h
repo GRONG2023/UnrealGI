@@ -2,15 +2,15 @@
 
 #pragma once
 
+#include "TraceServices/Model/Counters.h"
 #include "TraceServices/Model/LoadTimeProfiler.h"
-#include "TraceServices/AnalysisService.h"
 #include "Common/SlabAllocator.h"
 #include "Common/PagedArray.h"
 #include "Common/StringStore.h"
 #include "Model/MonotonicTimeline.h"
 #include "Model/Tables.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 class FAnalysisSessionLock;
@@ -21,7 +21,9 @@ class FLoadTimeProfilerProvider
 public:
 	typedef TMonotonicTimeline<FLoadTimeProfilerCpuEvent> CpuTimelineInternal;
 
-	FLoadTimeProfilerProvider(IAnalysisSession& Session, ICounterProvider& CounterProvider);
+	explicit FLoadTimeProfilerProvider(IAnalysisSession& Session, IEditableCounterProvider& EditableCounterProvider);
+	virtual ~FLoadTimeProfilerProvider() {}
+
 	virtual uint64 GetTimelineCount() const override { return CpuTimelines.Num(); }
 	virtual bool GetCpuThreadTimelineIndex(uint32 ThreadId, uint32& OutTimelineIndex) const override;
 	virtual bool ReadTimeline(uint32 Index, TFunctionRef<void(const CpuTimeline&)> Callback) const override;
@@ -29,12 +31,11 @@ public:
 	virtual ITable<FLoadTimeProfilerAggregatedStats>* CreateObjectTypeAggregation(double IntervalStart, double IntervalEnd) const override;
 	virtual ITable<FPackagesTableRow>* CreatePackageDetailsTable(double IntervalStart, double IntervalEnd) const override;
 	virtual ITable<FExportsTableRow>* CreateExportDetailsTable(double IntervalStart, double IntervalEnd) const override;
+	virtual ITable<FRequestsTableRow>* CreateRequestsTable(double IntervalStart, double IntervalEnd) const override;
 	virtual const ITable<FLoadRequest>& GetRequestsTable() const override { return RequestsTable; }
 	const FClassInfo& AddClassInfo(const TCHAR* ClassName);
 	FLoadRequest& CreateRequest();
-	FPackageInfo& EditPackageInfo(const TCHAR* PackageName);
-	uint64 BeginLoadPackage(const FPackageInfo& PackageInfo, double Time);
-	void EndLoadPackage(uint64 LoadHandle, double Time);
+	FPackageInfo& CreatePackage();
 	FPackageExportInfo& CreateExport();
 	CpuTimelineInternal& EditCpuTimeline(uint32 ThreadId);
 	uint64 BeginIoDispatcherBatch(uint64 BatchId, double Time);
@@ -82,12 +83,17 @@ private:
 		};
 
 		FLoaderFrameCounter(ELoaderFrameCounterType Type, const TPagedArray<FLoaderFrame>& Frames);
+		virtual ~FLoaderFrameCounter() {}
+
 		virtual const TCHAR* GetName() const override;
+		virtual const TCHAR* GetGroup() const override;
 		virtual const TCHAR* GetDescription() const override;
 		virtual bool IsFloatingPoint() const override;
 		virtual ECounterDisplayHint GetDisplayHint() const override;
 		virtual void EnumerateValues(double IntervalStart, double IntervalEnd, bool bIncludeExternalBounds, TFunctionRef<void(double, int64)> Callback) const override;
 		virtual void EnumerateFloatValues(double IntervalStart, double IntervalEnd, bool bIncludeExternalBounds, TFunctionRef<void(double, double)> Callback) const override;
+		virtual void EnumerateOps(double IntervalStart, double IntervalEnd, bool bIncludeExternalBounds, TFunctionRef<void(double, ECounterOpType, int64)> Callback) const override;
+		virtual void EnumerateFloatOps(double IntervalStart, double IntervalEnd, bool bIncludeExternalBounds, TFunctionRef<void(double, ECounterOpType, double)> Callback) const override;
 
 	private:
 		const TPagedArray<FLoaderFrame>& Frames;
@@ -95,11 +101,10 @@ private:
 	};
 
 	IAnalysisSession& Session;
-	ICounterProvider& CounterProvider;
+	IEditableCounterProvider& EditableCounterProvider;
 	TPagedArray<FClassInfo> ClassInfos;
 	TPagedArray<FLoadRequest> Requests;
 	TPagedArray<FPackageInfo> Packages;
-	TPagedArray<FPackageLoad> PackageLoads;
 	TPagedArray<FIoDispatcherBatch> IoDispatcherBatches;
 	TPagedArray<FPackageExportInfo> Exports;
 	TArray<TSharedRef<CpuTimelineInternal>> CpuTimelines;
@@ -108,6 +113,7 @@ private:
 	TTableLayout<FLoadTimeProfilerAggregatedStats> AggregatedStatsTableLayout;
 	TTableLayout<FPackagesTableRow> PackagesTableLayout;
 	TTableLayout<FExportsTableRow> ExportsTableLayout;
+	TTableLayout<FRequestsTableRow> RequestsTableLayout;
 	TPagedArray<FLoaderFrame> Frames;
 	bool bHasCreatedCounters = false;
 	IEditableCounter* ActiveIoDispatcherBatchesCounter = nullptr;
@@ -116,4 +122,4 @@ private:
 	IEditableCounter* TotalLoaderBytesLoadedCounter = nullptr;
 };
 
-}
+} // namespace TraceServices

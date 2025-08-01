@@ -35,7 +35,7 @@ enum class ECurveTableMode : uint8
 /**
  * Imported spreadsheet table as curves.
  */
-UCLASS(MinimalAPI)
+UCLASS(MinimalAPI, Meta = (LoadBehavior = "LazyOnDemand"))
 class UCurveTable
 	: public UObject
 	, public FCurveOwnerInterface
@@ -55,8 +55,16 @@ class UCurveTable
 
 	ECurveTableMode GetCurveTableMode() const { return CurveTableMode; }
 
+	/** Removes a single row from the CurveTable by name. Just returns if row is not found. */
+	ENGINE_API virtual void RemoveRow(FName RowName);
 	ENGINE_API FRichCurve& AddRichCurve(FName RowName);
 	ENGINE_API FSimpleCurve& AddSimpleCurve(FName RowName);
+
+	/** Move the curve to another FName in the table */
+	ENGINE_API void RenameRow(FName& CurveName, FName& NewCurveName);
+
+	/** Remove a curve row from the table.  Note the associated curve will be deleted. */
+	ENGINE_API void DeleteRow(FName& CurveName);
 
 protected:
 	/** 
@@ -66,18 +74,22 @@ protected:
 	 */
 	TMap<FName, FRealCurve*>	RowMap;
 
+	static FCriticalSection& GetCurveTableChangeCriticalSection();
+
 public:
 	//~ Begin UObject Interface.
 	virtual void FinishDestroy() override;
 	virtual void Serialize( FArchive& Ar ) override;
 
 #if WITH_EDITORONLY_DATA
+	virtual void GetAssetRegistryTags(FAssetRegistryTagsContext Context) const override;
+	UE_DEPRECATED(5.4, "Implement the version that takes FAssetRegistryTagsContext instead.")
 	virtual void GetAssetRegistryTags(TArray<FAssetRegistryTag>& OutTags) const override;
 	virtual void PostInitProperties() override;
 	virtual void PostLoad() override;
 
 	UPROPERTY(VisibleAnywhere, Instanced, Category=ImportSettings)
-	class UAssetImportData* AssetImportData;
+	TObjectPtr<class UAssetImportData> AssetImportData;
 
 	/** The filename imported to create this object. Relative to this object's package, BaseDir() or absolute */
 	UPROPERTY()
@@ -177,7 +189,7 @@ public:
 
 	/** Output entire contents of table as JSON. bAsArray true will write is as a JSON array, false will write it as a series of named objects*/
 	template <typename CharType = TCHAR>
-	ENGINE_API bool WriteTableAsJSON(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter,bool bAsArray = true) const;
+	bool WriteTableAsJSON(const TSharedRef< TJsonWriter<CharType, TPrettyJsonPrintPolicy<CharType> > >& JsonWriter,bool bAsArray = true) const;
 
 	/** 
 	 *	Create table from CSV style comma-separated string. 
@@ -208,7 +220,7 @@ public:
 
 	ENGINE_API static void InvalidateAllCachedCurves();
 
-	ENGINE_API static int32 GetGlobalCachedCurveID()
+	static int32 GetGlobalCachedCurveID()
 	{
 		return GlobalCachedCurveID;
 	}
@@ -227,6 +239,7 @@ protected:
 
 	ENGINE_API static int32 GlobalCachedCurveID;
 
+
 private:
 
 	/** A multicast delegate that is called any time the curve table changes. */
@@ -241,7 +254,7 @@ protected:
  * Handle to a particular row in a table.
  */
 USTRUCT(BlueprintType)
-struct ENGINE_API FCurveTableRowHandle
+struct FCurveTableRowHandle
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -252,7 +265,7 @@ struct ENGINE_API FCurveTableRowHandle
 
 	/** Pointer to table we want a row from */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=CurveTableRowHandle, meta=(DisplayThumbnail="false"))
-	const class UCurveTable*	CurveTable;
+	TObjectPtr<const class UCurveTable>	CurveTable;
 
 	/** Name of row in the table that we want */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=CurveTableRowHandle)
@@ -271,13 +284,13 @@ struct ENGINE_API FCurveTableRowHandle
 	}
 
 	/** Get the curve straight from the row handle */
-	FRealCurve* GetCurve(const FString& ContextString, bool bWarnIfNotFound=true) const;
+	ENGINE_API FRealCurve* GetCurve(const FString& ContextString, bool bWarnIfNotFound=true) const;
 
 	/** Get the rich curve straight from the row handle */
-	FRichCurve* GetRichCurve(const FString& ContextString, bool bWarnIfNotFound=true) const;
+	ENGINE_API FRichCurve* GetRichCurve(const FString& ContextString, bool bWarnIfNotFound=true) const;
 
 	/** Get the simple curve straight from the row handle */
-	FSimpleCurve* GetSimpleCurve(const FString& ContextString, bool bWarnIfNotFound = true) const;
+	ENGINE_API FSimpleCurve* GetSimpleCurve(const FString& ContextString, bool bWarnIfNotFound = true) const;
 
 	/** Evaluate the curve if it is valid
 	 * @param XValue The input X value to the curve
@@ -297,16 +310,16 @@ struct ENGINE_API FCurveTableRowHandle
 	 * @param ContextString A string to provide context for where this operation is being carried out
 	 * @return True if it filled out YValue with a valid number, false otherwise
 	 */
-	bool Eval(float XValue, float* YValue,const FString& ContextString) const;
+	ENGINE_API bool Eval(float XValue, float* YValue,const FString& ContextString) const;
 
-	bool operator==(const FCurveTableRowHandle& Other) const;
-	bool operator!=(const FCurveTableRowHandle& Other) const;
-	void PostSerialize(const FArchive& Ar);
+	ENGINE_API bool operator==(const FCurveTableRowHandle& Other) const;
+	ENGINE_API bool operator!=(const FCurveTableRowHandle& Other) const;
+	ENGINE_API void PostSerialize(const FArchive& Ar);
 
 	/** Used so we can have a TMap of this struct */
 	FORCEINLINE friend uint32 GetTypeHash(const FCurveTableRowHandle& Handle)
 	{
-		return HashCombine(::GetTypeHash(Handle.RowName), PointerHash(Handle.CurveTable));
+		return HashCombine(GetTypeHash(Handle.RowName), PointerHash(Handle.CurveTable));
 	}
 };
 

@@ -6,6 +6,8 @@
 
 #pragma once
 
+// HEADER_UNIT_SKIP - Not included directly
+
 #include <linux/version.h>
 #include <signal.h>
 #include "Clang/ClangPlatform.h"
@@ -32,11 +34,7 @@ typedef FUnixPlatformTypes FPlatformTypes;
 
 #define UNIX_MAX_PATH				PATH_MAX
 
-#if defined(_LINUX64) || defined(_LP64)
-	#define PLATFORM_64BITS						1
-#else
-	#define PLATFORM_64BITS						0
-#endif
+#define PLATFORM_64BITS							1
 #define PLATFORM_CAN_SUPPORT_EDITORONLY_DATA	1
 
 // Base defines, defaults are commented out
@@ -54,19 +52,29 @@ typedef FUnixPlatformTypes FPlatformTypes;
 #define PLATFORM_TCHAR_IS_4_BYTES						1
 #endif
 #define PLATFORM_HAS_BSD_TIME							1
+#define PLATFORM_HAS_BSD_THREAD_CPUTIME					1
 #define PLATFORM_USE_PTHREADS							1
 #define PLATFORM_MAX_FILEPATH_LENGTH_DEPRECATED			UNIX_MAX_PATH /* @todo linux: avoid using PATH_MAX as it is known to be broken */
 #define PLATFORM_HAS_NO_EPROCLIM						1
 #define PLATFORM_HAS_BSD_IPV6_SOCKETS					1
 #define PLATFORM_HAS_BSD_SOCKET_FEATURE_IOCTL			1
+#define PLATFORM_HAS_BSD_SOCKET_FEATURE_POLL			1
 #define PLATFORM_HAS_BSD_SOCKET_FEATURE_MSG_DONTWAIT	1
 #define PLATFORM_HAS_BSD_SOCKET_FEATURE_RECVMMSG		1
 #define PLATFORM_HAS_BSD_SOCKET_FEATURE_TIMESTAMP		1
+#define PLATFORM_SUPPORTS_MIMALLOC						PLATFORM_64BITS
 #define PLATFORM_SUPPORTS_STACK_SYMBOLS					1
 #define PLATFORM_IS_ANSI_MALLOC_THREADSAFE				1
 #define PLATFORM_ALLOW_ALLOCATIONS_IN_FASYNCWRITER_SERIALIZEBUFFERTOARCHIVE 0
-#define PLATFORM_RHITHREAD_DEFAULT_BYPASS				0
 #define PLATFORM_SUPPORTS_VIRTUAL_TEXTURE_STREAMING		1
+#define PLATFORM_USE_ANSI_POSIX_MALLOC					1
+#define PLATFORM_SUPPORTS_BINDLESS_RENDERING			1
+
+#define PLATFORM_RETURN_ADDRESS_FOR_CALLSTACKTRACING	PLATFORM_RETURN_ADDRESS
+
+#if WITH_EDITOR
+#define PLATFORM_FILE_READER_BUFFER_SIZE				(256*1024)
+#endif
 
 #if PLATFORM_CPU_X86_FAMILY
 	#define PLATFORM_BREAK()							__asm__ volatile("int $0x03")
@@ -78,36 +86,21 @@ typedef FUnixPlatformTypes FPlatformTypes;
 
 #define PLATFORM_ENABLE_POPCNT_INTRINSIC				1
 
-#if __has_feature(cxx_decltype_auto)
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 1
-#else
-	#define PLATFORM_COMPILER_HAS_DECLTYPE_AUTO 0
-#endif
-
 // SOCK_CLOEXEC is available on Unix since 2.6.27
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 	#define PLATFORM_HAS_BSD_SOCKET_FEATURE_CLOSE_ON_EXEC	1
 #endif // LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 
-// only enable vectorintrinsics on x86(-64) for now
 #if defined(_M_IX86) || defined(__i386__) || defined(_M_X64) || defined(__x86_64__) || defined (__amd64__) 
 	#define PLATFORM_ENABLE_VECTORINTRINSICS		1
-#else
-	#define PLATFORM_ENABLE_VECTORINTRINSICS		0
 #endif // defined(_M_IX86) || defined(__i386__) || defined(_M_X64) || defined(__x86_64__) || defined (__amd64__) 
 
-#if PLATFORM_LINUXAARCH64
+#if PLATFORM_LINUXARM64
 	// Enable NEON intrinsics for ARM64 builds
 	#define PLATFORM_ENABLE_VECTORINTRINSICS_NEON	1
+	#define PLATFORM_ENABLE_VECTORINTRINSICS		1
 #endif
 
-// We do not currently compile with -msse4 or higher on Unix or Linux
-#ifndef PLATFORM_MAYBE_HAS_SSE4_1 // May be set from UnrealBuildTool
-	#define PLATFORM_MAYBE_HAS_SSE4_1							0
-#endif
-#ifndef PLATFORM_ALWAYS_HAS_SSE4_1 // May be set from UnrealBuildTool
-	#define PLATFORM_ALWAYS_HAS_SSE4_1							0
-#endif
 #ifndef PLATFORM_ALWAYS_HAS_FMA3
 	#define PLATFORM_ALWAYS_HAS_FMA3							0
 #endif

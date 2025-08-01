@@ -1,12 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MaterialNodes/SGraphNodeMaterialResult.h"
-#include "MaterialGraph/MaterialGraph.h"
-#include "MaterialGraph/MaterialGraphNode_Root.h"
-#include "SGraphPanel.h"
-#include "TutorialMetaData.h"
-#include "Widgets/SToolTip.h"
+
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "GenericPlatform/ICursor.h"
+#include "GraphEditor.h"
+#include "HAL/Platform.h"
 #include "IDocumentation.h"
+#include "Internationalization/Text.h"
+#include "MaterialGraph/MaterialGraph.h"
+#include "MaterialGraph/MaterialGraphNode_Base.h"
+#include "MaterialGraph/MaterialGraphNode_Root.h"
+#include "MaterialGraph/MaterialGraphSchema.h"
+#include "Materials/Material.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "Misc/Optional.h"
+#include "SGraphPanel.h"
+#include "SGraphPin.h"
+#include "Templates/Casts.h"
+#include "Templates/SharedPointer.h"
+#include "TutorialMetaData.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectPtr.h"
+#include "Widgets/SToolTip.h"
+
+class SToolTip;
 
 /////////////////////////////////////////////////////
 // SGraphNodeMaterialResult
@@ -24,34 +47,38 @@ void SGraphNodeMaterialResult::Construct(const FArguments& InArgs, UMaterialGrap
 void SGraphNodeMaterialResult::CreatePinWidgets()
 {
 	// Create Pin widgets for each of the pins.
-	for( int32 PinIndex=0; PinIndex < GraphNode->Pins.Num(); ++PinIndex )
+	UMaterialGraphNode_Base* MaterialGraphNode = Cast<UMaterialGraphNode_Base>(GraphNode);
+	UMaterialGraph* MaterialGraph = CastChecked<UMaterialGraph>(GraphNode->GetGraph());
+
+	bool bHideNoConnectionPins = false;
+	if (OwnerGraphPanelPtr.IsValid())
 	{
-		UEdGraphPin* CurPin = GraphNode->Pins[PinIndex];
+		bHideNoConnectionPins = OwnerGraphPanelPtr.Pin()->GetPinVisibility() == SGraphEditor::Pin_HideNoConnection;
+	}
 
-		bool bHideNoConnectionPins = false;
-		
-		if (OwnerGraphPanelPtr.IsValid())
-		{
-			bHideNoConnectionPins = OwnerGraphPanelPtr.Pin()->GetPinVisibility() == SGraphEditor::Pin_HideNoConnection;
-		}
-
+	for (UEdGraphPin* CurPin : MaterialGraphNode->Pins)
+	{
 		const bool bPinHasConections = CurPin->LinkedTo.Num() > 0;
 
-		//const bool bPinDesiresToBeHidden = CurPin->bHidden || (bHideNoConnectionPins && !bPinHasConections);
-
-		UMaterialGraph* MaterialGraph = CastChecked<UMaterialGraph>(GraphNode->GetGraph());
-
-		check(PinIndex < MaterialGraph->MaterialInputs.Num());
-
-		const bool bPinDesiresToBeHidden = !MaterialGraph->MaterialInputs[PinIndex].IsVisiblePin(MaterialGraph->Material) || (bHideNoConnectionPins && !bPinHasConections);
+		bool bPinDesiresToBeHidden = bHideNoConnectionPins && !bPinHasConections;
+		if (CurPin->PinType.PinCategory != UMaterialGraphSchema::PC_Exec)
+		{
+			if (!MaterialGraph->MaterialInputs[CurPin->SourceIndex].IsVisiblePin(MaterialGraph->Material))
+			{
+				bPinDesiresToBeHidden = true;
+			}
+		}
 
 		if (!bPinDesiresToBeHidden)
 		{
 			TSharedPtr<SGraphPin> NewPin = CreatePinWidget(CurPin);
 			check(NewPin.IsValid());
 
-			TSharedPtr<SToolTip> ToolTipWidget = IDocumentation::Get()->CreateToolTip(MaterialGraph->MaterialInputs[PinIndex].GetToolTip(), nullptr, FString( TEXT("") ), FString( TEXT("") ) );
-			NewPin->SetToolTip( ToolTipWidget.ToSharedRef() );
+			if (CurPin->PinType.PinCategory != UMaterialGraphSchema::PC_Exec)
+			{
+				TSharedPtr<SToolTip> ToolTipWidget = IDocumentation::Get()->CreateToolTip(MaterialGraph->MaterialInputs[CurPin->SourceIndex].GetToolTip(), nullptr, FString(TEXT("")), FString(TEXT("")));
+				NewPin->SetToolTip(ToolTipWidget.ToSharedRef());
+			}
 
 			this->AddPin(NewPin.ToSharedRef());
 		}

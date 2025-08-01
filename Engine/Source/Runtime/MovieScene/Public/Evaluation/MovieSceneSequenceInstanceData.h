@@ -2,12 +2,22 @@
 
 #pragma once
 
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
+#include "CoreTypes.h"
+#include "Misc/AssertionMacros.h"
 #include "Misc/InlineValue.h"
+#include "Templates/Decay.h"
+#include "Templates/EnableIf.h"
+#include "Templates/PointerIsConvertibleFromTo.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
 
 #include "MovieSceneSequenceInstanceData.generated.h"
+
+class FArchive;
 
 /**
  * Abstract base class that defines instance data for sub sequences
@@ -44,7 +54,7 @@ private:
 
 /**  */
 USTRUCT()
-struct MOVIESCENE_API FMovieSceneSequenceInstanceDataPtr
+struct FMovieSceneSequenceInstanceDataPtr
 #if CPP
 	: TInlineValue<FMovieSceneSequenceInstanceData, 16>
 #endif
@@ -69,7 +79,7 @@ struct MOVIESCENE_API FMovieSceneSequenceInstanceDataPtr
 	{
 		typedef typename TDecay<T>::Type ClientType;
 
-		static_assert(!TIsSame<ClientType, FMovieSceneSequenceInstanceData>::Value, "Direct usage of FMovieSceneSequenceInstanceData is prohibited.");
+		static_assert(!std::is_same_v<ClientType, FMovieSceneSequenceInstanceData>, "Direct usage of FMovieSceneSequenceInstanceData is prohibited.");
 
 #if WITH_EDITOR && DO_CHECK
 		const UStruct* ClientStruct = ClientType::StaticStruct();
@@ -78,15 +88,15 @@ struct MOVIESCENE_API FMovieSceneSequenceInstanceDataPtr
 	}
 	
 	/** Copy construction/assignment */
-	FMovieSceneSequenceInstanceDataPtr(const FMovieSceneSequenceInstanceDataPtr& RHS);
-	FMovieSceneSequenceInstanceDataPtr& operator=(const FMovieSceneSequenceInstanceDataPtr& RHS);
+	MOVIESCENE_API FMovieSceneSequenceInstanceDataPtr(const FMovieSceneSequenceInstanceDataPtr& RHS);
+	MOVIESCENE_API FMovieSceneSequenceInstanceDataPtr& operator=(const FMovieSceneSequenceInstanceDataPtr& RHS);
 
 	/** Templates are moveable */
 	FMovieSceneSequenceInstanceDataPtr(FMovieSceneSequenceInstanceDataPtr&&) = default;
 	FMovieSceneSequenceInstanceDataPtr& operator=(FMovieSceneSequenceInstanceDataPtr&&) = default;
 
 	/** Serialize the template */
-	bool Serialize(FArchive& Ar);
+	MOVIESCENE_API bool Serialize(FArchive& Ar);
 };
 
 template<> struct TStructOpsTypeTraits<FMovieSceneSequenceInstanceDataPtr> : public TStructOpsTypeTraitsBase2<FMovieSceneSequenceInstanceDataPtr>

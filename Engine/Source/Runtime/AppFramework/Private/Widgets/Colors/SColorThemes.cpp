@@ -71,7 +71,7 @@ TSharedPtr<SWidget> FColorDragDrop::GetDefaultDecorator() const
 			SNew(SColorBlock) 
 				.Color(Color)
 				.ColorIsHSV(true) 
-				.IgnoreAlpha(bIgnoreAlpha) 
+				.AlphaDisplayMode(bIgnoreAlpha ? EColorBlockAlphaDisplayMode::Ignore : EColorBlockAlphaDisplayMode::Combined)
 				.ShowBackgroundForAlpha(bShowBackgroundForAlpha) 
 				.UseSRGB(bUseSRGB)
 		];
@@ -148,9 +148,8 @@ void SColorTrash::Construct( const FArguments& InArgs )
 			SNew(SHorizontalBox)
 			+SHorizontalBox::Slot() .HAlign(HAlign_Center) .FillWidth(1)
 			[
-				SNew(SImage) .Image(InArgs._UsesSmallIcon.Get() ?
-					FCoreStyle::Get().GetBrush("TrashCan_Small") :
-					FCoreStyle::Get().GetBrush("TrashCan"))
+				SNew(SImage) 
+				.Image(FAppStyle::Get().GetBrush("Icons.Delete"))
 			]
 		]
 	];
@@ -215,7 +214,7 @@ FReply SColorTrash::OnDrop( const FGeometry& MyGeometry, const FDragDropEvent& D
 const FSlateBrush* SColorTrash::GetBorderStyle() const
 {
 	return (bBorderActivated) ?
-		FCoreStyle::Get().GetBrush("FocusRectangle") :
+		FAppStyle::Get().GetBrush("FocusRectangle") :
 		FStyleDefaults::GetNoBrush();
 }
 
@@ -239,8 +238,8 @@ void SThemeColorBlock::Construct(const FArguments& InArgs )
 
 	DistanceDragged = 0;
 
-	const FSlateFontInfo SmallLayoutFont = FCoreStyle::GetDefaultFontStyle("Regular", 9);
-	const FSlateFontInfo SmallLabelFont = FCoreStyle::GetDefaultFontStyle("Bold", 9);
+	const FSlateFontInfo SmallLayoutFont = FAppStyle::Get().GetFontStyle("Regular");
+	const FSlateFontInfo SmallLabelFont = FAppStyle::Get().GetFontStyle("Bold");
 
 	TSharedPtr<SToolTip> ColorTooltip =
 		SNew(SToolTip)
@@ -258,8 +257,8 @@ void SThemeColorBlock::Construct(const FArguments& InArgs )
 						SNew(SColorBlock)
 							.Color(this, &SThemeColorBlock::GetColor)
 							.ColorIsHSV(true)
-							.IgnoreAlpha(TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateSP(this, &SThemeColorBlock::OnReadIgnoreAlpha)))
-							.ShowBackgroundForAlpha(TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateSP(this, &SThemeColorBlock::OnReadShowBackgroundForAlpha)))
+							.AlphaDisplayMode(this, &SThemeColorBlock::OnGetAlphaDisplayMode)
+							.ShowBackgroundForAlpha(this, &SThemeColorBlock::OnReadShowBackgroundForAlpha)
 							.UseSRGB(bUseSRGB)
 					]
 				]
@@ -319,26 +318,15 @@ void SThemeColorBlock::Construct(const FArguments& InArgs )
 			.BorderBackgroundColor(this, &SThemeColorBlock::HandleBorderColor)
 			.Padding(FMargin(1.0f))
 			.ToolTip(ColorTooltip)
+			.VAlign(VAlign_Center)
 			[
-				SNew(SHorizontalBox)
-				+ SHorizontalBox::Slot()
-				[
-					SNew(SColorBlock)
-					.Color(this, &SThemeColorBlock::GetColor)
-					.ColorIsHSV(true)
-					.IgnoreAlpha(true)
-					.ShowBackgroundForAlpha(false)
-					.UseSRGB(bUseSRGB)
-				]
-				+ SHorizontalBox::Slot()
-				[
-					SNew(SColorBlock)
-					.Color(this, &SThemeColorBlock::GetColor)
-					.ColorIsHSV(true)
-					.IgnoreAlpha(TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateSP(this, &SThemeColorBlock::OnReadIgnoreAlpha)))
-					.ShowBackgroundForAlpha(TAttribute<bool>::Create(TAttribute<bool>::FGetter::CreateSP(this, &SThemeColorBlock::OnReadShowBackgroundForAlpha)))
-					.UseSRGB(bUseSRGB)
-				]
+				SNew(SColorBlock)
+				.Color(this, &SThemeColorBlock::GetColor)
+				.AlphaDisplayMode(EColorBlockAlphaDisplayMode::Separate)
+				.ColorIsHSV(true)
+				.ShowBackgroundForAlpha(true)
+				.UseSRGB(bUseSRGB)
+				.Size(FVector2D(32,16))
 			]
 	];
 }
@@ -448,8 +436,8 @@ FSlateColor SThemeColorBlock::HandleBorderColor() const
 const FSlateBrush* SThemeColorBlock::HandleBorderImage() const
 {
 	return IsHovered() ?
-		FCoreStyle::Get().GetBrush("FocusRectangle") :
-		FCoreStyle::Get().GetBrush("GenericWhiteBox");
+		FAppStyle::Get().GetBrush("FocusRectangle") :
+		FAppStyle::Get().GetBrush("GenericWhiteBox");
 }
 
 #define LOCTEXT_NAMESPACE "ThemeColorBlock"
@@ -487,9 +475,9 @@ FText SThemeColorBlock::FormatToolTipText(const FText& ColorIdentifier, float Va
 }
 #undef LOCTEXT_NAMESPACE
 
-bool SThemeColorBlock::OnReadIgnoreAlpha() const
+EColorBlockAlphaDisplayMode SThemeColorBlock::OnGetAlphaDisplayMode() const
 {
-	return !bUseAlpha.Get();
+	return !bUseAlpha.Get() ? EColorBlockAlphaDisplayMode::Ignore : EColorBlockAlphaDisplayMode::Combined;
 }
 
 bool SThemeColorBlock::OnReadShowBackgroundForAlpha() const
@@ -842,28 +830,29 @@ void SColorThemesViewer::Construct(const FArguments& InArgs)
 
 	LoadColorThemesFromIni();
 
-	const FSlateFontInfo SmallLayoutFont = FCoreStyle::GetDefaultFontStyle("Regular", 10);
+	const FSlateFontInfo SmallLayoutFont = FAppStyle::Get().GetFontStyle("Regular");
+
 
 	// different menus that could be visible for the color themes menu
 	// standard menu with "new", "rename" and "delete"
 	MenuStandard =
 		SNew(SHorizontalBox)
-		+SHorizontalBox::Slot() .FillWidth(1) .Padding(3)
+		+SHorizontalBox::Slot() .AutoWidth().Padding(3)
 		[
 			SNew(SButton) .Text(LOCTEXT("NewButton", "New")) .HAlign(HAlign_Center)
 				.OnClicked(this, &SColorThemesViewer::NewColorTheme)
 		]
-		+SHorizontalBox::Slot() .FillWidth(1) .Padding(3)
+		+SHorizontalBox::Slot() .AutoWidth().Padding(3)
 		[
 			SNew(SButton) .Text(LOCTEXT("DuplicateButton", "Duplicate")) .HAlign(HAlign_Center)
 				.OnClicked(this, &SColorThemesViewer::DuplicateColorTheme)
 		]
-		+SHorizontalBox::Slot() .FillWidth(1) .Padding(3)
+		+SHorizontalBox::Slot() .AutoWidth().Padding(3)
 		[
 			SNew(SButton) .Text(LOCTEXT("RenameButton", "Rename")) .HAlign(HAlign_Center)
 				.OnClicked(this, &SColorThemesViewer::MenuToRename)
 		]
-		+SHorizontalBox::Slot() .FillWidth(1) .Padding(3)
+		+SHorizontalBox::Slot() .AutoWidth().Padding(3)
 		[
 			SNew(SButton) .Text(LOCTEXT("DeleteButton", "Delete")) .HAlign(HAlign_Center)
 				.OnClicked(this, &SColorThemesViewer::MenuToDelete)
@@ -919,10 +908,12 @@ void SColorThemesViewer::Construct(const FArguments& InArgs)
 	this->ChildSlot
 	[
 		SNew(SVerticalBox)
-		+SVerticalBox::Slot().AutoHeight()
+		+SVerticalBox::Slot()
+			.AutoHeight()
+			.MaxHeight(455.0f) // Roughly matches the size of the color picker at max height
 		[
 			SNew(SBox)
-			.WidthOverride(320)
+			.WidthOverride(360)
 			[
 				SAssignNew(ColorThemeList, SListView< TSharedPtr<FColorTheme> >)
 					.ItemHeight(32)
@@ -930,11 +921,15 @@ void SColorThemesViewer::Construct(const FArguments& InArgs)
 					.OnGenerateRow(this, &SColorThemesViewer::OnGenerateColorThemeBars)
 			]
 		]
-		+SVerticalBox::Slot().AutoHeight() .Padding(0,15,0,0)
+		+SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0,15,0,0)
 		[
 			SAssignNew(Menu, SBorder)
+			.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
 		]
-		+ SVerticalBox::Slot().AutoHeight()
+		+ SVerticalBox::Slot()
+			.AutoHeight()
 		[
 			SAssignNew(ErrorText, SErrorText)
 				.Visibility(this, &SColorThemesViewer::OnGetErrorTextVisibility)

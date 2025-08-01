@@ -36,6 +36,7 @@ struct FPlatformOpenGLContext
 	GLuint		DefaultVertexArrayObject;
 	GLuint		BackBufferResource;
 	GLenum		BackBufferTarget;
+	GLuint		DummyFrameBuffer;
 
 	FPlatformOpenGLContext()
 	{
@@ -50,6 +51,7 @@ struct FPlatformOpenGLContext
 		DefaultVertexArrayObject = 0;
 		BackBufferResource = 0;
 		BackBufferTarget = 0;
+		DummyFrameBuffer = 0;
 	}
 };
 
@@ -69,7 +71,7 @@ public:
 	bool IsInitialized();
 	void InitBackBuffer();
 	void DestroyBackBuffer();
-	void Init( APIVariant API, uint32 MajorVersion, uint32 MinorVersion, bool bDebug);
+	void Init( APIVariant API, uint32 MajorVersion, uint32 MinorVersion);
 	void ReInit();
 	void UnBind();
 	void UnBindRender();
@@ -79,11 +81,15 @@ public:
 	void InitSurface(bool bUseSmallSurface, bool bCreateWndSurface);
 	void InitRenderSurface(bool bUseSmallSurface, bool bCreateWndSurface);
 	void InitSharedSurface(bool bUseSmallSurface);
+	void UpdateBuffersTransform();
+	bool IsOfflineSurfaceRequired();
 
 	void GetDimensions(uint32& OutWidth, uint32& OutHeight);
-	
+	bool IsUsingRobustContext() const { return bIsEXTRobustContextActive; }
+
 	EGLDisplay GetDisplay() const;
 	EGLSurface GetSurface() const;
+	EGLConfig GetConfig() const;
 	ANativeWindow* GetNativeWindow() const;
 	void GetSwapIntervalRange(EGLint& OutMinSwapInterval, EGLint& OutMaxSwapInterval) const;
 
@@ -94,7 +100,6 @@ public:
 	void AcquireCurrentRenderingContext();
 	void ReleaseContextOwnership();
 
-	GLuint GetOnScreenColorRenderBuffer();
 	GLuint GetResolveFrameBuffer();
 	bool IsCurrentContextValid();
 	EGLContext  GetCurrentContext(  );
@@ -141,6 +146,8 @@ private:
 	bool bSupportsKHRCreateContext;
 	bool bSupportsKHRSurfacelessContext;
 	bool bSupportsKHRNoErrorContext;
+	bool bSupportsEXTRobustContext;
+	bool bIsEXTRobustContextActive = false;
 
 	int *ContextAttributes;
 };

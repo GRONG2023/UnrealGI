@@ -6,8 +6,6 @@ public class ClothingSystemRuntimeNv : ModuleRules
 {
 	public ClothingSystemRuntimeNv(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivateIncludePaths.Add("Runtime/ClothingSystemRuntimeNv/Private");
-        
         SetupModulePhysicsSupport(Target);
 
         PublicIncludePathModuleNames.Add("ClothingSystemRuntimeInterface");
@@ -25,9 +23,6 @@ public class ClothingSystemRuntimeNv : ModuleRules
             new string[]
             {
                 "Engine",
-                "RenderCore",
-                "SlateCore",
-                "Slate"
             }
         );
     }

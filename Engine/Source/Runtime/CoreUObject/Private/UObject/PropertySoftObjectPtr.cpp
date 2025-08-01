@@ -1,22 +1,46 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/SoftObjectPtr.h"
-#include "UObject/PropertyPortFlags.h"
 #include "UObject/UnrealType.h"
+
 #include "UObject/LinkerLoad.h"
+#include "UObject/SoftObjectPtr.h"
+#if WITH_EDITOR
+#include "Misc/EditorPathHelper.h"
+#endif
 
 /*-----------------------------------------------------------------------------
 	FSoftObjectProperty.
 -----------------------------------------------------------------------------*/
 IMPLEMENT_FIELD(FSoftObjectProperty)
 
+FSoftObjectProperty::FSoftObjectProperty(FFieldVariant InOwner, const UECodeGen_Private::FSoftObjectPropertyParams& Prop)
+	: TFObjectPropertyBase(InOwner, Prop)
+{
+}
+
+FSoftObjectProperty::FSoftObjectProperty(FFieldVariant InOwner, const UECodeGen_Private::FObjectPropertyParamsWithoutClass& Prop, UClass* InClass)
+	: TFObjectPropertyBase(InOwner, Prop, InClass)
+{
+}
+
 FString FSoftObjectProperty::GetCPPTypeCustom(FString* ExtendedTypeText, uint32 CPPExportFlags, const FString& InnerNativeTypeName) const
 {
 	ensure(!InnerNativeTypeName.IsEmpty());
 	return FString::Printf(TEXT("TSoftObjectPtr<%s>"), *InnerNativeTypeName);
 }
+
+FString FSoftObjectProperty::GetCPPType(FString* ExtendedTypeText, uint32 CPPExportFlags) const
+{
+	if (ensureMsgf(PropertyClass, TEXT("Soft object property missing PropertyClass: %s"), *GetFullNameSafe(this)))
+	{
+		return Super::GetCPPType(ExtendedTypeText, CPPExportFlags);
+	}
+	else
+	{
+		return TEXT("TSoftObjectPtr<UObject>");
+	}
+}
+
 FString FSoftObjectProperty::GetCPPMacroType( FString& ExtendedTypeText ) const
 {
 	ExtendedTypeText = FString::Printf(TEXT("TSoftObjectPtr<%s%s>"), PropertyClass->GetPrefixCPP(), *PropertyClass->GetName());
@@ -43,6 +67,12 @@ bool FSoftObjectProperty::Identical( const void* A, const void* B, uint32 PortFl
 	return ObjectA.GetUniqueID() == ObjectB.GetUniqueID();
 }
 
+void FSoftObjectProperty::LinkInternal(FArchive& Ar)
+{
+	checkf(!HasAnyPropertyFlags(CPF_NonNullable), TEXT("Soft Object Properties can't be non nullable but \"%s\" is marked as CPF_NonNullable"), *GetFullName());
+	Super::LinkInternal(Ar);
+}
+
 void FSoftObjectProperty::SerializeItem( FStructuredArchive::FSlot Slot, void* Value, void const* Defaults ) const
 {
 	FArchive& UnderlyingArchive = Slot.GetUnderlyingArchive();
@@ -61,7 +91,7 @@ void FSoftObjectProperty::SerializeItem( FStructuredArchive::FSlot Slot, void* V
 		{
 			if (OldValue.GetUniqueID() != ((FSoftObjectPtr*)Value)->GetUniqueID())
 			{
-				CheckValidObject(Value);
+				CheckValidObject(Value, nullptr); // FSoftObjectProperty is never non-nullable at this point so it's ok to pass null as the current value
 			}
 		}
 #endif
@@ -82,36 +112,42 @@ bool FSoftObjectProperty::NetSerializeItem(FArchive& Ar, UPackageMap* Map, void*
 	return true;
 }
 
-void FSoftObjectProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FSoftObjectProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	FSoftObjectPtr& SoftObjectPtr = *(FSoftObjectPtr*)PropertyValue;
+	FSoftObjectPtr SoftObjectPtr;
+	
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
+	{
+		GetValue_InContainer(PropertyValueOrContainer, &SoftObjectPtr);
+	}
+	else
+	{
+		SoftObjectPtr = *(FSoftObjectPtr*)PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType);
+	}
 
 	FSoftObjectPath SoftObjectPath;
 	UObject *Object = SoftObjectPtr.Get();
 
 	if (Object)
 	{
+#if WITH_EDITOR
+		// Use object in case name has changed. Export editor path if feature is enabled.
+		SoftObjectPath = FEditorPathHelper::GetEditorPathFromReferencer(Object, Parent);
+#else
 		// Use object in case name has changed.
 		SoftObjectPath = FSoftObjectPath(Object);
+#endif
 	}
 	else
 	{
 		SoftObjectPath = SoftObjectPtr.GetUniqueID();
 	}
 
-	if (0 != (PortFlags & PPF_ExportCpp))
-	{
-		ValueStr += FString::Printf(TEXT("FSoftObjectPath(TEXT(\"%s\"))"), *SoftObjectPath.ToString().ReplaceCharWithEscapedChar());
-		return;
-	}
-
 	SoftObjectPath.ExportTextItem(ValueStr, SoftObjectPath, Parent, PortFlags, ExportRootScope);
 }
 
-const TCHAR* FSoftObjectProperty::ImportText_Internal( const TCHAR* InBuffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FSoftObjectProperty::ImportText_Internal( const TCHAR* InBuffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
-	FSoftObjectPtr& SoftObjectPtr = *(FSoftObjectPtr*)Data;
-
 	FSoftObjectPath SoftObjectPath;
 
 	bool bImportTextSuccess = false;
@@ -129,18 +165,46 @@ const TCHAR* FSoftObjectProperty::ImportText_Internal( const TCHAR* InBuffer, vo
 
 	if (bImportTextSuccess)
 	{
-		SoftObjectPtr = SoftObjectPath;
+#if WITH_EDITOR
+		// If EditorPath feature is enabled. Make sure we import a proper Editor Path if Object has a EditorPathOwner
+		if (FEditorPathHelper::IsEnabled())
+		{
+			if (UObject* Object = SoftObjectPath.ResolveObject())
+			{
+				SoftObjectPath = FEditorPathHelper::GetEditorPathFromReferencer(Object, Parent);
+			}
+		}
+#endif
+
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+		{
+			FSoftObjectPtr SoftObjectPtr(SoftObjectPath);
+			SetValue_InContainer(ContainerOrPropertyPtr, SoftObjectPtr);
+		}
+		else
+		{
+			FSoftObjectPtr& SoftObjectPtr = *(FSoftObjectPtr*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+			SoftObjectPtr = SoftObjectPath;
+		}
 		return InBuffer;
 	}
-
 	else
 	{
-		SoftObjectPtr = nullptr;
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
+		{
+			FSoftObjectPtr NullPtr(nullptr);
+			SetValue_InContainer(ContainerOrPropertyPtr, NullPtr);
+		}
+		else
+		{
+			FSoftObjectPtr& SoftObjectPtr = *(FSoftObjectPtr*)PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType);
+			SoftObjectPtr = nullptr;
+		}
 		return nullptr;
 	}
 }
 
-EConvertFromTypeResult FSoftObjectProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+EConvertFromTypeResult FSoftObjectProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	static FName NAME_AssetObjectProperty = "AssetObjectProperty";
 	static FName NAME_SoftObjectPath = "SoftObjectPath";
@@ -172,21 +236,27 @@ EConvertFromTypeResult FSoftObjectProperty::ConvertFromType(const FPropertyTag& 
 		FSoftObjectPtr* PropertyValue = GetPropertyValuePtr_InContainer(Data, Tag.ArrayIndex);
 		check(PropertyValue);
 
+		FSerializedPropertyScope SerializedProperty(Archive, this);
 		return PropertyValue->GetUniqueID().SerializeFromMismatchedTag(Tag, Slot) ? EConvertFromTypeResult::Converted : EConvertFromTypeResult::UseSerializeItem;
 	}
-	else if (Tag.Type == NAME_StructProperty && (Tag.StructName == NAME_SoftObjectPath || Tag.StructName == NAME_SoftClassPath || Tag.StructName == NAME_StringAssetReference || Tag.StructName == NAME_StringClassReference))
+	else if (Tag.Type == NAME_StructProperty)
 	{
-		// This property used to be a FSoftObjectPath but is now a TSoftObjectPtr<Foo>
-		FSoftObjectPath PreviousValue;
-		// explicitly call Serialize to ensure that the various delegates needed for cooking are fired
-		PreviousValue.Serialize(Slot);
+		const FName StructName = Tag.GetType().GetParameterName(0);
+		if (StructName == NAME_SoftObjectPath || StructName == NAME_SoftClassPath || StructName == NAME_StringAssetReference || StructName == NAME_StringClassReference)
+		{
+			// This property used to be a FSoftObjectPath but is now a TSoftObjectPtr<Foo>
+			FSoftObjectPath PreviousValue;
+			// explicitly call Serialize to ensure that the various delegates needed for cooking are fired
+			FSerializedPropertyScope SerializedProperty(Archive, this);
+			PreviousValue.Serialize(Slot);
 
-		// now copy the value into the object's address space
-		FSoftObjectPtr PreviousValueSoftObjectPtr;
-		PreviousValueSoftObjectPtr = PreviousValue;
-		SetPropertyValue_InContainer(Data, PreviousValueSoftObjectPtr, Tag.ArrayIndex);
+			// now copy the value into the object's address space
+			FSoftObjectPtr PreviousValueSoftObjectPtr;
+			PreviousValueSoftObjectPtr = PreviousValue;
+			SetPropertyValue_InContainer(Data, PreviousValueSoftObjectPtr, Tag.ArrayIndex);
 
-		return EConvertFromTypeResult::Converted;
+			return EConvertFromTypeResult::Converted;
+		}
 	}
 
 	return EConvertFromTypeResult::UseSerializeItem;
@@ -197,14 +267,31 @@ UObject* FSoftObjectProperty::LoadObjectPropertyValue(const void* PropertyValueA
 	return GetPropertyValue(PropertyValueAddress).LoadSynchronous();
 }
 
+TObjectPtr<UObject> FSoftObjectProperty::GetObjectPtrPropertyValue(const void* PropertyValueAddress) const
+{
+	return TObjectPtr<UObject>(GetPropertyValue(PropertyValueAddress).Get());
+}
+
 UObject* FSoftObjectProperty::GetObjectPropertyValue(const void* PropertyValueAddress) const
 {
 	return GetPropertyValue(PropertyValueAddress).Get();
 }
 
+UObject* FSoftObjectProperty::GetObjectPropertyValue_InContainer(const void* ContainerAddress, int32 ArrayIndex) const
+{
+	UObject* Result = nullptr;
+	GetWrappedUObjectPtrValues<FSoftObjectPtr>(&Result, ContainerAddress, EPropertyMemoryAccess::InContainer, ArrayIndex, 1);
+	return Result;
+}
+
 void FSoftObjectProperty::SetObjectPropertyValue(void* PropertyValueAddress, UObject* Value) const
 {
 	SetPropertyValue(PropertyValueAddress, TCppType(Value));
+}
+
+void FSoftObjectProperty::SetObjectPropertyValue_InContainer(void* ContainerAddress, UObject* Value, int32 ArrayIndex) const
+{
+	SetWrappedUObjectPtrValues<FSoftObjectPtr>(ContainerAddress, EPropertyMemoryAccess::InContainer, &Value, ArrayIndex, 1);
 }
 
 bool FSoftObjectProperty::AllowCrossLevel() const
@@ -216,24 +303,3 @@ uint32 FSoftObjectProperty::GetValueTypeHashInternal(const void* Src) const
 {
 	return GetTypeHash(GetPropertyValue(Src));
 }
-
-void FSoftObjectProperty::CopySingleValueToScriptVM(void* Dest, void const* Src) const
-{
-	CopySingleValue(Dest, Src);
-}
-
-void FSoftObjectProperty::CopyCompleteValueToScriptVM(void* Dest, void const* Src) const
-{
-	CopyCompleteValue(Dest, Src);
-}
-
-void FSoftObjectProperty::CopySingleValueFromScriptVM(void* Dest, void const* Src) const
-{
-	CopySingleValue(Dest, Src);
-}
-
-void FSoftObjectProperty::CopyCompleteValueFromScriptVM(void* Dest, void const* Src) const
-{
-	CopyCompleteValue(Dest, Src);
-}
-

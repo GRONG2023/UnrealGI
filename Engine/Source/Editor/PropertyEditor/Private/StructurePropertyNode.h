@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "PropertyNode.h"
 #include "UObject/StructOnScope.h"
+#include "IStructureDataProvider.h"
 
 //-----------------------------------------------------------------------------
 //	FStructPropertyNode - Used for the root and various sub-nodes
@@ -14,125 +15,198 @@ class FStructurePropertyNode : public FComplexPropertyNode
 {
 public:
 	FStructurePropertyNode() : FComplexPropertyNode() {}
-	virtual ~FStructurePropertyNode() {}
+	virtual ~FStructurePropertyNode() override {}
 
 	virtual FStructurePropertyNode* AsStructureNode() override { return this; }
 	virtual const FStructurePropertyNode* AsStructureNode() const override { return this; }
 
-	void SetStructure(TSharedPtr<FStructOnScope> InStructData)
+	void RemoveStructure(bool bInDestroySelf = true)
 	{
 		ClearCachedReadAddresses(true);
-		DestroyTree();
-		StructData = InStructData;
+		DestroyTree(bInDestroySelf);
+		StructProvider = nullptr;
+		WeakCachedBaseStruct.Reset();
+	}
+
+	void SetStructure(TSharedPtr<FStructOnScope> InStructData)
+	{
+		RemoveStructure(false);
+		if (InStructData)
+		{
+			StructProvider = MakeShared<FStructOnScopeStructureDataProvider>(InStructData);
+		}
+	}
+
+	void SetStructure(TSharedPtr<IStructureDataProvider> InStructProvider)
+	{
+		RemoveStructure(false);
+		StructProvider = InStructProvider;
 	}
 
 	bool HasValidStructData() const
 	{
-		return StructData.IsValid() && StructData->IsValid();
+		return StructProvider.IsValid() && StructProvider->IsValid();
 	}
 
+	// Returns just the first structure. Please use GetStructProvider() or GetAllStructureData() when dealing with multiple struct instances.
 	TSharedPtr<FStructOnScope> GetStructData() const
 	{
-		return StructData;
+		if (StructProvider)
+		{
+			TArray<TSharedPtr<FStructOnScope>> Instances;
+			StructProvider->GetInstances(Instances, WeakCachedBaseStruct.Get());
+			
+			if (Instances.Num() > 0)
+			{
+				return Instances[0];
+			}
+		}
+		return nullptr;
 	}
 
-	bool GetReadAddressUncached(const FPropertyNode& InPropertyNode, FReadAddressListData& OutAddresses) const override
+	void GetAllStructureData(TArray<TSharedPtr<FStructOnScope>>& OutStructs) const
 	{
-		if (!HasValidStructData())
+		if (StructProvider)
 		{
-			return false;
+			StructProvider->GetInstances(OutStructs, WeakCachedBaseStruct.Get());
 		}
-
-		const FProperty* InItemProperty = InPropertyNode.GetProperty();
-		if (!InItemProperty)
-		{
-			return false;
-		}
-
-		UStruct* OwnerStruct = InItemProperty->GetOwnerStruct();
-		if (!OwnerStruct || OwnerStruct->IsStructTrashed())
-		{
-			// Verify that the property is not part of an invalid trash class
-			return false;
-		}
-
-		uint8* ReadAddress = StructData->GetStructMemory();
-		check(ReadAddress);
-		OutAddresses.Add(nullptr, InPropertyNode.GetValueBaseAddress(ReadAddress, InPropertyNode.HasNodeFlags(EPropertyNodeFlags::IsSparseClassData) != 0), true);
-		return true;
 	}
 
-	bool GetReadAddressUncached(const FPropertyNode& InPropertyNode,
+	TSharedPtr<IStructureDataProvider> GetStructProvider() const
+	{
+		return StructProvider;
+	}
+
+	virtual bool GetReadAddressUncached(const FPropertyNode& InPropertyNode, FReadAddressListData& OutAddresses) const override;
+
+	virtual bool GetReadAddressUncached(const FPropertyNode& InPropertyNode,
 		bool InRequiresSingleSelection,
 		FReadAddressListData* OutAddresses,
 		bool bComparePropertyContents,
 		bool bObjectForceCompare,
-		bool bArrayPropertiesCanDifferInSize) const override
-	{
-		if(OutAddresses)
-		{
-			return GetReadAddressUncached(InPropertyNode, *OutAddresses);
-		}
-		else
-		{
-			FReadAddressListData Unused;
-			return GetReadAddressUncached(InPropertyNode, Unused);
-		}
-	}
+		bool bArrayPropertiesCanDifferInSize) const override;
 
-	UPackage* GetOwnerPackage() const
+	void GetOwnerPackages(TArray<UPackage*>& OutPackages) const
 	{
-		return HasValidStructData() ? StructData->GetPackage() : nullptr;
+		if (StructProvider)
+		{
+			TArray<TSharedPtr<FStructOnScope>> Instances;
+			StructProvider->GetInstances(Instances, WeakCachedBaseStruct.Get());
+
+			for (TSharedPtr<FStructOnScope>& Instance : Instances)
+			{
+				// Returning null for invalid instances, to match instance count.
+				OutPackages.Add(Instance.IsValid() ? Instance->GetPackage() : nullptr);
+			}
+		}
 	}
 
 	/** FComplexPropertyNode Interface */
 	virtual const UStruct* GetBaseStructure() const override
 	{ 
-		return HasValidStructData() ? StructData->GetStruct() : nullptr;
+		if (StructProvider)
+		{
+			return StructProvider->GetBaseStructure();
+		}
+		return nullptr; 
 	}
 	virtual UStruct* GetBaseStructure() override
 	{
-		const UStruct* Struct = HasValidStructData() ? StructData->GetStruct() : nullptr;
-		return const_cast<UStruct*>(Struct);
+		if (StructProvider)
+		{
+			return const_cast<UStruct*>(StructProvider->GetBaseStructure());
+		}
+		return nullptr; 
 	}
 	virtual TArray<UStruct*> GetAllStructures() override
 	{
 		TArray<UStruct*> RetVal;
-		if (UStruct* BaseStruct = GetBaseStructure())
+		if (StructProvider)
 		{
-			RetVal.Add(BaseStruct);
+			TArray<TSharedPtr<FStructOnScope>> Instances;
+			StructProvider->GetInstances(Instances, WeakCachedBaseStruct.Get());
+			
+			for (TSharedPtr<FStructOnScope>& Instance : Instances)
+			{
+				const UStruct* Struct = Instance.IsValid() ? Instance->GetStruct() : nullptr;
+				if (Struct)
+				{
+					RetVal.AddUnique(const_cast<UStruct*>(Struct));
+				}
+			}
 		}
+
 		return RetVal;
 	}
 	virtual TArray<const UStruct*> GetAllStructures() const override
 	{
 		TArray<const UStruct*> RetVal;
-		if (const UStruct* BaseStruct = GetBaseStructure())
+		if (StructProvider)
 		{
-			RetVal.Add(BaseStruct);
+			TArray<TSharedPtr<FStructOnScope>> Instances;
+			StructProvider->GetInstances(Instances, WeakCachedBaseStruct.Get());
+			
+			for (TSharedPtr<FStructOnScope>& Instance : Instances)
+			{
+				const UStruct* Struct = Instance.IsValid() ? Instance->GetStruct() : nullptr;
+				if (Struct)
+				{
+					RetVal.AddUnique(Struct);
+				}
+			}
 		}
 		return RetVal;
 	}
 	virtual int32 GetInstancesNum() const override
-	{ 
-		return HasValidStructData() ? 1 : 0;
-	}
-	virtual uint8* GetMemoryOfInstance(int32 Index) override
-	{ 
-		check(0 == Index);
-		return HasValidStructData() ? StructData->GetStructMemory() : NULL;
-	}
-	virtual uint8* GetValuePtrOfInstance(int32 Index, const FProperty* InProperty, FPropertyNode* InParentNode) override
-	{ 
-		check(0 == Index);
-		uint8* StructBaseAddress = HasValidStructData() ? StructData->GetStructMemory() : nullptr;
-		uint8* ParentBaseAddress = InParentNode ? InParentNode->GetValueAddress(StructBaseAddress, false) : nullptr;
-		return InProperty ? InProperty->ContainerPtrToValuePtr<uint8>(ParentBaseAddress) : nullptr;
-	}
-	virtual TWeakObjectPtr<UObject> GetInstanceAsUObject(int32 Index) override
 	{
-		check(0 == Index);
-		return NULL;
+		if (StructProvider)
+		{
+			TArray<TSharedPtr<FStructOnScope>> Instances;
+			StructProvider->GetInstances(Instances, WeakCachedBaseStruct.Get());
+			
+			return Instances.Num();
+		}
+		return 0;
+		
+	}
+	virtual uint8* GetMemoryOfInstance(int32 Index) const override
+	{
+		if (StructProvider)
+		{
+			TArray<TSharedPtr<FStructOnScope>> Instances;
+			StructProvider->GetInstances(Instances, WeakCachedBaseStruct.Get());
+			if (Instances.IsValidIndex(Index) && Instances[Index].IsValid())
+			{
+				return Instances[Index]->GetStructMemory();
+			}
+		}
+		return nullptr;
+	}
+	virtual uint8* GetValuePtrOfInstance(int32 Index, const FProperty* InProperty, const FPropertyNode* InParentNode) const override
+	{ 
+		if (InProperty == nullptr || InParentNode == nullptr)
+		{
+			return nullptr;
+		}
+
+		uint8* StructBaseAddress = GetMemoryOfInstance(Index);
+		if (StructBaseAddress == nullptr)
+		{
+			return nullptr;
+		}
+
+		uint8* ParentBaseAddress = InParentNode->GetValueAddress(StructBaseAddress, false, /*bIsStruct=*/true);
+		if (ParentBaseAddress == nullptr)
+		{
+			return nullptr;
+		}
+
+		return InProperty->ContainerPtrToValuePtr<uint8>(ParentBaseAddress);
+	}
+
+	virtual TWeakObjectPtr<UObject> GetInstanceAsUObject(int32 Index) const override
+	{
+		return nullptr;
 	}
 	virtual EPropertyType GetPropertyType() const override
 	{
@@ -141,27 +215,49 @@ public:
 
 	virtual void Disconnect() override
 	{
-		SetStructure(NULL);
+		ClearCachedReadAddresses(true);
+		DestroyTree();
+		StructProvider = nullptr;
 	}
 
+	/** Generates a single child from the provided property name.  Any existing children are destroyed */
+	virtual TSharedPtr<FPropertyNode> GenerateSingleChild(FName ChildPropertyName) override;
+
 protected:
+
+	virtual EPropertyDataValidationResult EnsureDataIsValid() override;
 
 	/** FPropertyNode interface */
 	virtual void InitChildNodes() override;
 
-	virtual uint8* GetValueBaseAddress(uint8* Base, bool bIsSparseData) const override
-	{
-		check(bIsSparseData == false);
-		return HasValidStructData() ? StructData->GetStructMemory() : nullptr;
-	}
+    virtual void InitBeforeNodeFlags() override;
+	void InternalInitChildNodes(FName SinglePropertyName);
+
+	virtual uint8* GetValueBaseAddress(uint8* Base, bool bIsSparseData, bool bIsStruct) const override;
 
 	virtual bool GetQualifiedName(FString& PathPlusIndex, const bool bWithArrayIndex, const FPropertyNode* StopParent = nullptr, bool bIgnoreCategories = false) const override
 	{
+		bool bAddedAnything = false;
+		const TSharedPtr<FPropertyNode> ParentNode = ParentNodeWeakPtr.Pin();
+		if (ParentNode && StopParent != ParentNode.Get())
+		{
+			bAddedAnything = ParentNode->GetQualifiedName(PathPlusIndex, bWithArrayIndex, StopParent, bIgnoreCategories);
+		}
+
+		if (bAddedAnything)
+		{
+			PathPlusIndex += TEXT(".");
+		}
+
 		PathPlusIndex += TEXT("Struct");
-		return true;
+		bAddedAnything = true;
+
+		return bAddedAnything;
 	}
 
 private:
-	TSharedPtr<FStructOnScope> StructData;
-};
+	TSharedPtr<IStructureDataProvider> StructProvider;
 
+	/** The base struct at the time InitChildNodes() was called. */
+	TWeakObjectPtr<const UStruct> WeakCachedBaseStruct = nullptr;
+};

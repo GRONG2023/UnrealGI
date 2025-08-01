@@ -2,11 +2,21 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformMisc.h"
 #include "Serialization/JsonWriter.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 
 class FJsonObject;
+class FText;
+
 enum class EModuleLoadResult;
+enum class EModuleUnloadResult;
 
 /**
  * Phase at which this module should be loaded during startup.
@@ -141,7 +151,7 @@ namespace EHostType
 /**
  * Description of a loadable module.
  */
-struct PROJECTS_API FModuleDescriptor
+struct FModuleDescriptor
 {
 	/** Name of this module */
 	FName Name;
@@ -153,68 +163,81 @@ struct PROJECTS_API FModuleDescriptor
 	ELoadingPhase::Type LoadingPhase;
 
 	/** List of allowed platforms */
-	TArray<FString> WhitelistPlatforms;
+	TArray<FString> PlatformAllowList;
 
 	/** List of disallowed platforms */
-	TArray<FString> BlacklistPlatforms;
+	TArray<FString> PlatformDenyList;
 
 	/** List of allowed targets */
-	TArray<EBuildTargetType> WhitelistTargets;
+	TArray<EBuildTargetType> TargetAllowList;
 
 	/** List of disallowed targets */
-	TArray<EBuildTargetType> BlacklistTargets;
+	TArray<EBuildTargetType> TargetDenyList;
 
 	/** List of allowed target configurations */
-	TArray<EBuildConfiguration> WhitelistTargetConfigurations;
+	TArray<EBuildConfiguration> TargetConfigurationAllowList;
 
 	/** List of disallowed target configurations */
-	TArray<EBuildConfiguration> BlacklistTargetConfigurations;
+	TArray<EBuildConfiguration> TargetConfigurationDenyList;
 
 	/** List of allowed programs */
-	TArray<FString> WhitelistPrograms;
+	TArray<FString> ProgramAllowList;
 
 	/** List of disallowed programs */
-	TArray<FString> BlacklistPrograms;
+	TArray<FString> ProgramDenyList;
 
 	/** List of additional dependencies for building this module. */
 	TArray<FString> AdditionalDependencies;
 
+	/** When true, an empty PlatformAllowList is interpeted as 'no platforms' with the expectation that explict platforms will be added in plugin extensions */
+	bool bHasExplicitPlatforms;
+
+
 	/** Normal constructor */
-	FModuleDescriptor(const FName InName = NAME_None, EHostType::Type InType = EHostType::Runtime, ELoadingPhase::Type InLoadingPhase = ELoadingPhase::Default);
+	PROJECTS_API FModuleDescriptor(const FName InName = NAME_None, EHostType::Type InType = EHostType::Runtime, ELoadingPhase::Type InLoadingPhase = ELoadingPhase::Default);
 
 	/** Reads a descriptor from the given JSON object */
-	bool Read(const FJsonObject& Object, FText& OutFailReason);
+	PROJECTS_API bool Read(const FJsonObject& Object, FText* OutFailReason = nullptr);
+
+	/** Reads a descriptor from the given JSON object */
+	PROJECTS_API bool Read(const FJsonObject& Object, FText& OutFailReason);
 
 	/** Reads an array of modules from the given JSON object */
-	static bool ReadArray(const FJsonObject& Object, const TCHAR* Name, TArray<FModuleDescriptor>& OutModules, FText& OutFailReason);
+	static PROJECTS_API bool ReadArray(const FJsonObject& Object, const TCHAR* Name, TArray<FModuleDescriptor>& OutModules, FText* OutFailReason = nullptr);
+
+	/** Reads an array of modules from the given JSON object */
+	static PROJECTS_API bool ReadArray(const FJsonObject& Object, const TCHAR* Name, TArray<FModuleDescriptor>& OutModules, FText& OutFailReason);
 
 	/** Writes a descriptor to JSON */
-	void Write(TJsonWriter<>& Writer) const;
+	PROJECTS_API void Write(TJsonWriter<>& Writer) const;
 
 	/** Updates the given json object with values in this descriptor */
-	void UpdateJson(FJsonObject& JsonObject) const;
+	PROJECTS_API void UpdateJson(FJsonObject& JsonObject) const;
 
 	/** Writes an array of modules to JSON */
-	static void WriteArray(TJsonWriter<>& Writer, const TCHAR* ArrayName, const TArray<FModuleDescriptor>& Modules);
+	static PROJECTS_API void WriteArray(TJsonWriter<>& Writer, const TCHAR* ArrayName, const TArray<FModuleDescriptor>& Modules);
 
 	/** Updates an array of module descriptors in the specified JSON field (indexed by module name) */
-	static void UpdateArray(FJsonObject& JsonObject, const TCHAR* ArrayName, const TArray<FModuleDescriptor>& Modules);
+	static PROJECTS_API void UpdateArray(FJsonObject& JsonObject, const TCHAR* ArrayName, const TArray<FModuleDescriptor>& Modules);
 
 	/** Tests whether the module should be built for the given target */
-	bool IsCompiledInConfiguration(const FString& Platform, EBuildConfiguration Configuration, const FString& TargetName, EBuildTargetType TargetType, bool bBuildDeveloperTools, bool bBuildRequiresCookedData) const;
+	PROJECTS_API bool IsCompiledInConfiguration(const FString& Platform, EBuildConfiguration Configuration, const FString& TargetName, EBuildTargetType TargetType, bool bBuildDeveloperTools, bool bBuildRequiresCookedData) const;
 
 	/** Tests whether the module should be built for the current engine configuration */
-	bool IsCompiledInCurrentConfiguration() const;
+	PROJECTS_API bool IsCompiledInCurrentConfiguration() const;
 
 	/** Tests whether the module should be loaded for the current engine configuration */
-	bool IsLoadedInCurrentConfiguration() const;
+	PROJECTS_API bool IsLoadedInCurrentConfiguration() const;
 
 	/** Loads all the modules for a given loading phase. Returns a map of module names to load errors */
-	static void LoadModulesForPhase(ELoadingPhase::Type LoadingPhase, const TArray<FModuleDescriptor>& Modules, TMap<FName, EModuleLoadResult>& ModuleLoadErrors);
+	static PROJECTS_API void LoadModulesForPhase(ELoadingPhase::Type LoadingPhase, const TArray<FModuleDescriptor>& Modules, TMap<FName, EModuleLoadResult>& ModuleLoadErrors);
+
+	/** Unloads all the modules for a given loading phase. Returns a map of module names to load errors. bSkipUnload can be used to simulate unloading */
+	static PROJECTS_API void UnloadModulesForPhase(ELoadingPhase::Type LoadingPhase, const TArray<FModuleDescriptor>& Modules, TMap<FName, EModuleUnloadResult>& OutErrors, bool bSkipUnload = false, bool bAllowUnloadCode = true);
 
 #if !IS_MONOLITHIC
 	/** Checks that all modules are compatible with the current engine version. Returns false and appends a list of names to OutIncompatibleFiles if not. */
-	static bool CheckModuleCompatibility(const TArray<FModuleDescriptor>& Modules, TArray<FString>& OutIncompatibleFiles);
+	static PROJECTS_API bool CheckModuleCompatibility(const TArray<FModuleDescriptor>& Modules, TArray<FString>& OutIncompatibleFiles);
 #endif
 };
 

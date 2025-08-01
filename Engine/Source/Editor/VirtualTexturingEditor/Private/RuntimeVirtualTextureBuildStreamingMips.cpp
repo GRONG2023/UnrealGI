@@ -9,9 +9,11 @@
 #include "RendererInterface.h"
 #include "RenderTargetPool.h"
 #include "SceneInterface.h"
+#include "RenderGraphBuilder.h"
 #include "VT/RuntimeVirtualTexture.h"
 #include "VT/RuntimeVirtualTextureRender.h"
 #include "VT/VirtualTextureBuilder.h"
+#include "SceneUtils.h"
 
 namespace
 {
@@ -29,28 +31,33 @@ namespace
 
 			for (int32 Layer = 0; Layer < NumLayers; ++Layer)
 			{
-				check(InLayerFormats[Layer] == PF_G16 || InLayerFormats[Layer] == PF_B8G8R8A8 || InLayerFormats[Layer] == PF_DXT1 || InLayerFormats[Layer] == PF_DXT5 || InLayerFormats[Layer] == PF_BC5);
-				LayerFormats[Layer] = InLayerFormats[Layer] == PF_G16 ? PF_G16 : PF_B8G8R8A8;
+				check(InLayerFormats[Layer] == PF_G16 || InLayerFormats[Layer] == PF_B8G8R8A8 || InLayerFormats[Layer] == PF_DXT1 || InLayerFormats[Layer] == PF_DXT5 || InLayerFormats[Layer] == PF_BC4
+					|| InLayerFormats[Layer] == PF_BC5 || InLayerFormats[Layer] == PF_R5G6B5_UNORM || InLayerFormats[Layer] == PF_B5G5R5A1_UNORM);
+				LayerFormats[Layer] = InLayerFormats[Layer] == PF_G16 || InLayerFormats[Layer] == PF_BC4 ? PF_G16 : PF_B8G8R8A8;
 				LayerOffsets[Layer] = TotalSizeBytes;
 				TotalSizeBytes += CalculateImageBytes(InTileSize, InTileSize, 0, LayerFormats[Layer]) * InNumTilesX * InNumTilesY;
 			}
 		}
 
 		//~ Begin FRenderResource Interface.
-		virtual void InitRHI() override
+		virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 		{
 			RenderTargets.Init(nullptr, NumLayers);
 			StagingTextures.Init(nullptr, NumLayers);
 
 			for (int32 Layer = 0; Layer < NumLayers; ++Layer)
 			{
-				FRHIResourceCreateInfo CreateInfo;
-				RenderTargets[Layer] = RHICreateTexture2D(TileSize, TileSize, LayerFormats[Layer], 1, 1, TexCreate_RenderTargetable, CreateInfo);
-				StagingTextures[Layer] = RHICreateTexture2D(TileSize, TileSize, LayerFormats[Layer], 1, 1, TexCreate_CPUReadback, CreateInfo);
+				FRHITextureCreateDesc Desc =
+					FRHITextureCreateDesc::Create2D(TEXT("FTileRenderResources"), TileSize, TileSize, LayerFormats[Layer]);
+
+				Desc.SetFlags(ETextureCreateFlags::RenderTargetable);
+				RenderTargets[Layer] = RHICreateTexture(Desc);
+
+				Desc.SetFlags(ETextureCreateFlags::CPUReadback);
+				StagingTextures[Layer] = RHICreateTexture(Desc);
 			}
 
-			FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-			Fence = RHICmdList.CreateGPUFence(TEXT("Runtime Virtual Texture Build"));
+			Fence = RHICreateGPUFence(TEXT("Runtime Virtual Texture Build"));
 		}
 
 		virtual void ReleaseRHI() override
@@ -91,7 +98,7 @@ namespace
 		for (int32 y = 0; y < TileSize; y++)
 		{
 			memcpy(
-				DestPixels + (SIZE_T)DestStride * (SIZE_T)(DestPos[1] + y) + DestPos[0],
+				DestPixels + (SIZE_T)DestStride * ((SIZE_T)DestPos[1] + (SIZE_T)y) + DestPos[0],
 				SrcPixels + SrcStride * y,
 				TileSize * sizeof(T));
 		}
@@ -117,6 +124,12 @@ namespace RuntimeVirtualTexture
 {
 	bool HasStreamedMips(URuntimeVirtualTextureComponent* InComponent)
 	{
+		EShadingPath ShadingPath = (InComponent && InComponent->GetScene()) ? InComponent->GetScene()->GetShadingPath() : EShadingPath::Deferred;
+		return HasStreamedMips(ShadingPath, InComponent);
+	}
+
+	bool HasStreamedMips(EShadingPath ShadingPath, URuntimeVirtualTextureComponent* InComponent)
+	{
 		if (InComponent == nullptr)
 		{
 			return false;
@@ -132,12 +145,23 @@ namespace RuntimeVirtualTexture
 			return false;
 		}
 
+		if (ShadingPath == EShadingPath::Mobile && !InComponent->GetStreamingTexture()->bSeparateTextureForMobile)
+		{
+			return false;
+		}
+
 		return true;
 	}
-
-	bool BuildStreamedMips(URuntimeVirtualTextureComponent* InComponent, ERuntimeVirtualTextureDebugType DebugType)
+	
+	bool BuildStreamedMips(URuntimeVirtualTextureComponent* InComponent, FLinearColor const& FixedColor)
 	{
-		if (!HasStreamedMips(InComponent))
+		EShadingPath ShadingPath = (InComponent && InComponent->GetScene()) ? InComponent->GetScene()->GetShadingPath() : EShadingPath::Deferred;
+		return BuildStreamedMips(ShadingPath, InComponent, FixedColor);
+	}
+
+	bool BuildStreamedMips(EShadingPath ShadingPath, URuntimeVirtualTextureComponent* InComponent, FLinearColor const& FixedColor)
+	{
+		if (!HasStreamedMips(ShadingPath, InComponent))
 		{
 			return true;
 		}
@@ -172,7 +196,7 @@ namespace RuntimeVirtualTexture
 
 		// Spin up slow task UI
 		const float TaskWorkRender = NumTilesX * NumTilesY;
-		const float TextureBuildTaskMultiplier = InComponent->IsCrunchCompressed() ? 3.f : .25f; // Crunch compression is slow.
+		const float TextureBuildTaskMultiplier = 0.25f;
 		const float TaskWorkBuildBulkData = TaskWorkRender * TextureBuildTaskMultiplier;
 		FScopedSlowTask Task(TaskWorkRender + TaskWorkBuildBulkData, FText::AsCultureInvariant(InComponent->GetStreamingTexture()->GetName()));
 		Task.MakeDialog(true);
@@ -181,9 +205,15 @@ namespace RuntimeVirtualTexture
 		FTileRenderResources RenderTileResources(TileSize, NumTilesX, NumTilesY, NumLayers, LayerFormats);
 		BeginInitResource(&RenderTileResources);
 
+		int64 RenderTileResourcesBytes = RenderTileResources.GetTotalSizeBytes();
+
+		UE_LOG(LogVirtualTexturing,Display,TEXT("Allocating %uMiB for RenderTileResourcesBytes"),(uint32)(RenderTileResourcesBytes/(1024*1024)));
+
 		// Final pixels will contain image data for each virtual texture layer in order
 		TArray64<uint8> FinalPixels;
-		FinalPixels.SetNumUninitialized(RenderTileResources.GetTotalSizeBytes());
+		FinalPixels.SetNumUninitialized(RenderTileResourcesBytes);
+
+		UE::RenderCommandPipe::FSyncScope SyncScope;
 
 		// Iterate over all tiles and render/store each one to the final image
 		for (int32 TileY = 0; TileY < NumTilesY && !Task.ShouldCancel(); TileY++)
@@ -201,7 +231,7 @@ namespace RuntimeVirtualTexture
 				//todo[vt]: Batch groups of streaming locations and render commands to reduce number of flushes.
 				const FVector StreamingWorldPos = Transform.TransformPosition(FVector(UVRange.GetCenter(), 0.5f));
 				IStreamingManager::Get().Tick(0.f);
-				IStreamingManager::Get().AddViewSlaveLocation(StreamingWorldPos);
+				IStreamingManager::Get().AddViewLocation(StreamingWorldPos);
 				IStreamingManager::Get().StreamAllResources(0);
 
 				ENQUEUE_RENDER_COMMAND(BakeStreamingTextureTileCommand)([
@@ -213,7 +243,7 @@ namespace RuntimeVirtualTexture
 					TileX, TileY,
 					TileSize, ImageSizeX, ImageSizeY, 
 					&FinalPixels,
-					DebugType](FRHICommandListImmediate& RHICmdList)
+					FixedColor](FRHICommandListImmediate& RHICmdList)
 				{
 					const FBox2D TileBox(FVector2D(0, 0), FVector2D(TileSize, TileSize));
 					const FIntRect TileRect(0, 0, TileSize, TileSize);
@@ -224,50 +254,50 @@ namespace RuntimeVirtualTexture
 						RHICmdList.Transition(FRHITransitionInfo(RenderTileResources.GetRenderTarget(Layer), ERHIAccess::Unknown, ERHIAccess::RTV));
 					}
 
-					RuntimeVirtualTexture::FRenderPageBatchDesc Desc;
-					Desc.Scene = Scene->GetRenderScene();
-					Desc.RuntimeVirtualTextureMask = 1 << VirtualTextureSceneIndex;
-					Desc.UVToWorld = Transform;
-					Desc.WorldBounds = Bounds;
-					Desc.MaterialType = MaterialType;
-					Desc.MaxLevel = MaxLevel;
-					Desc.bClearTextures = true;
-					Desc.bIsThumbnails = false;
-					Desc.DebugType = DebugType;
-					Desc.NumPageDescs = 1;
-					Desc.Targets[0].Texture = RenderTileResources.GetRenderTarget(0);
-					Desc.Targets[1].Texture = RenderTileResources.GetRenderTarget(1);
-					Desc.Targets[2].Texture = RenderTileResources.GetRenderTarget(2);
-					Desc.PageDescs[0].DestBox[0] = TileBox;
-					Desc.PageDescs[0].DestBox[1] = TileBox;
-					Desc.PageDescs[0].DestBox[2] = TileBox;
-					Desc.PageDescs[0].UVRange = UVRange;
-					Desc.PageDescs[0].vLevel = RenderLevel;
-
-					RuntimeVirtualTexture::RenderPages(RHICmdList, Desc);
-
-					// Transition render targets for copying
-					for (int32 Layer = 0; Layer < NumLayers; Layer++)
 					{
-						RHICmdList.Transition(FRHITransitionInfo(RenderTileResources.GetRenderTarget(Layer), ERHIAccess::RTV, ERHIAccess::SRVGraphics));
+						FRDGBuilder GraphBuilder(RHICmdList);
+
+						RuntimeVirtualTexture::FRenderPageBatchDesc Desc;
+						Desc.Scene = Scene->GetRenderScene();
+						Desc.RuntimeVirtualTextureMask = 1 << VirtualTextureSceneIndex;
+						Desc.UVToWorld = Transform;
+						Desc.WorldBounds = Bounds;
+						Desc.MaterialType = MaterialType;
+						Desc.MaxLevel = MaxLevel;
+						Desc.bClearTextures = true;
+						Desc.bIsThumbnails = false;
+						Desc.FixedColor = FixedColor;
+						Desc.NumPageDescs = 1;
+						Desc.Targets[0].Texture = RenderTileResources.GetRenderTarget(0);
+						Desc.Targets[1].Texture = RenderTileResources.GetRenderTarget(1);
+						Desc.Targets[2].Texture = RenderTileResources.GetRenderTarget(2);
+						Desc.PageDescs[0].DestBox[0] = TileBox;
+						Desc.PageDescs[0].DestBox[1] = TileBox;
+						Desc.PageDescs[0].DestBox[2] = TileBox;
+						Desc.PageDescs[0].UVRange = UVRange;
+						Desc.PageDescs[0].vLevel = RenderLevel;
+
+						RuntimeVirtualTexture::RenderPagesStandAlone(GraphBuilder, Desc);
+
+						GraphBuilder.Execute();
 					}
 
 					// Copy to staging
 					for (int32 Layer = 0; Layer < NumLayers; Layer++)
 					{
+						RHICmdList.Transition(FRHITransitionInfo(RenderTileResources.GetRenderTarget(Layer), ERHIAccess::RTV, ERHIAccess::CopySrc));
 						RHICmdList.CopyTexture(RenderTileResources.GetRenderTarget(Layer), RenderTileResources.GetStagingTexture(Layer), FRHICopyTextureInfo());
 					}
 
-					//todo[vt]: Insert fence for immediate read back. But is there no API to wait on it?
+					RenderTileResources.GetFence()->Clear();
 					RHICmdList.WriteGPUFence(RenderTileResources.GetFence());
-					RHICmdList.ImmediateFlush(EImmediateFlushType::FlushRHIThread);
 
 					// Read back tile data and copy into final destination
 					for (int32 Layer = 0; Layer < NumLayers; Layer++)
 					{
 						void* TilePixels = nullptr;
 						int32 OutWidth, OutHeight;
-						RHICmdList.MapStagingSurface(RenderTileResources.GetStagingTexture(Layer), TilePixels, OutWidth, OutHeight);
+						RHICmdList.MapStagingSurface(RenderTileResources.GetStagingTexture(Layer), RenderTileResources.GetFence(), TilePixels, OutWidth, OutHeight);
 						check(TilePixels != nullptr);
 						check(OutHeight == TileSize);
 
@@ -294,7 +324,7 @@ namespace RuntimeVirtualTexture
 		// Place final pixel data into the runtime virtual texture
 		Task.EnterProgressFrame(TaskWorkBuildBulkData);
 
-		InComponent->InitializeStreamingTexture(ImageSizeX, ImageSizeY, (uint8*)FinalPixels.GetData());
+		InComponent->InitializeStreamingTexture(ShadingPath, ImageSizeX, ImageSizeY, (uint8*)FinalPixels.GetData());
 
 		return true;
 	}

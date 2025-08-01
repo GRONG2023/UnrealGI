@@ -30,6 +30,8 @@
 #include "Misc/CoreDelegates.h"
 #include "Misc/App.h"
 #include "Misc/Fork.h"
+#include "HAL/PlatformTime.h"
+#include "Misc/DateTime.h"
 
 namespace PlatformProcessLimits
 {
@@ -43,6 +45,14 @@ namespace PlatformProcessLimits
 __thread uint32 FUnixTLS::ThreadIdTLS = 0;
 #else
 uint32 FUnixTLS::ThreadIdTLSKey = FUnixTLS::AllocTlsSlot();
+#endif
+
+#if UE_CHECK_LARGE_ALLOCATIONS
+static TAutoConsoleVariable<int32> CVarEnableLargeAllocationChecksAfterFork(
+	TEXT("memory.EnableLargeAllocationChecksAfterFork"),
+	false,
+	TEXT("After forking, Turn on ensure which checks no single allocation is greater than 'LargeAllocationThreshold'"),
+	ECVF_Default);
 #endif
 
 void* FUnixPlatformProcess::GetDllHandle( const TCHAR* Filename )
@@ -307,11 +317,28 @@ const TCHAR* FUnixPlatformProcess::ApplicationSettingsDir()
 	return Result;
 }
 
+FString FUnixPlatformProcess::GetApplicationSettingsDir(const ApplicationSettingsContext& Settings)
+{
+	// The ApplicationSettingsDir is where the engine stores settings and configuration
+	// data.  On linux this corresponds to $HOME/.config/Epic
+	TCHAR Result[UNIX_MAX_PATH] = TEXT("");
+	FCString::Strncpy(Result, FPlatformProcess::UserHomeDir(), UE_ARRAY_COUNT(Result));
+	if (Settings.bIsEpic)
+	{
+		FCString::Strncat(Result, TEXT("/.config/Epic/"), UE_ARRAY_COUNT(Result));
+	}
+	else
+	{
+		FCString::Strncat(Result, TEXT("/.config/"), UE_ARRAY_COUNT(Result));
+	}
+	return FString(Result);
+}
+
 bool FUnixPlatformProcess::SetProcessLimits(EProcessResource::Type Resource, uint64 Limit)
 {
 	rlimit NativeLimit;
 
-	static_assert(sizeof(long) == sizeof(NativeLimit.rlim_cur), TEXT("Platform has atypical rlimit type."));
+	static_assert(sizeof(long) == sizeof(NativeLimit.rlim_cur), "Platform has atypical rlimit type.");
 
 	// 32-bit platforms set limits as long
 	if (sizeof(NativeLimit.rlim_cur) < sizeof(Limit))
@@ -513,7 +540,7 @@ void FUnixPlatformProcess::ClosePipe( void* ReadPipe, void* WritePipe )
 	}
 }
 
-bool FUnixPlatformProcess::CreatePipe( void*& ReadPipe, void*& WritePipe )
+bool FUnixPlatformProcess::CreatePipe(void*& ReadPipe, void*& WritePipe, bool bWritePipeLocal)
 {
 	int PipeFd[2];
 	if (-1 == pipe(PipeFd))
@@ -524,8 +551,8 @@ bool FUnixPlatformProcess::CreatePipe( void*& ReadPipe, void*& WritePipe )
 		return false;
 	}
 
-	ReadPipe = new FPipeHandle(PipeFd[ 0 ]);
-	WritePipe = new FPipeHandle(PipeFd[ 1 ]);
+	ReadPipe = new FPipeHandle(PipeFd[ 0 ], PipeFd[ 1 ]);
+	WritePipe = new FPipeHandle(PipeFd[ 1 ], PipeFd[ 0 ]);
 
 	return true;
 }
@@ -555,19 +582,17 @@ bool FUnixPlatformProcess::ReadPipeToArray(void* ReadPipe, TArray<uint8> & Outpu
 bool FUnixPlatformProcess::WritePipe(void* WritePipe, const FString& Message, FString* OutWritten)
 {
 	// if there is not a message or WritePipe is null
-	if ((Message.Len() == 0) || (WritePipe == nullptr))
+	int32 MessageLen = Message.Len();
+	if ((MessageLen == 0) || (WritePipe == nullptr))
 	{
 		return false;
 	}
 
 	// Convert input to UTF8CHAR
-	uint32 BytesAvailable = Message.Len();
-	UTF8CHAR * Buffer = new UTF8CHAR[BytesAvailable + 2];
-	for (uint32 i = 0; i < BytesAvailable; i++)
-	{
-		Buffer[i] = Message[i];
-	}
-	Buffer[BytesAvailable] = '\n';
+	const TCHAR* MessagePtr = *Message;
+	int32 BytesAvailable = FPlatformString::ConvertedLength<UTF8CHAR>(MessagePtr, MessageLen);
+	UTF8CHAR* Buffer = new UTF8CHAR[BytesAvailable + 2];
+	*FPlatformString::Convert(Buffer, BytesAvailable, MessagePtr, MessageLen) = (UTF8CHAR)'\n';
 
 	// write to pipe
 	uint32 BytesWritten = write(*(int*)WritePipe, Buffer, BytesAvailable + 1);
@@ -575,8 +600,7 @@ bool FUnixPlatformProcess::WritePipe(void* WritePipe, const FString& Message, FS
 	// Get written message
 	if (OutWritten)
 	{
-		Buffer[BytesWritten] = '\0';
-		*OutWritten = FUTF8ToTCHAR((const ANSICHAR*)Buffer).Get();
+		*OutWritten = StringCast<TCHAR>(Buffer, BytesWritten).Get();
 	}
 
 	delete[] Buffer;
@@ -756,44 +780,149 @@ namespace UnixPlatformProcess
 	}
 }
 
-FProcHandle FUnixPlatformProcess::CreateProc(const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void * PipeReadChild)
+FProcHandle FUnixPlatformProcess::CreateProc(const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void* PipeReadChild)
+{
+	// CreateProc used to only have a single "write" pipe argument, which Windows and Mac would pipe both stdout and stderr into.
+	// On Unix though, only stdout was piped to it, and stderr wasn't available at all, so we'll preserve that behaviour in this overload for compatibility with existing code
+	return CreateProc(URL, Parms, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, OutProcessID, PriorityModifier, OptionalWorkingDirectory, PipeWriteChild, PipeReadChild, PipeWriteChild);
+}
+
+static char* MallocedUtf8FromString(const FString& Str)
+{
+	FTCHARToUTF8 AnsiBuffer(*Str);
+	const char* Ansi = AnsiBuffer.Get();
+	size_t AnsiSize = FCStringAnsi::Strlen(Ansi) + 1;	// will work correctly with UTF-8
+	check(AnsiSize);
+
+	char* Ret = reinterpret_cast<char*>(FMemory::Malloc(AnsiSize));
+	check(Ret);
+
+	FCStringAnsi::Strncpy(Ret, Ansi, AnsiSize);	// will work correctly with UTF-8
+	return Ret;
+}
+
+static bool AddCmdLineArgumentTo(char** Argv, int& Argc, const FString& CurArg)
+{
+	if (Argc == PlatformProcessLimits::MaxArgvParameters)
+	{
+		UE_LOG(LogHAL, Warning, TEXT("FUnixPlatformProcess::CreateProc: too many (%d) commandline arguments passed, will only pass %d"),
+			Argc, PlatformProcessLimits::MaxArgvParameters);
+		return false;
+	}
+	Argv[Argc] = MallocedUtf8FromString(CurArg);
+	UE_LOG(LogHAL, Verbose, TEXT("FUnixPlatformProcess::CreateProc: Argv[%d] = '%s'"), Argc, *CurArg);
+	Argc++;
+	return true;
+}
+
+// returns true if the token completes the current argument
+static bool ParseCmdLineToken(const TCHAR* token, bool& OutIsInString, bool& OutHasArg, FString& OutCurArg, bool& OutEOL)
+{
+	if (*token == TEXT('\0'))
+	{
+		OutEOL = true;
+		return OutHasArg;
+	}
+
+	if (*token == TEXT('"'))
+	{
+		// need to make sure this isn't a double-double quoted path
+		// if we're currently in a string, then a double quote will only end a string if the next character is not a whitespace character
+		if (OutIsInString)
+		{
+			// peek ahead to see if this looks like the start or end of a double-double quoted string
+			FString temp(token + 1);
+			bool StartDoubleDoubleQuote = !temp.IsEmpty() && !temp.StartsWith(TEXT(" ")) && !temp.StartsWith(TEXT("\n")) && !temp.StartsWith(TEXT("\r"));
+			bool EndDoubleDoubleQuote = OutCurArg.StartsWith(TEXT("\"")) && temp.StartsWith(TEXT("\""));
+
+			if (StartDoubleDoubleQuote || EndDoubleDoubleQuote)
+			{
+				// need to capture this quote into the argument
+				OutCurArg += *token;
+				OutHasArg = true;
+
+				return false;
+			}
+		}
+
+		OutIsInString = !OutIsInString;
+		OutHasArg = true;
+		return false;
+	}
+
+	if (*token == TEXT(' ') && !OutIsInString)
+	{
+		return OutHasArg;
+	}
+
+	// if we've made it this far, the token should be added to the argument
+	OutCurArg += *token;
+	OutHasArg = true;
+
+	return false;
+}
+
+FProcHandle FUnixPlatformProcess::CreateProc(const TCHAR* URL, const TCHAR* Parms, bool bLaunchDetached, bool bLaunchHidden, bool bLaunchReallyHidden, uint32* OutProcessID, int32 PriorityModifier, const TCHAR* OptionalWorkingDirectory, void* PipeWriteChild, void* PipeReadChild, void* PipeStdErrChild)
 {
 	// @TODO bLaunchHidden bLaunchReallyHidden are not handled
-	// We need an absolute path to executable
+
 	FString ProcessPath = URL;
-	if (*URL != TEXT('/'))
+
+	// - If the first character is /, we use the provided absolute path as-is.
+	// - If no leading slash, prefer the result of FPaths::ConvertRelativePathToFull if it exists. This is roughly
+	//   morally equivalent to prepending the basedir to $PATH (and in turn, Windows' cwd (==basedir) priority).
+	// - If there was a (non-leading) slash, and ConvertRelativePathToFull missed, return failure.
+	// - If there were no path separators in the input string, allow posix_spawnp to search the $PATH.
+
+	int32 PathSepIdx = INDEX_NONE;
+	const bool bInputHasPathSep = ProcessPath.FindChar(TEXT('/'), PathSepIdx);
+	bool bAbsolutePath = PathSepIdx == 0;
+
+	if (!bAbsolutePath)
 	{
-		ProcessPath = FPaths::ConvertRelativePathToFull(ProcessPath);
+		const FString CandidatePath = FPaths::ConvertRelativePathToFull(ProcessPath);
+		if (bInputHasPathSep || FPaths::FileExists(CandidatePath))
+		{
+			ProcessPath = CandidatePath;
+			bAbsolutePath = true;
+		}
 	}
 
-	if (!FPaths::FileExists(ProcessPath))
+	// Even if we weren't passed an absolute path, we may have expanded to one above.
+	if (bAbsolutePath)
 	{
-		return FProcHandle();
+		if (!FPaths::FileExists(ProcessPath))
+		{
+			UE_LOG(LogHAL, Error, TEXT("FUnixPlatformProcess::CreateProc: File does not exist (%s)"), *ProcessPath);
+			return FProcHandle();
+		}
+
+		if (!UnixPlatformProcess::AttemptToMakeExecIfNotAlready(ProcessPath))
+		{
+			UE_LOG(LogHAL, Error, TEXT("FUnixPlatformProcess::CreateProc: File not executable (%s)"), *ProcessPath);
+			return FProcHandle();
+		}
 	}
 
-	// check if it's worth attemptting to execute the file
-	if (!UnixPlatformProcess::AttemptToMakeExecIfNotAlready(ProcessPath))
+	if (Parms == nullptr)
 	{
-		return FProcHandle();
+		Parms = TEXT("");
 	}
 
-	FString Commandline = FString::Printf(TEXT("\"%s\""), *ProcessPath);
-	Commandline += TEXT(" ");
-	Commandline += Parms;
-
+	const FString Commandline = FString::Printf(TEXT("\"%s\" %s"), *ProcessPath, Parms);
 	UE_LOG(LogHAL, Verbose, TEXT("FUnixPlatformProcess::CreateProc: '%s'"), *Commandline);
 
-	TArray<FString> ArgvArray;
-	int Argc = Commandline.ParseIntoArray(ArgvArray, TEXT(" "), true);
+	int Argc = 1;
 	char* Argv[PlatformProcessLimits::MaxArgvParameters + 1] = { NULL };	// last argument is NULL, hence +1
+	Argv[0] = MallocedUtf8FromString(ProcessPath);
 	struct CleanupArgvOnExit
 	{
 		int Argc;
 		char** Argv;	// relying on it being long enough to hold Argc elements
 
-		CleanupArgvOnExit( int InArgc, char *InArgv[] )
-			:	Argc(InArgc)
-			,	Argv(InArgv)
+		CleanupArgvOnExit(int InArgc, char* InArgv[])
+			: Argc(InArgc)
+			, Argv(InArgv)
 		{}
 
 		~CleanupArgvOnExit()
@@ -805,96 +934,40 @@ FProcHandle FUnixPlatformProcess::CreateProc(const TCHAR* URL, const TCHAR* Parm
 		}
 	} CleanupGuard(Argc, Argv);
 
-	// make sure we do not lose arguments with spaces in them due to Commandline.ParseIntoArray breaking them apart above
-	// @todo this code might need to be optimized somehow and integrated with main argument parser below it
-	TArray<FString> NewArgvArray;
-	if (Argc > 0)
+	UE_LOG(LogHAL, Verbose, TEXT("FUnixPlatformProcess::CreateProc: ProcessPath = '%s' Parms = '%s'"), *ProcessPath, Parms);
+	FString CurArg; // current argument, during parsing new chars will be appended, will be reused, once the argument is complete
+	const TCHAR* CurChar = Parms; // pointer to the current char
+	bool IsInString = false; // are we in a string?  if yes, spaces are treated as normal chars
+	bool HasArg = false; // do we have a partial argument? CurArg might be empty if Parms contains "". Parms might contain two or more spaces in a row, so not every space indicates the end of an argument
+	bool EOL = false;
+
+	// parse Parms and fill Argv
+	while (!EOL)
 	{
-		if (Argc > PlatformProcessLimits::MaxArgvParameters)
+		if (ParseCmdLineToken(CurChar, IsInString, HasArg, CurArg, EOL))
 		{
-			UE_LOG(LogHAL, Warning, TEXT("FUnixPlatformProcess::CreateProc: too many (%d) commandline arguments passed, will only pass %d"),
-				Argc, PlatformProcessLimits::MaxArgvParameters);
-			Argc = PlatformProcessLimits::MaxArgvParameters;
+			// if we're still in a string, then quit parsing because we've found a mismatched quote
+			// if we can't add the argument, then we've exceeded the maximum number of allowed arguments
+			if (!IsInString && !AddCmdLineArgumentTo(Argv, Argc, CurArg))
+			{
+				break;
+			}
+
+			HasArg = false;
+			CurArg.Reset(0);
 		}
 
-		FString MultiPartArg;
-		for (int32 Index = 0; Index < Argc; Index++)
-		{
-			if (MultiPartArg.IsEmpty())
-			{
-				if ((ArgvArray[Index].StartsWith(TEXT("\"")) && !ArgvArray[Index].EndsWith(TEXT("\""))) // check for a starting quote but no ending quote, excludes quoted single arguments
-					|| (ArgvArray[Index].Contains(TEXT("=\"")) && !ArgvArray[Index].EndsWith(TEXT("\""))) // check for quote after =, but no ending quote, this gets arguments of the type -blah="string string string"
-					|| ArgvArray[Index].EndsWith(TEXT("=\""))) // check for ending quote after =, this gets arguments of the type -blah=" string string string "
-				{
-					MultiPartArg = ArgvArray[Index];
-				}
-				else
-				{
-					if (ArgvArray[Index].Contains(TEXT("=\"")))
-					{
-						FString SingleArg = ArgvArray[Index];
-						SingleArg = SingleArg.Replace(TEXT("=\""), TEXT("="));
-						NewArgvArray.Add(SingleArg.TrimQuotes(NULL));
-					}
-					else
-					{
-						NewArgvArray.Add(ArgvArray[Index].TrimQuotes(NULL));
-					}
-				}
-			}
-			else
-			{
-				MultiPartArg += TEXT(" ");
-				MultiPartArg += ArgvArray[Index];
-				if (ArgvArray[Index].EndsWith(TEXT("\"")))
-				{
-					if (MultiPartArg.StartsWith(TEXT("\"")))
-					{
-						NewArgvArray.Add(MultiPartArg.TrimQuotes(NULL));
-					}
-					else if (MultiPartArg.Contains(TEXT("=\"")))
-					{
-						FString SingleArg = MultiPartArg.Replace(TEXT("=\""), TEXT("="));
-						NewArgvArray.Add(SingleArg.TrimQuotes(nullptr));
-					}
-					else
-					{
-						NewArgvArray.Add(MultiPartArg);
-					}
-					MultiPartArg.Empty();
-				}
-			}
-		}
+		CurChar++;
 	}
-	// update Argc with the new argument count
-	Argc = NewArgvArray.Num();
 
-	if (Argc > 0)	// almost always, unless there's no program name
+	if (IsInString)
 	{
-		if (Argc > PlatformProcessLimits::MaxArgvParameters)
-		{
-			UE_LOG(LogHAL, Warning, TEXT("FUnixPlatformProcess::CreateProc: too many (%d) commandline arguments passed, will only pass %d"), 
-				Argc, PlatformProcessLimits::MaxArgvParameters);
-			Argc = PlatformProcessLimits::MaxArgvParameters;
-		}
-
-		for (int Idx = 0; Idx < Argc; ++Idx)
-		{
-			FTCHARToUTF8 AnsiBuffer(*NewArgvArray[Idx]);
-			const char* Ansi = AnsiBuffer.Get();
-			size_t AnsiSize = FCStringAnsi::Strlen(Ansi) + 1;	// will work correctly with UTF-8
-			check(AnsiSize);
-
-			Argv[Idx] = reinterpret_cast< char* >( FMemory::Malloc(AnsiSize) );
-			check(Argv[Idx]);
-
-			FCStringAnsi::Strncpy(Argv[Idx], Ansi, AnsiSize);	// will work correctly with UTF-8
-		}
-
-		// last Argv should be NULL
-		check(Argc <= PlatformProcessLimits::MaxArgvParameters + 1);
-		Argv[Argc] = NULL;
+		UE_LOG(LogHAL, Warning, TEXT("FUnixPlatformProcess::CreateProc: mismatched quotes in command line (%s %s)"), *ProcessPath, Parms);
 	}
+
+	// we assume PlatformProcessLimits::MaxArgvParameters is >= 1. Since Argc starts at 1 and can never grow larger than PlatformProcessLimits::MaxArgvParameters,
+	// we are within the Array
+	Argv[Argc] = NULL;
 
 	extern char ** environ;	// provided by libc
 	pid_t ChildPid = -1;
@@ -924,25 +997,45 @@ FProcHandle FUnixPlatformProcess::CreateProc(const TCHAR* URL, const TCHAR* Parm
 	SpawnFlags |= POSIX_SPAWN_SETPGROUP;
 
 	int PosixSpawnErrNo = -1;
-	if (PipeWriteChild || PipeReadChild)
+	if (PipeWriteChild || PipeReadChild || PipeStdErrChild)
 	{
 		posix_spawn_file_actions_t FileActions;
 		posix_spawn_file_actions_init(&FileActions);
 
 		if (PipeWriteChild)
 		{
+			const FPipeHandle* PipeReadHandle = reinterpret_cast<const FPipeHandle*>(PipeReadChild);
 			const FPipeHandle* PipeWriteHandle = reinterpret_cast<const FPipeHandle*>(PipeWriteChild);
+
+			// If using unique read and write pipes, close the other end of the write pipe
+			if (PipeReadChild && PipeWriteHandle->GetPairHandle() != PipeReadHandle->GetHandle())
+			{
+				posix_spawn_file_actions_addclose(&FileActions, PipeWriteHandle->GetPairHandle());
+			}
 			posix_spawn_file_actions_adddup2(&FileActions, PipeWriteHandle->GetHandle(), STDOUT_FILENO);
 		}
 
 		if (PipeReadChild)
 		{
 			const FPipeHandle* PipeReadHandle = reinterpret_cast<const FPipeHandle*>(PipeReadChild);
+			const FPipeHandle* PipeWriteHandle = reinterpret_cast<const FPipeHandle*>(PipeWriteChild);
+
+			// If using unique read and write pipes, close the other end of the read pipe
+			if (PipeWriteChild && PipeReadHandle->GetPairHandle() != PipeWriteHandle->GetHandle())
+			{
+				posix_spawn_file_actions_addclose(&FileActions, PipeReadHandle->GetPairHandle());
+			}
 			posix_spawn_file_actions_adddup2(&FileActions, PipeReadHandle->GetHandle(), STDIN_FILENO);
 		}
 
+		if (PipeStdErrChild)
+		{
+			const FPipeHandle* PipeStdErrorHandle = reinterpret_cast<const FPipeHandle*>(PipeStdErrChild);
+			posix_spawn_file_actions_adddup2(&FileActions, PipeStdErrorHandle->GetHandle(), STDERR_FILENO);
+		}
+
 		posix_spawnattr_setflags(&SpawnAttr, SpawnFlags);
-		PosixSpawnErrNo = posix_spawn(&ChildPid, TCHAR_TO_UTF8(*ProcessPath), &FileActions, &SpawnAttr, Argv, environ);
+		PosixSpawnErrNo = posix_spawnp(&ChildPid, TCHAR_TO_UTF8(*ProcessPath), &FileActions, &SpawnAttr, Argv, environ);
 		posix_spawn_file_actions_destroy(&FileActions);
 	}
 	else
@@ -957,14 +1050,14 @@ FProcHandle FUnixPlatformProcess::CreateProc(const TCHAR* URL, const TCHAR* Parm
 		SpawnFlags |= POSIX_SPAWN_USEVFORK;
 
 		posix_spawnattr_setflags(&SpawnAttr, SpawnFlags);
-		PosixSpawnErrNo = posix_spawn(&ChildPid, TCHAR_TO_UTF8(*ProcessPath), nullptr, &SpawnAttr, Argv, environ);
+		PosixSpawnErrNo = posix_spawnp(&ChildPid, TCHAR_TO_UTF8(*ProcessPath), nullptr, &SpawnAttr, Argv, environ);
 	}
 	posix_spawnattr_destroy(&SpawnAttr);
 
 	if (PosixSpawnErrNo != 0)
 	{
-		UE_LOG(LogHAL, Fatal, TEXT("FUnixPlatformProcess::CreateProc: posix_spawn() failed (%d, %s)"), PosixSpawnErrNo, UTF8_TO_TCHAR(strerror(PosixSpawnErrNo)));
-		return FProcHandle();	// produce knowingly invalid handle if for some reason Fatal log (above) returns
+		UE_LOG(LogHAL, Error, TEXT("FUnixPlatformProcess::CreateProc: posix_spawnp() failed (%d, %s)"), PosixSpawnErrNo, UTF8_TO_TCHAR(strerror(PosixSpawnErrNo)));
+		return FProcHandle();
 	}
 
 	// renice the child (subject to race condition).
@@ -1112,7 +1205,7 @@ FProcState::~FProcState()
 	else if (IsRunning())
 	{
 		// warn about leaking a thread ;/
-		UE_LOG(LogHAL, Warning, TEXT("Process (pid=%d) is still running - we will reap it in a waiter thread, but the thread handle is going to be leaked."),
+		UE_LOG(LogHAL, Verbose, TEXT("Process (pid=%d) is still running - we will reap it in a waiter thread, but the thread handle is going to be leaked."),
 				 GetProcessId()
 			);
 
@@ -1290,6 +1383,8 @@ void FUnixPlatformProcess::TerminateProc( FProcHandle & ProcessHandle, bool Kill
 	}
 }
 
+static FDelegateHandle OnEndFrameHandle;
+
 /*
  * WaitAndFork on Unix
  *
@@ -1312,14 +1407,26 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 #ifndef WAIT_AND_FORK_PARENT_SHUTDOWN_EXIT_CODE
 	#define WAIT_AND_FORK_PARENT_SHUTDOWN_EXIT_CODE 0
 #endif
-
+#ifndef WAIT_AND_FORK_RESPONSE_TIMEOUT_EXIT_CODE
+	#define WAIT_AND_FORK_RESPONSE_TIMEOUT_EXIT_CODE 1
+#endif
+	
 	// Only works in -nothreading mode for now (probably best this way)
 	if (FPlatformProcess::SupportsMultithreading())
 	{
 		return EWaitAndForkResult::Error;
 	}
 
-	static TCircularQueue<int32> WaitAndForkSignalQueue(WAIT_AND_FORK_QUEUE_LENGTH);
+	struct FForkSignalData
+	{
+		FForkSignalData() = default;
+		FForkSignalData(int32 InSignal, double InTimeSeconds) : SignalValue(InSignal), TimeSeconds(InTimeSeconds) {}
+
+		int32 SignalValue = 0;
+		double TimeSeconds = 0.0;
+	};
+
+	static TCircularQueue<FForkSignalData> WaitAndForkSignalQueue(WAIT_AND_FORK_QUEUE_LENGTH);
 
 	// If we asked to fork up front without the need to send signals, just push the fork requests on the queue and we will refork them if they close
 	// This is mostly used in cases where there is no external process sending signals to this process to create forks and is a simple way to start or test
@@ -1329,7 +1436,7 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 	{
 		for (int32 ForkIdx = 0; ForkIdx < NumForks; ++ForkIdx)
 		{
-			WaitAndForkSignalQueue.Enqueue(ForkIdx + 1);
+			WaitAndForkSignalQueue.Enqueue(FForkSignalData(ForkIdx + 1, FPlatformTime::Seconds()));
 		}
 	}
 
@@ -1348,6 +1455,15 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 	// If we are asked to wait for a response signal, keep track of that here so we can behave differently in children.
 	const bool bRequireResponseSignal = FParse::Param(FCommandLine::Get(), TEXT("WaitAndForkRequireResponse"));
 
+	double WaitAndForkResponseTimeout = -1.0;
+	FParse::Value(FCommandLine::Get(), TEXT("-WaitAndForkResponseTimeout="), WaitAndForkResponseTimeout);
+	if (WaitAndForkResponseTimeout > 0.0)
+	{
+		UE_LOG(LogHAL, Log, TEXT("WaitAndFork setting WaitAndForkResponseTimeout to %0.2f seconds."), WaitAndForkResponseTimeout);
+	}
+
+	FCoreDelegates::OnParentBeginFork.Broadcast();
+
 	// Set up a signal handler for the signal to fork()
 	{
 		struct sigaction Action;
@@ -1357,7 +1473,7 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 		Action.sa_sigaction = [](int32 Signal, siginfo_t* Info, void* Context) {
 			if (Signal == WAIT_AND_FORK_QUEUE_SIGNAL && Info)
 			{
-				WaitAndForkSignalQueue.Enqueue(Info->si_value.sival_int);
+				WaitAndForkSignalQueue.Enqueue(FForkSignalData(Info->si_value.sival_int, FPlatformTime::Seconds()));
 			}
 		};
 		sigaction(WAIT_AND_FORK_QUEUE_SIGNAL, &Action, nullptr);
@@ -1368,11 +1484,11 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 
 	struct FMemoryStatsHolder
 	{
-		float AvailablePhysical;
-		float PeakUsedPhysical;
-		float PeakUsedVirtual;
+		double AvailablePhysical;
+		double PeakUsedPhysical;
+		double PeakUsedVirtual;
 
-		constexpr float ByteToMiB(uint64 InBytes) { return InBytes / (1024.f * 1024.f); }
+		constexpr double ByteToMiB(uint64 InBytes) { return static_cast<double>(InBytes) / (1024.0 * 1024.0); }
 
 		FMemoryStatsHolder(const FPlatformMemoryStats& PlatformStats)
 			: AvailablePhysical(ByteToMiB(PlatformStats.AvailablePhysical))
@@ -1393,16 +1509,25 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 		FPidAndSignal(pid_t InPid, int32 InSignalValue) : Pid(InPid), SignalValue(InSignalValue) {}
 	};
 	TArray<FPidAndSignal> AllChildren;
-	AllChildren.Reserve(1024); // Sized to be big enough that it probably wont reallocte, but its not the end of the world if it does.
+	AllChildren.Reserve(1024); // Sized to be big enough that it probably wont reallocate, but its not the end of the world if it does.
 	while (!IsEngineExitRequested())
 	{
 		BeginExitIfRequested();
 
-		int32 SignalValue = 0;
-		if (WaitAndForkSignalQueue.Dequeue(SignalValue))
+		FForkSignalData SignalData;
+		if (WaitAndForkSignalQueue.Dequeue(SignalData))
 		{
 			// Sleep for a short while to avoid spamming new processes to the OS all at once
 			FPlatformProcess::Sleep(WAIT_AND_FORK_CHILD_SPAWN_DELAY);
+
+			uint16 Cookie = (SignalData.SignalValue >> 16) & 0xffff;
+			uint16 ChildIdx = SignalData.SignalValue & 0xffff;
+
+			FDateTime SignalReceived = FDateTime::FromUnixTimestamp(FMath::FloorToInt64(SignalData.TimeSeconds));
+
+			FCoreDelegates::OnParentPreFork.Broadcast();
+
+			UE_LOG(LogHAL, Log, TEXT("[Parent] WaitAndFork processing child request %04hx-%04hx received at: %s"), Cookie, ChildIdx, *SignalReceived.ToString());
 
 			FMemoryStatsHolder CurrentMasterMemStats(FPlatformMemory::GetStats());
 			UE_LOG(LogHAL, Log, TEXT("MemoryStats PreFork: AvailablePhysical: %.02fMiB (%+.02fMiB), PeakPhysical: %.02fMiB, PeakVirtual: %.02fMiB"),
@@ -1415,6 +1540,8 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 			// Make sure there are no pending messages in the log.
 			GLog->Flush();
 
+			// This should be the very last thing we do before forking for optimal interaction with GMalloc
+			FForkProcessHelper::LowLevelPreFork();
 			// ******** The fork happens here! ********
 			pid_t ChildPID = fork();
 			// ******** The fork happened! This is now either the parent process or the new child process ********
@@ -1430,17 +1557,14 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 			}
 			else if (ChildPID == 0)
 			{
-				FForkProcessHelper::SetIsForkedChildProcess();
+				// This should be the very first thing we do after forking for optimal interaction with GMalloc
+				FForkProcessHelper::LowLevelPostForkChild(ChildIdx);
 
 				if (FPlatformMemory::HasForkPageProtectorEnabled())
 				{
 					UE::FForkPageProtector::OverrideGMalloc();
 					UE::FForkPageProtector::Get().ProtectMemoryRegions();
 				}
-
-				// Child
-				uint16 Cookie = (SignalValue >> 16) & 0xffff;
-				uint16 ChildIdx = SignalValue & 0xffff;
 
 				// Close the log state we inherited from our parent
 				GLog->TearDown();
@@ -1459,19 +1583,23 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 					{
 						FCommandLine::Set(*NewCmdLine);
 					}
+					else
+					{
+						UE_LOG(LogHAL, Error, TEXT("[Child] WaitAndFork child %04hx-%04hx failed to set command line from: %s"), Cookie, ChildIdx, *CmdLineFilename);
+					}
 				}
 
 				// Start up the log again
 				FPlatformOutputDevices::SetupOutputDevices();
-				GLog->SetCurrentThreadAsMasterThread();
+				GLog->SetCurrentThreadAsPrimaryThread();
 
 				// Set the process name, if specified
 				if (ChildIdx > 0)
 				{
-					if (prctl(PR_SET_NAME, TCHAR_TO_UTF8(*FString::Printf(TEXT("DS-%04x-%04x"), Cookie, ChildIdx))) != 0)
+					if (prctl(PR_SET_NAME, TCHAR_TO_UTF8(*FString::Printf(TEXT("DS-%04hx-%04hx"), Cookie, ChildIdx))) != 0)
 					{
 						int ErrNo = errno;
-						UE_LOG(LogHAL, Fatal, TEXT("WaitAndFork failed to set process name with prctl! error:%d"), ErrNo);
+						UE_LOG(LogHAL, Fatal, TEXT("[Child] WaitAndFork failed to set process name with prctl! error:%d"), ErrNo);
 					}
 				}
 
@@ -1494,18 +1622,38 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 					};
 					sigaction(WAIT_AND_FORK_RESPONSE_SIGNAL, &Action, nullptr);
 
-					UE_LOG(LogHAL, Log, TEXT("[Child] WaitAndFork child waiting for signal %d to proceed."), WAIT_AND_FORK_RESPONSE_SIGNAL);
+					const double StartChildWaitSeconds = FPlatformTime::Seconds();
+
+					UE_LOG(LogHAL, Log, TEXT("[Child] WaitAndFork child %04hx-%04hx waiting for signal %d to proceed."), Cookie, ChildIdx, WAIT_AND_FORK_RESPONSE_SIGNAL);
 					while (!IsEngineExitRequested() && !bResponseReceived)
 					{
 						FPlatformProcess::Sleep(1);
+
+						// Check to see how long we've been waiting and if we should time out.
+						if ((WaitAndForkResponseTimeout > 0.0) && ((FPlatformTime::Seconds() - StartChildWaitSeconds) > WaitAndForkResponseTimeout))
+						{
+							UE_LOG(LogHAL, Error, TEXT("[Child] WaitAndFork child %04hx-%04hx has exceeded WAIT_AND_FORK_RESPONSE_SIGNAL timeout"), Cookie, ChildIdx);
+							FPlatformMisc::RequestExitWithStatus(true, WAIT_AND_FORK_RESPONSE_TIMEOUT_EXIT_CODE);
+							break;
+						}
 					}
 
 					FMemory::Memzero(Action);
 					sigaction(WAIT_AND_FORK_RESPONSE_SIGNAL, &Action, nullptr);
 				}
 
-				UE_LOG(LogHAL, Log, TEXT("[Child] WaitAndFork child process has started with pid %d."), GetCurrentProcessId());
+				UE_LOG(LogHAL, Log, TEXT("[Child] WaitAndFork child process %04hx-%04hx has started with pid %d."), Cookie, ChildIdx, GetCurrentProcessId());
 				FApp::PrintStartupLogMessages();
+
+				OnEndFrameHandle = FCoreDelegates::OnEndFrame.AddStatic(FUnixPlatformProcess::OnChildEndFramePostFork);
+				FCoreDelegates::OnPostFork.Broadcast(EForkProcessRole::Child);
+
+#if UE_CHECK_LARGE_ALLOCATIONS
+				if (CVarEnableLargeAllocationChecksAfterFork.GetValueOnAnyThread())
+				{
+					UE::Memory::Private::CVarEnableLargeAllocationChecks->Set(true);
+				}
+#endif
 
 				// Children break out of the loop and return
 				RetVal = EWaitAndForkResult::Child;
@@ -1513,10 +1661,15 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 			}
 			else
 			{
-				// Parent
-				AllChildren.Emplace(ChildPID, SignalValue);
+				// This should be the very first thing we do after forking for optimal interaction with GMalloc
+				FForkProcessHelper::LowLevelPostForkParent();
 
-				UE_LOG(LogHAL, Log, TEXT("[Parent] WaitAndFork Successfully made a child with pid %d!"), ChildPID);
+				// Parent
+				AllChildren.Emplace(ChildPID, SignalData.SignalValue);
+
+				FCoreDelegates::OnPostFork.Broadcast(EForkProcessRole::Parent);
+
+				UE_LOG(LogHAL, Log, TEXT("[Parent] WaitAndFork Successfully processed request %04hx-%04hx, made a child with pid %d! Total number of children: %d."), Cookie, ChildIdx, ChildPID, AllChildren.Num());
 			}
 		}
 		else
@@ -1547,14 +1700,14 @@ FGenericPlatformProcess::EWaitAndForkResult FUnixPlatformProcess::WaitAndFork()
 					else if (NumForks > 0 && ChildPidAndSignal.SignalValue > 0 && ChildPidAndSignal.SignalValue <= NumForks)
 					{
 						UE_LOG(LogHAL, Log, TEXT("[Parent] WaitAndFork child %d missing. This was NumForks child %d. Relaunching..."), ChildPidAndSignal.Pid, ChildPidAndSignal.SignalValue);
-						WaitAndForkSignalQueue.Enqueue(ChildPidAndSignal.SignalValue);
+						WaitAndForkSignalQueue.Enqueue(FForkSignalData(ChildPidAndSignal.SignalValue, FPlatformTime::Seconds()));
 					}
 					else
 					{
 						UE_LOG(LogHAL, Log, TEXT("[Parent] WaitAndFork child %d missing. Removing from children list..."), ChildPidAndSignal.Pid);
 					}
 
-					AllChildren.RemoveAt(ChildIdx, 1, false);
+					AllChildren.RemoveAt(ChildIdx, 1, EAllowShrinking::No);
 				}
 			}
 		}
@@ -1652,20 +1805,42 @@ bool FUnixPlatformProcess::IsApplicationRunning( const TCHAR* ProcName )
 	return !system(TCHAR_TO_UTF8(*Commandline));
 }
 
-bool FUnixPlatformProcess::ExecProcess(const TCHAR* URL, const TCHAR* Params, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr, const TCHAR* OptionalWorkingDirectory)
+static bool ReadPipeToStr(void *PipeRead, FString *OutStr)
+{
+	if (PipeRead)
+	{
+		FString NewLine = FPlatformProcess::ReadPipe(PipeRead);
+
+		if (NewLine.Len() > 0)
+		{
+			if (OutStr != nullptr)
+			{
+				*OutStr += NewLine;
+			}
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool FUnixPlatformProcess::ExecProcess(const TCHAR* URL, const TCHAR* Params, int32* OutReturnCode, FString* OutStdOut, FString* OutStdErr, const TCHAR* OptionalWorkingDirectory, bool bShouldEndWithParentProcess)
 {
 	FString CmdLineParams = Params;
 	FString ExecutableFileName = URL;
 	int32 ReturnCode = -1;
-	FString DefaultError;
-	if (!OutStdErr)
-	{
-		OutStdErr = &DefaultError;
-	}
 
-	void* PipeRead = nullptr;
-	void* PipeWrite = nullptr;
-	verify(FPlatformProcess::CreatePipe(PipeRead, PipeWrite));
+	void* PipeReadStdOut = nullptr;
+	void* PipeWriteStdOut = nullptr;
+	verify(FPlatformProcess::CreatePipe(PipeReadStdOut, PipeWriteStdOut));
+
+	void* PipeReadStdErr = nullptr;
+	void* PipeWriteStdErr = nullptr;
+	if (OutStdErr)
+	{
+		verify(FPlatformProcess::CreatePipe(PipeReadStdErr, PipeWriteStdErr));
+	}
 
 	bool bInvoked = false;
 
@@ -1673,34 +1848,30 @@ bool FUnixPlatformProcess::ExecProcess(const TCHAR* URL, const TCHAR* Params, in
 	const bool bLaunchHidden = false;
 	const bool bLaunchReallyHidden = bLaunchHidden;
 
-	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*ExecutableFileName, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, OptionalWorkingDirectory, PipeWrite);
+	FProcHandle ProcHandle = FPlatformProcess::CreateProc(*ExecutableFileName, *CmdLineParams, bLaunchDetached, bLaunchHidden, bLaunchReallyHidden, NULL, 0, OptionalWorkingDirectory, PipeWriteStdOut, nullptr, PipeWriteStdErr);
+
 	if (ProcHandle.IsValid())
 	{
 		while (FPlatformProcess::IsProcRunning(ProcHandle))
 		{
-			FString NewLine = FPlatformProcess::ReadPipe(PipeRead);
-			if (NewLine.Len() > 0)
-			{
-				if (OutStdOut != nullptr)
-				{
-					*OutStdOut += NewLine;
-				}
-			}
+			ReadPipeToStr(PipeReadStdOut, OutStdOut);
+			ReadPipeToStr(PipeReadStdErr, OutStdErr);
 			FPlatformProcess::Sleep(0.5);
 		}
 
-		// read the remainder
-		for(;;)
+		// Read the remainder
+		bool bReadingStdOut = true;
+		bool bReadingStdErr = true;
+		while (bReadingStdOut || bReadingStdErr)
 		{
-			FString NewLine = FPlatformProcess::ReadPipe(PipeRead);
-			if (NewLine.Len() <= 0)
+			if (bReadingStdOut && !ReadPipeToStr(PipeReadStdOut, OutStdOut))
 			{
-				break;
+				bReadingStdOut = false;
 			}
 
-			if (OutStdOut != nullptr)
+			if (bReadingStdErr && !ReadPipeToStr(PipeReadStdErr, OutStdErr))
 			{
-				*OutStdOut += NewLine;
+				bReadingStdErr = false;
 			}
 		}
 
@@ -1727,13 +1898,19 @@ bool FUnixPlatformProcess::ExecProcess(const TCHAR* URL, const TCHAR* Params, in
 		{
 			*OutStdOut = "";
 		}
+		if (OutStdErr != nullptr)
+		{
+			*OutStdErr = "";
+		}
 		UE_LOG(LogHAL, Warning, TEXT("Failed to launch Tool. (%s)"), *ExecutableFileName);
 	}
-	FPlatformProcess::ClosePipe(PipeRead, PipeWrite);
+
+	FPlatformProcess::ClosePipe(PipeReadStdOut, PipeWriteStdOut);
+	FPlatformProcess::ClosePipe(PipeReadStdErr, PipeWriteStdErr);
 	return bInvoked;
 }
 
-void FUnixPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* FileName, const TCHAR* Parms, ELaunchVerb::Type Verb )
+bool FUnixPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* FileName, const TCHAR* Parms, ELaunchVerb::Type Verb, bool bPromptToOpenOnFailure)
 {
 	// TODO This ignores parms and verb
 	pid_t pid = fork();
@@ -1741,6 +1918,8 @@ void FUnixPlatformProcess::LaunchFileInDefaultExternalApplication( const TCHAR* 
 	{
 		exit(execl("/usr/bin/xdg-open", "xdg-open", TCHAR_TO_UTF8(FileName), (char *)0));
 	}
+
+	return pid != -1;
 }
 
 void FUnixPlatformProcess::ExploreFolder( const TCHAR* FilePath )
@@ -1893,7 +2072,6 @@ bool FUnixPlatformProcess::IsFirstInstance()
 	static bool bIsFirstInstance = false;
 	static bool bNeverFirst = FParse::Param(FCommandLine::Get(), TEXT("neverfirst"));
 
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
 	if (!bIsFirstInstance && !bNeverFirst)	// once we determined that we're first, this can never change until we exit; otherwise, we re-check each time
 	{
 		// create the file if it doesn't exist
@@ -1903,7 +2081,7 @@ bool FUnixPlatformProcess::IsFirstInstance()
 			FString ExecPath(FPlatformProcess::ExecutableName());
 			ExecPath.ReplaceInline(TEXT("/"), TEXT("-"), ESearchCase::CaseSensitive);
 			// [RCL] 2015-09-20: can run out of filename limits (256 bytes) due to a long path, be conservative and assume 4-char UTF-8 name like e.g. Japanese
-			ExecPath.RightInline(80, false);
+			ExecPath.RightInline(80, EAllowShrinking::No);
 
 			LockFileName += ExecPath;
 
@@ -1924,13 +2102,12 @@ bool FUnixPlatformProcess::IsFirstInstance()
 			}
 		}
 	}
-#endif
+
 	return bIsFirstInstance;
 }
 
 void FUnixPlatformProcess::CeaseBeingFirstInstance()
 {
-#if !(UE_BUILD_SHIPPING && WITH_EDITOR)
 	if (GFileLockDescriptor != -1)
 	{
 		// may fail if we didn't have the lock
@@ -1938,5 +2115,80 @@ void FUnixPlatformProcess::CeaseBeingFirstInstance()
 		close(GFileLockDescriptor);
 		GFileLockDescriptor = -1;
 	}
-#endif
+}
+
+void FUnixPlatformProcess::OnChildEndFramePostFork()
+{
+	FCoreDelegates::OnEndFrame.Remove(OnEndFrameHandle);
+	OnEndFrameHandle.Reset();
+
+	FCoreDelegates::OnChildEndFramePostFork.Broadcast();
+}
+
+int32 FUnixPlatformProcess::TranslateThreadPriority(EThreadPriority Priority)
+{
+	// In general, the range is -20 to 19 (negative is highest, positive is lowest)
+	int32 NiceLevel = 0;
+	switch (Priority)
+	{
+		case TPri_TimeCritical:
+			NiceLevel = -20;
+			break;
+
+		case TPri_Highest:
+			NiceLevel = -15;
+			break;
+
+		case TPri_AboveNormal:
+			NiceLevel = -10;
+			break;
+
+		case TPri_Normal:
+			NiceLevel = 0;
+			break;
+
+		case TPri_SlightlyBelowNormal:
+			NiceLevel = 3;
+			break;
+
+		case TPri_BelowNormal:
+			NiceLevel = 5;
+			break;
+
+		case TPri_Lowest:
+			NiceLevel = 10;		// 19 is a total starvation
+			break;
+
+		default:
+			UE_LOG(LogHAL, Fatal, TEXT("Unknown Priority passed to FRunnableThreadPThread::TranslateThreadPriority()"));
+			return 0;
+	}
+
+	// note: a non-privileged process can only go as low as RLIMIT_NICE
+	return NiceLevel;
+}
+
+void FUnixPlatformProcess::SetThreadNiceValue(uint32_t ThreadId, int32 NiceValue)
+{
+	// We still try to set priority, but failure is not considered as an error
+	if (setpriority(PRIO_PROCESS, ThreadId, NiceValue) != 0 && WITH_PROCESS_PRIORITY_CONTROL)
+	{
+		static bool bIsLogged = false;
+		if (!bIsLogged)
+		{
+			bIsLogged = true;
+			// Unfortunately this is going to be a frequent occurence given that by default Unix doesn't allow raising priorities.
+			// NOTE: In WSL run "sudo prlimit --nice=40 --pid $$" to promote current shell to change nice values.
+			int ErrNo = errno;
+			UE_LOG(LogHAL, Error, TEXT("Can't set nice to %d. Reason = %s. Do you have CAP_SYS_NICE capability?"), NiceValue, ANSI_TO_TCHAR(strerror(ErrNo)));
+		}
+	}
+}
+
+void FUnixPlatformProcess::SetThreadPriority(EThreadPriority NewPriority)
+{
+	uint32 ThreadId = FPlatformTLS::GetCurrentThreadId();
+	int32 NiceValue = FUnixPlatformProcess::TranslateThreadPriority(NewPriority);
+
+	FUnixPlatformProcess::SetThreadNiceValue(ThreadId, NiceValue);
 }

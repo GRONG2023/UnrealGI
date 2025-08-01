@@ -5,6 +5,9 @@
 #include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "Kismet/GameplayStatics.h"
+#include "Misc/App.h"
+
+const int32 IXRTrackingSystem::HMDDeviceId;
 
 void IXRTrackingSystem::GetHMDData(UObject* WorldContext, FXRHMDData& HMDData)
 {
@@ -27,8 +30,20 @@ void IXRTrackingSystem::GetHMDData(UObject* WorldContext, FXRHMDData& HMDData)
 bool IXRTrackingSystem::IsHeadTrackingAllowedForWorld(UWorld& World) const
 {
 #if WITH_EDITOR
-	// For VR PIE only the first instance uses the headset
-	return IsHeadTrackingAllowed() && ((World.WorldType != EWorldType::PIE) || (World.GetOutermost()->PIEInstanceID == 0));
+	// For VR PIE only the primary instance uses the headset.
+
+	if (!IsHeadTrackingAllowed())
+	{
+		return false;
+	}
+
+	if (World.WorldType != EWorldType::PIE)
+	{
+		return true;
+	}
+
+	FWorldContext* const WorldContext = GEngine->GetWorldContextFromWorld(&World);
+	return WorldContext && WorldContext->bIsPrimaryPIEInstance;
 #else
 	return IsHeadTrackingAllowed();
 #endif

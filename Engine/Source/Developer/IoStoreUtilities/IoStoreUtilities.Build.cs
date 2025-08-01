@@ -13,11 +13,23 @@ public class IoStoreUtilities : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[] {
             "Core",
             "CoreUObject",
-            "Projects",
-            "AssetRegistry",
-        });
-        PrivateDependencyModuleNames.Add("PakFile");
+			"AssetRegistry",
+			"CookMetadata",
+			"Projects",
+			"Zen",
+			"RenderCore",
+			"Sockets",
+		});
+
+		PublicIncludePathModuleNames.AddRange(new string[] {
+			"Zen",
+		});
+
+		PrivateDependencyModuleNames.Add("PakFile");
         PrivateDependencyModuleNames.Add("Json");
         PrivateDependencyModuleNames.Add("RSA");
+        PrivateDependencyModuleNames.Add("DeveloperToolSettings");
+        PrivateDependencyModuleNames.Add("SandboxFile");
+        PrivateDependencyModuleNames.Add("IoStoreOnDemand");
 	}
 }

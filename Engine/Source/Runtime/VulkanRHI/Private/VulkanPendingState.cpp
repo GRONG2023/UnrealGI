@@ -31,12 +31,25 @@ FVulkanDescriptorPool::FVulkanDescriptorPool(FVulkanDevice* InDevice, const FVul
 		uint32 NumTypesUsed = Layout.GetTypesUsed(DescriptorType);
 		if (NumTypesUsed > 0)
 		{
-			VkDescriptorPoolSize* Type = new(Types) VkDescriptorPoolSize;
-			FMemory::Memzero(*Type);
-			Type->type = DescriptorType;
-			Type->descriptorCount = NumTypesUsed * MaxSetsAllocations;
+			VkDescriptorPoolSize& Type = Types.AddDefaulted_GetRef();
+			FMemory::Memzero(Type);
+			Type.type = DescriptorType;
+			Type.descriptorCount = NumTypesUsed * MaxSetsAllocations;
 		}
 	}
+
+#if VULKAN_RHI_RAYTRACING
+	{
+		uint32 NumTypesUsed = Layout.GetTypesUsed(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR);
+		if (NumTypesUsed > 0)
+		{
+			VkDescriptorPoolSize& Type = Types.AddDefaulted_GetRef();
+			FMemory::Memzero(Type);
+			Type.type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+			Type.descriptorCount = NumTypesUsed * MaxSetsAllocations;
+		}
+	}
+#endif
 
 	VkDescriptorPoolCreateInfo PoolInfo;
 	ZeroVulkanStruct(PoolInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
@@ -74,6 +87,12 @@ void FVulkanDescriptorPool::TrackAddUsage(const FVulkanDescriptorSetsLayout& InL
 		ensure(Layout.GetTypesUsed((VkDescriptorType)TypeIndex) == InLayout.GetTypesUsed((VkDescriptorType)TypeIndex));
 	}
 
+#if VULKAN_RHI_RAYTRACING
+	{
+		ensure(Layout.GetTypesUsed(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) == InLayout.GetTypesUsed(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR));
+	}
+#endif
+
 	NumAllocatedDescriptorSets += InLayout.GetLayouts().Num();
 	PeakAllocatedDescriptorSets = FMath::Max(NumAllocatedDescriptorSets, PeakAllocatedDescriptorSets);
 }
@@ -84,6 +103,12 @@ void FVulkanDescriptorPool::TrackRemoveUsage(const FVulkanDescriptorSetsLayout& 
 	{
 		check(Layout.GetTypesUsed((VkDescriptorType)TypeIndex) == InLayout.GetTypesUsed((VkDescriptorType)TypeIndex));
 	}
+
+#if VULKAN_RHI_RAYTRACING
+	{
+		check(Layout.GetTypesUsed(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) == InLayout.GetTypesUsed(VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR));
+	}
+#endif
 
 	NumAllocatedDescriptorSets -= InLayout.GetLayouts().Num();
 }
@@ -273,7 +298,7 @@ void FVulkanDescriptorPoolsManager::GC()
 		auto* PoolSet = PoolSets[Index];
 		if (PoolSet->IsUnused() && GFrameNumberRenderThread - PoolSet->GetLastFrameUsed() > NUM_FRAMES_TO_WAIT_BEFORE_RELEASING_TO_OS)
 		{
-			PoolSets.RemoveAtSwap(Index, 1, true);
+			PoolSets.RemoveAtSwap(Index, 1, EAllowShrinking::Yes);
 
 			if (AsyncDeletionTask)
 			{
@@ -306,59 +331,16 @@ FVulkanPendingComputeState::~FVulkanPendingComputeState()
 	}
 }
 
-
 void FVulkanPendingComputeState::SetSRVForUBResource(uint32 DescriptorSet, uint32 BindingIndex, FVulkanShaderResourceView* SRV)
 {
-	if (SRV)
-	{
-		// make sure any dynamically backed SRV points to current memory
-		SRV->UpdateView();
-		if (SRV->BufferViews.Num() != 0)
-		{
-			FVulkanBufferView* BufferView = SRV->GetBufferView();
-			checkf(BufferView->View != VK_NULL_HANDLE, TEXT("Empty SRV"));
-			CurrentState->SetSRVBufferViewState(DescriptorSet, BindingIndex, BufferView);
-		}
-		else if (SRV->SourceStructuredBuffer)
-		{
-			CurrentState->SetStorageBuffer(DescriptorSet, BindingIndex, SRV->SourceStructuredBuffer);
-		}
-		else
-		{
-			checkf(SRV->TextureView.View != VK_NULL_HANDLE, TEXT("Empty SRV"));
-			const FVulkanImageLayout& Layout = Context.GetLayoutManager().GetFullLayoutChecked(SRV->TextureView.Image);
-			CurrentState->SetSRVTextureView(DescriptorSet, BindingIndex, SRV->TextureView, Layout.GetSubresLayout(SRV->FirstArraySlice, SRV->MipLevel));
-		}
-	}
-	else
-	{
-		//CurrentState->SetSRVBufferViewState(BindIndex, nullptr);
-	}
+	check(SRV);
+	CurrentState->SetSRV(Context.GetCommandBufferManager()->GetActiveCmdBuffer(), true, DescriptorSet, BindingIndex, SRV);
 }
 
 void FVulkanPendingComputeState::SetUAVForUBResource(uint32 DescriptorSet, uint32 BindingIndex, FVulkanUnorderedAccessView* UAV)
 {
-	if (UAV)
-	{
-		// make sure any dynamically backed UAV points to current memory
-		UAV->UpdateView();
-		if (UAV->SourceStructuredBuffer)
-		{
-			CurrentState->SetStorageBuffer(DescriptorSet, BindingIndex, UAV->SourceStructuredBuffer);
-		}
-		else if (UAV->BufferView)
-		{
-			CurrentState->SetUAVTexelBufferViewState(DescriptorSet, BindingIndex, UAV->BufferView);
-		}
-		else if (UAV->SourceTexture)
-		{
-			CurrentState->SetUAVTextureView(DescriptorSet, BindingIndex, UAV->TextureView, VK_IMAGE_LAYOUT_GENERAL);
-		}
-		else
-		{
-			ensure(0);
-		}
-	}
+	check(UAV);
+	CurrentState->SetUAV(Context.GetCommandBufferManager()->GetActiveCmdBuffer(), true, DescriptorSet, BindingIndex, UAV);
 }
 
 
@@ -370,11 +352,17 @@ void FVulkanPendingComputeState::PrepareForDispatch(FVulkanCmdBuffer* InCmdBuffe
 
 	check(CurrentState);
 
-	const bool bHasDescriptorSets = CurrentState->UpdateDescriptorSets(&Context, InCmdBuffer);
-
 	VkCommandBuffer CmdBuffer = InCmdBuffer->GetHandle();
 
+	if (Device->SupportsBindless())
 	{
+		CurrentState->UpdateBindlessDescriptors(&Context, InCmdBuffer);
+		CurrentPipeline->Bind(CmdBuffer);
+	}
+	else
+	{
+		const bool bHasDescriptorSets = CurrentState->UpdateDescriptorSets(&Context, InCmdBuffer);
+
 		//#todo-rco: Move this to SetComputePipeline()
 #if VULKAN_ENABLE_AGGRESSIVE_STATS
 		SCOPE_CYCLE_COUNTER(STAT_VulkanPipelineBind);
@@ -406,20 +394,29 @@ void FVulkanPendingGfxState::PrepareForDraw(FVulkanCmdBuffer* CmdBuffer)
 
 	check(CmdBuffer->bHasPipeline);
 
-	// TODO: Add 'dirty' flag? Need to rebind only on PSO change
-	if (CurrentPipeline->bHasInputAttachments)
+	if (Device->SupportsBindless())
 	{
-		FVulkanFramebuffer* CurrentFramebuffer = Context.GetLayoutManager().CurrentFramebuffer;
-		UpdateInputAttachments(CurrentFramebuffer);
+		check(!CurrentPipeline->bHasInputAttachments); // todo-jn: bindless + InputAttachments
+		UpdateDynamicStates(CmdBuffer);
+		CurrentState->UpdateBindlessDescriptors(&Context, CmdBuffer);
 	}
-	
-	bool bHasDescriptorSets = CurrentState->UpdateDescriptorSets(&Context, CmdBuffer);
-
-	UpdateDynamicStates(CmdBuffer);
-
-	if (bHasDescriptorSets)
+	else
 	{
-		CurrentState->BindDescriptorSets(CmdBuffer->GetHandle());
+		// TODO: Add 'dirty' flag? Need to rebind only on PSO change
+		if (CurrentPipeline->bHasInputAttachments)
+		{
+			FVulkanFramebuffer* CurrentFramebuffer = Context.GetCurrentFramebuffer();
+			UpdateInputAttachments(CurrentFramebuffer);
+		}
+
+		const bool bHasDescriptorSets = CurrentState->UpdateDescriptorSets(&Context, CmdBuffer);
+
+		UpdateDynamicStates(CmdBuffer);
+
+		if (bHasDescriptorSets)
+		{
+			CurrentState->BindDescriptorSets(CmdBuffer->GetHandle());
+		}
 	}
 
 	if (bDirtyVertexStreams)
@@ -500,33 +497,35 @@ void FVulkanPendingGfxState::PrepareForDraw(FVulkanCmdBuffer* CmdBuffer)
 
 void FVulkanPendingGfxState::InternalUpdateDynamicStates(FVulkanCmdBuffer* Cmd)
 {
-	bool bInCmdNeedsDynamicState = Cmd->bNeedsDynamicStateSet;
-
-	bool bNeedsUpdateViewport = !Cmd->bHasViewport || (FMemory::Memcmp((const void*)&Cmd->CurrentViewport, (const void*)&Viewport, sizeof(VkViewport)) != 0);
+	const bool bNeedsUpdateViewport = !Cmd->bHasViewport || Viewports.Num() != Cmd->CurrentViewports.Num() || (FMemory::Memcmp((const void*)Cmd->CurrentViewports.GetData(), (const void*)Viewports.GetData(), Viewports.Num() * sizeof(VkViewport)) != 0);
 	// Validate and update Viewport
 	if (bNeedsUpdateViewport)
 	{
-		ensure(Viewport.width > 0 || Viewport.height > 0);
+		// it is legal to pass a zero-area viewport, and the higher level expectation (see e.g. FProjectedShadowInfo::SetupProjectionStencilMask()) is that
+		// such viewport is going to be essentially disabled.
 
-		// Flip viewport on Y-axis to be uniform between HLSLcc and DXC generated SPIR-V shaders (requires VK_KHR_maintenance1 extension)
-		VkViewport FlippedViewport = Viewport;
-		FlippedViewport.y += FlippedViewport.height;
-		FlippedViewport.height = -FlippedViewport.height;
-		VulkanRHI::vkCmdSetViewport(Cmd->GetHandle(), 0, 1, &FlippedViewport);
+		// Flip viewport on Y-axis to be uniform between DXC generated SPIR-V shaders (requires VK_KHR_maintenance1 extension)
+		TArray<VkViewport, TInlineAllocator<2>> FlippedViewports = Viewports;
+		for (VkViewport& FlippedViewport : FlippedViewports)
+		{
+			FlippedViewport.y += FlippedViewport.height;
+			FlippedViewport.height = -FlippedViewport.height;
+		}
+		VulkanRHI::vkCmdSetViewport(Cmd->GetHandle(), 0, FlippedViewports.Num(), FlippedViewports.GetData());
 
-		FMemory::Memcpy(Cmd->CurrentViewport, Viewport);
+		Cmd->CurrentViewports = Viewports;
 		Cmd->bHasViewport = true;
 	}
 
-	bool bNeedsUpdateScissor = !Cmd->bHasScissor || (FMemory::Memcmp((const void*)&Cmd->CurrentScissor, (const void*)&Scissor, sizeof(VkRect2D)) != 0);
+	const bool bNeedsUpdateScissor = !Cmd->bHasScissor || Scissors.Num() != Cmd->CurrentScissors.Num() || (FMemory::Memcmp((const void*)Cmd->CurrentScissors.GetData(), (const void*)Scissors.GetData(), Scissors.Num() * sizeof(VkRect2D)) != 0);
 	if (bNeedsUpdateScissor)
 	{
-		VulkanRHI::vkCmdSetScissor(Cmd->GetHandle(), 0, 1, &Scissor);
-		FMemory::Memcpy(Cmd->CurrentScissor, Scissor);
+		VulkanRHI::vkCmdSetScissor(Cmd->GetHandle(), 0, Scissors.Num(), Scissors.GetData());
+		Cmd->CurrentScissors = Scissors;
 		Cmd->bHasScissor = true;
 	}
 
-	bool bNeedsUpdateStencil = !Cmd->bHasStencilRef || (Cmd->CurrentStencilRef != StencilRef);
+	const bool bNeedsUpdateStencil = !Cmd->bHasStencilRef || (Cmd->CurrentStencilRef != StencilRef);
 	if (bNeedsUpdateStencil)
 	{
 		VulkanRHI::vkCmdSetStencilReference(Cmd->GetHandle(), VK_STENCIL_FRONT_AND_BACK, StencilRef);
@@ -550,8 +549,6 @@ void FVulkanPendingGfxState::UpdateInputAttachments(FVulkanFramebuffer* Framebuf
 		switch (AttachmentData.Type)
 		{
 		case FVulkanShaderHeader::EAttachmentType::Color0:
-			CurrentState->SetInputAttachment(AttachmentData.DescriptorSet, AttachmentData.BindingIndex, Framebuffer->AttachmentTextureViews[0], VK_IMAGE_LAYOUT_GENERAL);
-			break;
 		case FVulkanShaderHeader::EAttachmentType::Color1:
 		case FVulkanShaderHeader::EAttachmentType::Color2:
 		case FVulkanShaderHeader::EAttachmentType::Color3:
@@ -560,7 +557,7 @@ void FVulkanPendingGfxState::UpdateInputAttachments(FVulkanFramebuffer* Framebuf
 		case FVulkanShaderHeader::EAttachmentType::Color6:
 		case FVulkanShaderHeader::EAttachmentType::Color7:
 			check(ColorIndex < Framebuffer->GetNumColorAttachments());
-			CurrentState->SetInputAttachment(AttachmentData.DescriptorSet, AttachmentData.BindingIndex, Framebuffer->AttachmentTextureViews[ColorIndex], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+			CurrentState->SetInputAttachment(AttachmentData.DescriptorSet, AttachmentData.BindingIndex, Framebuffer->AttachmentTextureViews[ColorIndex]->GetTextureView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 			break;
 		case FVulkanShaderHeader::EAttachmentType::Depth:
 			CurrentState->SetInputAttachment(AttachmentData.DescriptorSet, AttachmentData.BindingIndex, Framebuffer->GetPartialDepthTextureView(), VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
@@ -573,58 +570,14 @@ void FVulkanPendingGfxState::UpdateInputAttachments(FVulkanFramebuffer* Framebuf
 
 void FVulkanPendingGfxState::SetSRVForUBResource(uint8 DescriptorSet, uint32 BindingIndex, FVulkanShaderResourceView* SRV)
 {
-	if (SRV)
-	{
-		// make sure any dynamically backed SRV points to current memory
-		SRV->UpdateView();
-		if (SRV->BufferViews.Num() != 0)
-		{
-			FVulkanBufferView* BufferView = SRV->GetBufferView();
-			checkf(BufferView->View != VK_NULL_HANDLE, TEXT("Empty SRV"));
-
-			CurrentState->SetSRVBufferViewState(DescriptorSet, BindingIndex, BufferView);
-		}
-		else if (SRV->SourceStructuredBuffer)
-		{
-			CurrentState->SetStorageBuffer(DescriptorSet, BindingIndex, SRV->SourceStructuredBuffer);
-		}
-		else
-		{
-			checkf(SRV->TextureView.View != VK_NULL_HANDLE, TEXT("Empty SRV"));
-			const FVulkanImageLayout& Layout = Context.GetLayoutManager().GetFullLayoutChecked(SRV->TextureView.Image);
-			CurrentState->SetSRVTextureView(DescriptorSet, BindingIndex, SRV->TextureView, Layout.GetSubresLayout(SRV->FirstArraySlice, SRV->MipLevel));
-		}
-	}
-	else
-	{
-		//CurrentState->SetSRVBufferViewState(Stage, BindIndex, nullptr);
-	}
+	check(SRV);
+	CurrentState->SetSRV(Context.GetCommandBufferManager()->GetActiveCmdBuffer(), false, DescriptorSet, BindingIndex, SRV);
 }
 
 void FVulkanPendingGfxState::SetUAVForUBResource(uint8 DescriptorSet, uint32 BindingIndex, FVulkanUnorderedAccessView* UAV)
 {
-	if (UAV)
-	{
-		// make sure any dynamically backed UAV points to current memory
-		UAV->UpdateView();
-		if (UAV->SourceStructuredBuffer)
-		{
-			CurrentState->SetStorageBuffer(DescriptorSet, BindingIndex, UAV->SourceStructuredBuffer);
-		}
-		else if (UAV->BufferView)
-		{
-			CurrentState->SetUAVTexelBufferViewState(DescriptorSet, BindingIndex, UAV->BufferView);
-		}
-		else if (UAV->SourceTexture)
-		{
-			VkImageLayout Layout = Context.GetLayoutManager().FindLayoutChecked(UAV->TextureView.Image);
-			CurrentState->SetUAVTextureView(DescriptorSet, BindingIndex, UAV->TextureView, Layout);
-		}
-		else
-		{
-			ensure(0);
-		}
-	}
+	check(UAV);
+	CurrentState->SetUAV(Context.GetCommandBufferManager()->GetActiveCmdBuffer(), false, DescriptorSet, BindingIndex, UAV);
 }
 
 int32 GDSetCacheTargetSetsPerPool = 4096;
@@ -643,78 +596,44 @@ FAutoConsoleVariableRef CVarDSetCacheMaxPoolLookups(
 	ECVF_ReadOnly | ECVF_RenderThreadSafe
 );
 
-FVulkanGenericDescriptorPool::FVulkanGenericDescriptorPool(FVulkanDevice* InDevice, uint32 InMaxDescriptorSets)
+const float DefaultPoolSizes[VK_DESCRIPTOR_TYPE_RANGE_SIZE] = 
+{
+	2,		// VK_DESCRIPTOR_TYPE_SAMPLER
+	2,		// VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+	2,		// VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE
+	1/8.0,	// VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+	1/2.0,	// VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER
+	1/8.0,	// VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER
+	1/4.0,	// VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+	1/8.0,	// VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+	4,		// VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+	1/8.0,	// VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+	1/8.0	// VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT
+};
+
+FVulkanGenericDescriptorPool::FVulkanGenericDescriptorPool(FVulkanDevice* InDevice, uint32 InMaxDescriptorSets, const float PoolSizesRatio[VK_DESCRIPTOR_TYPE_RANGE_SIZE])
 	: Device(InDevice)
 	, MaxDescriptorSets(InMaxDescriptorSets)
 	, DescriptorPool(VK_NULL_HANDLE)
 {
-	// Based on statisticts of runing BR_50v50.replay
-	// TODO Need a better solution
-	const uint32 LimitMaxUniformBuffers = MaxDescriptorSets * 2;
-	const uint32 LimitMaxSamplers = MaxDescriptorSets / 2;
-	const uint32 LimitMaxCombinedImageSamplers = MaxDescriptorSets * 3;
-	const uint32 LimitMaxUniformTexelBuffers = MaxDescriptorSets / 2;
-	const uint32 LimitMaxStorageTexelBuffers = MaxDescriptorSets / 4;
-	const uint32 LimitMaxStorageBuffers = MaxDescriptorSets / 4;
-	const uint32 LimitMaxStorageImage = MaxDescriptorSets / 4;
-	const uint32 LimitMaxSampledImages = MaxDescriptorSets * 2;
-	const uint32 LimitMaxInputAttachments = MaxDescriptorSets / 16;
+	VkDescriptorPoolSize Types[VK_DESCRIPTOR_TYPE_RANGE_SIZE];
+	FMemory::Memzero(Types);
 
-	TArray<VkDescriptorPoolSize> Types;
-	VkDescriptorPoolSize* Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	Type->descriptorCount = LimitMaxUniformBuffers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-	Type->descriptorCount = LimitMaxUniformBuffers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_SAMPLER;
-	Type->descriptorCount = LimitMaxSamplers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	Type->descriptorCount = LimitMaxCombinedImageSamplers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	Type->descriptorCount = LimitMaxSampledImages;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
-	Type->descriptorCount = LimitMaxUniformTexelBuffers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
-	Type->descriptorCount = LimitMaxStorageTexelBuffers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	Type->descriptorCount = LimitMaxStorageBuffers;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	Type->descriptorCount = LimitMaxStorageImage;
-
-	Type = new(Types) VkDescriptorPoolSize;
-	FMemory::Memzero(*Type);
-	Type->type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
-	Type->descriptorCount = LimitMaxInputAttachments;
+	for (uint32 i = 0; i < VK_DESCRIPTOR_TYPE_RANGE_SIZE; ++i)
+	{
+		VkDescriptorType DescriptorType = static_cast<VkDescriptorType>(VK_DESCRIPTOR_TYPE_BEGIN_RANGE + i);
+		
+		float MinSize = FMath::Max(DefaultPoolSizes[i]*InMaxDescriptorSets, 4.0f);
+		PoolSizes[i] = (uint32)FMath::Max(PoolSizesRatio[i]*InMaxDescriptorSets, MinSize);
+		
+		Types[i].type = DescriptorType;
+		Types[i].descriptorCount = PoolSizes[i];
+	}
 
 	VkDescriptorPoolCreateInfo PoolInfo;
 	ZeroVulkanStruct(PoolInfo, VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO);
-	PoolInfo.poolSizeCount = Types.Num();
-	PoolInfo.pPoolSizes = Types.GetData();
+	PoolInfo.poolSizeCount = VK_DESCRIPTOR_TYPE_RANGE_SIZE;
+	PoolInfo.pPoolSizes = Types;
 	PoolInfo.maxSets = MaxDescriptorSets;
 
 #if VULKAN_ENABLE_AGGRESSIVE_STATS
@@ -761,7 +680,7 @@ FVulkanDescriptorSetCache::FVulkanDescriptorSetCache(FVulkanDevice* InDevice)
 	, PoolAllocRatio(0.0f)
 {
 	constexpr uint32 ProbePoolMaxNumSets = 128; // Used for initial estimation of the Allocation Ratio
-	CachedPools.Add(MakeUnique<FCachedPool>(Device, ProbePoolMaxNumSets));
+	CachedPools.Add(MakeUnique<FCachedPool>(Device, ProbePoolMaxNumSets, DefaultPoolSizes));
 }
 
 FVulkanDescriptorSetCache::~FVulkanDescriptorSetCache()
@@ -782,20 +701,24 @@ void FVulkanDescriptorSetCache::AddCachedPool()
 	{
 		constexpr float MinErrorTolerance = -0.10f;
 		constexpr float MaxErrorTolerance = 0.50f;
-		const float Error = ((static_cast<float>(FreePool->GetMaxDescriptorSets()) -
-			static_cast<float>(MaxDescriptorSets)) / static_cast<float>(MaxDescriptorSets));
+		const float Error = ((static_cast<float>(FreePool->GetMaxDescriptorSets()) - static_cast<float>(MaxDescriptorSets)) / static_cast<float>(MaxDescriptorSets));
 		if ((Error >= MinErrorTolerance) && (Error <= MaxErrorTolerance))
 		{
 			FreePool->Reset();
 			CachedPools.EmplaceAt(0, MoveTemp(FreePool));
 			return;
 		}
+
 		// Don't write 'error' as it confuses reporting; it's a perf warning more than an actual error
-		UE_LOG(LogVulkanRHI, Display, TEXT("FVulkanDescriptorSetCache::AddCachedPool() MaxDescriptorSets Delta/Err: %f. Tolerance: [%f..%f]."),
-			static_cast<double>(Error), static_cast<double>(MinErrorTolerance), static_cast<double>(MaxErrorTolerance));
+		UE_LOG(LogVulkanRHI, Display, TEXT("FVulkanDescriptorSetCache::AddCachedPool() MaxDescriptorSets Delta/Err: %f. Tolerance: [%f..%f]."),	Error, MinErrorTolerance, MaxErrorTolerance);
 		FreePool.Reset();
 	}
-	CachedPools.EmplaceAt(0, MakeUnique<FCachedPool>(Device, MaxDescriptorSets));
+	
+	// use current pool sizes statistic for a new pool
+	float PoolSizesRatio[VK_DESCRIPTOR_TYPE_RANGE_SIZE];
+	CachedPools[0]->CalcPoolSizesRatio(PoolSizesRatio);
+
+	CachedPools.EmplaceAt(0, MakeUnique<FCachedPool>(Device, MaxDescriptorSets, PoolSizesRatio));
 }
 
 void FVulkanDescriptorSetCache::GetDescriptorSets(const FVulkanDSetsKey& DSetsKey, const FVulkanDescriptorSetsLayout& SetsLayout,
@@ -832,12 +755,20 @@ void FVulkanDescriptorSetCache::GC()
 			UE_LOG(LogVulkanRHI, Warning, TEXT("FVulkanDescriptorSetCache::GC() Free Pool is not empty! Too small r.Vulkan.DSetCacheTargetSetsPerPool?"));
 		}
 		FreePool = MoveTemp(CachedPools[RemoveIndex]);
-		CachedPools.RemoveAt(RemoveIndex, 1, false);
+		CachedPools.RemoveAt(RemoveIndex, 1, EAllowShrinking::No);
 	}
 }
 
 const float FVulkanDescriptorSetCache::FCachedPool::MinAllocRatio = 0.5f;
 const float FVulkanDescriptorSetCache::FCachedPool::MaxAllocRatio = 16.0f;
+
+FVulkanDescriptorSetCache::FCachedPool::FCachedPool(FVulkanDevice* InDevice, uint32 InMaxDescriptorSets, const float PoolSizes[VK_DESCRIPTOR_TYPE_RANGE_SIZE])
+	: SetCapacity(FMath::RoundToZero(InMaxDescriptorSets * MaxAllocRatio))
+	, Pool(InDevice, InMaxDescriptorSets, PoolSizes)
+	, RecentFrame(0)
+{
+	FMemory::Memzero(PoolSizesStatistic, sizeof(PoolSizesStatistic));
+}
 
 bool FVulkanDescriptorSetCache::FCachedPool::FindDescriptorSets(const FVulkanDSetsKey& DSetsKey, VkDescriptorSet* OutSets)
 {
@@ -853,8 +784,11 @@ bool FVulkanDescriptorSetCache::FCachedPool::FindDescriptorSets(const FVulkanDSe
 	return true;
 }
 
-bool FVulkanDescriptorSetCache::FCachedPool::CreateDescriptorSets(const FVulkanDSetsKey& DSetsKey, const FVulkanDescriptorSetsLayout& SetsLayout,
-	TArray<FVulkanDescriptorSetWriter>& DSWriters, VkDescriptorSet* OutSets)
+bool FVulkanDescriptorSetCache::FCachedPool::CreateDescriptorSets(
+	const FVulkanDSetsKey& DSetsKey, 
+	const FVulkanDescriptorSetsLayout& SetsLayout,
+	TArray<FVulkanDescriptorSetWriter>& DSWriters, 
+	VkDescriptorSet* OutSets)
 {
 	FSetsEntry NewSetEntry{};
 
@@ -884,6 +818,13 @@ bool FVulkanDescriptorSetCache::FCachedPool::CreateDescriptorSets(const FVulkanD
 		SetCache.Emplace(DSWriter.GetKey().CopyDeep(), NewSetEntry.Sets[Index]);
 
 		DSWriter.SetDescriptorSet(NewSetEntry.Sets[Index]);
+		DSWriter.CheckAllWritten();
+
+		for (int32 i = 0; i < VK_DESCRIPTOR_TYPE_RANGE_SIZE; ++i)
+		{
+			VkDescriptorType DescriptorType = static_cast<VkDescriptorType>(VK_DESCRIPTOR_TYPE_BEGIN_RANGE + i);
+			PoolSizesStatistic[i] += SetsLayout.GetTypesUsed(DescriptorType);
+		}
 
 #if VULKAN_ENABLE_AGGRESSIVE_STATS
 		INC_DWORD_STAT_BY(STAT_VulkanNumUpdateDescriptors, DSWriter.GetNumWrites());
@@ -902,6 +843,14 @@ bool FVulkanDescriptorSetCache::FCachedPool::CreateDescriptorSets(const FVulkanD
 	return true;
 }
 
+void FVulkanDescriptorSetCache::FCachedPool::Reset()
+{
+	Pool.Reset();
+	SetsCache.Reset();
+	SetCache.Reset();
+	FMemory::Memzero(PoolSizesStatistic, sizeof(PoolSizesStatistic));
+}
+
 bool FVulkanDescriptorSetCache::FCachedPool::CanGC() const
 {
 	constexpr uint32 FramesBeforeGC = NUM_FRAMES_TO_WAIT_BEFORE_RELEASING_TO_OS;
@@ -913,12 +862,21 @@ float FVulkanDescriptorSetCache::FCachedPool::CalcAllocRatio() const
 	float AllocRatio = (static_cast<float>(SetCache.Num()) / static_cast<float>(Pool.GetMaxDescriptorSets()));
 	if (AllocRatio < MinAllocRatio)
 	{
-		UE_LOG(LogVulkanRHI, Warning, TEXT("FVulkanDescriptorSetCache::FCachedPool::CalcAllocRatio() Pool Allocation Ratio is too low: %f. Using: %f."),
-			static_cast<double>(AllocRatio), static_cast<double>(MinAllocRatio));
+		UE_LOG(LogVulkanRHI, Warning, TEXT("FVulkanDescriptorSetCache::FCachedPool::CalcAllocRatio() Pool Allocation Ratio is too low: %f. Using: %f."), AllocRatio, MinAllocRatio);
 		AllocRatio = MinAllocRatio;
 	}
 	return AllocRatio;
 }
+
+void FVulkanDescriptorSetCache::FCachedPool::CalcPoolSizesRatio(float PoolSizesRatio[VK_DESCRIPTOR_TYPE_RANGE_SIZE])
+{
+	int32 NumSets = FMath::Max(SetCache.Num(), 1);
+	for (uint32 i = 0; i < VK_DESCRIPTOR_TYPE_RANGE_SIZE; ++i)
+	{
+		PoolSizesRatio[i] = PoolSizesStatistic[i]/(float)NumSets;
+	}
+}
+
 bool FVulkanPendingGfxState::SetGfxPipeline(FVulkanRHIGraphicsPipelineState* InGfxPipeline, bool bForceReset)
 {
 	bool bChanged = bForceReset;

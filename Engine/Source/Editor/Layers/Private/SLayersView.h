@@ -2,6 +2,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "DragAndDrop/CompositeDragDropOp.h"
+#include "DragAndDrop/FolderDragDropOp.h"
 #include "Misc/Attribute.h"
 #include "Layout/Visibility.h"
 #include "Input/Reply.h"
@@ -10,13 +12,14 @@
 #include "Widgets/SBoxPanel.h"
 #include "LayerCollectionViewCommands.h"
 #include "Widgets/Views/SHeaderRow.h"
-#include "DragAndDrop/ActorDragDropGraphEdOp.h"
+#include "DragAndDrop/ActorDragDropOp.h"
 #include "Widgets/Views/STableViewBase.h"
 #include "Widgets/Views/STableRow.h"
 #include "Widgets/Views/SListView.h"
-#include "Editor/Layers/Private/LayerCollectionViewModel.h"
-#include "Editor/Layers/Private/SLayersViewRow.h"
+#include "LayerCollectionViewModel.h"
+#include "SLayersViewRow.h"
 #include "LayersDragDropOp.h"
+#include "EditorActorFolders.h"
 
 #define LOCTEXT_NAMESPACE "LayersView"
 
@@ -118,7 +121,7 @@ public:
 					.OnItemScrolledIntoView( this, &SLayersView::OnItemScrolledIntoView)
 
 					// Help text 
-					.ToolTipText(LOCTEXT("HelpText", "Drag actors from world outliner or right click to add a new layer."))
+					.ToolTipText(LOCTEXT("HelpText", "Drag actors from the outliner or right click to add a new layer."))
 				]
 			];
 
@@ -168,10 +171,10 @@ protected:
 	 */
 	virtual void OnDragLeave( const FDragDropEvent& DragDropEvent ) override
 	{
-		TSharedPtr< FActorDragDropGraphEdOp > DragActorOp = DragDropEvent.GetOperationAs< FActorDragDropGraphEdOp >();
-		if (DragActorOp.IsValid())
+		TSharedPtr< FDecoratedDragDropOp > DragOp = DragDropEvent.GetOperationAs<FDecoratedDragDropOp>();
+		if (DragOp.IsValid())
 		{
-			DragActorOp->ResetToDefaultToolTip();
+			DragOp->ResetToDefaultToolTip();
 		}
 	}
 
@@ -185,10 +188,11 @@ protected:
 	 */
 	virtual FReply OnDragOver( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent ) override
 	{
-		TSharedPtr< FActorDragDropGraphEdOp > DragActorOp = DragDropEvent.GetOperationAs< FActorDragDropGraphEdOp >();
-		if (DragActorOp.IsValid())
+		TSharedPtr< FDecoratedDragDropOp > DecoratedDragDropOp = DragDropEvent.GetOperationAs<FDecoratedDragDropOp>();
+		
+		if (DecoratedDragDropOp.IsValid())
 		{
-			DragActorOp->SetToolTip(FActorDragDropGraphEdOp::ToolTip_CompatibleGeneric, LOCTEXT("OnDragOver", "Add Actors to New Layer"));
+			DecoratedDragDropOp->SetToolTip(LOCTEXT("OnDragOver", "Add Actors to New Layer"), FAppStyle::GetBrush(TEXT("Graph.ConnectorFeedback.OK")));
 		}
 
 		// We leave the event unhandled so the children of the ListView get a chance to grab the drag/drop
@@ -205,15 +209,45 @@ protected:
 	 */
 	virtual FReply OnDrop( const FGeometry& MyGeometry, const FDragDropEvent& DragDropEvent ) override
 	{
-		TSharedPtr< FActorDragDropGraphEdOp > DragActorOp = DragDropEvent.GetOperationAs< FActorDragDropGraphEdOp >();
-		if ( !DragActorOp.IsValid() )	
+		bool bHandled = false;
+		TArray<TWeakObjectPtr<AActor>> ActorsToDrop;
+
+		TSharedPtr<FActorDragDropOp> ActorDragOp = nullptr;
+		TSharedPtr<FFolderDragDropOp> FolderDragOp = nullptr;
+
+		if (const TSharedPtr<FCompositeDragDropOp> CompositeDragOp = DragDropEvent.GetOperationAs<FCompositeDragDropOp>())
 		{
-			return FReply::Unhandled();
+			ActorDragOp = CompositeDragOp->GetSubOp<FActorDragDropOp>();
+			FolderDragOp = CompositeDragOp->GetSubOp<FFolderDragDropOp>();
+		}
+		else
+		{
+			ActorDragOp = DragDropEvent.GetOperationAs<FActorDragDropOp>();
+			FolderDragOp = DragDropEvent.GetOperationAs<FFolderDragDropOp>();
 		}
 
-		ViewModel->AddActorsToNewLayer( DragActorOp->Actors );
+		if (ActorDragOp.IsValid())
+		{
+			ActorsToDrop = ActorDragOp->Actors;
+			bHandled = true;
+		}
 
-		return FReply::Handled();
+		if (FolderDragOp.IsValid())
+		{
+			if (UWorld* World = FolderDragOp->World.Get())
+			{
+				FActorFolders::GetWeakActorsFromFolders(*World, FolderDragOp->Folders, ActorsToDrop, FolderDragOp->RootObject);
+
+				bHandled = true;
+			}
+		}
+
+		if (ActorsToDrop.Num() > 0)
+		{
+			ViewModel->AddActorsToNewLayer(ActorsToDrop);
+		}
+
+		return bHandled ? FReply::Handled() : FReply::Unhandled();
 	}
 
 	FReply OnDragRow(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent)

@@ -1,9 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "TrackEditors/ObjectPropertyTrackEditor.h"
-#include "Tracks/MovieSceneObjectPropertyTrack.h"
-#include "Sections/MovieSceneObjectPropertySection.h"
+
 #include "AssetToolsModule.h"
+#include "Channels/MovieSceneObjectPathChannel.h"
+#include "HAL/PlatformCrt.h"
+#include "IAssetTools.h"
+#include "IAssetTypeActions.h"
+#include "KeyPropertyParams.h"
+#include "Math/Color.h"
+#include "Modules/ModuleManager.h"
+#include "PropertyPath.h"
+#include "Tracks/MovieSceneObjectPropertyTrack.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/WeakFieldPtr.h"
+
+class ISequencer;
+class ISequencerTrackEditor;
+class UMovieSceneSection;
+class UObject;
 
 
 #define LOCTEXT_NAMESPACE "ObjectPropertyTrackEditor"
@@ -32,6 +49,16 @@ void FObjectPropertyTrackEditor::InitializeNewTrack(UMovieSceneObjectPropertyTra
 	if (KeyedProperty)
 	{
 		NewTrack->PropertyClass = KeyedProperty->PropertyClass;
+
+		if (KeyedProperty->HasAllPropertyFlags(CPF_UObjectWrapper))
+		{
+			FClassProperty* ClassProperty = CastField<FClassProperty>(KeyedProperty);
+			if (ClassProperty)
+			{
+				NewTrack->PropertyClass = ClassProperty->MetaClass;
+				NewTrack->bClassProperty = true;
+			}
+		}
 
 		FAssetToolsModule& AssetToolsModule = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
 		TArray< TWeakPtr<IAssetTypeActions> > AssetTypeActions;

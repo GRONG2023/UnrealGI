@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 using AutomationTool;
+using EpicGames.BuildGraph;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -8,10 +9,14 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Xml;
-using Tools.DotNETCommon;
+using EpicGames.Core;
 using UnrealBuildTool;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
 
-namespace BuildGraph.Tasks
+using static AutomationTool.CommandUtils;
+
+namespace AutomationTool.Tasks
 {
 	/// <summary>
 	/// Parameters for a task that runs the cooker
@@ -77,7 +82,7 @@ namespace BuildGraph.Tasks
 	/// Creates a PAK file from a given set of files.
 	/// </summary>
 	[TaskElement("PakFile", typeof(PakFileTaskParameters))]
-	public class PakFileTask : CustomTask
+	public class PakFileTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for the task
@@ -99,10 +104,10 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// Find the directories we're going to rebase relative to
-			HashSet<DirectoryReference> RebaseDirs = new HashSet<DirectoryReference>{ CommandUtils.RootDirectory };
+			HashSet<DirectoryReference> RebaseDirs = new HashSet<DirectoryReference>{ Unreal.RootDirectory };
 			if(Parameters.RebaseDir != null)
 			{
 				RebaseDirs.UnionWith(Parameters.RebaseDir);
@@ -123,7 +128,7 @@ namespace BuildGraph.Tasks
 				}
 
 				// Write out the response file
-				HashSet<FileReference> Files = ResolveFilespec(CommandUtils.RootDirectory, Parameters.Files, TagNameToFileSet);
+				HashSet<FileReference> Files = ResolveFilespec(Unreal.RootDirectory, Parameters.Files, TagNameToFileSet);
 				using (StreamWriter Writer = new StreamWriter(ResponseFile.FullName, false, new System.Text.UTF8Encoding(true)))
 				{
 					foreach (FileReference File in Files)
@@ -149,7 +154,7 @@ namespace BuildGraph.Tasks
 			{
 				CommandLine.AppendFormat(" -order={0}", CommandUtils.MakePathSafeToUseWithCommandLine(Parameters.Order.FullName));
 			}
-			if (CommandUtils.IsEngineInstalled())
+			if (Unreal.IsEngineInstalled())
 			{
 				CommandLine.Append(" -installed");
 			}
@@ -170,7 +175,7 @@ namespace BuildGraph.Tasks
 			}
 
 			// Run it
-			CommandUtils.LogInformation("Running '{0} {1}'", CommandUtils.MakePathSafeToUseWithCommandLine(UnrealPakExe.FullName), CommandLine.ToString());
+			Logger.LogInformation("Running '{Arg0} {Arg1}'", CommandUtils.MakePathSafeToUseWithCommandLine(UnrealPakExe.FullName), CommandLine.ToString());
 			CommandUtils.RunAndLog(CommandUtils.CmdEnv, UnrealPakExe.FullName, CommandLine.ToString(), Options: CommandUtils.ERunOptions.Default | CommandUtils.ERunOptions.UTF8Output);
 			BuildProducts.Add(OutputFile);
 
@@ -179,6 +184,8 @@ namespace BuildGraph.Tasks
 			{
 				FindOrAddTagSet(TagNameToFileSet, TagName).Add(OutputFile);
 			}
+
+			return Task.CompletedTask;
 		}
 
 		/// <summary>

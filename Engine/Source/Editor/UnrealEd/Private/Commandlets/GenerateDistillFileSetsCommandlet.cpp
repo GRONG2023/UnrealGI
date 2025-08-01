@@ -14,6 +14,7 @@
 #include "Misc/RedirectCollector.h"
 #include "Editor.h"
 #include "Engine/AssetManager.h"
+#include "Engine/World.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGenerateDistillFileSetsCommandlet, Log, All);
 
@@ -105,29 +106,26 @@ int32 UGenerateDistillFileSetsCommandlet::Main( const FString& InParams )
 	}
 
 	// Add any assets from the asset manager
-	if (UAssetManager::IsValid())
+	UAssetManager& Manager = UAssetManager::Get();
+	TArray<FPrimaryAssetTypeInfo> TypeInfos;
+	Manager.GetPrimaryAssetTypeInfoList(TypeInfos);
+
+	for (const FPrimaryAssetTypeInfo& TypeInfo : TypeInfos)
 	{
-		UAssetManager& Manager = UAssetManager::Get();
-		TArray<FPrimaryAssetTypeInfo> TypeInfos;
-		Manager.GetPrimaryAssetTypeInfoList(TypeInfos);
+		TArray<FAssetData> AssetDataList;
 
-		for (const FPrimaryAssetTypeInfo& TypeInfo : TypeInfos)
+		Manager.GetPrimaryAssetDataList(TypeInfo.PrimaryAssetType, AssetDataList);
+
+		for (const FAssetData& AssetData : AssetDataList)
 		{
-			TArray<FAssetData> AssetDataList;
-
-			Manager.GetPrimaryAssetDataList(TypeInfo.PrimaryAssetType, AssetDataList);
-
-			for (const FAssetData& AssetData : AssetDataList)
+			FString PackageName = AssetData.PackageName.ToString();
+			// Warn about maps in "NoShip" or "TestMaps" folders.
+			if (PackageName.Contains("/NoShip/") || PackageName.Contains("/TestMaps/"))
 			{
-				FString PackageName = AssetData.PackageName.ToString();
-				// Warn about maps in "NoShip" or "TestMaps" folders.
-				if (PackageName.Contains("/NoShip/") || PackageName.Contains("/TestMaps/"))
-				{
-					UE_LOG(LogGenerateDistillFileSetsCommandlet, Display, TEXT("Skipping map package %s in TestMaps or NoShip folder"), *PackageName);
-					continue;
-				}
-				MapList.AddUnique(AssetData.PackageName.ToString());
+				UE_LOG(LogGenerateDistillFileSetsCommandlet, Display, TEXT("Skipping map package %s in TestMaps or NoShip folder"), *PackageName);
+				continue;
 			}
+			MapList.AddUnique(AssetData.PackageName.ToString());
 		}
 	}
 	
@@ -220,30 +218,12 @@ int32 UGenerateDistillFileSetsCommandlet::Main( const FString& InParams )
 	// Form a full unique package list
 	TSet<FString> AllPackageNames;
 
-	//@todo SLATE: This is a hack to ensure all slate referenced assets get cooked.
-	// Slate needs to be refactored to properly identify required assets at cook time.
-	// Simply jamming everything in a given directory into the cook list is error-prone
-	// on many levels - assets not required getting cooked/shipped; assets not put under 
-	// the correct folder; etc.
+	// Slate
 	{
 		TArray<FString> UIContentPaths;
 		if (GConfig->GetArray(TEXT("UI"), TEXT("ContentDirectories"), UIContentPaths, GEditorIni) > 0)
 		{
-			for (int32 DirIdx = 0; DirIdx < UIContentPaths.Num(); DirIdx++)
-			{
-				FString ContentPath = FPackageName::LongPackageNameToFilename(UIContentPaths[DirIdx]);
-
-				TArray<FString> Files;
-				IFileManager::Get().FindFilesRecursive(Files, *ContentPath, *(FString(TEXT("*")) + FPackageName::GetAssetPackageExtension()), true, false);
-				for (int32 Index = 0; Index < Files.Num(); Index++)
-				{
-					FString StdFile = Files[Index];
-					FPaths::MakeStandardFilename(StdFile);
-					StdFile = FPackageName::FilenameToLongPackageName(StdFile);
-					AllPackageNames.Add(StdFile);
-				}
-			}
-
+			UE_LOG(LogGenerateDistillFileSetsCommandlet, Warning, TEXT("The [UI]ContentDirectories is deprecated. You may use DirectoriesToAlwaysCook in your project settings instead."));
 		}
 	}
 
@@ -261,17 +241,54 @@ int32 UGenerateDistillFileSetsCommandlet::Main( const FString& InParams )
 				AllPackageNames.Add(Package->GetName());
 
 				UE_LOG(LogGenerateDistillFileSetsCommandlet, Display, TEXT( "Finding content referenced by %s..." ), *MapPackage );
-				TArray<UObject *> AllPackages;
-				GetObjectsOfClass(UPackage::StaticClass(), AllPackages);
-				for (int32 Index = 0; Index < AllPackages.Num(); Index++)
+
+				auto GatherLoadedPackages = [&]()
 				{
-					FString OtherName = AllPackages[Index]->GetOutermost()->GetName();
-					if (!AllPackageNames.Contains(OtherName))
+					TArray<UObject *> AllPackages;
+					GetObjectsOfClass(UPackage::StaticClass(), AllPackages);
+					for (int32 Index = 0; Index < AllPackages.Num(); Index++)
 					{
-						AllPackageNames.Add(OtherName);
-						UE_LOG(LogGenerateDistillFileSetsCommandlet, Log, TEXT("Package: %s"), *OtherName);
+						FString OtherName = AllPackages[Index]->GetOutermost()->GetName();
+						if (!AllPackageNames.Contains(OtherName))
+						{
+							AllPackageNames.Add(OtherName);
+							UE_LOG(LogGenerateDistillFileSetsCommandlet, Log, TEXT("Package: %s"), *OtherName);
+						}
 					}
+				};
+
+				// Load all external actor packages to gather their dependencies
+				if (UWorld* World = UWorld::FindWorldInPackage(Package))
+				{
+					World->AddToRoot();
+
+					uint32 ActorPackageIndex = 0;
+					TArray<FString> ExternalActorPackages = World->PersistentLevel->GetOnDiskExternalActorPackages();
+
+					for (const FString& ExternalActorPackage : ExternalActorPackages)
+					{
+						if (!AllPackageNames.Contains(ExternalActorPackage))
+						{
+							AllPackageNames.Add(ExternalActorPackage);
+							UE_LOG(LogGenerateDistillFileSetsCommandlet, Log, TEXT("Package: %s"), *ExternalActorPackage);
+
+							FString LongActorPackageName;
+							FPackageName::TryConvertFilenameToLongPackageName(ExternalActorPackage, LongActorPackageName);
+							UPackage* ActorPackage = LoadPackage(nullptr, *LongActorPackageName, LOAD_None);
+
+							if (!(++ActorPackageIndex % 50))
+							{
+								GatherLoadedPackages();
+								UE_LOG(LogGenerateDistillFileSetsCommandlet, Display, TEXT( "Collecting garbage..." ) );
+								CollectGarbage(RF_NoFlags);
+							}
+						}
+					}
+
+					World->RemoveFromRoot();
 				}
+
+				GatherLoadedPackages();
 				UE_LOG(LogGenerateDistillFileSetsCommandlet, Display, TEXT( "Collecting garbage..." ) );
 				CollectGarbage(RF_NoFlags);
 			}
@@ -320,7 +337,7 @@ int32 UGenerateDistillFileSetsCommandlet::Main( const FString& InParams )
 			if (bSimpleTxtOutput)
 			{
 				FString ActualFile;
-				if (FPackageName::DoesPackageExist(PackageName, NULL, &ActualFile))
+				if (FPackageName::DoesPackageExist(PackageName, &ActualFile))
 				{
 					ActualFile = IFileManager::Get().ConvertToAbsolutePathForExternalAppForRead(*ActualFile);
 					AllFileSets += FString::Printf(TEXT("%s") LINE_TERMINATOR, *ActualFile);

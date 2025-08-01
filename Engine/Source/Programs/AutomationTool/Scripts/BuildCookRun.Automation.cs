@@ -5,8 +5,10 @@ using System.IO;
 using System.Threading;
 using System.Reflection;
 using AutomationTool;
+using AutomationScripts;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
 
 [Help(@"Builds/Cooks/Runs a project.
 
@@ -17,12 +19,14 @@ If no DefaultMap can be found, the command falls back to /Engine/Maps/Entry.")]
 [Help("destsample", "Destination Sample name")]
 [Help("foreigndest", "Foreign Destination")]
 [Help(typeof(ProjectParams))]
-[Help(typeof(UE4Build))]
+[Help(typeof(UnrealBuild))]
 [Help(typeof(CodeSign))]
-public class BuildCookRun : BuildCommand
+public class BuildCookRun : BuildCommand, IProjectParamsHelpers
 {
 	public override void ExecuteBuild()
 	{
+		var StartTime = DateTime.UtcNow;
+
 		// these need to be done first
 		var bForeign = ParseParam("foreign");
 		var bForeignCode = ParseParam("foreigncode");
@@ -37,11 +41,13 @@ public class BuildCookRun : BuildCommand
 		var Params = SetupParams();
 
 		DoBuildCookRun(Params);
+
+		Logger.LogInformation("BuildCookRun time: {0:0.00} s", (DateTime.UtcNow - StartTime).TotalMilliseconds / 1000);
 	}
 
 	protected ProjectParams SetupParams()
 	{
-		LogInformation("Setting up ProjectParams for {0}", ProjectPath);
+		Logger.LogInformation("Setting up ProjectParams for {ProjectPath}", ProjectPath);
 
 		var Params = new ProjectParams
 		(
@@ -75,6 +81,18 @@ public class BuildCookRun : BuildCommand
             Params.CulturesToCook = new ParamList<string>(CulturesToCook.Split('+'));
         }
 
+		var ReferenceContainerGlobalFileName = ParseParamValue("ReferenceContainerGlobalFileName");
+		if (!String.IsNullOrEmpty(ReferenceContainerGlobalFileName))
+		{
+			Params.ReferenceContainerGlobalFileName = ReferenceContainerGlobalFileName;
+		}
+
+		var ReferenceContainerCryptoKeys = ParseParamValue("ReferenceContainerCryptoKeys");
+		if (!String.IsNullOrEmpty(ReferenceContainerCryptoKeys))
+		{
+			Params.ReferenceContainerCryptoKeys = ReferenceContainerCryptoKeys;
+		}
+
 		if (Params.DedicatedServer)
 		{
 			foreach (var ServerPlatformInstance in Params.ServerTargetPlatformInstances)
@@ -88,6 +106,19 @@ public class BuildCookRun : BuildCommand
 			{
 				ClientPlatformInstance.PlatformSetupParams(ref Params);
 			}
+		}
+
+		List<string> PluginsToEnable = new List<string>();
+		string EnablePlugins = ParseParamValue("EnablePlugins", null);
+		if (!string.IsNullOrEmpty(EnablePlugins))
+		{
+			PluginsToEnable.AddRange(EnablePlugins.Split(new[] { ',', '+' }, StringSplitOptions.RemoveEmptyEntries));
+		}
+
+		if (PluginsToEnable.Count > 0)
+		{
+			Params.AdditionalCookerOptions += " -EnablePlugins=\"" + string.Join(",", PluginsToEnable) + "\"";
+			Params.AdditionalBuildOptions += " -EnablePlugins=\"" + string.Join(",", PluginsToEnable) + "\"";
 		}
 
 		Params.ValidateAndLog();
@@ -127,13 +158,13 @@ public class BuildCookRun : BuildCommand
 	private string GetDefaultMap(ProjectParams Params)
 	{
 		const string EngineEntryMap = "/Engine/Maps/Entry";
-		LogInformation("Trying to find DefaultMap in ini files");
+		Logger.LogInformation("Trying to find DefaultMap in ini files");
 		string DefaultMap = null;
 		var ProjectFolder = GetDirectoryName(Params.RawProjectPath.FullName);
 		var DefaultGameEngineConfig = CombinePaths(ProjectFolder, "Config", "DefaultEngine.ini");
 		if (FileExists(DefaultGameEngineConfig))
 		{
-			LogInformation("Looking for DefaultMap in {0}", DefaultGameEngineConfig);
+			Logger.LogInformation("Looking for DefaultMap in {DefaultGameEngineConfig}", DefaultGameEngineConfig);
 			DefaultMap = GetDefaultMapFromIni(DefaultGameEngineConfig, Params.DedicatedServer);
 			if (DefaultMap == null && Params.DedicatedServer)
 			{
@@ -145,7 +176,7 @@ public class BuildCookRun : BuildCommand
 			var BaseEngineConfig = CombinePaths(CmdEnv.LocalRoot, "Config", "BaseEngine.ini");
 			if (FileExists(BaseEngineConfig))
 			{
-				LogInformation("Looking for DefaultMap in {0}", BaseEngineConfig);
+				Logger.LogInformation("Looking for DefaultMap in {BaseEngineConfig}", BaseEngineConfig);
 				DefaultMap = GetDefaultMapFromIni(BaseEngineConfig, Params.DedicatedServer);
 				if (DefaultMap == null && Params.DedicatedServer)
 				{
@@ -156,12 +187,12 @@ public class BuildCookRun : BuildCommand
 		// We check for null here becase null == not found
 		if (DefaultMap == null)
 		{
-			LogInformation("No DefaultMap found, assuming: {0}", EngineEntryMap);
+			Logger.LogInformation("No DefaultMap found, assuming: {EngineEntryMap}", EngineEntryMap);
 			DefaultMap = EngineEntryMap;
 		}
 		else
 		{
-			LogInformation("Found DefaultMap={0}", DefaultMap);
+			Logger.LogInformation("Found DefaultMap={DefaultMap}", DefaultMap);
 		}
 		return DefaultMap;
 	}
@@ -194,25 +225,14 @@ public class BuildCookRun : BuildCommand
 
 	protected void DoBuildCookRun(ProjectParams Params)
 	{
-		const ProjectBuildTargets ClientTargets = ProjectBuildTargets.ClientCooked | ProjectBuildTargets.ServerCooked;
-        bool bGenerateNativeScripts = Params.RunAssetNativization;
 		int WorkingCL = -1;
 		if (P4Enabled && GlobalCommandLine.Submit && AllowSubmit)
 		{
 			WorkingCL = P4.CreateChange(P4Env.Client, String.Format("{0} build from changelist {1}", Params.ShortProjectName, P4Env.Changelist));
 		}
 
-        Project.Build(this, Params, WorkingCL, bGenerateNativeScripts ? (ProjectBuildTargets.All & ~ClientTargets) : ProjectBuildTargets.All);
+        Project.Build(this, Params, WorkingCL, ProjectBuildTargets.All);
 		Project.Cook(Params);
-        if (bGenerateNativeScripts)
-        {
-            // crash reporter is built along with client targets, so we need to 
-            // include that target flag here as well - note: that its not folded
-            // into ClientTargets because the editor needs its own CrashReporter 
-            // as well (which would be built above)
-            Project.Build(this, Params, WorkingCL, ClientTargets | ProjectBuildTargets.CrashReporter);
-        }
-        
 		Project.CopyBuildToStagingDirectory(Params);
 		Project.Package(Params, WorkingCL);
 		Project.Archive(Params);
@@ -239,8 +259,8 @@ public class BuildCookRun : BuildCommand
 			throw new AutomationException("Can't find source directory to make foreign sample {0}.", Src);
 		}
 
-		var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue4\foreign\", DestSample + "_ _Dir"));
-		LogInformation("Make a foreign sample {0} -> {1}", Src, Dest);
+		var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue\foreign\", DestSample + "_ _Dir"));
+		Logger.LogInformation("Make a foreign sample {Src} -> {Dest}", Src, Dest);
 
 		CloneDirectory(Src, Dest);
 
@@ -265,8 +285,8 @@ public class BuildCookRun : BuildCommand
 			throw new AutomationException("Can't find source directory to make foreign sample {0}.", Src);
 		}
 
-		var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue4\foreign\", DestSample + "_ _Dir"));
-		LogInformation("Make a foreign sample {0} -> {1}", Src, Dest);
+		var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue\foreign\", DestSample + "_ _Dir"));
+		Logger.LogInformation("Make a foreign sample {Src} -> {Dest}", Src, Dest);
 
 		CloneDirectory(Src, Dest);
 		DeleteDirectory_NoExceptions(CombinePaths(Dest, "Intermediate"));
@@ -288,58 +308,14 @@ public class BuildCookRun : BuildCommand
 		{
 			if (ProjectFullPath == null)
 			{
-				var bForeign = ParseParam("foreign");
-				var bForeignCode = ParseParam("foreigncode");
-				if (bForeign)
-				{
-					var DestSample = ParseParamValue("DestSample", "CopiedHoverShip");
-					var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue4\foreign\", DestSample + "_ _Dir"));
-					ProjectFullPath = new FileReference(CombinePaths(Dest, DestSample + ".uproject"));
-				}
-				else if (bForeignCode)
-				{
-					var DestSample = ParseParamValue("DestSample", "PlatformerGame");
-					var Dest = ParseParamValue("ForeignDest", CombinePaths(@"C:\testue4\foreign\", DestSample + "_ _Dir"));
-					ProjectFullPath = new FileReference(CombinePaths(Dest, DestSample + ".uproject"));
-				}
-				else
-				{
-					var OriginalProjectName = ParseParamValue("project", "");
+				ProjectFullPath = ParseProjectParam();
 
-                    if (string.IsNullOrEmpty(OriginalProjectName))
-                    {
-                        throw new AutomationException("No project file specified. Use -project=<project>.");
-                    }
-
-					var ProjectName = OriginalProjectName;
-					ProjectName = ProjectName.Trim(new char[] { '\"' });
-					if (ProjectName.IndexOfAny(new char[] { '\\', '/' }) < 0)
-					{
-						ProjectName = CombinePaths(CmdEnv.LocalRoot, ProjectName, ProjectName + ".uproject");
-					}
-					else if (!FileExists_NoExceptions(ProjectName))
-					{
-						ProjectName = CombinePaths(CmdEnv.LocalRoot, ProjectName);
-					}
-					if(FileExists_NoExceptions(ProjectName))
-					{
-						ProjectFullPath = new FileReference(ProjectName);
-					}
-					else
-					{
-						var Branch = new BranchInfo();
-						var GameProj = Branch.FindGame(OriginalProjectName);
-						if (GameProj != null)
-						{
-							ProjectFullPath = GameProj.FilePath;
-						}
-						if (ProjectFullPath == null || !FileExists_NoExceptions(ProjectFullPath.FullName))
-						{
-							throw new AutomationException("Could not find a project file {0}.", ProjectName);
-						}
-					}
+				if (ProjectFullPath == null)
+				{
+					throw new AutomationException("No project file specified. Use -project=<project>.");
 				}
 			}
+
 			return ProjectFullPath;
 		}
 	}

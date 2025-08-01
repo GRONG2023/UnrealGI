@@ -58,11 +58,17 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="..\Private\DatasmithRevitDocument.cs">
+      <Link>DatasmithRevitExporter\DatasmithRevitDocument.cs</Link>
+    </Compile>
     <Compile Include="..\Private\DatasmithRevitDocumentData.cs">
       <Link>DatasmithRevitExporter\DatasmithRevitDocumentData.cs</Link>
     </Compile>
     <Compile Include="..\Private\DatasmithRevitDirectLink.cs">
       <Link>DatasmithRevitExporter\DatasmithRevitDirectLink.cs</Link>
+    </Compile>
+    <Compile Include="..\Private\DatasmithRevitDecal.cs">
+      <Link>DatasmithRevitExporter\DatasmithRevitDecal.cs</Link>
     </Compile>
     <Compile Include="..\Private\DatasmithRevitApplication.cs">
       <Link>DatasmithRevitExporter\DatasmithRevitApplication.cs</Link>
@@ -86,6 +92,16 @@
     </Compile>
     <Compile Include="..\Private\DatasmithRevitMaterial.cs">
       <Link>DatasmithRevitExporter\DatasmithRevitMaterial.cs</Link>
+    </Compile>
+    <Compile Include="..\Private\DatasmithRevitSettingsManager.cs">
+      <Link>DatasmithRevitExporter\DatasmithRevitSettingsManager.cs</Link>
+    </Compile>
+    <Compile Include="..\Private\DatasmithRevitUtils.cs">
+      <Link>DatasmithRevitExporter\DatasmithRevitUtils.cs</Link>
+    </Compile>
+    <Compile Include="..\Private\DatasmithRevitSettingsDialog.cs">
+      <Link>DatasmithRevitExporter\DatasmithRevitSettingsDialog.cs</Link>
+	  <SubType>Form</SubType>
     </Compile>
     <Compile Include="..\..\..\..\..\..\Binaries\Win64\DatasmithFacadeCSharp\Public\*.cs">
       <Link>DatasmithSwigFacade\%(Filename)%(Extension)</Link>

@@ -1,10 +1,12 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
 #pragma once
 
+// BEGIN EPIC MOD
 #include <type_traits>
+// END EPIC MOD
 #include "LC_Event.h"
-#include "LC_Thread.h"
+#include "LC_ThreadTypes.h"
 
 
 // helper class that is the only one calling COM-related functions and methods.
@@ -25,10 +27,14 @@ public:
 	~COMThread(void);
 
 	// helper function that runs any given function in the internal COM thread and waits until execution has finished
+	// BEGIN EPIC MOD
 	template <typename F, typename... Args>
-	inline typename std::result_of<F(Args...)>::type CallInThread(F ptrToFunction, Args&&... args)
+	inline std::invoke_result_t<F, Args...> CallInThread(F ptrToFunction, Args&&... args)
+	// END EPIC MOD
 	{
-		typedef typename std::result_of<F(Args...)>::type ReturnValue;
+		// BEGIN EPIC MOD
+		typedef std::invoke_result_t<F, Args...> ReturnValue;
+		// END EPIC MOD
 
 		// a helper lambda that calls the given functions with the provided arguments.
 		// because this lambda needs to capture, it cannot be converted to a function pointer implicitly,
@@ -68,11 +74,11 @@ public:
 	}
 
 private:
-	unsigned int ThreadFunction(void);
+	Thread::ReturnValue ThreadFunction(void);
 
 	COMFunction m_function;
 	Event m_functionAvailableEvent;
 	Event m_functionFinishedExecutingEvent;
 	Event m_leaveThreadEvent;
-	thread::Handle m_internalThread;
+	Thread::Handle m_internalThread;
 };

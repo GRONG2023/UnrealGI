@@ -1,17 +1,35 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "KismetNodes/SGraphNodeSwitchStatement.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Images/SImage.h"
-#include "GraphEditorSettings.h"
-#include "SGraphPin.h"
-#include "K2Node_Switch.h"
-#include "KismetPins/SGraphPinExec.h"
-#include "NodeFactory.h"
-#include "K2Node_SwitchEnum.h"
 
-#include "ScopedTransaction.h"
+#include "Containers/Array.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
+#include "GenericPlatform/ICursor.h"
+#include "GraphEditorSettings.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "K2Node_Switch.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "KismetPins/SGraphPinExec.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Optional.h"
+#include "NodeFactory.h"
+#include "SGraphNode.h"
+#include "SGraphPin.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Templates/Casts.h"
+#include "Types/SlateEnums.h"
+#include "UObject/NameTypes.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/SBoxPanel.h"
+
+class SWidget;
 
 //////////////////////////////////////////////////////////////////////////
 // SGraphPinSwitchNodeDefaultCaseExec
@@ -71,7 +89,7 @@ void SGraphNodeSwitchStatement::CreatePinWidgets()
 			.Padding(1.0f)
 			[
 				SNew(SImage)
-				.Image(FEditorStyle::GetBrush("Graph.Pin.DefaultPinSeparator"))
+				.Image(FAppStyle::GetBrush("Graph.Pin.DefaultPinSeparator"))
 			];
 
 		// Create the pin itself
@@ -101,7 +119,8 @@ void SGraphNodeSwitchStatement::CreateOutputSideAddButton(TSharedPtr<SVerticalBo
 
 EVisibility SGraphNodeSwitchStatement::IsAddPinButtonVisible() const
 {
-	if(!GraphNode->IsA<UK2Node_SwitchEnum>())
+	if (UK2Node_Switch* SwitchNode = CastChecked<UK2Node_Switch>(GraphNode)
+		; SwitchNode && SwitchNode->SupportsAddPinButton())
 	{
 		return SGraphNode::IsAddPinButtonVisible();
 	}
@@ -119,7 +138,7 @@ FReply SGraphNodeSwitchStatement::OnAddPin()
 	FBlueprintEditorUtils::MarkBlueprintAsModified(SwitchNode->GetBlueprint());
 
 	UpdateGraphNode();
-	GraphNode->GetGraph()->NotifyGraphChanged();
+	GraphNode->GetGraph()->NotifyNodeChanged(GraphNode);
 
 	return FReply::Handled();
 }

@@ -6,16 +6,16 @@ public class InstallBundleManager : ModuleRules
 {
 	public InstallBundleManager(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PrivatePCHHeaderFile = "Private/InstallBundleManagerPrivatePCH.h";
-
 		PrivateDependencyModuleNames.AddRange(
 			new string[] {
 				"Core",
-				"CoreUObject",
-				"Engine",
-				"InputCore",
-				"Projects",
 				"ApplicationCore",
+				"Json"
+			}
+		);
+
+		PublicIncludePathModuleNames.AddRange(
+			new string[] {
 				"Json"
 			}
 		);

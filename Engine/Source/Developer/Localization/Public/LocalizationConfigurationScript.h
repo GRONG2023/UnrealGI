@@ -2,8 +2,12 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "HAL/Platform.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/Optional.h"
 
 class ULocalizationTarget;
 
@@ -11,14 +15,14 @@ struct LOCALIZATION_API FLocalizationConfigurationScript : public FConfigFile
 {
 	bool WriteWithSCC(const FString& InConfigFilename);
 
-	FConfigSection& CommonSettings()
+	void AddCommonSettings(FConfigSection&& Section)
 	{
-		return FindOrAdd(TEXT("CommonSettings"));
+		Add(TEXT("CommonSettings"), Section);
 	}
 
-	FConfigSection& GatherTextStep(const uint32 Index)
+	void AddGatherTextStep(const uint32 Index, FConfigSection&& Section)
 	{
-		return FindOrAdd( FString::Printf( TEXT("GatherTextStep%u"), Index) );
+		Add(FString::Printf( TEXT("GatherTextStep%u"), Index), MoveTemp(Section));
 	}
 };
 

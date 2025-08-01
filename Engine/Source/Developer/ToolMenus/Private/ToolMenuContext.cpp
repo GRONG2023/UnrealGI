@@ -10,13 +10,10 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Internationalization/Internationalization.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ToolMenuContext)
 
-FToolMenuContext::FToolMenuContext() : bIsEditing(false)
-{
 
-}
-
-FToolMenuContext::FToolMenuContext(UObject* InContext) : bIsEditing(false)
+FToolMenuContext::FToolMenuContext(UObject* InContext)
 {
 	if (InContext)
 	{
@@ -24,7 +21,19 @@ FToolMenuContext::FToolMenuContext(UObject* InContext) : bIsEditing(false)
 	}
 }
 
-FToolMenuContext::FToolMenuContext(TSharedPtr<FUICommandList> InCommandList, TSharedPtr<FExtender> InExtender, UObject* InContext) : bIsEditing(false)
+FToolMenuContext::FToolMenuContext(UObject* InContext, FContextObjectCleanup&& InCleanup)
+{
+	if (InContext)
+	{
+		ContextObjects.Add(InContext);
+		if (InCleanup)
+		{
+			ContextObjectCleanupFuncs.Add(InContext, MoveTemp(InCleanup));
+		}
+	}
+}
+
+FToolMenuContext::FToolMenuContext(TSharedPtr<FUICommandList> InCommandList, TSharedPtr<FExtender> InExtender, UObject* InContext)
 {
 	if (InContext)
 	{
@@ -142,10 +151,43 @@ void FToolMenuContext::AddObject(UObject* InObject)
 	ContextObjects.AddUnique(InObject);
 }
 
+void FToolMenuContext::AddObject(UObject* InObject, FContextObjectCleanup&& InCleanup)
+{
+	ContextObjects.AddUnique(InObject);
+	if (InCleanup)
+	{
+		ContextObjectCleanupFuncs.Add(InObject, MoveTemp(InCleanup));
+	}
+}
+
+void FToolMenuContext::AddCleanup(FContextCleanup&& InCleanup)
+{
+	if (InCleanup)
+	{
+		ContextCleanupFuncs.Add(MoveTemp(InCleanup));
+	}
+}
+
+void FToolMenuContext::CleanupObjects()
+{
+	for (const TTuple<TObjectPtr<UObject>, FContextObjectCleanup>& CleanupPair : ContextObjectCleanupFuncs)
+	{
+		CleanupPair.Value(CleanupPair.Key);
+	}
+
+	for (const FContextCleanup& CleanupFunc : ContextCleanupFuncs)
+	{
+		CleanupFunc();
+	}
+}
+
 void FToolMenuContext::Empty()
 {
 	ContextObjects.Empty();
+	ContextObjectCleanupFuncs.Empty();
+	ContextCleanupFuncs.Empty();
 	CommandLists.Empty();
 	CommandList.Reset();
 	Extenders.Empty();
 }
+

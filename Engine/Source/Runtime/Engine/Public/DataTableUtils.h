@@ -20,10 +20,7 @@ enum class EDataTableExportFlags : uint8
 	/** Export text properties as their display string, rather than their complex lossless form. */
 	UseSimpleText = 1 << 1,
 
-	// DEPRECATED. Native properties/enums are always exported using their internal name, user struct/enums are always exported using the friendly names set in the editor
-
-	UsePrettyPropertyNames UE_DEPRECATED(4.23, "UsePrettyPropertyNames is deprecated, we now always use the unlocalized but readable authored names") = 1 << 6,
-	UsePrettyEnumNames UE_DEPRECATED(4.23, "UsePrettyEnumNames is deprecated, we now always use the unlocalized but readable authored names") = 1 << 7,
+	// Deprecated options removed, Native properties/enums are always exported using their internal name, user struct/enums are always exported using the friendly names set in the editor
 };
 ENUM_CLASS_FLAGS(EDataTableExportFlags);
 
@@ -68,7 +65,7 @@ namespace DataTableUtils
 	/**
 	 * Util to get all property names from a struct.
 	 */
-	ENGINE_API TArray<FName> GetStructPropertyNames(UStruct* InStruct);
+	ENGINE_API TArray<FName> GetStructPropertyNames(const UStruct* InStruct);
 
 	/**
 	 * Util that removes invalid chars and then make an FName.

@@ -1,14 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MovieSceneSpawnSectionRecorder.h"
+
+#include "Animation/AnimationRecordingSettings.h"
+#include "Channels/MovieSceneBoolChannel.h"
+#include "Channels/MovieSceneChannelData.h"
+#include "Channels/MovieSceneChannelProxy.h"
 #include "GameFramework/Actor.h"
-#include "KeyParams.h"
-#include "Sections/MovieSceneBoolSection.h"
-#include "Tracks/MovieSceneSpawnTrack.h"
+#include "HAL/PlatformCrt.h"
+#include "Math/Range.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/FrameRate.h"
+#include "Misc/FrameTime.h"
 #include "MovieScene.h"
+#include "MovieSceneSection.h"
+#include "Sections/MovieSceneBoolSection.h"
 #include "SequenceRecorderSettings.h"
 #include "SequenceRecorderUtils.h"
-#include "Channels/MovieSceneChannelProxy.h"
+#include "Templates/Casts.h"
+#include "Tracks/MovieSceneSpawnTrack.h"
+#include "UObject/UObjectGlobals.h"
 
 TSharedPtr<IMovieSceneSectionRecorder> FMovieSceneSpawnSectionRecorderFactory::CreateSectionRecorder(const struct FActorRecordingSettings& InActorRecordingSettings) const
 {
@@ -86,7 +98,7 @@ void FMovieSceneSpawnSectionRecorder::FinalizeSection(float CurrentTime)
 		FMovieSceneBoolChannel* Channel = MovieSceneSection->GetChannelProxy().GetChannel<FMovieSceneBoolChannel>(0);
 		if (ensure(Channel))
 		{
-			double       OneFrameInterval = 1.0/GetDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleRate;
+			double       OneFrameInterval = GetDefault<USequenceRecorderSettings>()->DefaultAnimationSettings.SampleFrameRate.AsInterval();
 
 			FFrameRate   TickResolution   = MovieSceneSection->GetTypedOuter<UMovieScene>()->GetTickResolution();
 			FFrameNumber StartTime        = MovieSceneSection->GetExclusiveEndFrame() - (OneFrameInterval * TickResolution).CeilToFrame();

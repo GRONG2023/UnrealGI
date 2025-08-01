@@ -5,11 +5,18 @@
 =============================================================================*/
 
 #include "Components/SplineComponent.h"
+#include "Engine/Engine.h"
 #include "UObject/EditorObjectVersion.h"
+#include "Math/RotationMatrix.h"
 #include "PrimitiveViewRelevance.h"
 #include "PrimitiveSceneProxy.h"
 #include "SceneManagement.h"
-#include "UnrealEngine.h"
+#include "Net/UnrealNetwork.h"
+#include "Net/Core/PushModel/PushModel.h"
+#include "Styling/SlateColor.h"
+#include "Styling/StyleColors.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SplineComponent)
 
 #if WITH_EDITOR
 #include "Settings/LevelEditorViewportSettings.h"
@@ -40,25 +47,16 @@ USplineComponent::USplineComponent(const FObjectInitializer& ObjectInitializer)
 	, bClosedLoop(false)
 	, DefaultUpVector(FVector::UpVector)
 #if WITH_EDITORONLY_DATA
-	, EditorUnselectedSplineSegmentColor(FLinearColor(1.0f, 1.0f, 1.0f))
-	, EditorSelectedSplineSegmentColor(FLinearColor(0.828f, 0.364f, 0.003f))
-	, EditorTangentColor(FLinearColor(1.0f, 1.0f, 1.0f))
+	, EditorUnselectedSplineSegmentColor(FStyleColors::White.GetSpecifiedColor())
+	, EditorSelectedSplineSegmentColor(FStyleColors::AccentOrange.GetSpecifiedColor())
+	, EditorTangentColor(FLinearColor(0.718f, 0.589f, 0.921f))
 	, bAllowDiscontinuousSpline(false)
+	, bAdjustTangentsOnSnap(true)
 	, bShouldVisualizeScale(false)
 	, ScaleVisualizationWidth(30.0f)
 #endif
 {
-	SplineCurves.Position.Points.Reset(10);
-	SplineCurves.Rotation.Points.Reset(10);
-	SplineCurves.Scale.Points.Reset(10);
-
-	SplineCurves.Position.Points.Emplace(0.0f, FVector(0, 0, 0), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
-	SplineCurves.Rotation.Points.Emplace(0.0f, FQuat::Identity, FQuat::Identity, FQuat::Identity, CIM_CurveAuto);
-	SplineCurves.Scale.Points.Emplace(0.0f, FVector(1.0f), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
-	
-	SplineCurves.Position.Points.Emplace(1.0f, FVector(100, 0, 0), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
-	SplineCurves.Rotation.Points.Emplace(1.0f, FQuat::Identity, FQuat::Identity, FQuat::Identity, CIM_CurveAuto);
-	SplineCurves.Scale.Points.Emplace(1.0f, FVector(1.0f), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
+	SetDefaultSpline();
 
 #if WITH_EDITORONLY_DATA
 	if (GEngine)
@@ -76,6 +74,53 @@ USplineComponent::USplineComponent(const FObjectInitializer& ObjectInitializer)
 	SplineReparamTable_DEPRECATED = SplineCurves.ReparamTable;
 }
 
+void USplineComponent::ResetToDefault()
+{
+	SetDefaultSpline();
+
+	bAllowSplineEditingPerInstance_DEPRECATED = true;
+	ReparamStepsPerSegment = 10;
+	Duration = 1.0f;
+	bStationaryEndpoints = false;
+	bSplineHasBeenEdited = false;
+	bModifiedByConstructionScript = false;
+	bInputSplinePointsToConstructionScript = false;
+	bDrawDebug  = true ;
+	bClosedLoop = false;
+	DefaultUpVector = FVector::UpVector;
+#if WITH_EDITORONLY_DATA
+	EditorUnselectedSplineSegmentColor = FStyleColors::White.GetSpecifiedColor();
+	EditorSelectedSplineSegmentColor = FStyleColors::AccentOrange.GetSpecifiedColor();
+	EditorTangentColor = FLinearColor(0.718f, 0.589f, 0.921f);
+	bAllowDiscontinuousSpline = false;
+	bShouldVisualizeScale = false;
+	ScaleVisualizationWidth = 30.0f;
+#endif
+}
+
+void USplineComponent::SetDefaultSpline()
+{
+	SplineCurves.Position.Points.Reset(10);
+	SplineCurves.Rotation.Points.Reset(10);
+	SplineCurves.Scale.Points.Reset(10);
+
+	SplineCurves.Position.Points.Emplace(0.0f, FVector(0, 0, 0), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
+	SplineCurves.Rotation.Points.Emplace(0.0f, FQuat::Identity, FQuat::Identity, FQuat::Identity, CIM_CurveAuto);
+	SplineCurves.Scale.Points.Emplace(0.0f, FVector(1.0f), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
+
+	SplineCurves.Position.Points.Emplace(1.0f, FVector(100, 0, 0), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
+	SplineCurves.Rotation.Points.Emplace(1.0f, FQuat::Identity, FQuat::Identity, FQuat::Identity, CIM_CurveAuto);
+	SplineCurves.Scale.Points.Emplace(1.0f, FVector(1.0f), FVector::ZeroVector, FVector::ZeroVector, CIM_CurveAuto);
+}
+
+void USplineComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	// This is a workaround for UE-129807 so that scrubbing a replay doesn't cause instance edited properties to be reset to class defaults
+	// If you encounter this issue, reset the relevant replicated properties of this class with COND_ReplayOnly
+	DISABLE_ALL_CLASS_REPLICATED_PROPERTIES(USplineComponent, EFieldIteratorFlags::ExcludeSuper);
+}
 
 EInterpCurveMode ConvertSplinePointTypeToInterpCurveMode(ESplinePointType::Type SplinePointType)
 {
@@ -123,8 +168,8 @@ void USplineComponent::Serialize(FArchive& Ar)
 	}
 
 	// Support old resources which don't have the rotation and scale splines present
-	const int32 ArchiveUE4Version = Ar.UE4Ver();
-	if (ArchiveUE4Version < VER_UE4_INTERPCURVE_SUPPORTS_LOOPING)
+	const FPackageFileVersion ArchiveUEVersion = Ar.UEVer();
+	if (ArchiveUEVersion < VER_UE4_INTERPCURVE_SUPPORTS_LOOPING)
 	{
 		int32 NumPoints = SplineCurves.Position.Points.Num();
 
@@ -133,7 +178,7 @@ void USplineComponent::Serialize(FArchive& Ar)
 
 		if (bHasExtraEndpoint)
 		{
-			SplineCurves.Position.Points.RemoveAt(NumPoints - 1, 1, false);
+			SplineCurves.Position.Points.RemoveAt(NumPoints - 1, 1, EAllowShrinking::No);
 			NumPoints--;
 		}
 
@@ -190,7 +235,7 @@ void FSplineCurves::UpdateSpline(bool bClosedLoop, bool bStationaryEndpoints, in
 	Scale.AutoSetTangents(0.0f, bStationaryEndpoints);
 
 	// Now initialize the spline reparam table
-	const int32 NumSegments = bClosedLoop ? NumPoints : NumPoints - 1;
+	const int32 NumSegments = bClosedLoop ? NumPoints : FMath::Max(0, NumPoints - 1);
 
 	// Start by clearing it
 	ReparamTable.Points.Reset(NumSegments * ReparamStepsPerSegment + 1);
@@ -214,8 +259,17 @@ void FSplineCurves::UpdateSpline(bool bClosedLoop, bool bStationaryEndpoints, in
 void USplineComponent::UpdateSpline()
 {
 	SplineCurves.UpdateSpline(bClosedLoop, bStationaryEndpoints, ReparamStepsPerSegment, bLoopPositionOverride, LoopPosition, GetComponentTransform().GetScale3D());
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, SplineCurves, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, bClosedLoop, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, bStationaryEndpoints, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, ReparamStepsPerSegment, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, bLoopPositionOverride, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, LoopPosition, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, DefaultUpVector, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, bSplineHasBeenEdited, this);
+	MARK_PROPERTY_DIRTY_FROM_NAME(USplineComponent, bInputSplinePointsToConstructionScript, this);
 
-#if !UE_BUILD_SHIPPING
+#if UE_ENABLE_DEBUG_DRAWING
 	if (bDrawDebug)
 	{
 		MarkRenderStateDirty();
@@ -267,7 +321,8 @@ float FSplineCurves::GetSegmentLength(const int32 Index, const float Param, bool
 	}
 	else if (StartPoint.InterpMode == CIM_Constant)
 	{
-		return 0.0f;
+		// Special case: constant interpolation acts like distance = 0 for all p in [0, 1[ but for p == 1, the distance returned is the linear distance between start and end
+		return Param == 1.f ? ((P1 - P0) * Scale3D).Size() : 0.0f;
 	}
 
 	// Cache the coefficients to be fed into the function to calculate the spline derivative at each sample point as they are constant.
@@ -488,6 +543,13 @@ float USplineComponent::GetDistanceAlongSplineAtSplineInputKey(float InKey) cons
 	return 0.0f;
 }
 
+float USplineComponent::GetDistanceAlongSplineAtLocation(const FVector& InLocation, ESplineCoordinateSpace::Type CoordinateSpace) const
+{
+	const FVector LocalLocation = (CoordinateSpace == ESplineCoordinateSpace::World) ? GetComponentTransform().InverseTransformPosition(InLocation) : InLocation;
+	float Dummy;
+	float Key = SplineCurves.Position.FindNearest(LocalLocation, Dummy);
+	return GetDistanceAlongSplineAtSplineInputKey(Key);
+}
 
 template<class T>
 T GetPropertyValueAtSplineInputKey(const USplineMetadata* Metadata, float InKey, FName PropertyName)
@@ -667,8 +729,11 @@ void USplineComponent::AddPoint(const FSplinePoint& InSplinePoint, bool bUpdateS
 
 void USplineComponent::AddPoints(const TArray<FSplinePoint>& InSplinePoints, bool bUpdateSpline)
 {
-	const int32 NumPoints = SplineCurves.Position.Points.Num();
-	SplineCurves.Position.Points.Reserve(NumPoints + InSplinePoints.Num());
+	const int32 NumPoints = SplineCurves.Position.Points.Num() + InSplinePoints.Num();
+	// Position, Rotation, and Scale will all grow together.
+	SplineCurves.Position.Points.Reserve(NumPoints);
+	SplineCurves.Rotation.Points.Reserve(NumPoints);
+	SplineCurves.Scale.Points.Reserve(NumPoints);
 
 	for (const auto& SplinePoint : InSplinePoints)
 	{
@@ -760,9 +825,9 @@ void USplineComponent::RemoveSplinePoint(int32 Index, bool bUpdateSpline)
 
 	if (Index >= 0 && Index < NumPoints)
 	{
-		SplineCurves.Position.Points.RemoveAt(Index, 1, false);
-		SplineCurves.Rotation.Points.RemoveAt(Index, 1, false);
-		SplineCurves.Scale.Points.RemoveAt(Index, 1, false);
+		SplineCurves.Position.Points.RemoveAt(Index, 1, EAllowShrinking::No);
+		SplineCurves.Rotation.Points.RemoveAt(Index, 1, EAllowShrinking::No);
+		SplineCurves.Scale.Points.RemoveAt(Index, 1, EAllowShrinking::No);
 		USplineMetadata* Metadata = GetSplinePointsMetadata();
 		if (Metadata)
 		{
@@ -981,9 +1046,32 @@ int32 USplineComponent::GetNumberOfSplinePoints() const
 int32 USplineComponent::GetNumberOfSplineSegments() const
 {
 	const int32 NumPoints = SplineCurves.Position.Points.Num();
-	return (bClosedLoop ? NumPoints : NumPoints - 1);
+	return (bClosedLoop ? NumPoints : FMath::Max(0, NumPoints - 1));
 }
 
+float USplineComponent::GetInputKeyValueAtSplinePoint(int32 PointIndex) const
+{
+	const FInterpCurvePointVector& SplinePoint = GetPositionPointSafe(PointIndex);
+	return SplinePoint.InVal;
+}
+
+
+FSplinePoint USplineComponent::GetSplinePointAt(int32 PointIndex, ESplineCoordinateSpace::Type CoordinateSpace) const
+{
+	const FInterpCurvePointVector& SplinePoint = GetPositionPointSafe(PointIndex);
+
+	const FInterpCurvePointQuat& RotationPoint = GetRotationPointSafe(PointIndex);
+	const FRotator& Rotation = GetRotationAtSplineInputKey(RotationPoint.InVal, CoordinateSpace);
+
+	const FVector Scale = GetScaleAtSplinePoint(PointIndex);
+
+	return FSplinePoint(SplinePoint.InVal, 
+		SplinePoint.OutVal,
+		SplinePoint.ArriveTangent,
+		SplinePoint.LeaveTangent,
+		Rotation,
+		Scale);
+}
 
 FVector USplineComponent::GetLocationAtSplinePoint(int32 PointIndex, ESplineCoordinateSpace::Type CoordinateSpace) const
 {
@@ -1088,7 +1176,9 @@ float USplineComponent::GetDistanceAlongSplineAtSplinePoint(int32 PointIndex) co
 	const int32 NumPoints = SplineCurves.Position.Points.Num();
 	const int32 NumSegments = bClosedLoop ? NumPoints : NumPoints - 1;
 
-	if ((PointIndex >= 0) && (PointIndex < NumSegments + 1))
+	// Ensure that if the reparam table is not prepared yet we don't attempt to access it. This can happen
+	// early in the construction of the spline component object.
+	if ((PointIndex >= 0) && (PointIndex < NumSegments + 1) && ((PointIndex * ReparamStepsPerSegment) < SplineCurves.ReparamTable.Points.Num()))
 	{
 		return SplineCurves.ReparamTable.Points[PointIndex * ReparamStepsPerSegment].InVal;
 	}
@@ -1145,6 +1235,23 @@ FVector USplineComponent::GetDefaultUpVector(ESplineCoordinateSpace::Type Coordi
 
 float USplineComponent::GetInputKeyAtDistanceAlongSpline(float Distance) const
 {
+	return GetTimeAtDistanceAlongSpline(Distance);
+}
+
+float USplineComponent::GetInputKeyValueAtDistanceAlongSpline(float Distance) const
+{
+	const int32 NumPoints = SplineCurves.Position.Points.Num();
+
+	if (NumPoints < 2)
+	{
+		return 0.0f;
+	}
+	
+	return SplineCurves.ReparamTable.Eval(Distance, 0.0f);
+}
+
+float USplineComponent::GetTimeAtDistanceAlongSpline(float Distance) const
+{
 	const int32 NumPoints = SplineCurves.Position.Points.Num();
 
 	if (NumPoints < 2)
@@ -1155,7 +1262,6 @@ float USplineComponent::GetInputKeyAtDistanceAlongSpline(float Distance) const
 	const float TimeMultiplier = Duration / (bClosedLoop ? NumPoints : (NumPoints - 1.0f));
 	return SplineCurves.ReparamTable.Eval(Distance, 0.0f) * TimeMultiplier;
 }
-
 
 FVector USplineComponent::GetLocationAtDistanceAlongSpline(float Distance, ESplineCoordinateSpace::Type CoordinateSpace) const
 {
@@ -1441,7 +1547,7 @@ float USplineComponent::FindInputKeyClosestToWorldLocation(const FVector& WorldL
 {
 	const FVector LocalLocation = GetComponentTransform().InverseTransformPosition(WorldLocation);
 	float Dummy;
-	return SplineCurves.Position.InaccurateFindNearest(LocalLocation, Dummy);
+	return SplineCurves.Position.FindNearest(LocalLocation, Dummy);
 }
 
 
@@ -1514,6 +1620,323 @@ FTransform USplineComponent::FindTransformClosestToWorldLocation(const FVector& 
 	return GetTransformAtSplineInputKey(Param, CoordinateSpace, bUseScale);
 }
 
+bool USplineComponent::DivideSplineIntoPolylineRecursiveWithDistances(float StartDistanceAlongSpline, float EndDistanceAlongSpline, ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints, TArray<double>& OutDistancesAlongSpline) const
+{
+	return ConvertSplineToPolyline_InDistanceRange(CoordinateSpace, MaxSquareDistanceFromSpline, StartDistanceAlongSpline, EndDistanceAlongSpline, OutPoints, OutDistancesAlongSpline, false);
+}
+
+bool USplineComponent::DivideSplineIntoPolylineRecursiveWithDistancesHelper(float StartDistanceAlongSpline, float EndDistanceAlongSpline, ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints, TArray<double>& OutDistancesAlongSpline) const
+{
+	double Dist = EndDistanceAlongSpline - StartDistanceAlongSpline;
+	if (Dist <= 0.0f)
+	{
+		return false;
+	}
+	double MiddlePointDistancAlongSpline = StartDistanceAlongSpline + Dist / 2.0f;
+	FVector Samples[3];
+	Samples[0] = GetLocationAtDistanceAlongSpline(StartDistanceAlongSpline, CoordinateSpace);
+	Samples[1] = GetLocationAtDistanceAlongSpline(MiddlePointDistancAlongSpline, CoordinateSpace);
+	Samples[2] = GetLocationAtDistanceAlongSpline(EndDistanceAlongSpline, CoordinateSpace);
+
+	if (FMath::PointDistToSegmentSquared(Samples[1], Samples[0], Samples[2]) > MaxSquareDistanceFromSpline)
+	{
+		TArray<FVector> NewPoints[2];
+		TArray<double> NewDistancesAlongSpline[2];
+		DivideSplineIntoPolylineRecursiveWithDistancesHelper(StartDistanceAlongSpline, MiddlePointDistancAlongSpline, CoordinateSpace, MaxSquareDistanceFromSpline, NewPoints[0], NewDistancesAlongSpline[0]);
+		DivideSplineIntoPolylineRecursiveWithDistancesHelper(MiddlePointDistancAlongSpline, EndDistanceAlongSpline, CoordinateSpace, MaxSquareDistanceFromSpline, NewPoints[1], NewDistancesAlongSpline[1]);
+		if ((NewPoints[0].Num() > 0) && (NewPoints[1].Num() > 0))
+		{
+			check(NewPoints[0].Last() == NewPoints[1][0]);
+			check(NewDistancesAlongSpline[0].Last() == NewDistancesAlongSpline[1][0]);
+			NewPoints[0].RemoveAt(NewPoints[0].Num() - 1);
+			NewDistancesAlongSpline[0].RemoveAt(NewDistancesAlongSpline[0].Num() - 1);
+		}
+		NewPoints[0].Append(NewPoints[1]);
+		NewDistancesAlongSpline[0].Append(NewDistancesAlongSpline[1]);
+		OutPoints.Append(NewPoints[0]);
+		OutDistancesAlongSpline.Append(NewDistancesAlongSpline[0]);
+	}
+	else
+	{
+		// The middle point is close enough to the other 2 points, let's keep those and stop the recursion :
+		OutPoints.Add(Samples[0]);
+		OutPoints.Add(Samples[2]);
+		OutDistancesAlongSpline.Add(StartDistanceAlongSpline);
+		OutDistancesAlongSpline.Add(EndDistanceAlongSpline);
+	}
+
+	check(OutPoints.Num() == OutDistancesAlongSpline.Num())
+	return (OutPoints.Num() > 0);
+}
+
+bool USplineComponent::DivideSplineIntoPolylineRecursiveHelper(float StartDistanceAlongSpline, float EndDistanceAlongSpline, ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints) const
+{
+	TArray<double> DummyDistancesAlongSpline;
+	return DivideSplineIntoPolylineRecursiveWithDistancesHelper(StartDistanceAlongSpline, EndDistanceAlongSpline, CoordinateSpace, MaxSquareDistanceFromSpline, OutPoints, DummyDistancesAlongSpline);
+}
+
+bool USplineComponent::DivideSplineIntoPolylineRecursive(float StartDistanceAlongSpline, float EndDistanceAlongSpline, ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints) const
+{
+	TArray<double> DummyDistancesAlongSpline;
+	return ConvertSplineToPolyline_InDistanceRange(CoordinateSpace, MaxSquareDistanceFromSpline, StartDistanceAlongSpline, EndDistanceAlongSpline, OutPoints, DummyDistancesAlongSpline, false);
+}
+
+bool USplineComponent::ConvertSplineSegmentToPolyLine(int32 SplinePointStartIndex, ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints) const
+{
+	OutPoints.Empty();
+
+	const double StartDist = GetDistanceAlongSplineAtSplinePoint(SplinePointStartIndex);
+	const double StopDist = GetDistanceAlongSplineAtSplinePoint(SplinePointStartIndex + 1);
+
+	const int32 NumLines = 2; // Dichotomic subdivision of the spline segment
+	double Dist = StopDist - StartDist;
+	double SubstepSize = Dist / NumLines;
+	if (SubstepSize == 0.0)
+	{
+		// There is no distance to cover, so handle the segment with a single point
+		OutPoints.Add(GetLocationAtDistanceAlongSpline(StopDist, CoordinateSpace));
+		return true;
+	}
+
+	double SubstepStartDist = StartDist;
+	for (int32 i = 0; i < NumLines; ++i)
+	{
+		double SubstepEndDist = SubstepStartDist + SubstepSize;
+		TArray<FVector> NewPoints;
+		// Recursively sub-divide each segment until the requested precision is reached :
+		if (DivideSplineIntoPolylineRecursiveHelper(SubstepStartDist, SubstepEndDist, CoordinateSpace, MaxSquareDistanceFromSpline, NewPoints))
+		{
+			if (OutPoints.Num() > 0)
+			{
+				check(OutPoints.Last() == NewPoints[0]); // our last point must be the same as the new segment's first
+				OutPoints.RemoveAt(OutPoints.Num() - 1);
+			}
+			OutPoints.Append(NewPoints);
+		}
+
+		SubstepStartDist = SubstepEndDist;
+	}
+
+	return (OutPoints.Num() > 0);
+}
+
+bool USplineComponent::ConvertSplineToPolyLine(ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints) const
+{
+	int32 NumSegments = GetNumberOfSplineSegments();
+	OutPoints.Empty();
+	OutPoints.Reserve(NumSegments * 2); // We sub-divide each segment in at least 2 sub-segments, so let's start with this amount of points
+
+	TArray<FVector> SegmentPoints;
+	for (int32 SegmentIndex = 0; SegmentIndex < NumSegments; ++SegmentIndex)
+	{
+		if (ConvertSplineSegmentToPolyLine(SegmentIndex, CoordinateSpace, MaxSquareDistanceFromSpline, SegmentPoints))
+		{
+			if (OutPoints.Num() > 0)
+			{
+				check(OutPoints.Last() == SegmentPoints[0]); // our last point must be the same as the new segment's first
+				OutPoints.RemoveAt(OutPoints.Num() - 1);
+			}
+			OutPoints.Append(SegmentPoints);
+		}
+	}
+
+	return (OutPoints.Num() > 0);
+}
+
+bool USplineComponent::ConvertSplineToPolyLineWithDistances(ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, TArray<FVector>& OutPoints, TArray<double>& OutDistancesAlongSpline) const
+{
+	return ConvertSplineToPolyline_InDistanceRange(CoordinateSpace, MaxSquareDistanceFromSpline, 0, GetSplineLength(), OutPoints, OutDistancesAlongSpline, false);
+}
+
+bool USplineComponent::ConvertSplineToPolyline_InDistanceRange(ESplineCoordinateSpace::Type CoordinateSpace, const float InMaxSquareDistanceFromSpline, float RangeStart, float RangeEnd, TArray<FVector>& OutPoints, TArray<double>& OutDistancesAlongSpline, bool bAllowWrappingIfClosed) const
+{
+	const int32 NumPoints = SplineCurves.Position.Points.Num();
+	if (NumPoints == 0)
+	{
+		return false;
+	}
+	const int32 NumSegments = GetNumberOfSplineSegments();
+
+	float SplineLength = GetSplineLength();
+	if (SplineLength <= 0)
+	{
+		OutPoints.Add(GetLocationAtDistanceAlongSpline(0, CoordinateSpace));
+		OutDistancesAlongSpline.Add(0);
+		return false;
+	}
+
+	// Sanitize the sampling tolerance
+	const float MaxSquareDistanceFromSpline = FMath::Max(UE_SMALL_NUMBER, InMaxSquareDistanceFromSpline);
+
+	// Sanitize range and mark whether the range wraps through 0
+	bool bNeedsWrap = false;
+	if (!bClosedLoop || !bAllowWrappingIfClosed)
+	{
+		RangeStart = FMath::Clamp(RangeStart, 0, SplineLength);
+		RangeEnd = FMath::Clamp(RangeEnd, 0, SplineLength);
+	}
+	else if (RangeStart < 0 || RangeEnd > SplineLength)
+	{
+		bNeedsWrap = true;
+	}
+	if (RangeStart > RangeEnd)
+	{
+		return false;
+	}
+
+	// expect at least 2 points per segment covered
+	int32 EstimatedPoints = 2 * NumSegments * static_cast<int32>((RangeEnd - RangeStart) / SplineLength);
+	OutPoints.Empty();
+	OutPoints.Reserve(EstimatedPoints);
+	OutDistancesAlongSpline.Empty();
+	OutDistancesAlongSpline.Reserve(EstimatedPoints);
+
+	if (RangeStart == RangeEnd)
+	{
+		OutPoints.Add(GetLocationAtDistanceAlongSpline(RangeStart, CoordinateSpace));
+		OutDistancesAlongSpline.Add(RangeStart);
+		return true;
+	}
+
+	// If we need to wrap around, break the wrapped segments into non-wrapped parts and add each part separately
+	if (bNeedsWrap)
+	{
+		float TotalRange = RangeEnd - RangeStart;
+		auto WrapDistance = [SplineLength](float Distance, int32& LoopIdx) -> float
+		{
+			LoopIdx = FMath::FloorToInt32(Distance / SplineLength);
+			float WrappedDistance = FMath::Fmod(Distance, SplineLength);
+			if (WrappedDistance < 0)
+			{
+				WrappedDistance += SplineLength;
+			}
+			return WrappedDistance;
+		};
+		int32 StartLoopIdx, EndLoopIdx;
+		float WrappedStart = WrapDistance(RangeStart, StartLoopIdx);
+		float WrappedEnd = WrapDistance(RangeEnd, EndLoopIdx);
+		float WrappedLoc = WrappedStart;
+		bool bHasAdded = false;
+		for (int32 LoopIdx = StartLoopIdx; LoopIdx <= EndLoopIdx; ++LoopIdx)
+		{
+			if (bHasAdded && ensure(OutPoints.Num()))
+			{
+				OutPoints.RemoveAt(OutPoints.Num() - 1, 1, EAllowShrinking::No);
+				OutDistancesAlongSpline.RemoveAt(OutDistancesAlongSpline.Num() - 1, 1, EAllowShrinking::No);
+			}
+			float EndLoc = LoopIdx == EndLoopIdx ? WrappedEnd : SplineLength;
+
+			TArray<FVector> Points;
+			TArray<double> Distances;
+			ConvertSplineToPolyline_InDistanceRange(CoordinateSpace, MaxSquareDistanceFromSpline, WrappedLoc, EndLoc, Points, Distances, false);
+			OutPoints.Append(Points);
+			OutDistancesAlongSpline.Append(Distances);
+
+			bHasAdded = true;
+			WrappedLoc = 0;
+		}
+		return bHasAdded;
+	} // end of the wrap-around case, after this values will be in the normal range
+	
+	int32 SegmentStart = SplineCurves.ReparamTable.GetPointIndexForInputValue(RangeStart) / ReparamStepsPerSegment;
+	int32 SegmentEnd = FMath::Min(NumSegments, 1 + SplineCurves.ReparamTable.GetPointIndexForInputValue(RangeEnd) / ReparamStepsPerSegment);
+
+	TArray<FVector> NewPoints;
+	TArray<double> NewDistances;
+	for (int32 SegmentIndex = SegmentStart; SegmentIndex < SegmentEnd; ++SegmentIndex)
+	{
+		// Get the segment range as distances, clipped with the input range
+		double StartDist = FMath::Max(RangeStart, GetDistanceAlongSplineAtSplinePoint(SegmentIndex));
+		double StopDist = FMath::Min(RangeEnd, GetDistanceAlongSplineAtSplinePoint(SegmentIndex + 1));
+		bool bIsLast = SegmentIndex + 1 == SegmentEnd;
+
+		const int32 NumLines = 2; // Dichotomic subdivision of the spline segment
+		double Dist = StopDist - StartDist;
+		double SubstepSize = Dist / NumLines;
+		if (SubstepSize == 0.0)
+		{
+			// There is no distance to cover, so handle the segment with a single point (or nothing, if this isn't the very last point)
+			if (bIsLast)
+			{
+				OutPoints.Add(GetLocationAtDistanceAlongSpline(StopDist, CoordinateSpace));
+				OutDistancesAlongSpline.Add(StopDist);
+			}
+			continue;
+		}
+
+		double SubstepStartDist = StartDist;
+		for (int32 i = 0; i < NumLines; ++i)
+		{
+			double SubstepEndDist = SubstepStartDist + SubstepSize;
+			NewPoints.Reset();
+			NewDistances.Reset();
+			// Recursively sub-divide each segment until the requested precision is reached :
+			if (DivideSplineIntoPolylineRecursiveWithDistancesHelper(SubstepStartDist, SubstepEndDist, CoordinateSpace, MaxSquareDistanceFromSpline, NewPoints, NewDistances))
+			{
+				if (OutPoints.Num() > 0)
+				{
+					check(OutPoints.Last() == NewPoints[0]); // our last point must be the same as the new segment's first
+					OutPoints.RemoveAt(OutPoints.Num() - 1);
+					OutDistancesAlongSpline.RemoveAt(OutDistancesAlongSpline.Num() - 1);
+				}
+				OutPoints.Append(NewPoints);
+				OutDistancesAlongSpline.Append(NewDistances);
+			}
+
+			SubstepStartDist = SubstepEndDist;
+		}
+	}
+
+	return !OutPoints.IsEmpty();
+}
+
+bool USplineComponent::ConvertSplineToPolyline_InTimeRange(ESplineCoordinateSpace::Type CoordinateSpace, const float MaxSquareDistanceFromSpline, float StartTimeAlongSpline, float EndTimeAlongSpline, bool bUseConstantVelocity, TArray<FVector>& OutPoints, TArray<double>& OutDistancesAlongSpline, bool bAllowWrappingIfClosed) const
+{
+	if (SplineCurves.Position.Points.Num() == 0)
+	{
+		return false;
+	}
+
+	// Helper to convert times to distances, so we can call the distance-based version of this function
+	auto TimeToDistance = [this, bUseConstantVelocity, bAllowWrappingIfClosed](float Time) -> float
+	{
+		float TimeFrac = Time / Duration; // fraction of spline travelled
+		if (bUseConstantVelocity)
+		{
+			return TimeFrac * GetSplineLength();
+		}
+		else
+		{
+			const int32 NumPoints = SplineCurves.Position.Points.Num();
+			const int32 NumSegments = bClosedLoop ? NumPoints : NumPoints - 1;
+			// Note: 'InputKey' values correspond to the spline in parameter space, in the range of 0 to NumSegments
+			float InputKey = TimeFrac * NumSegments;
+			if (bClosedLoop && bAllowWrappingIfClosed)
+			{
+				// Note the GetDistanceAlongSplineAtSplineInputKey() requires values in the 0-NumSegments range
+				// So we wrap (modulus) into that range, find the distance, and then translate back to the original un-wrapped range.
+				float DistanceAtStartOfLoop = FMath::Floor(TimeFrac) * GetSplineLength();
+				float InRangeInputKey = FMath::Fmod(InputKey, NumSegments);
+				if (InRangeInputKey < 0)
+				{
+					InRangeInputKey += NumSegments;
+				}
+				float DistanceWrapped = GetDistanceAlongSplineAtSplineInputKey(InRangeInputKey);
+				return DistanceWrapped + DistanceAtStartOfLoop;
+			}
+			else
+			{
+				// If wrapping is not allowed, clamp to the valid range
+				float ClampedInputKey = FMath::Clamp(InputKey, 0, NumSegments);
+				return GetDistanceAlongSplineAtSplineInputKey(InputKey);
+			}
+		}
+	};
+
+	return ConvertSplineToPolyline_InDistanceRange(CoordinateSpace, MaxSquareDistanceFromSpline, TimeToDistance(StartTimeAlongSpline), TimeToDistance(EndTimeAlongSpline), OutPoints, OutDistancesAlongSpline, bAllowWrappingIfClosed);
+}
+
+
 template<class T>
 T GetPropertyValueAtSplinePoint(const USplineMetadata* Metadata, int32 Index, FName PropertyName)
 {
@@ -1545,7 +1968,7 @@ FVector USplineComponent::GetVectorPropertyAtSplinePoint(int32 Index, FName Prop
 	return GetPropertyValueAtSplinePoint<FVector>(GetSplinePointsMetadata(), Index, PropertyName);
 }
 
-#if !UE_BUILD_SHIPPING
+#if UE_ENABLE_DEBUG_DRAWING
 FPrimitiveSceneProxy* USplineComponent::CreateSceneProxy()
 {
 	if (!bDrawDebug)
@@ -1624,6 +2047,21 @@ FPrimitiveSceneProxy* USplineComponent::CreateSceneProxy()
 
 	return new FSplineSceneProxy(this);
 }
+#endif
+	
+#if WITH_EDITOR
+
+void USplineComponent::PushSelectionToProxy()
+{
+	if (!IsComponentIndividuallySelected())
+	{
+		OnDeselectedInEditor.Broadcast(this);
+	}
+	Super::PushSelectionToProxy();
+}
+#endif
+
+#if UE_ENABLE_DEBUG_DRAWING
 
 void USplineComponent::Draw(FPrimitiveDrawInterface* PDI, const FSceneView* View, const FInterpCurveVector& SplineInfo, const FMatrix& LocalToWorld, const FLinearColor& LineColor, uint8 DepthPriorityGroup)
 {
@@ -1687,22 +2125,10 @@ void USplineComponent::Draw(FPrimitiveDrawInterface* PDI, const FSceneView* View
 		OldKeyPos = NewKeyPos;
 	}
 }
-
-#if WITH_EDITOR
-bool USplineComponent::IgnoreBoundsForEditorFocus() const
-{
-	// Cannot compute proper bounds when there's no point so don't participate to editor focus if that's the case : 
-	return SplineCurves.Position.Points.Num() == 0;
-}
-#endif // WITH_EDITOR
+#endif
 
 FBoxSphereBounds USplineComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	if (!bDrawDebug)
-	{
-		// Do as little as possible if not rendering anything
-		return Super::CalcBounds(LocalToWorld);
-	}
 
 #if SPLINE_FAST_BOUNDS_CALCULATION
 	FBox BoundingBox(0);
@@ -1738,12 +2164,21 @@ FBoxSphereBounds USplineComponent::CalcBounds(const FTransform& LocalToWorld) co
 	{
 		Min = Max = SplineCurves.Position.Points[0].OutVal;
 	}
+	else
+	{
+		Min = FVector::ZeroVector;
+		Max = FVector::ZeroVector;
+	}
 
 	return FBoxSphereBounds(FBox(Min, Max).TransformBy(LocalToWorld));
 #endif
 }
 
-#endif
+bool USplineComponent::GetIgnoreBoundsForEditorFocus() const
+{
+	// Cannot compute proper bounds when there's no point so don't participate to editor focus if that's the case : 
+	return Super::GetIgnoreBoundsForEditorFocus() || SplineCurves.Position.Points.Num() == 0;
+}
 
 TStructOnScope<FActorComponentInstanceData> USplineComponent::GetComponentInstanceData() const
 {
@@ -1854,3 +2289,4 @@ void FSplinePositionLinearApproximation::Build(const FSplineCurves& InCurves, TA
 
 	OutPoints.Emplace(InCurves.Position.Points.Last().OutVal, InCurves.ReparamTable.Points.Last().OutVal);
 }
+

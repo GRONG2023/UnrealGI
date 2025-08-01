@@ -21,7 +21,7 @@ PRAGMA_DEFAULT_VISIBILITY_END
 #endif
 
 bool FRBFInterpolatorBase::SetUpperKernel(
-	const TArrayView<float>& UpperKernel,
+	const TArrayView<float>& UpperKernel, 
 	int32 Size
 )
 {
@@ -33,7 +33,7 @@ bool FRBFInterpolatorBase::SetUpperKernel(
 	// portion.
 	FullKernel = MatrixXf::Identity(Size, Size);
 
-	for (int32 c = 0, i = 0; i < Size; i++)
+	for (int32 c = 0, i = 0; i < Size; i++)	
 	{
 		for (int32 j = i; j < Size; j++)
 		{

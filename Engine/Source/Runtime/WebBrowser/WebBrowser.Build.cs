@@ -7,8 +7,6 @@ public class WebBrowser : ModuleRules
 {
 	public WebBrowser(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PublicIncludePaths.Add("Runtime/WebBrowser/Public");
-		PrivateIncludePaths.Add("Runtime/WebBrowser/Private");
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
@@ -50,8 +48,24 @@ public class WebBrowser : ModuleRules
 			CircularlyReferencedDependentModules.Add("WebBrowserTexture");
 		}
 
+		if ( Target.Type != TargetType.Program && Target.Platform == UnrealTargetPlatform.Win64)
+        {
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"Engine",
+					"RenderCore"
+				}
+			);
+
+		}
+
+		if (Target.Platform == UnrealTargetPlatform.Android)
+		{
+			PublicSystemLibraries.Add("libjnigraphics");
+		}
+
 		if (Target.Platform == UnrealTargetPlatform.Win64
-		||  Target.Platform == UnrealTargetPlatform.Win32
 		||  Target.Platform == UnrealTargetPlatform.Mac
 		||  Target.Platform == UnrealTargetPlatform.Linux)
 		{
@@ -62,34 +76,17 @@ public class WebBrowser : ModuleRules
 
 			if (Target.Type != TargetType.Server)
 			{
-				if (Target.Platform == UnrealTargetPlatform.Mac)
+				if (Target.Platform == UnrealTargetPlatform.Mac || Target.Platform == UnrealTargetPlatform.Linux)
 				{
-					// Add contents of UnrealCefSubProcess.app directory as runtime dependencies
-					foreach (string FilePath in Directory.EnumerateFiles(Target.RelativeEnginePath + "/Binaries/Mac/UnrealCEFSubProcess.app", "*", SearchOption.AllDirectories))
-					{
-						RuntimeDependencies.Add(FilePath);
-					}
-				}
-				else if (Target.Platform == UnrealTargetPlatform.Linux)
-				{
-					RuntimeDependencies.Add("$(EngineDir)/Binaries/" + Target.Platform.ToString() + "/UnrealCEFSubProcess");
+					RuntimeDependencies.Add("$(EngineDir)/Binaries/" + Target.Platform.ToString() + "/EpicWebHelper");
 				}
 				else
 				{
-					RuntimeDependencies.Add("$(EngineDir)/Binaries/" + Target.Platform.ToString() + "/UnrealCEFSubProcess.exe");
+					RuntimeDependencies.Add("$(EngineDir)/Binaries/" + Target.Platform.ToString() + "/EpicWebHelper.exe");
 				}
 			}
 		}
-
-		if (Target.Platform == UnrealTargetPlatform.PS4 &&
-			Target.bCompileAgainstEngine)
-		{
-			PrivateDependencyModuleNames.Add("Engine");
-		}
-
-		if(Target.Platform == UnrealTargetPlatform.Lumin)
-		{
-			PrecompileForTargets = ModuleRules.PrecompileTargetsType.None;
-		}
+		PrivateDefinitions.Add("PLATFORM_SPECIFIC_WEB_BROWSER=" + (bPlatformSpecificWebBrowser ? "1" : "0"));
 	}
+	protected virtual bool bPlatformSpecificWebBrowser { get { return false; } }
 }

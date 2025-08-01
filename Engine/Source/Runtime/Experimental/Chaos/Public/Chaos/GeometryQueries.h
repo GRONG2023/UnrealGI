@@ -9,6 +9,7 @@
 #include "Chaos/HeightField.h"
 #include "Chaos/ImplicitObject.h"
 #include "Chaos/ImplicitObjectScaled.h"
+#include "Chaos/ImplicitObjectUnion.h"
 #include "Chaos/Levelset.h"
 #include "Chaos/Plane.h"
 #include "Chaos/Sphere.h"
@@ -25,6 +26,7 @@ namespace Chaos
 	struct FMTDInfo
 	{
 		FVec3 Normal;
+		FVec3 Position;
 		FReal Penetration;
 	};
 
@@ -61,11 +63,12 @@ namespace Chaos
 			{
 				return Utilities::CastHelper(A, BToATM, [&](const auto& AConcrete, const auto& BToAFullTM)
 				{
-					FVec3 LocalA,LocalB,LocalNormal;
+					FVec3 LocalA, LocalB, LocalNormal;
 					int32 ClosestVertexIndexA, ClosestVertexIndexB;
-					if(GJKPenetration<false, FReal>(AConcrete,B,BToAFullTM,OutMTD->Penetration,LocalA,LocalB,LocalNormal,ClosestVertexIndexA,ClosestVertexIndexB,Thickness,0.0f,Offset.SizeSquared() < 1e-4 ? FVec3(1,0,0) : Offset))
+					if(GJKPenetration<false, FReal>(AConcrete,B,BToAFullTM,OutMTD->Penetration, LocalA, LocalB, LocalNormal,ClosestVertexIndexA,ClosestVertexIndexB,Thickness,0.,Offset.SizeSquared() < 1e-4 ? FVec3(1,0,0) : Offset))
 					{
 						OutMTD->Normal = ATM.TransformVectorNoScale(LocalNormal);
+						OutMTD->Position = ATM.TransformPosition(LocalA);
 						return true;
 					}
 
@@ -79,34 +82,59 @@ namespace Chaos
 		}
 		else
 		{
+			bool bOverlap = false;
 			switch (AType)
 			{
 				case ImplicitObjectType::HeightField:
 				{
 					const FHeightField& AHeightField = static_cast<const FHeightField&>(A);
-					return AHeightField.OverlapGeom(B, BToATM, Thickness, OutMTD);
+					bOverlap = AHeightField.OverlapGeom(B, BToATM, Thickness, OutMTD);
+					break;
 				}
 				case ImplicitObjectType::TriangleMesh:
 				{
 					const FTriangleMeshImplicitObject& ATriangleMesh = static_cast<const FTriangleMeshImplicitObject&>(A);
-					return ATriangleMesh.OverlapGeom(B, BToATM, Thickness, OutMTD);
+					bOverlap = ATriangleMesh.OverlapGeom(B, BToATM, Thickness, OutMTD);
+					break;
 				}
 				case ImplicitObjectType::LevelSet:
 				{
 					const FLevelSet& ALevelSet = static_cast<const FLevelSet&>(A);
-					return ALevelSet.OverlapGeom(B, BToATM, Thickness, OutMTD);
+					bOverlap = ALevelSet.OverlapGeom(B, BToATM, Thickness, OutMTD);
+					break;
+				}
+				case ImplicitObjectType::Union:
+				case ImplicitObjectType::UnionClustered:
+				{
+					const FImplicitObjectUnion& AUnion = static_cast<const FImplicitObjectUnion&>(A);
+					bool bHit = false;
+					AUnion.ForEachObject(
+						[&bHit, &ATM, &B, &BTM, Thickness, &OutMTD](const FImplicitObject& SubObject, const FRigidTransform3& SubTransform)
+						{
+							const FRigidTransform3 NewATM = SubTransform * ATM;
+							if (OverlapQuery(SubObject, NewATM, B, BTM, Thickness, OutMTD))
+							{
+								bHit = true;
+								return true;
+							}
+
+							return false;
+						}
+					);
+
+					return bHit;
 				}
 				default:
 				{
 					if(IsScaled(AType))
 					{
 						const auto& AScaled = TImplicitObjectScaled<FTriangleMeshImplicitObject>::AsScaledChecked(A);
-						return AScaled.LowLevelOverlapGeom(B, BToATM, Thickness, OutMTD);
+						bOverlap =  AScaled.LowLevelOverlapGeom(B, BToATM, Thickness, OutMTD);
 					}
 					else if(IsInstanced(AType))
 					{
 						const auto& AInstanced = TImplicitObjectInstanced<FTriangleMeshImplicitObject>::AsInstancedChecked(A);
-						return AInstanced.LowLevelOverlapGeom(B, BToATM, Thickness, OutMTD);
+						bOverlap = AInstanced.LowLevelOverlapGeom(B, BToATM, Thickness, OutMTD);
 					}
 					else
 					{
@@ -114,13 +142,19 @@ namespace Chaos
 					}
 				}
 			}
-		}
 
-		return false;
+			if (OutMTD && bOverlap)
+			{
+				OutMTD->Normal = ATM.TransformVectorNoScale(OutMTD->Normal);
+				OutMTD->Position = ATM.TransformPosition(OutMTD->Position);
+			}
+			return bOverlap;
+		}
 	}
 
+	// @todo(chaos): This does not handle Unions
 	template <typename SweptGeometry>
-	bool SweepQuery(const FImplicitObject& A, const FRigidTransform3& ATM, const SweptGeometry& B, const FRigidTransform3& BTM, const FVec3& Dir, const FReal Length, FReal& OutTime, FVec3& OutPosition, FVec3& OutNormal, int32& OutFaceIndex, const FReal Thickness, const bool bComputeMTD)
+	bool SweepQuery(const FImplicitObject& A, const FRigidTransform3& ATM, const SweptGeometry& B, const FRigidTransform3& BTM, const FVec3& Dir, const FReal Length, FReal& OutTime, FVec3& OutPosition, FVec3& OutNormal, int32& OutFaceIndex, FVec3& OutFaceNormal, const FReal Thickness, const bool bComputeMTD)
 	{
 		const EImplicitObjectType AType = A.GetType();
 		constexpr EImplicitObjectType BType = SweptGeometry::StaticType();
@@ -131,7 +165,7 @@ namespace Chaos
 		{
 			const TImplicitObjectTransformed<FReal, 3>& TransformedA = static_cast<const TImplicitObjectTransformed<FReal, 3>&>(A);
 			const FRigidTransform3 NewATM = TransformedA.GetTransform() * ATM;
-			return SweepQuery(*TransformedA.GetTransformedObject(), NewATM, B, BTM, Dir, Length, OutTime, OutPosition, OutNormal, OutFaceIndex, Thickness, bComputeMTD);
+			return SweepQuery(*TransformedA.GetTransformedObject(), NewATM, B, BTM, Dir, Length, OutTime, OutPosition, OutNormal, OutFaceIndex, OutFaceNormal, Thickness, bComputeMTD);
 		}
 
 		OutFaceIndex = INDEX_NONE;
@@ -140,7 +174,7 @@ namespace Chaos
 		FVec3 LocalNormal(0);
 
 		const FRigidTransform3 BToATM = BTM.GetRelativeTransform(ATM);
-		ensure(FMath::IsNearlyEqual(Dir.SizeSquared(), 1, KINDA_SMALL_NUMBER)); // Added to help determine cause of this ensure firing in GJKRaycast2.
+		ensure(FMath::IsNearlyEqual(Dir.SizeSquared(), (FReal)1, (FReal)UE_KINDA_SMALL_NUMBER)); // Added to help determine cause of this ensure firing in GJKRaycast2.
 		const FVec3 LocalDir = ATM.InverseTransformVectorNoScale(Dir);
 
 		bool bSweepAsRaycast = BType == ImplicitObjectType::Sphere && !bComputeMTD;
@@ -204,13 +238,13 @@ namespace Chaos
 				case ImplicitObjectType::HeightField:
 				{
 					const FHeightField& AHeightField = static_cast<const FHeightField&>(A);
-					bResult = AHeightField.SweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, Thickness, bComputeMTD);
+					bResult = AHeightField.SweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, OutFaceNormal, Thickness, bComputeMTD);
 					break;
 				}
 				case ImplicitObjectType::TriangleMesh:
 				{
 					const FTriangleMeshImplicitObject& ATriangleMesh = static_cast<const FTriangleMeshImplicitObject&>(A);
-					bResult = ATriangleMesh.SweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, Thickness, bComputeMTD);
+					bResult = ATriangleMesh.SweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, OutFaceNormal, Thickness, bComputeMTD);
 					break;
 				}
 				case ImplicitObjectType::LevelSet:
@@ -219,17 +253,54 @@ namespace Chaos
 					bResult = ALevelSet.SweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, Thickness, bComputeMTD);
 					break;
 				}
+				case ImplicitObjectType::Union:
+				case ImplicitObjectType::UnionClustered:
+				{
+					const FImplicitObjectUnion& AUnion = static_cast<const FImplicitObjectUnion&>(A);
+
+					bool bHit = false;
+					OutTime = TNumericLimits<FReal>::Max();
+					AUnion.ForEachObject(
+						[&bHit, &ATM, &B, &BTM, &Dir, Length, &OutTime, &OutPosition, &OutNormal, &OutFaceIndex, &OutFaceNormal, Thickness, bComputeMTD](const FImplicitObject& SubObject, const FRigidTransform3& SubTransform)
+						{
+							const FRigidTransform3 NewATM = SubTransform * ATM;
+
+							FReal ObjectTime = 0.0;
+							FVec3 ObjectPosition;
+							FVec3 ObjectNormal;
+							int32 ObjectFaceIndex;
+							FVec3 ObjectFaceNormal;
+
+							if (SweepQuery(SubObject, NewATM, B, BTM, Dir, Length, ObjectTime, ObjectPosition, ObjectNormal, ObjectFaceIndex, ObjectFaceNormal, Thickness, bComputeMTD))
+							{
+								bHit = true;
+								if (ObjectTime < OutTime)
+								{
+									OutTime = ObjectTime;
+									OutPosition = ObjectPosition;
+									OutNormal = ObjectNormal;
+									OutFaceIndex = ObjectFaceIndex;
+									OutFaceNormal = ObjectFaceNormal;
+								}
+							}
+
+							return false;
+						}
+					);
+
+					return bHit;
+				}
 				default:
 				if (IsScaled(AType))
 				{
 					const auto& AScaled = TImplicitObjectScaled<FTriangleMeshImplicitObject>::AsScaledChecked(A);
-					bResult = AScaled.LowLevelSweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, Thickness, bComputeMTD);
+					bResult = AScaled.LowLevelSweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, OutFaceNormal, Thickness, bComputeMTD);
 					break;
 				}
 				else if(IsInstanced(AType))
 				{
 					const auto& Instanced = TImplicitObjectInstanced<FTriangleMeshImplicitObject>::AsInstancedChecked(A);
-					bResult = Instanced.LowLevelSweepGeom(B,BToATM,LocalDir,Length,OutTime,LocalPosition,LocalNormal,OutFaceIndex,Thickness,bComputeMTD);
+					bResult = Instanced.LowLevelSweepGeom(B, BToATM, LocalDir, Length, OutTime, LocalPosition, LocalNormal, OutFaceIndex, OutFaceNormal, Thickness, bComputeMTD);
 					break;
 				}
 				else
@@ -242,10 +313,24 @@ namespace Chaos
 		//put back into world space
 		if (bResult && (OutTime > 0 || bComputeMTD))
 		{
-			OutNormal = ATM.TransformVectorNoScale(LocalNormal);
+			OutNormal = ATM.TransformVectorNoScale(LocalNormal).GetSafeNormal(UE_KINDA_SMALL_NUMBER, FVec3::AxisVector(0));
 			OutPosition = ATM.TransformPositionNoScale(LocalPosition);
+			OutFaceNormal = ATM.TransformVectorNoScale(A.FindGeometryOpposingNormal(LocalDir, OutFaceIndex, OutNormal));
 		}
 
 		return bResult;
 	}
+
+
+	// @todo(chaos): This does not handle Unions
+	inline bool SweepQuery(const FImplicitObject& A, const FRigidTransform3& ATM, const FImplicitObject& B, const FRigidTransform3& BTM, const FVec3& Dir, const FReal Length, FReal& OutTime, FVec3& OutPosition, FVec3& OutNormal, int32& OutFaceIndex, FVec3& OutFaceNormal, const FReal Thickness, const bool bComputeMTD)
+	{
+		return Chaos::Utilities::CastHelper(B, BTM,
+			[&A, &ATM, &Dir, &Length, &OutTime, &OutPosition, &OutNormal, &OutFaceIndex, &OutFaceNormal, &Thickness, &bComputeMTD]
+			(const auto& BInner, const FTransform& BInnerTM) -> bool
+			{
+				return SweepQuery(A, ATM, BInner, BInnerTM, Dir, Length, OutTime, OutPosition, OutNormal, OutFaceIndex, OutFaceNormal, Thickness, bComputeMTD);
+			});
+	}
+
 }

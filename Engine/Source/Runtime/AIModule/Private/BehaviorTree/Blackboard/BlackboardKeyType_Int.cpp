@@ -2,6 +2,8 @@
 
 #include "BehaviorTree/Blackboard/BlackboardKeyType_Int.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlackboardKeyType_Int)
+
 const UBlackboardKeyType_Int::FDataType UBlackboardKeyType_Int::InvalidValue = UBlackboardKeyType_Int::FDataType(0);
 
 UBlackboardKeyType_Int::UBlackboardKeyType_Int(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
@@ -31,6 +33,11 @@ EBlackboardCompare::Type UBlackboardKeyType_Int::CompareValues(const UBlackboard
 		EBlackboardCompare::Equal;
 }
 
+void UBlackboardKeyType_Int::InitializeMemory(UBlackboardComponent& OwnerComp, uint8* MemoryBlock)
+{
+	SetValue(this, MemoryBlock, DefaultValue);
+}
+
 FString UBlackboardKeyType_Int::DescribeValue(const UBlackboardComponent& OwnerComp, const uint8* RawData) const
 {
 	return FString::Printf(TEXT("%d"), GetValue(this, RawData));
@@ -57,3 +64,4 @@ FString UBlackboardKeyType_Int::DescribeArithmeticParam(int32 IntValue, float Fl
 {
 	return FString::Printf(TEXT("%d"), IntValue);
 }
+

@@ -7,10 +7,10 @@ using System.Drawing;
 using System.Collections.Generic;
 using System.Globalization;
 using SolidWorks.Interop.sldworks;
+using System.Diagnostics;
 
 namespace DatasmithSolidworks
 {
-	[ComVisible(false)]
 	public class FMaterial
 	{
 		private static List<Tuple<string, string>> SpecialFinishes = new List<Tuple<string, string>>();
@@ -792,6 +792,7 @@ namespace DatasmithSolidworks
 						}
 						catch
 						{
+							Debug.Assert(false);
 						}
 						if (Appearances != null && Appearances.Length > 0)
 						{
@@ -910,7 +911,7 @@ namespace DatasmithSolidworks
 				XPos * UDir.Y + YPos * VDir.Y - CenterPoint.Y,
 				XPos * UDir.Z + YPos * VDir.Z - CenterPoint.Z);
 
-			UVPlane.Normal = new FVec3() - FVec3.Cross(UVPlane.UDirection, UVPlane.VDirection);
+			UVPlane.Normal = - FVec3.Cross(UVPlane.UDirection, UVPlane.VDirection);
 
 			return UVPlane;
 		}
@@ -930,7 +931,7 @@ namespace DatasmithSolidworks
 				case FMaterial.EMappingType.TYPE_AUTOMATIC:
 				case FMaterial.EMappingType.TYPE_CYLINDRICAL:
 				{
-					FVec3 cross = new FVec3(0f, 0f, 0f) - FVec3.Cross(UDirection, VDirection);
+					FVec3 cross = - FVec3.Cross(UDirection, VDirection);
 					Planes.Add(GetUVPlane(UDirection, VDirection));
 					Planes.Add(GetUVPlane(UDirection, cross));
 					Planes.Add(GetUVPlane(VDirection, cross));
@@ -990,7 +991,7 @@ namespace DatasmithSolidworks
 		public FVec2 ComputeNormalAtan2(FVec3 InVertex, FVec3 InModelCenter)
 		{
 			FVec3 Normal = InVertex - InModelCenter;
-			FVec3 UVCross = FVec3.Cross(new FVec3() - UDirection, VDirection);
+			FVec3 UVCross = FVec3.Cross(- UDirection, VDirection);
 			FVec3 UVNormal = new FVec3(-FVec3.Dot(Normal, UDirection), FVec3.Dot(Normal, VDirection), FVec3.Dot(Normal, UVCross));
 			return new FVec2(((float)Math.Atan2(UVNormal.Z, UVNormal.X) / (Math.PI * 2)), UVNormal.Y);
 		}
@@ -1053,6 +1054,42 @@ namespace DatasmithSolidworks
 			if (InMat1.ProjectionReference != InMat2.ProjectionReference) return false;
 			if (!MathUtils.Equals(InMat1.Diffuse, InMat2.Diffuse)) return false;
 			if (InMat1.BlurryReflections != InMat2.BlurryReflections) return false;
+
+			return true;
+		}
+
+		// Used to backtrack Appearance to Material in case Solidworks api of RenderMaterial didn't return all entities this material is used on
+		public bool EqualsAppearance(AppearanceSetting OtherAppearance)
+		{
+			if (Source.PrimaryColor != OtherAppearance.Color)
+			{
+				return false;
+			}
+
+			if (Math.Abs(Source.Emission - OtherAppearance.Luminous) > 0.001)
+			{
+				return false;
+			}
+			
+			if (Math.Abs(Source.Transparency - OtherAppearance.Transparent) > 0.001)
+			{
+				return false;
+			}
+
+			if (Math.Abs(Source.Reflectivity - OtherAppearance.Reflection) > 0.001)
+			{
+				return false;
+			}
+
+			if (Math.Abs(Source.Specular - OtherAppearance.Specular) > 0.001)
+			{
+				return false;
+			}
+
+			if (Source.SpecularColor != OtherAppearance.SpecularColor)
+			{
+				return false;
+			}
 
 			return true;
 		}

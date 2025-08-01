@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WeightedRandomSampler.h"
+#include "Misc/DelayedAutoRegister.h"
 
 IMPLEMENT_ABSTRACT_TYPE_LAYOUT(FWeightedRandomSampler);
 
@@ -43,8 +44,8 @@ void FWeightedRandomSampler::Initialize()
 
 	while (Small.Num() && Large.Num())
 	{
-		int32 SmallIdx = Small.Pop(false);
-		int32 LargeIdx = Large.Pop(false);
+		int32 SmallIdx = Small.Pop(EAllowShrinking::No);
+		int32 LargeIdx = Large.Pop(EAllowShrinking::No);
 
 		Prob[SmallIdx] = P[SmallIdx];
 		Alias[SmallIdx] = LargeIdx;

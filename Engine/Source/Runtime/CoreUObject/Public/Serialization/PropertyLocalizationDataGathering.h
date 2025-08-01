@@ -2,10 +2,28 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/Set.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
-#include "Misc/EnumClassFlags.h"
-#include "Internationalization/TextKey.h"
+#include "HAL/Platform.h"
 #include "Internationalization/GatherableTextData.h"
+#include "Internationalization/TextKey.h"
+#include "Misc/EnumClassFlags.h"
+#include "Templates/Function.h"
+#include "Templates/TypeHash.h"
+#include "Templates/UniquePtr.h"
+
+class FProperty;
+class FText;
+class UClass;
+class UFunction;
+class UObject;
+class UPackage;
+class UScriptStruct;
+class UStruct;
+struct FGatherableTextData;
 
 enum class EPropertyLocalizationGathererTextFlags : uint8
 {
@@ -71,50 +89,62 @@ enum class EPropertyLocalizationGathererResultFlags : uint8
 };
 ENUM_CLASS_FLAGS(EPropertyLocalizationGathererResultFlags);
 
-class COREUOBJECT_API FPropertyLocalizationDataGatherer
+class FPropertyLocalizationDataGatherer
 {
 public:
-	typedef TFunction<void(const UObject* const, FPropertyLocalizationDataGatherer&, const EPropertyLocalizationGathererTextFlags)> FLocalizationDataGatheringCallback;
-	typedef TMap<const UClass*, FLocalizationDataGatheringCallback> FLocalizationDataGatheringCallbackMap;
+	typedef TFunction<void(const UObject* /*Object*/, FPropertyLocalizationDataGatherer& /*PropertyLocalizationDataGatherer*/, const EPropertyLocalizationGathererTextFlags /*GatherTextFlags*/)> FLocalizationDataObjectGatheringCallback;
+	typedef TMap<const UClass*, FLocalizationDataObjectGatheringCallback> FLocalizationDataObjectGatheringCallbackMap;
+
+	typedef TFunction<void(const FString& /*PathToParent*/, const UScriptStruct* /*Struct*/, const void* /*StructData*/, const void* /*DefaultStructData*/, FPropertyLocalizationDataGatherer& /*PropertyLocalizationDataGatherer*/, const EPropertyLocalizationGathererTextFlags /*GatherTextFlags*/)> FLocalizationDataStructGatheringCallback;
+	typedef TMap<const UScriptStruct*, FLocalizationDataStructGatheringCallback> FLocalizationDataStructGatheringCallbackMap;
 
 	struct FGatherableFieldsForType
 	{
 		TArray<const FProperty*> Properties;
 		TArray<const UFunction*> Functions;
-		const FLocalizationDataGatheringCallback* CustomCallback = nullptr;
+		const FLocalizationDataObjectGatheringCallback* CustomObjectCallback = nullptr;
+		const FLocalizationDataStructGatheringCallback* CustomStructCallback = nullptr;
 
-		bool HasFields() const
+		bool IsEmpty() const
 		{
-			return Properties.Num() > 0 || Functions.Num() > 0;
+			return Properties.Num() == 0
+				&& Functions.Num() == 0
+				&& !CustomObjectCallback
+				&& !CustomStructCallback;
 		}
 	};
 
-	FPropertyLocalizationDataGatherer(TArray<FGatherableTextData>& InOutGatherableTextDataArray, const UPackage* const InPackage, EPropertyLocalizationGathererResultFlags& OutResultFlags);
+	COREUOBJECT_API FPropertyLocalizationDataGatherer(TArray<FGatherableTextData>& InOutGatherableTextDataArray, const UPackage* const InPackage, EPropertyLocalizationGathererResultFlags& OutResultFlags);
 
 	// Non-copyable
 	FPropertyLocalizationDataGatherer(const FPropertyLocalizationDataGatherer&) = delete;
 	FPropertyLocalizationDataGatherer& operator=(const FPropertyLocalizationDataGatherer&) = delete;
 
-	void GatherLocalizationDataFromObjectWithCallbacks(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
-	void GatherLocalizationDataFromObject(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
-	void GatherLocalizationDataFromObjectFields(const FString& PathToParent, const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
-	void GatherLocalizationDataFromStructFields(const FString& PathToParent, const UStruct* Struct, const void* StructData, const void* DefaultStructData, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
-	void GatherLocalizationDataFromChildTextProperties(const FString& PathToParent, const FProperty* const Property, const void* const ValueAddress, const void* const DefaultValueAddress, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	COREUOBJECT_API void GatherLocalizationDataFromObjectWithCallbacks(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	COREUOBJECT_API void GatherLocalizationDataFromObject(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	COREUOBJECT_API void GatherLocalizationDataFromObjectFields(const FString& PathToParent, const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	
+	COREUOBJECT_API void GatherLocalizationDataFromStructWithCallbacks(const FString& PathToParent, const UScriptStruct* Struct, const void* StructData, const void* DefaultStructData, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	COREUOBJECT_API void GatherLocalizationDataFromStruct(const FString& PathToParent, const UScriptStruct* Struct, const void* StructData, const void* DefaultStructData, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	COREUOBJECT_API void GatherLocalizationDataFromStructFields(const FString& PathToParent, const UStruct* Struct, const void* StructData, const void* DefaultStructData, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	
+	COREUOBJECT_API void GatherLocalizationDataFromChildTextProperties(const FString& PathToParent, const FProperty* const Property, const void* const ValueAddress, const void* const DefaultValueAddress, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
 
-	void GatherTextInstance(const FText& Text, const FString& Description, const bool bIsEditorOnly);
-	void GatherScriptBytecode(const FString& PathToScript, const TArray<uint8>& ScriptData, const bool bIsEditorOnly);
+	COREUOBJECT_API void GatherTextInstance(const FText& Text, const FString& Description, const bool bIsEditorOnly);
+	COREUOBJECT_API void GatherScriptBytecode(const FString& PathToScript, const TArray<uint8>& ScriptData, const bool bIsEditorOnly);
 
-	bool IsDefaultTextInstance(const FText& Text) const;
-	void MarkDefaultTextInstance(const FText& Text);
+	COREUOBJECT_API bool IsDefaultTextInstance(const FText& Text) const;
+	COREUOBJECT_API void MarkDefaultTextInstance(const FText& Text);
 
-	bool ShouldProcessObject(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags) const;
-	void MarkObjectProcessed(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
+	COREUOBJECT_API bool ShouldProcessObject(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags) const;
+	COREUOBJECT_API void MarkObjectProcessed(const UObject* Object, const EPropertyLocalizationGathererTextFlags GatherTextFlags);
 
-	const FGatherableFieldsForType& GetGatherableFieldsForType(const UStruct* InType);
+	COREUOBJECT_API const FGatherableFieldsForType& GetGatherableFieldsForType(const UStruct* InType);
 
-	static bool ExtractTextIdentity(const FText& Text, FString& OutNamespace, FString& OutKey, const bool bCleanNamespace);
+	static COREUOBJECT_API bool ExtractTextIdentity(const FText& Text, FString& OutNamespace, FString& OutKey, const bool bCleanNamespace);
 
-	static FLocalizationDataGatheringCallbackMap& GetTypeSpecificLocalizationDataGatheringCallbacks();
+	static COREUOBJECT_API FLocalizationDataObjectGatheringCallbackMap& GetTypeSpecificLocalizationDataObjectGatheringCallbacks();
+	static COREUOBJECT_API FLocalizationDataStructGatheringCallbackMap& GetTypeSpecificLocalizationDataStructGatheringCallbacks();
 
 	FORCEINLINE TArray<FGatherableTextData>& GetGatherableTextDataArray() const
 	{
@@ -127,8 +157,8 @@ public:
 	}
 
 private:
-	const FGatherableFieldsForType& CacheGatherableFieldsForType(const UStruct* InType);
-	bool CanGatherFromInnerProperty(const FProperty* InInnerProperty);
+	COREUOBJECT_API const FGatherableFieldsForType& CacheGatherableFieldsForType(const UStruct* InType);
+	COREUOBJECT_API bool CanGatherFromInnerProperty(const FProperty* InInnerProperty);
 
 	struct FObjectAndGatherFlags
 	{
@@ -176,8 +206,13 @@ private:
 /** Struct to automatically register a callback when it's constructed */
 struct FAutoRegisterLocalizationDataGatheringCallback
 {
-	FORCEINLINE FAutoRegisterLocalizationDataGatheringCallback(const UClass* InClass, const FPropertyLocalizationDataGatherer::FLocalizationDataGatheringCallback& InCallback)
+	FORCEINLINE FAutoRegisterLocalizationDataGatheringCallback(const UClass* InClass, const FPropertyLocalizationDataGatherer::FLocalizationDataObjectGatheringCallback& InCallback)
 	{
-		FPropertyLocalizationDataGatherer::GetTypeSpecificLocalizationDataGatheringCallbacks().Add(InClass, InCallback);
+		FPropertyLocalizationDataGatherer::GetTypeSpecificLocalizationDataObjectGatheringCallbacks().Add(InClass, InCallback);
+	}
+
+	FORCEINLINE FAutoRegisterLocalizationDataGatheringCallback(const UScriptStruct* InStruct, const FPropertyLocalizationDataGatherer::FLocalizationDataStructGatheringCallback& InCallback)
+	{
+		FPropertyLocalizationDataGatherer::GetTypeSpecificLocalizationDataStructGatheringCallbacks().Add(InStruct, InCallback);
 	}
 };

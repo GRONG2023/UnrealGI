@@ -6,31 +6,54 @@
 #include "Math/UnrealMathUtility.h"
 #include "Containers/UnrealString.h"
 #include "Misc/Parse.h"
+#include "Misc/LargeWorldCoordinatesSerializer.h"
 #include "Logging/LogMacros.h"
 #include "Math/Vector.h"
 #include "Math/VectorRegister.h"
+#include "UObject/ObjectVersion.h"
+
+namespace UE
+{
+namespace Math
+{
 
 /**
  * Implements a container for rotation information.
  *
  * All rotation values are stored in degrees.
+ *
+ * The angles are interpreted as intrinsic rotations applied in the order Yaw, then Pitch, then Roll. I.e., an object would be rotated
+ * first by the specified yaw around its up axis (with positive angles interpreted as clockwise when viewed from above, along -Z), 
+ * then pitched around its (new) right axis (with positive angles interpreted as 'nose up', i.e. clockwise when viewed along +Y), 
+ * and then finally rolled around its (final) forward axis (with positive angles interpreted as clockwise rotations when viewed along +X).
+ *
+ * Note that these conventions differ from quaternion axis/angle. UE Quat always considers a positive angle to be a left-handed rotation, 
+ * whereas Rotator treats yaw as left-handed but pitch and roll as right-handed.
+ * 
  */
-struct FRotator
+template<typename T>
+struct TRotator
 {
+
+	// Can't have a TEMPLATE_REQUIRES in the declaration because of the forward declarations, so check for allowed types here.
+	static_assert(TIsFloatingPoint<T>::Value, "TRotator only supports float and double types.");
+
 public:
+	using FReal = T;
+
 	/** Rotation around the right axis (around Y axis), Looking up and down (0=Straight Ahead, +Up, -Down) */
-	float Pitch; 
+	T Pitch;
 
-	/** Rotation around the up axis (around Z axis), Running in circles 0=East, +North, -South. */
-	float Yaw; 
+	/** Rotation around the up axis (around Z axis), Turning around (0=Forward, +Right, -Left)*/
+	T Yaw;
 
-	/** Rotation around the forward axis (around X axis), Tilting your head, 0=Straight, +Clockwise, -CCW. */
-	float Roll;
+	/** Rotation around the forward axis (around X axis), Tilting your head, (0=Straight, +Clockwise, -CCW) */
+	T Roll;
 
 public:
 
 	/** A rotator of zero degrees on each axis. */
-	static CORE_API const FRotator ZeroRotator;
+	CORE_API static const TRotator<T> ZeroRotator;
 
 public:
 
@@ -39,8 +62,8 @@ public:
 	{
 		if (ContainsNaN())
 		{
-			logOrEnsureNanError(TEXT("FRotator contains NaN: %s"), *ToString());
-			*const_cast<FRotator*>(this) = ZeroRotator;
+			logOrEnsureNanError(TEXT("TRotator contains NaN: %s"), *ToString());
+			*const_cast<TRotator<T>*>(this) = ZeroRotator;
 		}
 	}
 
@@ -48,8 +71,8 @@ public:
 	{
 		if (ContainsNaN())
 		{
-			logOrEnsureNanError(TEXT("%s: FRotator contains NaN: %s"), Message, *ToString());
-			*const_cast<FRotator*>(this) = ZeroRotator;
+			logOrEnsureNanError(TEXT("%s: TRotator contains NaN: %s"), Message, *ToString());
+			*const_cast<TRotator<T>*>(this) = ZeroRotator;
 		}
 	}
 #else
@@ -60,14 +83,14 @@ public:
 	/**
 	 * Default constructor (no initialization).
 	 */
-	FORCEINLINE FRotator() { }
+	FORCEINLINE TRotator() { }
 
 	/**
 	 * Constructor
 	 *
 	 * @param InF Value to set all components to.
 	 */
-	explicit FORCEINLINE FRotator(float InF);
+	explicit FORCEINLINE TRotator(T InF);
 
 	/**
 	 * Constructor.
@@ -76,21 +99,21 @@ public:
 	 * @param InYaw Yaw in degrees.
 	 * @param InRoll Roll in degrees.
 	 */
-	FORCEINLINE FRotator( float InPitch, float InYaw, float InRoll );
+	FORCEINLINE TRotator( T InPitch, T InYaw, T InRoll );
 
 	/**
 	 * Constructor.
 	 *
 	 * @param EForceInit Force Init Enum.
 	 */
-	explicit FORCEINLINE FRotator( EForceInit );
+	explicit FORCEINLINE TRotator( EForceInit );
 
 	/**
 	 * Constructor.
 	 *
 	 * @param Quat Quaternion used to specify rotation.
 	 */
-	explicit CORE_API FRotator( const FQuat& Quat );
+	explicit CORE_API TRotator( const TQuat<T>& Quat );
 
 public:
 
@@ -102,7 +125,7 @@ public:
 	 * @param R The other rotator.
 	 * @return The result of adding a rotator to this.
 	 */
-	FRotator operator+( const FRotator& R ) const;
+	TRotator operator+( const TRotator<T>& R ) const;
 
 	/**
 	 * Get the result of subtracting a rotator from this.
@@ -110,7 +133,7 @@ public:
 	 * @param R The other rotator.
 	 * @return The result of subtracting a rotator from this.
 	 */
-	FRotator operator-( const FRotator& R ) const;
+	TRotator operator-( const TRotator<T>& R ) const;
 
 	/**
 	 * Get the result of scaling this rotator.
@@ -118,7 +141,11 @@ public:
 	 * @param Scale The scaling factor.
 	 * @return The result of scaling.
 	 */
-	FRotator operator*( float Scale ) const;
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TRotator operator*( FArg Scale ) const
+	{
+		return TRotator(Pitch * Scale, Yaw * Scale, Roll * Scale);
+	}
 
 	/**
 	 * Multiply this rotator by a scaling factor.
@@ -126,7 +153,13 @@ public:
 	 * @param Scale The scaling factor.
 	 * @return Copy of the rotator after scaling.
 	 */
-	FRotator operator*=( float Scale );
+	template<typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+	FORCEINLINE TRotator operator*=( FArg Scale )
+	{
+		Pitch = Pitch * Scale; Yaw = Yaw * Scale; Roll = Roll * Scale;
+		DiagnosticCheckNaN();
+		return *this;
+	}
 
 	// Binary comparison operators.
 
@@ -137,7 +170,7 @@ public:
 	 * @return true if two rotators are identical, otherwise false.
 	 * @see Equals()
 	 */
-	bool operator==( const FRotator& R ) const;
+	bool operator==( const TRotator<T>& R ) const;
 
 	/**
 	 * Checks whether two rotators are different.
@@ -145,7 +178,7 @@ public:
 	 * @param V The other rotator.
 	 * @return true if two rotators are different, otherwise false.
 	 */
-	bool operator!=( const FRotator& V ) const;
+	bool operator!=( const TRotator<T>& V ) const;
 
 	// Assignment operators.
 
@@ -155,7 +188,7 @@ public:
 	 * @param R The other rotator.
 	 * @return Copy of rotator after addition.
 	 */
-	FRotator operator+=( const FRotator& R );
+	TRotator operator+=( const TRotator<T>& R );
 
 	/**
 	 * Subtracts another rotator from this.
@@ -163,7 +196,7 @@ public:
 	 * @param R The other rotator.
 	 * @return Copy of rotator after subtraction.
 	 */
-	FRotator operator-=( const FRotator& R );
+	TRotator operator-=( const TRotator<T>& R );
 
 public:
 
@@ -171,16 +204,16 @@ public:
 
 	/**
 	 * Checks whether rotator is nearly zero within specified tolerance, when treated as an orientation.
-	 * This means that FRotator(0, 0, 360) is "zero", because it is the same final orientation as the zero rotator.
+	 * This means that TRotator(0, 0, 360) is "zero", because it is the same final orientation as the zero rotator.
 	 *
 	 * @param Tolerance Error Tolerance.
 	 * @return true if rotator is nearly zero, within specified tolerance, otherwise false.
 	 */
-	bool IsNearlyZero( float Tolerance=KINDA_SMALL_NUMBER ) const;
+	bool IsNearlyZero( T Tolerance = UE_KINDA_SMALL_NUMBER ) const;
 
 	/**
 	 * Checks whether this has exactly zero rotation, when treated as an orientation.
-	 * This means that FRotator(0, 0, 360) is "zero", because it is the same final orientation as the zero rotator.
+	 * This means that TRotator(0, 0, 360) is "zero", because it is the same final orientation as the zero rotator.
 	 *
 	 * @return true if this has exactly zero rotation, otherwise false.
 	 */
@@ -188,13 +221,30 @@ public:
 
 	/**
 	 * Checks whether two rotators are equal within specified tolerance, when treated as an orientation.
-	 * This means that FRotator(0, 0, 360).Equals(FRotator(0,0,0)) is true, because they represent the same final orientation.
+	 * This means that TRotator(0, 0, 360).Equals(TRotator(0,0,0)) is true, because they represent the same final orientation.
+	 * It can compare only wound rotators (i.e. multiples of 360 degrees) that end up in a same rotation
+	 * Rotators that represent the same final rotation, but get there via different intermediate rotations aren't equal
+	 * i.e. TRotator(0, 45, 0).Equals(TRotator(180, 135, 180)) is false
 	 *
 	 * @param R The other rotator.
 	 * @param Tolerance Error Tolerance.
 	 * @return true if two rotators are equal, within specified tolerance, otherwise false.
 	 */
-	bool Equals( const FRotator& R, float Tolerance=KINDA_SMALL_NUMBER ) const;
+	bool Equals( const TRotator<T>& R, T Tolerance = UE_KINDA_SMALL_NUMBER ) const;
+
+	/**
+	 * Checks whether two rotators have the same orientation within the specified tolerance, without requiring similar angles or wound multiples of 360.
+	 * Unlike Equals(), it can compare Rotators that represent the same final orientation, but get there via different intermediate rotations.
+	 * i.e. If we compare two rotators with different angles, but same orientation like so:
+	 * A = TRotator(0, 45, 0)
+	 * B = TRotator(180, 135, 180)
+	 * Then A.EqualsOrientation(B) would be TRUE while A.Equals(B) would be FALSE
+	 *
+	 * @param R The other rotator.
+	 * @param Tolerance Error Tolerance.
+	 * @return true if two rotators are equal, within specified tolerance, otherwise false.
+	 */
+	bool EqualsOrientation( const TRotator<T>& R, T Tolerance = UE_KINDA_SMALL_NUMBER ) const;
 
 	/**
 	 * Adds to each component of the rotator.
@@ -204,12 +254,12 @@ public:
 	 * @param DeltaRoll Change in roll. (+/-)
 	 * @return Copy of rotator after addition.
 	 */
-	FRotator Add( float DeltaPitch, float DeltaYaw, float DeltaRoll );
+	TRotator Add( T DeltaPitch, T DeltaYaw, T DeltaRoll );
 
 	/**
 	 * Returns the inverse of the rotator.
 	 */
-	CORE_API FRotator GetInverse() const;
+	CORE_API TRotator GetInverse() const;
 
 	/**
 	 * Get the rotation, snapped to specified degree segments.
@@ -217,28 +267,28 @@ public:
 	 * @param RotGrid A Rotator specifying how to snap each component.
 	 * @return Snapped version of rotation.
 	 */
-	FRotator GridSnap( const FRotator& RotGrid ) const;
+	TRotator GridSnap( const TRotator<T>& RotGrid ) const;
 
 	/**
 	 * Convert a rotation into a unit vector facing in its direction.
 	 *
 	 * @return Rotation as a unit direction vector.
 	 */
-	CORE_API FVector Vector() const;
+	CORE_API TVector<T> Vector() const;
 
 	/**
 	 * Get Rotation as a quaternion.
 	 *
 	 * @return Rotation as a quaternion.
 	 */
-	CORE_API FQuat Quaternion() const;
+	CORE_API TQuat<T> Quaternion() const;
 
 	/**
 	 * Convert a Rotator into floating-point Euler angles (in degrees). Rotator now stored in degrees.
 	 *
 	 * @return Rotation as a Euler angle vector.
 	 */
-	CORE_API FVector Euler() const;
+	CORE_API TVector<T> Euler() const;
 
 	/**
 	 * Rotate a vector rotated by this rotator.
@@ -246,7 +296,7 @@ public:
 	 * @param V The vector to rotate.
 	 * @return The rotated vector.
 	 */
-	CORE_API FVector RotateVector( const FVector& V ) const;
+	CORE_API TVector<T> RotateVector( const UE::Math::TVector<T>& V ) const;
 
 	/**
 	 * Returns the vector rotated by the inverse of this rotator.
@@ -254,34 +304,34 @@ public:
 	 * @param V The vector to rotate.
 	 * @return The rotated vector.
 	 */
-	CORE_API FVector UnrotateVector( const FVector& V ) const;
+	CORE_API TVector<T> UnrotateVector( const UE::Math::TVector<T>& V ) const;
 
 	/**
 	 * Gets the rotation values so they fall within the range [0,360]
 	 *
 	 * @return Clamped version of rotator.
 	 */
-	FRotator Clamp() const;
+	TRotator<T> Clamp() const;
 
 	/** 
 	 * Create a copy of this rotator and normalize, removes all winding and creates the "shortest route" rotation. 
 	 *
 	 * @return Normalized copy of this rotator
 	 */
-	FRotator GetNormalized() const;
+	TRotator<T> GetNormalized() const;
 
 	/** 
 	 * Create a copy of this rotator and denormalize, clamping each axis to 0 - 360. 
 	 *
 	 * @return Denormalized copy of this rotator
 	 */
-	FRotator GetDenormalized() const;
+	TRotator<T> GetDenormalized() const;
 
 	/** Get a specific component of the vector, given a specific axis by enum */
-	float GetComponentForAxis(EAxis::Type Axis) const;
+	T GetComponentForAxis(EAxis::Type Axis) const;
 
 	/** Set a specified componet of the vector, given a specific axis by enum */
-	void SetComponentForAxis(EAxis::Type Axis, float Component);
+	void SetComponentForAxis(EAxis::Type Axis, T Component);
 
 	/**
 	 * In-place normalize, removes all winding and creates the "shortest route" rotation.
@@ -295,21 +345,21 @@ public:
 	 * @param Winding[Out] the Winding part of this Rotator
 	 * @param Remainder[Out] the Remainder
 	 */
-	CORE_API void GetWindingAndRemainder( FRotator& Winding, FRotator& Remainder ) const;
+	CORE_API void GetWindingAndRemainder( TRotator<T>& Winding, TRotator<T>& Remainder ) const;
 
 	/**
 	* Return the manhattan distance in degrees between this Rotator and the passed in one.
 	* @param Rotator[In] the Rotator we are comparing with.
 	* @return Distance(Manhattan) between the two rotators. 
 	*/
-	float GetManhattanDistance(const FRotator & Rotator) const;
+	T GetManhattanDistance(const TRotator<T> & Rotator) const;
 
 	/**
 	* Return a Rotator that has the same rotation but has different degree values for Yaw, Pitch, and Roll.
 	* This rotator should be within -180,180 range,
 	* @return A Rotator with the same rotation but different degrees.
 	*/
-	FRotator GetEquivalentRotator() const;
+	TRotator GetEquivalentRotator() const;
 
 	/**
 	* Modify if necessary the passed in rotator to be the closest rotator to it based upon it's equivalent.
@@ -318,7 +368,7 @@ public:
 	* @param MakeClosest[In/Out] the Rotator we want to make closest to us. Should be between 
 	* (-180, 180]. This Rotator may change if we need to use different degree values to make it closer.
 	*/
-	void SetClosestToMe(FRotator& MakeClosest) const;
+	void SetClosestToMe(TRotator& MakeClosest) const;
 
 	/**
 	 * Get a textual representation of the vector.
@@ -332,7 +382,7 @@ public:
 
 	/**
 	 * Initialize this Rotator based on an FString. The String is expected to contain P=, Y=, R=.
-	 * The FRotator will be bogus when InitFromString returns false.
+	 * The TRotator will be bogus when InitFromString returns false.
 	 *
 	 * @param InSourceString	FString containing the rotator values.
 	 * @return true if the P,Y,R values were read successfully; false otherwise.
@@ -372,7 +422,7 @@ public:
 	 * @param Angle The angle to clamp.
 	 * @return The clamped angle.
 	 */
-	static float ClampAxis( float Angle );
+	static T ClampAxis( T Angle );
 
 	/**
 	 * Clamps an angle to the range of (-180, 180].
@@ -380,7 +430,7 @@ public:
 	 * @param Angle The Angle to clamp.
 	 * @return The clamped angle.
 	 */
-	static float NormalizeAxis( float Angle );
+	static T NormalizeAxis( T Angle );
 
 	/**
 	 * Compresses a floating point angle into a byte.
@@ -388,7 +438,7 @@ public:
 	 * @param Angle The angle to compress.
 	 * @return The angle as a byte.
 	 */
-	static uint8 CompressAxisToByte( float Angle );
+	static uint8 CompressAxisToByte( T Angle );
 
 	/**
 	 * Decompress a word into a floating point angle.
@@ -396,7 +446,7 @@ public:
 	 * @param Angle The word angle.
 	 * @return The decompressed angle.
 	 */
-	static float DecompressAxisFromByte( uint8 Angle );
+	static T DecompressAxisFromByte( uint8 Angle );
 
 	/**
 	 * Compress a floating point angle into a word.
@@ -404,7 +454,7 @@ public:
 	 * @param Angle The angle to compress.
 	 * @return The decompressed angle.
 	 */
-	static uint16 CompressAxisToShort( float Angle );
+	static uint16 CompressAxisToShort( T Angle );
 
 	/**
 	 * Decompress a short into a floating point angle.
@@ -412,7 +462,7 @@ public:
 	 * @param Angle The word angle.
 	 * @return The decompressed angle.
 	 */
-	static float DecompressAxisFromShort( uint16 Angle );
+	static T DecompressAxisFromShort( uint16 Angle );
 
 	/**
 	 * Convert a vector of floating-point Euler angles (in degrees) into a Rotator. Rotator now stored in degrees
@@ -420,31 +470,62 @@ public:
 	 * @param Euler Euler angle vector.
 	 * @return A rotator from a Euler angle.
 	 */
-	static CORE_API FRotator MakeFromEuler( const FVector& Euler );
+	static CORE_API TRotator MakeFromEuler( const TVector<T>& Euler );
 
 
 public:
-
-	/**
-	 * Serializer.
-	 *
-	 * @param Ar Serialization Archive.
-	 * @param R Rotator being serialized.
-	 * @return Reference to Archive after serialization.
-	 */
-	friend FArchive& operator<<( FArchive& Ar, FRotator& R )
-	{
-		Ar << R.Pitch << R.Yaw << R.Roll;
-		return Ar;
-	}
 
 	bool Serialize( FArchive& Ar )
 	{
 		Ar << *this;
 		return true;
 	}
+
+	bool SerializeFromMismatchedTag(FName StructTag, FArchive& Ar);
+
+	// Conversion from other type.
+	template<typename FArg, TEMPLATE_REQUIRES(!std::is_same_v<T, FArg>)>
+	explicit TRotator(const TRotator<FArg>& From) : TRotator<T>((T)From.Pitch, (T)From.Yaw, (T)From.Roll) {}
 };
 
+#if !defined(_MSC_VER) || defined(__clang__)  // MSVC can't forward declare explicit specializations
+template<> CORE_API const FRotator3f FRotator3f::ZeroRotator;
+template<> CORE_API const FRotator3d FRotator3d::ZeroRotator;
+#endif
+
+/* TRotator inline functions
+ *****************************************************************************/
+
+ /**
+  * Serializer.
+  *
+  * @param Ar Serialization Archive.
+  * @param R Rotator being serialized.
+  * @return Reference to Archive after serialization.
+  */
+
+inline FArchive& operator<<(FArchive& Ar, TRotator<float>& R)
+{
+	Ar << R.Pitch << R.Yaw << R.Roll;
+	return Ar;
+}
+
+inline FArchive& operator<<(FArchive& Ar, TRotator<double>& R)
+{
+	if (Ar.UEVer() >= EUnrealEngineObjectUE5Version::LARGE_WORLD_COORDINATES)
+	{
+		Ar << R.Pitch << R.Yaw << R.Roll;
+	}
+	else
+	{
+		checkf(Ar.IsLoading(), TEXT("float -> double conversion applied outside of load!"));
+		// Stored as floats, so serialize float and copy.
+		float Pitch, Yaw, Roll;
+		Ar << Pitch << Yaw << Roll;
+		R = TRotator<double>(Pitch, Yaw, Roll);
+	}
+	return Ar;
+}
 
 /* FRotator inline functions
  *****************************************************************************/
@@ -456,91 +537,78 @@ public:
  * @param R rotator to be scaled.
  * @return Scaled rotator.
  */
-FORCEINLINE FRotator operator*( float Scale, const FRotator& R )
+template<typename T, typename FArg, TEMPLATE_REQUIRES(std::is_arithmetic<FArg>::value)>
+FORCEINLINE TRotator<T> operator*(FArg Scale, const TRotator<T>& R )
 {
 	return R.operator*( Scale );
 }
 
-
-FORCEINLINE FRotator::FRotator( float InF ) 
+template<typename T>
+FORCEINLINE TRotator<T>::TRotator( T InF ) 
 	:	Pitch(InF), Yaw(InF), Roll(InF) 
 {
 	DiagnosticCheckNaN();
 }
 
-
-FORCEINLINE FRotator::FRotator( float InPitch, float InYaw, float InRoll )
+template<typename T>
+FORCEINLINE TRotator<T>::TRotator( T InPitch, T InYaw, T InRoll )
 	:	Pitch(InPitch), Yaw(InYaw), Roll(InRoll) 
 {
 	DiagnosticCheckNaN();
 }
 
-
-FORCEINLINE FRotator::FRotator(EForceInit)
+template<typename T>
+FORCEINLINE TRotator<T>::TRotator(EForceInit)
 	: Pitch(0), Yaw(0), Roll(0)
 {}
 
-
-FORCEINLINE FRotator FRotator::operator+( const FRotator& R ) const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::operator+( const TRotator<T>& R ) const
 {
-	return FRotator( Pitch+R.Pitch, Yaw+R.Yaw, Roll+R.Roll );
+	return TRotator( Pitch+R.Pitch, Yaw+R.Yaw, Roll+R.Roll );
 }
 
-
-FORCEINLINE FRotator FRotator::operator-( const FRotator& R ) const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::operator-( const TRotator<T>& R ) const
 {
-	return FRotator( Pitch-R.Pitch, Yaw-R.Yaw, Roll-R.Roll );
+	return TRotator( Pitch-R.Pitch, Yaw-R.Yaw, Roll-R.Roll );
 }
 
-
-FORCEINLINE FRotator FRotator::operator*( float Scale ) const
-{
-	return FRotator( Pitch*Scale, Yaw*Scale, Roll*Scale );
-}
-
-
-FORCEINLINE FRotator FRotator::operator*= (float Scale)
-{
-	Pitch = Pitch*Scale; Yaw = Yaw*Scale; Roll = Roll*Scale;
-	DiagnosticCheckNaN();
-	return *this;
-}
-
-
-FORCEINLINE bool FRotator::operator==( const FRotator& R ) const
+template<typename T>
+FORCEINLINE bool TRotator<T>::operator==( const TRotator<T>& R ) const
 {
 	return Pitch==R.Pitch && Yaw==R.Yaw && Roll==R.Roll;
 }
 
-
-FORCEINLINE bool FRotator::operator!=( const FRotator& V ) const
+template<typename T>
+FORCEINLINE bool TRotator<T>::operator!=( const TRotator<T>& V ) const
 {
 	return Pitch!=V.Pitch || Yaw!=V.Yaw || Roll!=V.Roll;
 }
 
-
-FORCEINLINE FRotator FRotator::operator+=( const FRotator& R )
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::operator+=( const TRotator<T>& R )
 {
 	Pitch += R.Pitch; Yaw += R.Yaw; Roll += R.Roll;
 	DiagnosticCheckNaN();
 	return *this;
 }
 
-
-FORCEINLINE FRotator FRotator::operator-=( const FRotator& R )
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::operator-=( const TRotator<T>& R )
 {
 	Pitch -= R.Pitch; Yaw -= R.Yaw; Roll -= R.Roll;
 	DiagnosticCheckNaN();
 	return *this;
 }
 
-
-FORCEINLINE bool FRotator::IsNearlyZero(float Tolerance) const
+template<typename T>
+FORCEINLINE bool TRotator<T>::IsNearlyZero(T Tolerance) const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	const VectorRegister RegA = VectorLoadFloat3_W0(this);
-	const VectorRegister Norm = VectorNormalizeRotator(RegA);
-	const VectorRegister AbsNorm = VectorAbs(Norm);
+	const TVectorRegisterType<T> RegA = VectorLoadFloat3_W0(this);
+	const TVectorRegisterType<T> Norm = VectorNormalizeRotator(RegA);
+	const TVectorRegisterType<T> AbsNorm = VectorAbs(Norm);
 	return !VectorAnyGreaterThan(AbsNorm, VectorLoadFloat1(&Tolerance));
 #else
 	return
@@ -550,20 +618,20 @@ FORCEINLINE bool FRotator::IsNearlyZero(float Tolerance) const
 #endif
 }
 
-
-FORCEINLINE bool FRotator::IsZero() const
+template<typename T>
+FORCEINLINE bool TRotator<T>::IsZero() const
 {
 	return (ClampAxis(Pitch)==0.f) && (ClampAxis(Yaw)==0.f) && (ClampAxis(Roll)==0.f);
 }
 
-
-FORCEINLINE bool FRotator::Equals(const FRotator& R, float Tolerance) const
+template<typename T>
+FORCEINLINE bool TRotator<T>::Equals(const TRotator<T>& R, T Tolerance) const
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	const VectorRegister RegA = VectorLoadFloat3_W0(this);
-	const VectorRegister RegB = VectorLoadFloat3_W0(&R);
-	const VectorRegister NormDelta = VectorNormalizeRotator(VectorSubtract(RegA, RegB));
-	const VectorRegister AbsNormDelta = VectorAbs(NormDelta);
+	const TVectorRegisterType<T> RegA = VectorLoadFloat3_W0(this);
+	const TVectorRegisterType<T> RegB = VectorLoadFloat3_W0(&R);
+	const TVectorRegisterType<T> NormDelta = VectorNormalizeRotator(VectorSubtract(RegA, RegB));
+	const TVectorRegisterType<T> AbsNormDelta = VectorAbs(NormDelta);
 	return !VectorAnyGreaterThan(AbsNormDelta, VectorLoadFloat1(&Tolerance));
 #else
 	return (FMath::Abs(NormalizeAxis(Pitch - R.Pitch)) <= Tolerance) 
@@ -572,8 +640,14 @@ FORCEINLINE bool FRotator::Equals(const FRotator& R, float Tolerance) const
 #endif
 }
 
+template <typename T>
+bool TRotator<T>::EqualsOrientation(const TRotator<T>& R, T Tolerance) const
+{
+	return Quaternion().AngularDistance(R.Quaternion()) <= Tolerance;
+}
 
-FORCEINLINE FRotator FRotator::Add( float DeltaPitch, float DeltaYaw, float DeltaRoll )
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::Add( T DeltaPitch, T DeltaYaw, T DeltaRoll )
 {
 	Yaw   += DeltaYaw;
 	Pitch += DeltaPitch;
@@ -582,10 +656,10 @@ FORCEINLINE FRotator FRotator::Add( float DeltaPitch, float DeltaYaw, float Delt
 	return *this;
 }
 
-
-FORCEINLINE FRotator FRotator::GridSnap( const FRotator& RotGrid ) const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::GridSnap( const TRotator<T>& RotGrid ) const
 {
-	return FRotator
+	return TRotator
 		(
 		FMath::GridSnap(Pitch,RotGrid.Pitch),
 		FMath::GridSnap(Yaw,  RotGrid.Yaw),
@@ -593,93 +667,93 @@ FORCEINLINE FRotator FRotator::GridSnap( const FRotator& RotGrid ) const
 		);
 }
 
-
-FORCEINLINE FRotator FRotator::Clamp() const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::Clamp() const
 {
-	return FRotator(ClampAxis(Pitch), ClampAxis(Yaw), ClampAxis(Roll));
+	return TRotator(ClampAxis(Pitch), ClampAxis(Yaw), ClampAxis(Roll));
 }
 
-
-FORCEINLINE float FRotator::ClampAxis( float Angle )
+template<typename T>
+FORCEINLINE T TRotator<T>::ClampAxis( T Angle )
 {
 	// returns Angle in the range (-360,360)
-	Angle = FMath::Fmod(Angle, 360.f);
+	Angle = FMath::Fmod(Angle, (T)360.0);
 
-	if (Angle < 0.f)
+	if (Angle < (T)0.0)
 	{
 		// shift to [0,360) range
-		Angle += 360.f;
+		Angle += (T)360.0;
 	}
 
 	return Angle;
 }
 
-
-FORCEINLINE float FRotator::NormalizeAxis( float Angle )
+template<typename T>
+FORCEINLINE T TRotator<T>::NormalizeAxis( T Angle )
 {
 	// returns Angle in the range [0,360)
 	Angle = ClampAxis(Angle);
 
-	if (Angle > 180.f)
+	if (Angle > (T)180.0)
 	{
 		// shift to (-180,180]
-		Angle -= 360.f;
+		Angle -= (T)360.0;
 	}
 
 	return Angle;
 }
 
-
-FORCEINLINE uint8 FRotator::CompressAxisToByte( float Angle )
+template<typename T>
+FORCEINLINE uint8 TRotator<T>::CompressAxisToByte( T Angle )
 {
 	// map [0->360) to [0->256) and mask off any winding
-	return FMath::RoundToInt(Angle * 256.f / 360.f) & 0xFF;
+	return FMath::RoundToInt(Angle * (T)256.f / (T)360.f) & 0xFF;
 }
 
-
-FORCEINLINE float FRotator::DecompressAxisFromByte( uint8 Angle )
+template<typename T>
+FORCEINLINE T TRotator<T>::DecompressAxisFromByte( uint8 Angle )
 {
 	// map [0->256) to [0->360)
-	return (Angle * 360.f / 256.f);
+	return (Angle * (T)360.f / (T)256.f);
 }
 
-
-FORCEINLINE uint16 FRotator::CompressAxisToShort( float Angle )
+template<typename T>
+FORCEINLINE uint16 TRotator<T>::CompressAxisToShort( T Angle )
 {
 	// map [0->360) to [0->65536) and mask off any winding
-	return FMath::RoundToInt(Angle * 65536.f / 360.f) & 0xFFFF;
+	return FMath::RoundToInt(Angle * (T)65536.f / (T)360.f) & 0xFFFF;
 }
 
-
-FORCEINLINE float FRotator::DecompressAxisFromShort( uint16 Angle )
+template<typename T>
+FORCEINLINE T TRotator<T>::DecompressAxisFromShort( uint16 Angle )
 {
 	// map [0->65536) to [0->360)
-	return (Angle * 360.f / 65536.f);
+	return (Angle * (T)360.f / (T)65536.f);
 }
 
-
-FORCEINLINE FRotator FRotator::GetNormalized() const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::GetNormalized() const
 {
-	FRotator Rot = *this;
+	TRotator Rot = *this;
 	Rot.Normalize();
 	return Rot;
 }
 
-
-FORCEINLINE FRotator FRotator::GetDenormalized() const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::GetDenormalized() const
 {
-	FRotator Rot = *this;
+	TRotator Rot = *this;
 	Rot.Pitch	= ClampAxis(Rot.Pitch);
 	Rot.Yaw		= ClampAxis(Rot.Yaw);
 	Rot.Roll	= ClampAxis(Rot.Roll);
 	return Rot;
 }
 
-
-FORCEINLINE void FRotator::Normalize()
+template<typename T>
+FORCEINLINE void TRotator<T>::Normalize()
 {
 #if PLATFORM_ENABLE_VECTORINTRINSICS
-	VectorRegister VRotator = VectorLoadFloat3_W0(this);
+	TVectorRegisterType<T> VRotator = VectorLoadFloat3_W0(this);
 	VRotator = VectorNormalizeRotator(VRotator);
 	VectorStoreFloat3(VRotator, this);
 #else
@@ -690,7 +764,8 @@ FORCEINLINE void FRotator::Normalize()
 	DiagnosticCheckNaN();
 }
 
-FORCEINLINE float FRotator::GetComponentForAxis(EAxis::Type Axis) const
+template<typename T>
+FORCEINLINE T TRotator<T>::GetComponentForAxis(EAxis::Type Axis) const
 {
 	switch (Axis)
 	{
@@ -705,7 +780,8 @@ FORCEINLINE float FRotator::GetComponentForAxis(EAxis::Type Axis) const
 	}
 }
 
-FORCEINLINE void FRotator::SetComponentForAxis(EAxis::Type Axis, float Component)
+template<typename T>
+FORCEINLINE void TRotator<T>::SetComponentForAxis(EAxis::Type Axis, T Component)
 {
 	switch (Axis)
 	{
@@ -721,13 +797,14 @@ FORCEINLINE void FRotator::SetComponentForAxis(EAxis::Type Axis, float Component
 	}
 }
 
-FORCEINLINE FString FRotator::ToString() const
+template<typename T>
+FORCEINLINE FString TRotator<T>::ToString() const
 {
 	return FString::Printf(TEXT("P=%f Y=%f R=%f"), Pitch, Yaw, Roll );
 }
 
-
-FORCEINLINE FString FRotator::ToCompactString() const
+template<typename T>
+FORCEINLINE FString TRotator<T>::ToCompactString() const
 {
 	if( IsNearlyZero() )
 	{
@@ -763,8 +840,8 @@ FORCEINLINE FString FRotator::ToCompactString() const
 	return ReturnString;
 }
 
-
-FORCEINLINE bool FRotator::InitFromString( const FString& InSourceString )
+template<typename T>
+FORCEINLINE bool TRotator<T>::InitFromString( const FString& InSourceString )
 {
 	Pitch = Yaw = Roll = 0;
 
@@ -774,48 +851,111 @@ FORCEINLINE bool FRotator::InitFromString( const FString& InSourceString )
 	return bSuccessful;
 }
 
-
-FORCEINLINE bool FRotator::ContainsNaN() const
+template<typename T>
+FORCEINLINE bool TRotator<T>::ContainsNaN() const
 {
 	return (!FMath::IsFinite(Pitch) ||
 			!FMath::IsFinite(Yaw) ||
 			!FMath::IsFinite(Roll));
 }
 
-FORCEINLINE float FRotator::GetManhattanDistance(const FRotator & Rotator) const
+template<typename T>
+FORCEINLINE T TRotator<T>::GetManhattanDistance(const TRotator<T> & Rotator) const
 {
-	return FMath::Abs<float>(Yaw - Rotator.Yaw) + FMath::Abs<float>(Pitch - Rotator.Pitch) + FMath::Abs<float>(Roll - Rotator.Roll);
+	return FMath::Abs<T>(Yaw - Rotator.Yaw) + FMath::Abs<T>(Pitch - Rotator.Pitch) + FMath::Abs<T>(Roll - Rotator.Roll);
 }
 
-FORCEINLINE FRotator FRotator::GetEquivalentRotator() const
+template<typename T>
+FORCEINLINE TRotator<T> TRotator<T>::GetEquivalentRotator() const
 {
-	return FRotator(180.0f - Pitch,Yaw + 180.0f, Roll + 180.0f);
+	return TRotator(180.0f - Pitch,Yaw + 180.0f, Roll + 180.0f);
 }
 
-FORCEINLINE void FRotator::SetClosestToMe(FRotator& MakeClosest) const
+template<typename T>
+FORCEINLINE void TRotator<T>::SetClosestToMe(TRotator& MakeClosest) const
 {
-	FRotator OtherChoice = MakeClosest.GetEquivalentRotator();
-	float FirstDiff = GetManhattanDistance(MakeClosest);
-	float SecondDiff = GetManhattanDistance(OtherChoice);
+	TRotator OtherChoice = MakeClosest.GetEquivalentRotator();
+	T FirstDiff = GetManhattanDistance(MakeClosest);
+	T SecondDiff = GetManhattanDistance(OtherChoice);
 	if (SecondDiff < FirstDiff)
 		MakeClosest = OtherChoice;
 }
 
-template<> struct TIsPODType<FRotator> { enum { Value = true }; };
+} // namespace UE::Math
+} // namespace UE
+
+UE_DECLARE_LWC_TYPE(Rotator, 3);
+
+template<> struct TCanBulkSerialize<FRotator3f> { enum { Value = false }; };
+template<> struct TIsPODType<FRotator3f> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FRotator3f> { enum { Value = true }; };
+DECLARE_INTRINSIC_TYPE_LAYOUT(FRotator3f);
+
+template<> struct TCanBulkSerialize<FRotator3d> { enum { Value = false }; };
+template<> struct TIsPODType<FRotator3d> { enum { Value = true }; };
+template<> struct TIsUECoreVariant<FRotator3d> { enum { Value = true }; };
+DECLARE_INTRINSIC_TYPE_LAYOUT(FRotator3d);
+
+// Forward declare all explicit specializations (in UnrealMath.cpp)
+template<> CORE_API FQuat4f FRotator3f::Quaternion() const;
+template<> CORE_API FQuat4d FRotator3d::Quaternion() const;
+
+
+
+template<>
+inline bool FRotator3f::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{	
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Rotator, Rotator3f, Rotator3d);
+}
+
+template<>
+inline bool FRotator3d::SerializeFromMismatchedTag(FName StructTag, FArchive& Ar)
+{
+	return UE_SERIALIZE_VARIANT_FROM_MISMATCHED_TAG(Ar, Rotator, Rotator3d, Rotator3f);
+}
 
 
 /* FMath inline functions
  *****************************************************************************/
 
-template<class U>
-FORCEINLINE_DEBUGGABLE FRotator FMath::Lerp(const FRotator& A, const FRotator& B, const U& Alpha)
+template<typename T>
+struct TCustomLerp<UE::Math::TRotator<T>>
 {
-	return A + (B - A).GetNormalized() * Alpha;
-}
+	// Required to make FMath::Lerp<TRotator>() call our custom Lerp() implementation below.
+	constexpr static bool Value = true;
+	using RotatorType = UE::Math::TRotator<T>;
 
-template<class U>
-FORCEINLINE_DEBUGGABLE FRotator FMath::LerpRange(const FRotator& A, const FRotator& B, const U& Alpha)
+	template<class U>
+	static FORCEINLINE_DEBUGGABLE RotatorType Lerp(const RotatorType& A, const RotatorType& B, const U& Alpha)
+	{
+		return A + (B - A).GetNormalized() * Alpha;
+	}
+};
+
+template< typename T, typename U >
+FORCEINLINE_DEBUGGABLE UE::Math::TRotator<T> FMath::LerpRange(const UE::Math::TRotator<T>& A, const UE::Math::TRotator<T>& B, U Alpha)
 {
 	// Similar to Lerp, but does not take the shortest path. Allows interpolation over more than 180 degrees.
-	return (A * (1 - Alpha) + B * Alpha).GetNormalized();
+	return (A * ((T)1.0 - (T)Alpha) + B * Alpha).GetNormalized();
+}
+
+template<typename T>
+FORCEINLINE_DEBUGGABLE T FMath::ClampAngle(T AngleDegrees, T MinAngleDegrees, T MaxAngleDegrees)
+{
+	const T MaxDelta = UE::Math::TRotator<T>::ClampAxis(MaxAngleDegrees - MinAngleDegrees) * 0.5f;			// 0..180
+	const T RangeCenter = UE::Math::TRotator<T>::ClampAxis(MinAngleDegrees + MaxDelta);						// 0..360
+	const T DeltaFromCenter = UE::Math::TRotator<T>::NormalizeAxis(AngleDegrees - RangeCenter);				// -180..180
+
+	// maybe clamp to nearest edge
+	if (DeltaFromCenter > MaxDelta)
+	{
+		return UE::Math::TRotator<T>::NormalizeAxis(RangeCenter + MaxDelta);
+	}
+	else if (DeltaFromCenter < -MaxDelta)
+	{
+		return UE::Math::TRotator<T>::NormalizeAxis(RangeCenter - MaxDelta);
+	}
+
+	// already in range, just return it
+	return UE::Math::TRotator<T>::NormalizeAxis(AngleDegrees);
 }

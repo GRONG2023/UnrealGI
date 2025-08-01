@@ -1,51 +1,129 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Animation/AnimInstanceProxy.h"
-#include "Animation/AnimNodeBase.h"
+#include "Animation/AnimMontageEvaluationState.h"
+#include "Animation/AnimNodeFunctionRef.h"
+#include "Animation/AnimSlotEvaluationPose.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/PoseAsset.h"
-#include "AnimationRuntime.h"
-#include "Animation/BlendSpaceBase.h"
-#include "AnimationUtils.h"
+#include "Animation/AnimNotifies/AnimNotifyState.h"
+#include "Animation/AnimStats.h"
 #include "Logging/MessageLog.h"
 #include "Animation/AnimNode_AssetPlayerBase.h"
 #include "Animation/AnimNode_StateMachine.h"
 #include "Animation/AnimNode_TransitionResult.h"
 #include "Animation/AnimNode_SaveCachedPose.h"
 #include "Animation/AnimNode_LinkedInputPose.h"
+#include "Animation/AnimSubsystemInstance.h"
+#include "Animation/BlendProfile.h"
+#include "Animation/AnimationPoseData.h"
+#include "Animation/BlendProfileScratchData.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
+#include "Engine/SkeletalMesh.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/WorldSettings.h"
 #include "Animation/AnimNode_Root.h"
 #include "Animation/AnimNode_LinkedAnimLayer.h"
-#include "Animation/AnimMontage.h"
+#include "Animation/AnimSyncScope.h"
+#include "Animation/AnimNotifyStateMachineInspectionLibrary.h"
+#include "Animation/MirrorDataTable.h"
+#include "Animation/AnimBlueprintGeneratedClass.h"
+#if WITH_EDITOR
+#include "Engine/PoseWatch.h"
+#endif
 
 #define DO_ANIMSTAT_PROCESSING(StatName) DEFINE_STAT(STAT_ ## StatName)
-#include "Animation/AnimMTStats.h"
+#include "Animation/AnimMTStats.h" // IWYU pragma: keep
 #undef DO_ANIMSTAT_PROCESSING
 
 #define DO_ANIMSTAT_PROCESSING(StatName) DEFINE_STAT(STAT_ ## StatName ## _WorkerThread)
-#include "Animation/AnimMTStats.h"
-#include "Animation/AnimInstance.h"
+#include "Animation/AnimMTStats.h" // IWYU pragma: keep
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AnimInstanceProxy)
 
 #undef DO_ANIMSTAT_PROCESSING
 
 #define LOCTEXT_NAMESPACE "AnimInstance"
 
 const FName NAME_AnimBlueprintLog(TEXT("AnimBlueprintLog"));
+const FName NAME_PIELog(TEXT("PIE"));
 const FName NAME_Evaluate(TEXT("Evaluate"));
 const FName NAME_Update(TEXT("Update"));
 const FName NAME_AnimGraph(TEXT("AnimGraph"));
 
+FAnimInstanceProxy::FAnimInstanceProxy()
+	: AnimInstanceObject(nullptr)
+	, AnimClassInterface(nullptr)
+	, Skeleton(nullptr)
+	, SkeletalMeshComponent(nullptr)
+	, MainInstanceProxy(nullptr)
+	, CurrentDeltaSeconds(0.0f)
+	, CurrentTimeDilation(1.0f)
+	, RootNode(nullptr)
+	, DefaultLinkedInstanceInputNode(nullptr)
+	, BufferWriteIndex(0)
+	, RootMotionMode(ERootMotionMode::NoRootMotionExtraction)
+	, FrameCounterForUpdate(0)
+	, FrameCounterForNodeUpdate(0)
+	, RequiredBones(MakeShared<FBoneContainer>())	// We sometime query for this before RecalcRequiredBones has been called
+	, CacheBonesRecursionCounter(0)
+	, bUpdatingRoot(false)
+	, bBoneCachesInvalidated(false)
+	, bShouldExtractRootMotion(false)
+	, bDeferRootNodeInitialization(false)
+#if WITH_EDITORONLY_DATA
+	, bIsBeingDebugged(false)
+	, bIsGameWorld(false)
+#endif
+	, bInitializeSubsystems(false)
+	, bUseMainInstanceMontageEvaluationData(false)
+{
+}
+
+FAnimInstanceProxy::FAnimInstanceProxy(UAnimInstance* Instance)
+	: AnimInstanceObject(Instance)
+	, AnimClassInterface(IAnimClassInterface::GetFromClass(Instance->GetClass()))
+	, Skeleton(nullptr)
+	, SkeletalMeshComponent(nullptr)
+	, MainInstanceProxy(nullptr)
+	, CurrentDeltaSeconds(0.0f)
+	, CurrentTimeDilation(1.0f)
+	, RootNode(nullptr)
+	, DefaultLinkedInstanceInputNode(nullptr)
+	, BufferWriteIndex(0)
+	, RootMotionMode(ERootMotionMode::NoRootMotionExtraction)
+	, FrameCounterForUpdate(0)
+	, FrameCounterForNodeUpdate(0)
+	, RequiredBones(MakeShared<FBoneContainer>())	// We sometime query for this before RecalcRequiredBones has been called
+	, CacheBonesRecursionCounter(0)
+	, bUpdatingRoot(false)
+	, bBoneCachesInvalidated(false)
+	, bShouldExtractRootMotion(false)
+	, bDeferRootNodeInitialization(false)
+#if WITH_EDITORONLY_DATA
+	, bIsBeingDebugged(false)
+#endif
+	, bInitializeSubsystems(false)
+	, bUseMainInstanceMontageEvaluationData(false)
+{
+}
+
+FAnimInstanceProxy::FAnimInstanceProxy(const FAnimInstanceProxy&) = default;
+FAnimInstanceProxy& FAnimInstanceProxy::operator=(FAnimInstanceProxy&&) = default;
+FAnimInstanceProxy& FAnimInstanceProxy::operator=(const FAnimInstanceProxy&) = default;
+FAnimInstanceProxy::~FAnimInstanceProxy() = default;
+
 void FAnimInstanceProxy::UpdateAnimationNode(const FAnimationUpdateContext& InContext)
 {
-	TRACE_SCOPED_ANIM_GRAPH(InContext);
-	TRACE_SCOPED_ANIM_NODE(InContext);
-
 	UpdateAnimationNode_WithRoot(InContext, RootNode, NAME_AnimGraph);
 }
 
 void FAnimInstanceProxy::UpdateAnimationNode_WithRoot(const FAnimationUpdateContext& InContext, FAnimNode_Base* InRootNode, FName InLayerName)
 {
+	TRACE_SCOPED_ANIM_GRAPH(InContext)
+	TRACE_SCOPED_ANIM_NODE(InContext)
+	
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 	if(InRootNode != nullptr)
 	{
@@ -53,14 +131,20 @@ void FAnimInstanceProxy::UpdateAnimationNode_WithRoot(const FAnimationUpdateCont
 		{
 			UpdateCounter.Increment();
 		}
-		
+
+		UE::Anim::FNodeFunctionCaller::InitialUpdate(InContext, *InRootNode);
+		UE::Anim::FNodeFunctionCaller::BecomeRelevant(InContext, *InRootNode);
+		UE::Anim::FNodeFunctionCaller::Update(InContext, *InRootNode);
 		InRootNode->Update_AnyThread(InContext);
 
 		// We've updated the graph, now update the fractured saved pose sections
-		TArray<FAnimNode_SaveCachedPose*>& SavedPoseQueue = SavedPoseQueueMap.FindChecked(InLayerName);
-		for(FAnimNode_SaveCachedPose* PoseNode : SavedPoseQueue)
+		// Note SavedPoseQueueMap can be empty if we have no cached poses in use
+		if(TArray<FAnimNode_SaveCachedPose*>* SavedPoseQueue = SavedPoseQueueMap.Find(InLayerName))
 		{
-			PoseNode->PostGraphUpdate();
+			for(FAnimNode_SaveCachedPose* PoseNode : *SavedPoseQueue)
+			{
+				PoseNode->PostGraphUpdate();
+			}
 		}
 	}
 }
@@ -68,14 +152,8 @@ void FAnimInstanceProxy::UpdateAnimationNode_WithRoot(const FAnimationUpdateCont
 void FAnimInstanceProxy::AddReferencedObjects(UAnimInstance* InAnimInstance, FReferenceCollector& Collector)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
-	for (int32 Index = 0; Index < UE_ARRAY_COUNT(UngroupedActivePlayerArrays); ++Index)
-	{
-		TArray<FAnimTickRecord>& UngroupedPlayers = UngroupedActivePlayerArrays[Index];
-		for (FAnimTickRecord& TickRecord : UngroupedPlayers)
-		{
-			Collector.AddReferencedObject(TickRecord.SourceAsset, InAnimInstance);
-		}
-	}
+	
+	Sync.AddReferencedObjects(InAnimInstance, Collector);
 }
 
 void FAnimInstanceProxy::Initialize(UAnimInstance* InAnimInstance)
@@ -146,7 +224,8 @@ void FAnimInstanceProxy::Initialize(UAnimInstance* InAnimInstance)
 #if WITH_EDITORONLY_DATA
 		if (UAnimBlueprint* Blueprint = Cast<UAnimBlueprint>(InAnimInstance->GetClass()->ClassGeneratedBy))
 		{
-			if (Blueprint->Status == BS_Error)
+			// If our blueprint is in an error or dirty state upon initialization, anim graph shouldn't run
+			if ((Blueprint->Status == BS_Error) || (Blueprint->Status == BS_Dirty))
 			{
 				RootNode = nullptr;
 			}
@@ -183,7 +262,7 @@ void FAnimInstanceProxy::Initialize(UAnimInstance* InAnimInstance)
 	}
 }
 
-void FAnimInstanceProxy::InitializeRootNode(bool bInDeferRootNodeInitialization)
+void FAnimInstanceProxy::InitializeCachedClassData()
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
@@ -199,15 +278,7 @@ void FAnimInstanceProxy::InitializeRootNode(bool bInDeferRootNodeInitialization)
 			FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
 			StateMachine->CacheMachineDescription(AnimClassInterface);
 		}
-
-		// Init any nodes that need non-relevancy based initialization
-		UAnimInstance* AnimInstance = CastChecked<UAnimInstance>(GetAnimInstanceObject());
-		for (const FStructProperty* Property : AnimClassInterface->GetInitializationNodeProperties())
-		{
-			FAnimNode_Base* AnimNode = Property->ContainerPtrToValuePtr<FAnimNode_Base>(AnimInstanceObject);
-			AnimNode->OnInitializeAnimInstance(this, AnimInstance);
-		}
-
+		
 		// Cache any preupdate nodes
 		for (const FStructProperty* Property : AnimClassInterface->GetPreUpdateNodeProperties())
 		{
@@ -237,6 +308,24 @@ void FAnimInstanceProxy::InitializeRootNode(bool bInDeferRootNodeInitialization)
 					}
 				}
 			}
+		}
+	}
+}
+
+void FAnimInstanceProxy::InitializeRootNode(bool bInDeferRootNodeInitialization)
+{
+	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
+
+	InitializeCachedClassData();
+	
+	if(AnimClassInterface)
+	{
+		// Init any nodes that need non-relevancy based initialization
+		UAnimInstance* AnimInstance = CastChecked<UAnimInstance>(GetAnimInstanceObject());
+		for (const FStructProperty* Property : AnimClassInterface->GetInitializationNodeProperties())
+		{
+			FAnimNode_Base* AnimNode = Property->ContainerPtrToValuePtr<FAnimNode_Base>(AnimInstanceObject);
+			AnimNode->OnInitializeAnimInstance(this, AnimInstance);
 		}
 	}
 	else
@@ -279,6 +368,8 @@ void FAnimInstanceProxy::InitializeRootNode(bool bInDeferRootNodeInitialization)
 	{
 		bDeferRootNodeInitialization = true;
 	}
+
+	bInitializeSubsystems = true;
 }
 
 void FAnimInstanceProxy::InitializeRootNode_WithRoot(FAnimNode_Base* InRootNode)
@@ -287,8 +378,9 @@ void FAnimInstanceProxy::InitializeRootNode_WithRoot(FAnimNode_Base* InRootNode)
 
 	if (InRootNode != nullptr)
 	{
-		FAnimationInitializeContext InitContext(this);
-
+		FAnimationUpdateSharedContext SharedContext;
+		FAnimationInitializeContext InitContext(this, &SharedContext);
+		
 		if(InRootNode == RootNode)
 		{
 			InitializationCounter.Increment();
@@ -299,15 +391,15 @@ void FAnimInstanceProxy::InitializeRootNode_WithRoot(FAnimNode_Base* InRootNode)
 		}
 		else
 		{
-		InRootNode->Initialize_AnyThread(InitContext);
-	}
+			InRootNode->Initialize_AnyThread(InitContext);
+		}
 	}
 }
 
 FGuid MakeGuidForMessage(const FText& Message)
 {
 	FString MessageString = Message.ToString();
-	const TArray<TCHAR> CharArray = MessageString.GetCharArray();
+	const TArray<TCHAR, FString::AllocatorType> CharArray = MessageString.GetCharArray();
 
 	FSHA1 Sha;
 
@@ -320,19 +412,33 @@ FGuid MakeGuidForMessage(const FText& Message)
 	return FGuid(Hash[0] ^ Hash[4], Hash[1], Hash[2], Hash[3]);
 }
 
-void FAnimInstanceProxy::LogMessage(FName InLogType, EMessageSeverity::Type InSeverity, const FText& InMessage) const
+FName FAnimInstanceProxy::GetTargetLogNameForCurrentWorldType() const
+{
+#if WITH_EDITORONLY_DATA
+	return bIsGameWorld ? NAME_PIELog : NAME_AnimBlueprintLog;
+#else
+	return NAME_AnimBlueprintLog;
+#endif
+}
+
+void FAnimInstanceProxy::LogMessage(FName InLogType, const TSharedRef<FTokenizedMessage>& InMessage) const
 {
 #if ENABLE_ANIM_LOGGING
-	FGuid CurrentMessageGuid = MakeGuidForMessage(InMessage);
+	FGuid CurrentMessageGuid = MakeGuidForMessage(InMessage->ToText());
 	if(!PreviouslyLoggedMessages.Contains(CurrentMessageGuid))
 	{
 		PreviouslyLoggedMessages.Add(CurrentMessageGuid);
 		if (TArray<FLogMessageEntry>* LoggedMessages = LoggedMessagesMap.Find(InLogType))
 		{
-			LoggedMessages->Emplace(InSeverity, InMessage);
+			LoggedMessages->Emplace(InMessage);
 		}
 	}
 #endif
+}
+
+void FAnimInstanceProxy::LogMessage(FName InLogType, EMessageSeverity::Type InSeverity, const FText& InMessage) const
+{
+	LogMessage(InLogType, FTokenizedMessage::Create(InSeverity, InMessage));
 }
 
 void FAnimInstanceProxy::Uninitialize(UAnimInstance* InAnimInstance)
@@ -340,17 +446,27 @@ void FAnimInstanceProxy::Uninitialize(UAnimInstance* InAnimInstance)
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
 	MontageEvaluationData.Reset();
+	SlotGroupInertializationRequestMap.Reset();
 	DefaultLinkedInstanceInputNode = nullptr;
 	ResetAnimationCurves();
 	MaterialParametersToClear.Reset();
+	ActiveAnimNotifiesSinceLastTick.Reset();
+	Sync.ResetAll();
+}
+
+void FAnimInstanceProxy::UpdateActiveAnimNotifiesSinceLastTick(const FAnimNotifyQueue& AnimInstanceQueue)
+{
+	ActiveAnimNotifiesSinceLastTick.Reset(AnimInstanceQueue.AnimNotifies.Num());
+	ActiveAnimNotifiesSinceLastTick.Append(AnimInstanceQueue.AnimNotifies);
 }
 
 void FAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeconds)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
-	USkeletalMeshComponent* SkelMeshComp = InAnimInstance->GetSkelMeshComponent();
-	UWorld* World = SkelMeshComp ? SkelMeshComp->GetWorld() : nullptr;
+	InitializeObjects(InAnimInstance);
+
+	UWorld* World = SkeletalMeshComponent ? SkeletalMeshComponent->GetWorld() : nullptr;
 	AWorldSettings* WorldSettings = World ? World->GetWorldSettings() : nullptr;
 
 	CurrentDeltaSeconds = DeltaSeconds;
@@ -358,9 +474,21 @@ void FAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSec
 	RootMotionMode = InAnimInstance->RootMotionMode;
 	bShouldExtractRootMotion = InAnimInstance->ShouldExtractRootMotion();
 
-	InitializeObjects(InAnimInstance);
+#if WITH_EDITORONLY_DATA
+	bIsGameWorld = World ? World->IsGameWorld() : false;
 
-	if (SkelMeshComp)
+	UpdatedNodesThisFrame.Reset();
+	NodeInputAttributesThisFrame.Reset();
+	NodeOutputAttributesThisFrame.Reset();
+	NodeSyncsThisFrame.Reset();
+
+	if (FAnimBlueprintDebugData* DebugData = GetAnimBlueprintDebugData())
+	{
+		DebugData->ResetNodeVisitSites();
+	}
+#endif
+
+	if (SkeletalMeshComponent)
 	{
 		// Save off LOD level that we're currently using.
 		const int32 PreviousLODLevel = LODLevel;
@@ -369,16 +497,9 @@ void FAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSec
 		{
 			OnPreUpdateLODChanged(PreviousLODLevel, LODLevel);
 		}
-
-		// Cache these transforms, so nodes don't have to pull it off the gamethread manually.
-		SkelMeshCompLocalToWorld = SkelMeshComp->GetComponentTransform();
-		if (const AActor* Owner = SkelMeshComp->GetOwner())
-		{
-			SkelMeshCompOwnerTransform = Owner->GetTransform();
-		}
 	}
 
-	NotifyQueue.Reset(InAnimInstance->GetSkelMeshComponent());
+	NotifyQueue.Reset(SkeletalMeshComponent);
 
 #if ENABLE_ANIM_DRAW_DEBUG
 	QueuedDrawDebugItems.Reset();
@@ -391,20 +512,13 @@ void FAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSec
 
 	ClearSlotNodeWeights();
 
-	// Reset the player tick list (but keep it presized)
-	TArray<FAnimTickRecord>& UngroupedActivePlayers = UngroupedActivePlayerArrays[GetSyncGroupWriteIndex()];
-	UngroupedActivePlayers.Reset();
+	// Reset the synchronizer
+	Sync.Reset();
 
-	FSyncGroupMap& SyncGroups = SyncGroupMaps[GetSyncGroupWriteIndex()];
-	for (auto& SyncGroupPair : SyncGroups)
-	{
-		SyncGroupPair.Value.Reset();
-	}
-
-	TArray<float>& StateWeights = StateWeightArrays[GetSyncGroupWriteIndex()];
+	TArray<float>& StateWeights = StateWeightArrays[GetBufferWriteIndex()];
 	FMemory::Memset(StateWeights.GetData(), 0, StateWeights.Num() * sizeof(float));
 
-	TArray<float>& MachineWeights = MachineWeightArrays[GetSyncGroupWriteIndex()];
+	TArray<float>& MachineWeights = MachineWeightArrays[GetBufferWriteIndex()];
 	FMemory::Memset(MachineWeights.GetData(), 0, MachineWeights.Num() * sizeof(float));
 
 #if WITH_EDITORONLY_DATA
@@ -415,7 +529,7 @@ void FAnimInstanceProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSec
 		FAnimBlueprintDebugData* DebugData = AnimBP->GetDebugData();
 		if (DebugData)
 		{
-			PoseWatchEntriesForThisFrame = DebugData->AnimNodePoseWatch;
+			DebugData->DisableAllPoseWatches();
 		}
 	}
 #endif
@@ -448,7 +562,7 @@ void FAnimInstanceProxy::OnPreUpdateLODChanged(const int32 PreviousLODIndex, con
 				if (!AnimNodePtr->IsLODEnabled(this))
 				{
 					LODDisabledGameThreadPreUpdateNodes.Add(AnimNodePtr);
-					GameThreadPreUpdateNodes.RemoveAt(NodeIndex, 1, false);
+					GameThreadPreUpdateNodes.RemoveAt(NodeIndex, 1, EAllowShrinking::No);
 					NodeIndex--;
 				}
 			}
@@ -465,7 +579,7 @@ void FAnimInstanceProxy::OnPreUpdateLODChanged(const int32 PreviousLODIndex, con
 				if (AnimNodePtr->IsLODEnabled(this))
 				{
 					GameThreadPreUpdateNodes.Add(AnimNodePtr);
-					LODDisabledGameThreadPreUpdateNodes.RemoveAt(NodeIndex, 1, false);
+					LODDisabledGameThreadPreUpdateNodes.RemoveAt(NodeIndex, 1, EAllowShrinking::No);
 					NodeIndex--;
 				}
 			}
@@ -477,14 +591,8 @@ void FAnimInstanceProxy::SavePoseSnapshot(USkeletalMeshComponent* InSkeletalMesh
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
-	FPoseSnapshot* PoseSnapshot = PoseSnapshots.FindByPredicate([SnapshotName](const FPoseSnapshot& PoseData) { return PoseData.SnapshotName == SnapshotName; });
-	if (PoseSnapshot == nullptr)
-	{
-		PoseSnapshot = &PoseSnapshots[PoseSnapshots.AddDefaulted()];
-		PoseSnapshot->SnapshotName = SnapshotName;
-	}
-
-	InSkeletalMeshComponent->SnapshotPose(*PoseSnapshot);
+	FPoseSnapshot& PoseSnapshot = AddPoseSnapshot(SnapshotName);
+	InSkeletalMeshComponent->SnapshotPose(PoseSnapshot);
 }
 
 void FAnimInstanceProxy::PostUpdate(UAnimInstance* InAnimInstance) const
@@ -495,54 +603,133 @@ void FAnimInstanceProxy::PostUpdate(UAnimInstance* InAnimInstance) const
 	if (FAnimBlueprintDebugData* DebugData = GetAnimBlueprintDebugData())
 	{
 		DebugData->RecordNodeVisitArray(UpdatedNodesThisFrame);
-		DebugData->AnimNodePoseWatch = PoseWatchEntriesForThisFrame;
+		DebugData->RecordNodeSyncsArray(NodeSyncsThisFrame);
 	}
 #endif
 
-	InAnimInstance->NotifyQueue.Append(NotifyQueue);
-	InAnimInstance->NotifyQueue.ApplyMontageNotifies(*this);
-
-	// Send Queued DrawDebug Commands.
-#if ENABLE_ANIM_DRAW_DEBUG
-	for (const FQueuedDrawDebugItem& DebugItem : QueuedDrawDebugItems)
+#if WITH_EDITORONLY_DATA
+	if (bIsBeingDebugged)
 	{
-		switch (DebugItem.ItemType)
+		FAnimBlueprintDebugData* DebugData = GetAnimBlueprintDebugData();
+		if (DebugData)
 		{
-		case EDrawDebugItemType::OnScreenMessage: GEngine->AddOnScreenDebugMessage(INDEX_NONE, 0.f, DebugItem.Color, DebugItem.Message, false, DebugItem.TextScale); break;
-		case EDrawDebugItemType::DirectionalArrow: DrawDebugDirectionalArrow(InAnimInstance->GetSkelMeshComponent()->GetWorld(), DebugItem.StartLoc, DebugItem.EndLoc, DebugItem.Size, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, 0, DebugItem.Thickness); break;
-		case EDrawDebugItemType::Sphere : DrawDebugSphere(InAnimInstance->GetSkelMeshComponent()->GetWorld(), DebugItem.Center, DebugItem.Radius, DebugItem.Segments, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, 0, DebugItem.Thickness); break;
-		case EDrawDebugItemType::Line: DrawDebugLine(InAnimInstance->GetSkelMeshComponent()->GetWorld(), DebugItem.StartLoc, DebugItem.EndLoc, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, 0, DebugItem.Thickness); break;
-		case EDrawDebugItemType::CoordinateSystem : DrawDebugCoordinateSystem(InAnimInstance->GetSkelMeshComponent()->GetWorld(), DebugItem.StartLoc, DebugItem.Rotation, DebugItem.Size, DebugItem.bPersistentLines, DebugItem.LifeTime, 0, DebugItem.Thickness); break;
+			for (const FAnimNodePoseWatch& PoseWatch : DebugData->AnimNodePoseWatch)
+			{
+				if (!PoseWatch.PoseWatchPoseElement->GetIsEnabled())
+				{
+					TRACE_ANIM_POSE_WATCH(*this, PoseWatch.PoseWatchPoseElement, PoseWatch.NodeID, TArray<FTransform>(), FBlendedHeapCurve(), TArray<uint16>(), FTransform::Identity, false);
+				}
+			}
 		}
 	}
 #endif
+	
+	// Copy slot information to main instance if we are using the main instance's montage evaluation data.
+	// Note that linked anim instance's proxies PostUpdate() will be called before the main instance's proxy PostUpdate().
+	if (bUseMainInstanceMontageEvaluationData && GetMainInstanceProxy() && GetMainInstanceProxy() != this)
+	{
+		FAnimInstanceProxy& MainProxy = *GetMainInstanceProxy();
+		
+		for (const TTuple<FName, int> & LinkedSlotTrackerPair : SlotNameToTrackerIndex)
+		{
+			const int* MainTrackerIndexPtr = MainProxy.SlotNameToTrackerIndex.Find(LinkedSlotTrackerPair.Key);
+
+			// Ensure slot tracker exists for main instance.
+			if (!MainTrackerIndexPtr)
+			{
+				MainProxy.RegisterSlotNodeWithAnimInstance(LinkedSlotTrackerPair.Key);
+				MainTrackerIndexPtr = MainProxy.SlotNameToTrackerIndex.Find(LinkedSlotTrackerPair.Key);
+			}
+
+			// Update slot information for main instance.
+			{
+				const FMontageActiveSlotTracker & LinkedTracker = SlotWeightTracker[GetBufferReadIndex()][LinkedSlotTrackerPair.Value];
+				FMontageActiveSlotTracker& MainTracker = MainProxy.SlotWeightTracker[MainProxy.GetBufferWriteIndex()][*MainTrackerIndexPtr];
+				
+				MainTracker.MontageLocalWeight = FMath::Max(MainTracker.MontageLocalWeight, LinkedTracker.MontageLocalWeight);
+				MainTracker.NodeGlobalWeight = FMath::Max(MainTracker.NodeGlobalWeight, LinkedTracker.NodeGlobalWeight);
+				
+				MainTracker.bIsRelevantThisTick = MainTracker.bIsRelevantThisTick || LinkedTracker.bIsRelevantThisTick;
+				MainTracker.bWasRelevantOnPreviousTick = MainTracker.bWasRelevantOnPreviousTick || LinkedTracker.bWasRelevantOnPreviousTick;
+			}
+		}
+	}
+	
+	InAnimInstance->NotifyQueue.Append(NotifyQueue);
+	InAnimInstance->NotifyQueue.ApplyMontageNotifies(*this);
+
+#if ENABLE_ANIM_DRAW_DEBUG
+	FlushQueuedDebugDrawItems(InAnimInstance->GetSkelMeshComponent()->GetOwner(), InAnimInstance->GetSkelMeshComponent()->GetWorld());
+#endif
 
 #if ENABLE_ANIM_LOGGING
-	FMessageLog MessageLog(NAME_AnimBlueprintLog);
+	FMessageLog MessageLog(GetTargetLogNameForCurrentWorldType());
 	const TArray<FLogMessageEntry>* Messages = LoggedMessagesMap.Find(NAME_Update);
 	if (ensureMsgf(Messages, TEXT("PreUpdate isn't called. This could potentially cause other issues.")))
 	{
 		for (const FLogMessageEntry& Message : *Messages)
 		{
-			MessageLog.Message(Message.Key, Message.Value);
+			MessageLog.AddMessage(Message);
 		}
 	}
 #endif
 }
 
+#if ENABLE_ANIM_DRAW_DEBUG
+void FAnimInstanceProxy::FlushQueuedDebugDrawItems(AActor* InActor, UWorld* InWorld) const
+{
+	for (const FQueuedDrawDebugItem& DebugItem : QueuedDrawDebugItems)
+	{
+		switch (DebugItem.ItemType)
+		{
+			case EDrawDebugItemType::OnScreenMessage: GEngine->AddOnScreenDebugMessage(INDEX_NONE, 0.f, DebugItem.Color, DebugItem.Message, false, DebugItem.TextScale); break;
+			case EDrawDebugItemType::InWorldMessage: DrawDebugString(InWorld, DebugItem.StartLoc, DebugItem.Message, InActor, DebugItem.Color, DebugItem.LifeTime, false /*bDrawShadow*/, DebugItem.TextScale.X); break;
+			case EDrawDebugItemType::DirectionalArrow: DrawDebugDirectionalArrow(InWorld, DebugItem.StartLoc, DebugItem.EndLoc.Value, DebugItem.Size, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority, DebugItem.Thickness); break;
+			case EDrawDebugItemType::Sphere: DrawDebugSphere(InWorld, DebugItem.Center, DebugItem.Radius, DebugItem.Segments, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority, DebugItem.Thickness); break;
+			case EDrawDebugItemType::Line: DrawDebugLine(InWorld, DebugItem.StartLoc, DebugItem.EndLoc.Value, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority, DebugItem.Thickness); break;
+			case EDrawDebugItemType::CoordinateSystem: DrawDebugCoordinateSystem(InWorld, DebugItem.StartLoc, DebugItem.Rotation, DebugItem.Size, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority, DebugItem.Thickness); break;
+			case EDrawDebugItemType::Point: DrawDebugPoint(InWorld, DebugItem.StartLoc, DebugItem.Size, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority); break;
+			case EDrawDebugItemType::Circle:
+			{
+				const FMatrix RotationMatrix = FRotationMatrix::MakeFromZ(DebugItem.Direction.Value);
+				const FVector ForwardVector = RotationMatrix.GetScaledAxis(EAxis::X);
+				const FVector RightVector = RotationMatrix.GetScaledAxis(EAxis::Y);
+				DrawDebugCircle(InWorld, DebugItem.Center, DebugItem.Radius, DebugItem.Segments, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority, DebugItem.Thickness, ForwardVector, RightVector, false);
+				break;
+			}
+			case EDrawDebugItemType::Cone: DrawDebugCone(InWorld, DebugItem.Center, DebugItem.Direction.Value, DebugItem.Length, DebugItem.AngleWidth, DebugItem.AngleHeight, DebugItem.Segments, DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, DebugItem.DepthPriority, DebugItem.Thickness); break;
+			case EDrawDebugItemType::Capsule: DrawDebugCapsule(InWorld, DebugItem.Center, DebugItem.Size, DebugItem.Radius, DebugItem.Rotation.Quaternion(), DebugItem.Color, DebugItem.bPersistentLines, DebugItem.LifeTime, 0, DebugItem.Thickness); break;
+		}
+	}
+
+	QueuedDrawDebugItems.Reset();
+}
+#endif
+
 void FAnimInstanceProxy::PostEvaluate(UAnimInstance* InAnimInstance)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
+#if WITH_EDITORONLY_DATA
+	if (FAnimBlueprintDebugData* DebugData = GetAnimBlueprintDebugData())
+	{
+		DebugData->RecordNodeAttributeMaps(NodeInputAttributesThisFrame, NodeOutputAttributesThisFrame);
+	}
+#endif
+	
 	ClearObjects();
 
+#if ENABLE_ANIM_DRAW_DEBUG
+	FlushQueuedDebugDrawItems(InAnimInstance->GetSkelMeshComponent()->GetOwner(), InAnimInstance->GetSkelMeshComponent()->GetWorld());
+#endif
+
 #if ENABLE_ANIM_LOGGING
-	FMessageLog MessageLog(NAME_AnimBlueprintLog);
+	FMessageLog MessageLog(GetTargetLogNameForCurrentWorldType());
 	if(const TArray<FLogMessageEntry>* Messages = LoggedMessagesMap.Find(NAME_Evaluate))
 	{
 		for (const FLogMessageEntry& Message : *Messages)
 		{
-			MessageLog.Message(Message.Key, Message.Value);
+			MessageLog.AddMessage(Message);
 		}
 	}
 #endif
@@ -553,14 +740,15 @@ void FAnimInstanceProxy::InitializeObjects(UAnimInstance* InAnimInstance)
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
 	SkeletalMeshComponent = InAnimInstance->GetSkelMeshComponent();
-	if(SkeletalMeshComponent->GetAnimInstance())
+	if(UAnimInstance* MainAnimInstance = SkeletalMeshComponent->GetAnimInstance())
 	{
-		MainInstanceProxy = &SkeletalMeshComponent->GetAnimInstance()->GetProxyOnAnyThread<FAnimInstanceProxy>();
+		MainInstanceProxy = &MainAnimInstance->GetProxyOnAnyThread<FAnimInstanceProxy>();
+		bUseMainInstanceMontageEvaluationData = InAnimInstance->IsUsingMainInstanceMontageEvaluationData();
 	}
 
-	if (SkeletalMeshComponent->SkeletalMesh != nullptr)
+	if (SkeletalMeshComponent->GetSkeletalMeshAsset() != nullptr)
 	{
-		Skeleton = SkeletalMeshComponent->SkeletalMesh->GetSkeleton();
+		Skeleton = SkeletalMeshComponent->GetSkeletalMeshAsset()->GetSkeleton();
 	}
 	else
 	{
@@ -604,44 +792,16 @@ void FAnimInstanceProxy::ClearObjects()
 
 FAnimTickRecord& FAnimInstanceProxy::CreateUninitializedTickRecord(FAnimGroupInstance*& OutSyncGroupPtr, FName GroupName)
 {
-	// Find or create the sync group if there is one
-	OutSyncGroupPtr = nullptr;
-	if (GroupName != NAME_None)
-	{
-		FSyncGroupMap& SyncGroupMap = SyncGroupMaps[GetSyncGroupWriteIndex()];
-		OutSyncGroupPtr = &SyncGroupMap.FindOrAdd(GroupName);
-	}
-
-	// Create the record
-	FAnimTickRecord* TickRecord = new ((OutSyncGroupPtr != nullptr) ? OutSyncGroupPtr->ActivePlayers : UngroupedActivePlayerArrays[GetSyncGroupWriteIndex()]) FAnimTickRecord();
-	return *TickRecord;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return Sync.CreateUninitializedTickRecord(OutSyncGroupPtr, GroupName);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 FAnimTickRecord& FAnimInstanceProxy::CreateUninitializedTickRecordInScope(FAnimGroupInstance*& OutSyncGroupPtr, FName GroupName, EAnimSyncGroupScope Scope)
 {
-	if (GroupName != NAME_None)
-	{
-		// If we have no main proxy or it is "this", force us to local
-		if(MainInstanceProxy == nullptr || MainInstanceProxy == this)
-		{
-			Scope = EAnimSyncGroupScope::Local;
-		}
-
-		switch(Scope)
-		{
-		default:
-			ensureMsgf(false, TEXT("FAnimInstanceProxy::CreateUninitializedTickRecordInScope: Scope has invalid value %d"), Scope);
-			// Fall through
-
-		case EAnimSyncGroupScope::Local:
-			return CreateUninitializedTickRecord(OutSyncGroupPtr, GroupName);
-		case EAnimSyncGroupScope::Component:
-			// Forward to the main instance to sync with animations there in TickAssetPlayerInstances()
-			return MainInstanceProxy->CreateUninitializedTickRecord(OutSyncGroupPtr, GroupName);
-		}
-	}
-	
-	return CreateUninitializedTickRecord(OutSyncGroupPtr, GroupName);
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	return Sync.CreateUninitializedTickRecordInScope(*this, OutSyncGroupPtr, GroupName, Scope);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 FAnimTickRecord& FAnimInstanceProxy::CreateUninitializedTickRecord(int32 GroupIndex, FAnimGroupInstance*& OutSyncGroupPtr)
@@ -652,7 +812,9 @@ FAnimTickRecord& FAnimInstanceProxy::CreateUninitializedTickRecord(int32 GroupIn
 		SyncGroupName = GetAnimClassInterface()->GetSyncGroupNames()[GroupIndex];
 	}
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	return CreateUninitializedTickRecord(OutSyncGroupPtr, SyncGroupName);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 FAnimTickRecord& FAnimInstanceProxy::CreateUninitializedTickRecordInScope(int32 GroupIndex, EAnimSyncGroupScope Scope, FAnimGroupInstance*& OutSyncGroupPtr)
@@ -663,7 +825,9 @@ FAnimTickRecord& FAnimInstanceProxy::CreateUninitializedTickRecordInScope(int32 
 		SyncGroupName = GetAnimClassInterface()->GetSyncGroupNames()[GroupIndex];
 	}
 
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	return CreateUninitializedTickRecordInScope(OutSyncGroupPtr, SyncGroupName, Scope);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
 void FAnimInstanceProxy::MakeSequenceTickRecord(FAnimTickRecord& TickRecord, class UAnimSequenceBase* Sequence, bool bLooping, float PlayRate, float FinalBlendWeight, float& CurrentTime, FMarkerTickRecord& MarkerTickRecord) const
@@ -674,13 +838,18 @@ void FAnimInstanceProxy::MakeSequenceTickRecord(FAnimTickRecord& TickRecord, cla
 	TickRecord.PlayRateMultiplier = PlayRate;
 	TickRecord.EffectiveBlendWeight = FinalBlendWeight;
 	TickRecord.bLooping = bLooping;
+	TickRecord.bIsEvaluator = false;
 }
 
-void FAnimInstanceProxy::MakeBlendSpaceTickRecord(FAnimTickRecord& TickRecord, class UBlendSpaceBase* BlendSpace, const FVector& BlendInput, TArray<FBlendSampleData>& BlendSampleDataCache, FBlendFilter& BlendFilter, bool bLooping, float PlayRate, float FinalBlendWeight, float& CurrentTime, FMarkerTickRecord& MarkerTickRecord) const
+void FAnimInstanceProxy::MakeBlendSpaceTickRecord(
+	FAnimTickRecord& TickRecord, class UBlendSpace* BlendSpace, const FVector& BlendInput, TArray<FBlendSampleData>& BlendSampleDataCache, FBlendFilter& BlendFilter, 
+	bool bLooping, float PlayRate, float FinalBlendWeight, float& CurrentTime, FMarkerTickRecord& MarkerTickRecord) const
 {
 	TickRecord.SourceAsset = BlendSpace;
 	TickRecord.BlendSpace.BlendSpacePositionX = BlendInput.X;
 	TickRecord.BlendSpace.BlendSpacePositionY = BlendInput.Y;
+	// This way of making a tick record is deprecated, so just set to defaults here rather than changing the API
+	TickRecord.BlendSpace.bTeleportToTime = false; 
 	TickRecord.BlendSpace.BlendSampleDataCache = &BlendSampleDataCache;
 	TickRecord.BlendSpace.BlendFilter = &BlendFilter;
 	TickRecord.TimeAccumulator = &CurrentTime;
@@ -688,9 +857,9 @@ void FAnimInstanceProxy::MakeBlendSpaceTickRecord(FAnimTickRecord& TickRecord, c
 	TickRecord.PlayRateMultiplier = PlayRate;
 	TickRecord.EffectiveBlendWeight = FinalBlendWeight;
 	TickRecord.bLooping = bLooping;
+	TickRecord.bIsEvaluator = false;
 }
 
-/** Helper function: make a tick record for a pose asset*/
 void FAnimInstanceProxy::MakePoseAssetTickRecord(FAnimTickRecord& TickRecord, class UPoseAsset* PoseAsset, float FinalBlendWeight) const
 {
 	TickRecord.SourceAsset = PoseAsset;
@@ -700,217 +869,42 @@ void FAnimInstanceProxy::MakePoseAssetTickRecord(FAnimTickRecord& TickRecord, cl
 void FAnimInstanceProxy::SequenceAdvanceImmediate(UAnimSequenceBase* Sequence, bool bLooping, float PlayRate, float DeltaSeconds, float& CurrentTime, FMarkerTickRecord& MarkerTickRecord)
 {
 	FAnimTickRecord TickRecord;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MakeSequenceTickRecord(TickRecord, Sequence, bLooping, PlayRate, /*FinalBlendWeight=*/ 1.0f, CurrentTime, MarkerTickRecord);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	FDeltaTimeRecord DeltaTimeRecord;
+	TickRecord.DeltaTimeRecord = &DeltaTimeRecord;
 
 	FAnimAssetTickContext TickContext(DeltaSeconds, RootMotionMode, true);
 	TickRecord.SourceAsset->TickAssetPlayer(TickRecord, NotifyQueue, TickContext);
 }
 
-void FAnimInstanceProxy::BlendSpaceAdvanceImmediate(class UBlendSpaceBase* BlendSpace, const FVector& BlendInput, TArray<FBlendSampleData>& BlendSampleDataCache, FBlendFilter& BlendFilter, bool bLooping, float PlayRate, float DeltaSeconds, float& CurrentTime, FMarkerTickRecord& MarkerTickRecord)
+void FAnimInstanceProxy::BlendSpaceAdvanceImmediate(class UBlendSpace* BlendSpace, const FVector& BlendInput, TArray<FBlendSampleData>& BlendSampleDataCache, FBlendFilter& BlendFilter, bool bLooping, float PlayRate, float DeltaSeconds, float& CurrentTime, FMarkerTickRecord& MarkerTickRecord)
 {
 	FAnimTickRecord TickRecord;
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	MakeBlendSpaceTickRecord(TickRecord, BlendSpace, BlendInput, BlendSampleDataCache, BlendFilter, bLooping, PlayRate, /*FinalBlendWeight=*/ 1.0f, CurrentTime, MarkerTickRecord);
-	
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
+
+	FDeltaTimeRecord DeltaTimeRecord;
+	TickRecord.DeltaTimeRecord = &DeltaTimeRecord;
+
 	FAnimAssetTickContext TickContext(DeltaSeconds, RootMotionMode, true);
 	TickRecord.SourceAsset->TickAssetPlayer(TickRecord, NotifyQueue, TickContext);
 }
 
 void FAnimInstanceProxy::TickAssetPlayerInstances()
 {
+PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	TickAssetPlayerInstances(CurrentDeltaSeconds);
+PRAGMA_ENABLE_DEPRECATION_WARNINGS
 }
 
-void FAnimInstanceProxy::TickAssetPlayerInstances(float DeltaSeconds)
+void FAnimInstanceProxy::TickAssetPlayerInstances(float InDeltaSeconds)
 {
-	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
-
-	SCOPE_CYCLE_COUNTER(STAT_TickAssetPlayerInstances);
-
-	// Handle all players inside sync groups
-	FSyncGroupMap& SyncGroupMap = SyncGroupMaps[GetSyncGroupWriteIndex()];
-	const FSyncGroupMap& PreviousSyncGroupMap = SyncGroupMaps[GetSyncGroupReadIndex()];
-	TArray<FAnimTickRecord>& UngroupedActivePlayers = UngroupedActivePlayerArrays[GetSyncGroupWriteIndex()];
-
-	for (auto& SyncGroupPair : SyncGroupMap)
-	{
-		FAnimGroupInstance& SyncGroup = SyncGroupPair.Value;
-	
-		if (SyncGroup.ActivePlayers.Num() > 0)
-		{
-			const FAnimGroupInstance* PreviousGroup = PreviousSyncGroupMap.Find(SyncGroupPair.Key);
-			SyncGroup.Prepare(PreviousGroup);
-
-			UE_LOG(LogAnimMarkerSync, Log, TEXT("Ticking Group [%s] GroupLeader [%d]"), *SyncGroupPair.Key.ToString(), SyncGroup.GroupLeaderIndex);
-
-			const bool bOnlyOneAnimationInGroup = SyncGroup.ActivePlayers.Num() == 1;
-
-			// Tick the group leader
-			FAnimAssetTickContext TickContext(DeltaSeconds, RootMotionMode, bOnlyOneAnimationInGroup, SyncGroup.ValidMarkers);
-			if (PreviousGroup)
-			{
-				const FMarkerSyncAnimPosition& EndPosition = PreviousGroup->MarkerTickContext.GetMarkerSyncEndPosition();
-				if ( EndPosition.IsValid() &&
-				     (EndPosition.PreviousMarkerName == NAME_None || SyncGroup.ValidMarkers.Contains(EndPosition.PreviousMarkerName)) &&
-					 (EndPosition.NextMarkerName == NAME_None || SyncGroup.ValidMarkers.Contains(EndPosition.NextMarkerName)))
-				{
-					TickContext.MarkerTickContext.SetMarkerSyncStartPosition(EndPosition);
-				}
-			}
-
-#if DO_CHECK
-			//For debugging UE-54705
-			FName InitialMarkerPrevious = TickContext.MarkerTickContext.GetMarkerSyncStartPosition().PreviousMarkerName;
-			FName InitialMarkerEnd = TickContext.MarkerTickContext.GetMarkerSyncStartPosition().NextMarkerName;
-			const bool bIsLeaderRecordValidPre = SyncGroup.ActivePlayers[0].MarkerTickRecord->IsValid(SyncGroup.ActivePlayers[0].bLooping);
-			FMarkerTickRecord LeaderPreMarkerTickRecord = *SyncGroup.ActivePlayers[0].MarkerTickRecord;
-#endif
-
-			// initialize to invalidate first
-			ensureMsgf(SyncGroup.GroupLeaderIndex == INDEX_NONE, TEXT("SyncGroup %s had a non -1 group leader index of %d in asset %s"), *SyncGroupPair.Key.ToString(), SyncGroup.GroupLeaderIndex, *GetNameSafe(SkeletalMeshComponent));
-			int32 GroupLeaderIndex = 0;
-			for (; GroupLeaderIndex < SyncGroup.ActivePlayers.Num(); ++GroupLeaderIndex)
-			{
-				FAnimTickRecord& GroupLeader = SyncGroup.ActivePlayers[GroupLeaderIndex];
-				// if it has leader score
-				SCOPE_CYCLE_COUNTER(STAT_TickAssetPlayerInstance);
-				FScopeCycleCounterUObject Scope(GroupLeader.SourceAsset);
-				GroupLeader.SourceAsset->TickAssetPlayer(GroupLeader, NotifyQueue, TickContext);
-
-				if (RootMotionMode == ERootMotionMode::RootMotionFromEverything && TickContext.RootMotionMovementParams.bHasRootMotion)
-				{
-					ExtractedRootMotion.AccumulateWithBlend(TickContext.RootMotionMovementParams, GroupLeader.GetRootMotionWeight());
-				}
-
-				// if we're not using marker based sync, we don't care, get out
-				if (TickContext.CanUseMarkerPosition() == false)
-				{
-					SyncGroup.GroupLeaderIndex = GroupLeaderIndex;
-					break;
-				}
-				// otherwise, the new position should contain the valid position for end, otherwise, we don't know where to sync to
-				else if (TickContext.MarkerTickContext.IsMarkerSyncEndValid())
-				{
-					// if this leader contains correct position, break
-					SyncGroup.MarkerTickContext = TickContext.MarkerTickContext;
-					SyncGroup.GroupLeaderIndex = GroupLeaderIndex;
-					UE_LOG(LogAnimMarkerSync, Log, TEXT("Previous Sync Group Marker Tick Context :\n%s"), *SyncGroup.MarkerTickContext.ToString());
-					UE_LOG(LogAnimMarkerSync, Log, TEXT("New Sync Group Marker Tick Context :\n%s"), *TickContext.MarkerTickContext.ToString());
-					break;
-				}
-				else
-				{
-					SyncGroup.GroupLeaderIndex = GroupLeaderIndex;
-					UE_LOG(LogAnimMarkerSync, Log, TEXT("Invalid position from Leader %d. Trying next leader"), GroupLeaderIndex);
-				}
-			} 
-
-			check(SyncGroup.GroupLeaderIndex != INDEX_NONE);
-			// we found leader
-			SyncGroup.Finalize(PreviousGroup);
-
-			if (TickContext.CanUseMarkerPosition())
-			{
-				const FMarkerSyncAnimPosition& MarkerStart = TickContext.MarkerTickContext.GetMarkerSyncStartPosition();
-				FName SyncGroupName = SyncGroupPair.Key;
-				FAnimTickRecord& GroupLeader = SyncGroup.ActivePlayers[SyncGroup.GroupLeaderIndex];
-				FString LeaderAnimName = GroupLeader.SourceAsset->GetName();
-
-				//  Updated logic in search for cause of UE-54705
-				const bool bStartMarkerValid = (MarkerStart.PreviousMarkerName == NAME_None) || SyncGroup.ValidMarkers.Contains(MarkerStart.PreviousMarkerName);
-				const bool bEndMarkerValid = (MarkerStart.NextMarkerName == NAME_None) || SyncGroup.ValidMarkers.Contains(MarkerStart.NextMarkerName);
-
-				if (!bStartMarkerValid)
-				{
-#if DO_CHECK
-					FString ErrorMsg = FString(TEXT("Prev Marker name not valid for sync group.\n"));
-					ErrorMsg += FString::Format(TEXT("\tMarker {0} : SyncGroupName {1} : Leader {2}\n"), { MarkerStart.PreviousMarkerName.ToString(), SyncGroupName.ToString(), LeaderAnimName });
-					ErrorMsg += FString::Format(TEXT("\tInitalPrev {0} : InitialNext {1} : GroupLeaderIndex {2}\n"), { InitialMarkerPrevious.ToString(), InitialMarkerEnd.ToString(), GroupLeaderIndex });
-					ErrorMsg += FString::Format(TEXT("\tLeader (0 index) was originally valid: {0} | Record: {1}\n"), { bIsLeaderRecordValidPre, LeaderPreMarkerTickRecord.ToString() });
-					ErrorMsg += FString::Format(TEXT("\t Valid Markers : {0}\n"), { SyncGroup.ValidMarkers.Num() });
-					for (int32 MarkerIndex = 0; MarkerIndex < SyncGroup.ValidMarkers.Num(); ++MarkerIndex)
-					{
-						ErrorMsg += FString::Format(TEXT("\t\t{0}) '{1}'\n"), {MarkerIndex, SyncGroup.ValidMarkers[MarkerIndex].ToString()});
-					}
-					ensureMsgf(false, TEXT("%s"), *ErrorMsg);
-#endif
-					TickContext.InvalidateMarkerSync();
-				}
-				else if (!bEndMarkerValid)
-				{
-#if DO_CHECK
-					FString ErrorMsg = FString(TEXT("Next Marker name not valid for sync group.\n"));
-					ErrorMsg += FString::Format(TEXT("\tMarker {0} : SyncGroupName {1} : Leader {2}\n"), { MarkerStart.NextMarkerName.ToString(), SyncGroupName.ToString(), LeaderAnimName });
-					ErrorMsg += FString::Format(TEXT("\tInitalPrev {0} : InitialNext {1} : GroupLeaderIndex {2}\n"), { InitialMarkerPrevious.ToString(), InitialMarkerEnd.ToString(), GroupLeaderIndex });
-					ErrorMsg += FString::Format(TEXT("\tLeader (0 index) was originally valid: {0} | Record: {1}\n"), { bIsLeaderRecordValidPre, LeaderPreMarkerTickRecord.ToString() });
-					ErrorMsg += FString::Format(TEXT("\t Valid Markers : {0}\n"), { SyncGroup.ValidMarkers.Num() });
-					for (int32 MarkerIndex = 0; MarkerIndex < SyncGroup.ValidMarkers.Num(); ++MarkerIndex)
-					{
-						ErrorMsg += FString::Format(TEXT("\t\t{0}) '{1}'\n"), { MarkerIndex, SyncGroup.ValidMarkers[MarkerIndex].ToString() });
-					}
-					ensureMsgf(false, TEXT("%s"), *ErrorMsg);
-#endif
-					TickContext.InvalidateMarkerSync();
-				}
-			}
-
-			// Update everything else to follow the leader, if there is more followers
-			if (SyncGroup.ActivePlayers.Num() > GroupLeaderIndex + 1)
-			{
-				// if we don't have a good leader, no reason to convert to follower
-				// tick as leader
-				TickContext.ConvertToFollower();
-	
-				for (int32 TickIndex = GroupLeaderIndex + 1; TickIndex < SyncGroup.ActivePlayers.Num(); ++TickIndex)
-				{
-					FAnimTickRecord& AssetPlayer = SyncGroup.ActivePlayers[TickIndex];
-					{
-						SCOPE_CYCLE_COUNTER(STAT_TickAssetPlayerInstance);
-						FScopeCycleCounterUObject Scope(AssetPlayer.SourceAsset);
-						TickContext.RootMotionMovementParams.Clear();
-						AssetPlayer.SourceAsset->TickAssetPlayer(AssetPlayer, NotifyQueue, TickContext);
-					}
-					if (RootMotionMode == ERootMotionMode::RootMotionFromEverything && TickContext.RootMotionMovementParams.bHasRootMotion)
-					{
-						ExtractedRootMotion.AccumulateWithBlend(TickContext.RootMotionMovementParams, AssetPlayer.GetRootMotionWeight());
-					}
-				}
-			}
-
-#if ANIM_TRACE_ENABLED
-			for(const FPassedMarker& PassedMarker : TickContext.MarkerTickContext.MarkersPassedThisTick)
-			{
-				TRACE_ANIM_SYNC_MARKER(CastChecked<UAnimInstance>(GetAnimInstanceObject()), PassedMarker);
-			}
-#endif
-		}
-	}
-
-	// Handle the remaining ungrouped animation players
-	for (int32 TickIndex = 0; TickIndex < UngroupedActivePlayers.Num(); ++TickIndex)
-	{
-		FAnimTickRecord& AssetPlayerToTick = UngroupedActivePlayers[TickIndex];
-		const TArray<FName>* UniqueNames = AssetPlayerToTick.SourceAsset->GetUniqueMarkerNames();
-		const TArray<FName>& ValidMarkers = UniqueNames ? *UniqueNames : FMarkerTickContext::DefaultMarkerNames;
-
-		const bool bOnlyOneAnimationInGroup = true;
-		FAnimAssetTickContext TickContext(DeltaSeconds, RootMotionMode, bOnlyOneAnimationInGroup, ValidMarkers);
-		{
-			SCOPE_CYCLE_COUNTER(STAT_TickAssetPlayerInstance);
-			FScopeCycleCounterUObject Scope(AssetPlayerToTick.SourceAsset);
-			AssetPlayerToTick.SourceAsset->TickAssetPlayer(AssetPlayerToTick, NotifyQueue, TickContext);
-		}
-		if (RootMotionMode == ERootMotionMode::RootMotionFromEverything && TickContext.RootMotionMovementParams.bHasRootMotion)
-		{
-			ExtractedRootMotion.AccumulateWithBlend(TickContext.RootMotionMovementParams, AssetPlayerToTick.GetRootMotionWeight());
-		}
-
-#if ANIM_TRACE_ENABLED
-		for(const FPassedMarker& PassedMarker : TickContext.MarkerTickContext.MarkersPassedThisTick)
-		{
-			TRACE_ANIM_SYNC_MARKER(CastChecked<UAnimInstance>(GetAnimInstanceObject()), PassedMarker);
-		}
-#endif
-	}
+	Sync.TickAssetPlayerInstances(*this, InDeltaSeconds);
+	Sync.TickSyncGroupWriteIndex();
 }
 
 void FAnimInstanceProxy::AddAnimNotifies(const TArray<FAnimNotifyEventReference>& NewNotifies, const float InstanceWeight)
@@ -929,27 +923,7 @@ int32 FAnimInstanceProxy::GetSyncGroupIndexFromName(FName SyncGroupName) const
 
 bool FAnimInstanceProxy::GetTimeToClosestMarker(FName SyncGroup, FName MarkerName, float& OutMarkerTime) const
 {
-	const FSyncGroupMap& SyncGroupMap = SyncGroupMaps[GetSyncGroupReadIndex()];
-
-	if (const FAnimGroupInstance* SyncGroupInstancePtr = SyncGroupMap.Find(SyncGroup))
-	{
-		if (SyncGroupInstancePtr->bCanUseMarkerSync && SyncGroupInstancePtr->ActivePlayers.IsValidIndex(SyncGroupInstancePtr->GroupLeaderIndex))
-		{
-			const FMarkerSyncAnimPosition& EndPosition = SyncGroupInstancePtr->MarkerTickContext.GetMarkerSyncEndPosition();
-			const FAnimTickRecord& Leader = SyncGroupInstancePtr->ActivePlayers[SyncGroupInstancePtr->GroupLeaderIndex];
-			if (EndPosition.PreviousMarkerName == MarkerName)
-			{
-				OutMarkerTime = Leader.MarkerTickRecord->PreviousMarker.TimeToMarker;
-				return true;
-			}
-			else if (EndPosition.NextMarkerName == MarkerName)
-			{
-				OutMarkerTime = Leader.MarkerTickRecord->NextMarker.TimeToMarker;
-				return true;
-			}
-		}
-	}
-	return false;
+	return Sync.GetTimeToClosestMarker(SyncGroup, MarkerName, OutMarkerTime);
 }
 
 void FAnimInstanceProxy::AddAnimNotifyFromGeneratedClass(int32 NotifyIndex)
@@ -969,51 +943,24 @@ void FAnimInstanceProxy::AddAnimNotifyFromGeneratedClass(int32 NotifyIndex)
 
 bool FAnimInstanceProxy::HasMarkerBeenHitThisFrame(FName SyncGroup, FName MarkerName) const
 {
-	const FSyncGroupMap& SyncGroupMap = SyncGroupMaps[GetSyncGroupReadIndex()];
-
-	if (const FAnimGroupInstance* SyncGroupInstancePtr = SyncGroupMap.Find(SyncGroup))
-	{
-		if (SyncGroupInstancePtr->bCanUseMarkerSync)
-		{
-			return SyncGroupInstancePtr->MarkerTickContext.MarkersPassedThisTick.ContainsByPredicate([&MarkerName](const FPassedMarker& PassedMarker) -> bool
-			{
-				return PassedMarker.PassedMarkerName == MarkerName;
-			});
-		}
-	}
-	return false;
+	return Sync.HasMarkerBeenHitThisFrame(SyncGroup, MarkerName);
 }
 
 bool FAnimInstanceProxy::IsSyncGroupBetweenMarkers(FName InSyncGroupName, FName PreviousMarker, FName NextMarker, bool bRespectMarkerOrder) const
 {
-	const FMarkerSyncAnimPosition& SyncGroupPosition = GetSyncGroupPosition(InSyncGroupName);
-	if ((SyncGroupPosition.PreviousMarkerName == PreviousMarker) && (SyncGroupPosition.NextMarkerName == NextMarker))
-	{
-		return true;
-	}
-
-	if (!bRespectMarkerOrder)
-	{
-		return ((SyncGroupPosition.PreviousMarkerName == NextMarker) && (SyncGroupPosition.NextMarkerName == PreviousMarker));
-	}
-
-	return false;
+	return Sync.IsSyncGroupBetweenMarkers(InSyncGroupName, PreviousMarker, NextMarker, bRespectMarkerOrder);
 }
 
 FMarkerSyncAnimPosition FAnimInstanceProxy::GetSyncGroupPosition(FName InSyncGroupName) const
 {
-	const FSyncGroupMap& SyncGroupMap = SyncGroupMaps[GetSyncGroupReadIndex()];
-
-	if (const FAnimGroupInstance* SyncGroupInstancePtr = SyncGroupMap.Find(InSyncGroupName))
-	{
-		if (SyncGroupInstancePtr->bCanUseMarkerSync && SyncGroupInstancePtr->MarkerTickContext.IsMarkerSyncEndValid())
-		{
-			return SyncGroupInstancePtr->MarkerTickContext.GetMarkerSyncEndPosition();
-		}
-	}
-
-	return FMarkerSyncAnimPosition();
+	return Sync.GetSyncGroupPosition(InSyncGroupName);
 }
+
+bool FAnimInstanceProxy::IsSyncGroupValid(FName InSyncGroupName) const
+{
+	return Sync.IsSyncGroupValid(InSyncGroupName);
+}
+
 
 void FAnimInstanceProxy::ReinitializeSlotNodes()
 {
@@ -1057,7 +1004,7 @@ void FAnimInstanceProxy::UpdateSlotNodeWeight(const FName& SlotNodeName, float I
 	const int32* TrackerIndexPtr = SlotNameToTrackerIndex.Find(SlotNodeName);
 	if (TrackerIndexPtr)
 	{
-		FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetSyncGroupWriteIndex()][*TrackerIndexPtr];
+		FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetBufferWriteIndex()][*TrackerIndexPtr];
 		Tracker.MontageLocalWeight = InMontageLocalWeight;
 		Tracker.NodeGlobalWeight = InNodeGlobalWeight;
 
@@ -1066,10 +1013,22 @@ void FAnimInstanceProxy::UpdateSlotNodeWeight(const FName& SlotNodeName, float I
 	}
 }
 
+bool FAnimInstanceProxy::GetSlotInertializationRequest(const FName& SlotName, UE::Anim::FSlotInertializationRequest& OutRequest)
+{
+	const FName GroupName = Skeleton ? Skeleton->GetSlotGroupName(SlotName) : NAME_None;
+	if (const UE::Anim::FSlotInertializationRequest* FoundRequest = GetSlotGroupInertializationRequestMap().Find(GroupName))
+	{
+		OutRequest = *FoundRequest;
+		return true;
+	}
+
+	return false;
+}
+
 void FAnimInstanceProxy::ClearSlotNodeWeights()
 {
-	TArray<FMontageActiveSlotTracker>& SlotWeightTracker_Read = SlotWeightTracker[GetSyncGroupReadIndex()];
-	TArray<FMontageActiveSlotTracker>& SlotWeightTracker_Write = SlotWeightTracker[GetSyncGroupWriteIndex()];
+	TArray<FMontageActiveSlotTracker>& SlotWeightTracker_Read = SlotWeightTracker[GetBufferReadIndex()];
+	TArray<FMontageActiveSlotTracker>& SlotWeightTracker_Write = SlotWeightTracker[GetBufferWriteIndex()];
 
 	for (int32 TrackerIndex = 0; TrackerIndex < SlotWeightTracker_Write.Num(); TrackerIndex++)
 	{
@@ -1083,7 +1042,7 @@ bool FAnimInstanceProxy::IsSlotNodeRelevantForNotifies(const FName& SlotNodeName
 	const int32* TrackerIndexPtr = SlotNameToTrackerIndex.Find(SlotNodeName);
 	if (TrackerIndexPtr)
 	{
-		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetSyncGroupReadIndex()][*TrackerIndexPtr];
+		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetBufferReadIndex()][*TrackerIndexPtr];
 		return (Tracker.bIsRelevantThisTick || Tracker.bWasRelevantOnPreviousTick);
 	}
 
@@ -1095,7 +1054,7 @@ float FAnimInstanceProxy::GetSlotNodeGlobalWeight(const FName& SlotNodeName) con
 	const int32* TrackerIndexPtr = SlotNameToTrackerIndex.Find(SlotNodeName);
 	if (TrackerIndexPtr)
 	{
-		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetSyncGroupReadIndex()][*TrackerIndexPtr];
+		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetBufferReadIndex()][*TrackerIndexPtr];
 		return Tracker.NodeGlobalWeight;
 	}
 
@@ -1107,7 +1066,7 @@ float FAnimInstanceProxy::GetSlotMontageGlobalWeight(const FName& SlotNodeName) 
 	const int32* TrackerIndexPtr = SlotNameToTrackerIndex.Find(SlotNodeName);
 	if (TrackerIndexPtr)
 	{
-		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetSyncGroupReadIndex()][*TrackerIndexPtr];
+		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetBufferReadIndex()][*TrackerIndexPtr];
 		return Tracker.MontageLocalWeight * Tracker.NodeGlobalWeight;
 	}
 
@@ -1119,7 +1078,7 @@ float FAnimInstanceProxy::GetSlotMontageLocalWeight(const FName& SlotNodeName) c
 	const int32* TrackerIndexPtr = SlotNameToTrackerIndex.Find(SlotNodeName);
 	if (TrackerIndexPtr)
 	{
-		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetSyncGroupReadIndex()][*TrackerIndexPtr];
+		const FMontageActiveSlotTracker& Tracker = SlotWeightTracker[GetBufferReadIndex()][*TrackerIndexPtr];
 		return Tracker.MontageLocalWeight;
 	}
 
@@ -1134,9 +1093,9 @@ float FAnimInstanceProxy::CalcSlotMontageLocalWeight(const FName& SlotNodeName) 
 	return out_SlotNodeLocalWeight;
 }
 
-FAnimNode_Base* FAnimInstanceProxy::GetCheckedNodeFromIndexUntyped(int32 NodeIdx, UScriptStruct* RequiredStructType)
+const FAnimNode_Base* FAnimInstanceProxy::GetCheckedNodeFromIndexUntyped(int32 NodeIdx, UScriptStruct* RequiredStructType) const
 {
-	FAnimNode_Base* NodePtr = nullptr;
+	const FAnimNode_Base* NodePtr = nullptr;
 	if (AnimClassInterface)
 	{
 		const TArray<FStructProperty*>& AnimNodeProperties = AnimClassInterface->GetAnimNodeProperties();
@@ -1166,9 +1125,14 @@ FAnimNode_Base* FAnimInstanceProxy::GetCheckedNodeFromIndexUntyped(int32 NodeIdx
 	return NodePtr;
 }
 
-FAnimNode_Base* FAnimInstanceProxy::GetNodeFromIndexUntyped(int32 NodeIdx, UScriptStruct* RequiredStructType)
+FAnimNode_Base* FAnimInstanceProxy::GetCheckedMutableNodeFromIndexUntyped(int32 NodeIdx, UScriptStruct* RequiredStructType)
 {
-	FAnimNode_Base* NodePtr = nullptr;
+	return const_cast<FAnimNode_Base*>(GetCheckedNodeFromIndexUntyped(NodeIdx, RequiredStructType));
+}
+
+const FAnimNode_Base* FAnimInstanceProxy::GetNodeFromIndexUntyped(int32 NodeIdx, UScriptStruct* RequiredStructType) const
+{
+	const FAnimNode_Base* NodePtr = nullptr;
 	if (AnimClassInterface)
 	{
 		const TArray<FStructProperty*>& AnimNodeProperties = AnimClassInterface->GetAnimNodeProperties();
@@ -1188,51 +1152,46 @@ FAnimNode_Base* FAnimInstanceProxy::GetNodeFromIndexUntyped(int32 NodeIdx, UScri
 	return NodePtr;
 }
 
+FAnimNode_Base* FAnimInstanceProxy::GetMutableNodeFromIndexUntyped(int32 NodeIdx, UScriptStruct* RequiredStructType)
+{
+	return const_cast<FAnimNode_Base*>(GetNodeFromIndexUntyped(NodeIdx, RequiredStructType));
+}
+
 void FAnimInstanceProxy::RecalcRequiredBones(USkeletalMeshComponent* Component, UObject* Asset)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
-	RequiredBones.InitializeTo(Component->RequiredBones, FCurveEvaluationOption(Component->GetAllowedAnimCurveEvaluate(), &Component->GetDisallowedAnimCurvesEvaluation(), Component->GetPredictedLODLevel()), *Asset);
+	// Use the shared bone container
+	RequiredBones = Component->GetSharedRequiredBones();
 
-	// If there is a ref pose override, we want to replace ref pose in RequiredBones
-	const FSkelMeshRefPoseOverride* RefPoseOverride = Component->GetRefPoseOverride();
-	if (RefPoseOverride)
+	// The first anim instance will initialize the required bones, all others will re-use it
+	if (!RequiredBones->IsValid())
 	{
-		// Get ref pose override info
-		// Get indices of required bones
-		const TArray<FBoneIndexType>& BoneIndicesArray = RequiredBones.GetBoneIndicesArray();
-		// Get number of required bones
-		int32 NumReqBones = BoneIndicesArray.Num();
+		RequiredBones->InitializeTo(Component->RequiredBones, Component->GetCurveFilterSettings(), *Asset);
 
-		// Build new array of ref pose transforms for required bones
-		TArray<FTransform> NewCompactRefPose;
-		NewCompactRefPose.AddUninitialized(NumReqBones);
-
-		for (int32 CompactBoneIndex = 0; CompactBoneIndex < NumReqBones; ++CompactBoneIndex)
-		{
-			FBoneIndexType MeshPoseIndex = BoneIndicesArray[CompactBoneIndex];
-
-			if (RefPoseOverride->RefBonePoses.IsValidIndex(MeshPoseIndex))
-			{
-				NewCompactRefPose[CompactBoneIndex] = RefPoseOverride->RefBonePoses[MeshPoseIndex];
-			}
-			else
-			{
-				NewCompactRefPose[CompactBoneIndex] = FTransform::Identity;
-			}
-		}
-
-		// Update ref pose in required bones structure
-		RequiredBones.SetRefPoseCompactArray(NewCompactRefPose);
+		// If there is a ref pose override, we want to replace ref pose in RequiredBones
+		// Update ref pose in required bones structure (either set it, or clear it, depending on if one is set on the Component)
+		RequiredBones->SetRefPoseOverride(Component->GetRefPoseOverride());
 	}
 
 	// If this instance can accept input poses, initialise the input pose container
-	if(DefaultLinkedInstanceInputNode)
+	if (DefaultLinkedInstanceInputNode)
 	{
-		DefaultLinkedInstanceInputNode->CachedInputPose.SetBoneContainer(&RequiredBones);
+		DefaultLinkedInstanceInputNode->CachedInputPose.SetBoneContainer(RequiredBones.Get());
+		
+		// SetBoneContainer allocates space for bone data but leaves it uninitalized.
+		DefaultLinkedInstanceInputNode->bIsCachedInputPoseInitialized = false;
 	}
 
-	// When RequiredBones mapping has changed, AnimNodes need to update their bones caches. 
+	// When RequiredBones mapping has changed, AnimNodes need to update their bones caches.
+	bBoneCachesInvalidated = true;
+}
+
+void FAnimInstanceProxy::RecalcRequiredCurves(const UE::Anim::FCurveFilterSettings& CurveFilterSettings)
+{
+	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
+
+	RequiredBones->CacheRequiredAnimCurves(CurveFilterSettings);
 	bBoneCachesInvalidated = true;
 }
 
@@ -1240,35 +1199,30 @@ void FAnimInstanceProxy::RecalcRequiredCurves(const FCurveEvaluationOption& Curv
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
-	RequiredBones.CacheRequiredAnimCurveUids(CurveEvalOption);
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS
+	RequiredBones->CacheRequiredAnimCurveUids(CurveEvalOption);
+	PRAGMA_ENABLE_DEPRECATION_WARNINGS
 	bBoneCachesInvalidated = true;
 }
 
 void FAnimInstanceProxy::UpdateAnimation()
 {
+	LLM_SCOPE(ELLMTag::Animation);
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
 	FMemMark Mark(FMemStack::Get());
-
-	// Process internal batched property copies
-	if(AnimClassInterface)
-	{
-		PropertyAccess::ProcessCopies(GetAnimInstanceObject(), AnimClassInterface->GetPropertyAccessLibrary(), EPropertyAccessCopyBatch::InternalBatched);
-	}
-
-#if WITH_EDITORONLY_DATA
-	UpdatedNodesThisFrame.Reset();
-#endif
-
 	FAnimationUpdateSharedContext SharedContext;
 	FAnimationUpdateContext Context(this, CurrentDeltaSeconds, &SharedContext);
-#if ANIM_NODE_IDS_AVAILABLE
+
 	if(AnimClassInterface && AnimClassInterface->GetAnimBlueprintFunctions().Num() > 0)
 	{
-		Context = Context.WithNodeId(AnimClassInterface->GetAnimBlueprintFunctions()[0].OutputPoseNodeIndex);
+		Context.SetNodeId(AnimClassInterface->GetAnimBlueprintFunctions()[0].OutputPoseNodeIndex);
 	}
-#endif
+
 	UpdateAnimation_WithRoot(Context, RootNode, NAME_AnimGraph);
+
+	// Tick syncing
+	Sync.TickAssetPlayerInstances(*this, CurrentDeltaSeconds);
 }
 
 void FAnimInstanceProxy::UpdateAnimation_WithRoot(const FAnimationUpdateContext& InContext, FAnimNode_Base* InRootNode, FName InLayerName)
@@ -1276,10 +1230,20 @@ void FAnimInstanceProxy::UpdateAnimation_WithRoot(const FAnimationUpdateContext&
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
 	ANIM_MT_SCOPE_CYCLE_COUNTER(ProxyUpdateAnimation, !IsInGameThread());
-	FScopeCycleCounterUObject AnimScope(GetAnimInstanceObject());
+	FScopeCycleCounterUObject AnimScope(bUpdatingRoot ? nullptr : GetAnimInstanceObject());
 
 	if(InRootNode == RootNode)
 	{
+		if(bInitializeSubsystems && AnimClassInterface)
+		{
+			AnimClassInterface->ForEachSubsystem(GetAnimInstanceObject(), [this](const FAnimSubsystemInstanceContext& InContext)
+			{
+				InContext.SubsystemInstance.Initialize_WorkerThread();
+				return EAnimSubsystemEnumeration::Continue;
+			});
+			bInitializeSubsystems = false;
+		}
+		
 		if(bDeferRootNodeInitialization)
 		{
 			InitializeRootNode_WithRoot(RootNode);
@@ -1320,9 +1284,41 @@ void FAnimInstanceProxy::UpdateAnimation_WithRoot(const FAnimationUpdateContext&
 		// from other linked instances with grouped layers
 		if(FrameCounterForUpdate != GFrameCounter)
 		{
-			SCOPE_CYCLE_COUNTER(STAT_NativeUpdateAnimation);
-			Update(CurrentDeltaSeconds);
+			if(AnimClassInterface)
+			{
+				AnimClassInterface->ForEachSubsystem(GetAnimInstanceObject(), [this](const FAnimSubsystemInstanceContext& InContext)
+				{
+					FAnimSubsystemParallelUpdateContext Context(InContext, *this, CurrentDeltaSeconds);
+					InContext.Subsystem.OnPreUpdate_WorkerThread(Context);
+					return EAnimSubsystemEnumeration::Continue;
+				});
+			}
 
+			{
+				SCOPE_CYCLE_COUNTER(STAT_NativeThreadSafeUpdateAnimation);
+				CastChecked<UAnimInstance>(GetAnimInstanceObject())->NativeThreadSafeUpdateAnimation(CurrentDeltaSeconds);
+			}
+
+			{
+				SCOPE_CYCLE_COUNTER(STAT_BlueprintUpdateAnimation);
+				CastChecked<UAnimInstance>(GetAnimInstanceObject())->BlueprintThreadSafeUpdateAnimation(CurrentDeltaSeconds);
+			}
+
+			{
+				SCOPE_CYCLE_COUNTER(STAT_NativeUpdateAnimation);
+				Update(CurrentDeltaSeconds);
+			}
+
+			if(AnimClassInterface)
+			{
+				AnimClassInterface->ForEachSubsystem(GetAnimInstanceObject(), [this](const FAnimSubsystemInstanceContext& InContext)
+				{
+					FAnimSubsystemParallelUpdateContext Context(InContext, *this, CurrentDeltaSeconds);
+					InContext.Subsystem.OnPostUpdate_WorkerThread(Context);
+					return EAnimSubsystemEnumeration::Continue;
+				});
+			}
+			
 			FrameCounterForUpdate = GFrameCounter;
 		}
 	}
@@ -1332,7 +1328,15 @@ void FAnimInstanceProxy::UpdateAnimation_WithRoot(const FAnimationUpdateContext&
 		// We re-enter this function when we call layer graphs linked to the main graph. In these cases we
 		// dont want to perform duplicate work
 		TGuardValue<bool> ScopeGuard(bUpdatingRoot, true);
-	
+
+		// Anything syncing within this scope is subject to sync groups.
+		// We only enable syncing here for the main instance or post process instance
+		// We also fall back to enabling this sync scope if there is not one already enabled (there must always be one)
+		const bool bEnableSyncScope =	GetAnimInstanceObject() == GetSkelMeshComponent()->GetAnimInstance() ||
+										GetAnimInstanceObject() == GetSkelMeshComponent()->GetPostProcessInstance() || 
+										InContext.GetMessage<UE::Anim::FAnimSyncGroupScope>() == nullptr;
+		UE::Anim::TOptionalScopedGraphMessage<UE::Anim::FAnimSyncGroupScope> Message(bEnableSyncScope, InContext, InContext);
+
 		// update all nodes
 		if(InRootNode == RootNode)
 		{
@@ -1351,6 +1355,17 @@ void FAnimInstanceProxy::PreEvaluateAnimation(UAnimInstance* InAnimInstance)
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
 	InitializeObjects(InAnimInstance);
+
+	// Re-cache Component Transforms if needed
+	// When playing root motion is the CharacterMovementComp who triggers the animation update and this happens before root motion is consumed and the position of the character is updated for this frame
+	// which means that at the point ComponentTransform is cached in the PreUpdate function it contain the previous frame transform
+	if (SkeletalMeshComponent && SkeletalMeshComponent->IsPlayingRootMotion())
+	{
+		ComponentTransform = SkeletalMeshComponent->GetComponentTransform();
+		ComponentRelativeTransform = SkeletalMeshComponent->GetRelativeTransform();
+		ActorTransform = SkeletalMeshComponent->GetOwner() ? SkeletalMeshComponent->GetOwner()->GetActorTransform() : FTransform::Identity;
+	}
+
 #if ENABLE_ANIM_LOGGING
 	LoggedMessagesMap.FindOrAdd(NAME_Evaluate).Reset();
 #endif
@@ -1358,13 +1373,12 @@ void FAnimInstanceProxy::PreEvaluateAnimation(UAnimInstance* InAnimInstance)
 
 void FAnimInstanceProxy::EvaluateAnimation(FPoseContext& Output)
 {
-	TRACE_SCOPED_ANIM_GRAPH(Output);
-
 	EvaluateAnimation_WithRoot(Output, RootNode);
 }
 
 void FAnimInstanceProxy::EvaluateAnimation_WithRoot(FPoseContext& Output, FAnimNode_Base* InRootNode)
 {
+	TRACE_SCOPED_ANIM_GRAPH(Output);
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
 	ANIM_MT_SCOPE_CYCLE_COUNTER(EvaluateAnimInstance, !IsInGameThread());
@@ -1445,23 +1459,22 @@ void FAnimInstanceProxy::EvaluateAnimationNode(FPoseContext& Output)
 
 void FAnimInstanceProxy::EvaluateAnimationNode_WithRoot(FPoseContext& Output, FAnimNode_Base* InRootNode)
 {
-	if (InRootNode != NULL)
+	if (InRootNode != nullptr)
 	{
 		ANIM_MT_SCOPE_CYCLE_COUNTER(EvaluateAnimGraph, !IsInGameThread());
 		if(InRootNode == RootNode)
 		{
 			EvaluationCounter.Increment();
-		}
 
-#if ANIM_NODE_IDS_AVAILABLE
-		if(AnimClassInterface && AnimClassInterface->GetAnimBlueprintFunctions().Num() > 0)
-		{
-			Output.SetNodeId(AnimClassInterface->GetAnimBlueprintFunctions()[0].OutputPoseNodeIndex);
+			if(AnimClassInterface && AnimClassInterface->GetAnimBlueprintFunctions().Num() > 0)
+			{
+				Output.SetNodeId(INDEX_NONE);
+				Output.SetNodeId(AnimClassInterface->GetAnimBlueprintFunctions()[0].OutputPoseNodeIndex);
+			}
 		}
-#endif
 
 		TRACE_SCOPED_ANIM_NODE(Output);
-
+		
 		InRootNode->Evaluate_AnyThread(Output);
 	}
 	else
@@ -1479,7 +1492,7 @@ void FAnimInstanceProxy::EvaluateAnimationNode_WithRoot(FPoseContext& Output, FA
 
 void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FCompactPose& SourcePose, const FBlendedCurve& SourceCurve, float InSourceWeight, FCompactPose& BlendedPose, FBlendedCurve& BlendedCurve, float InBlendWeight, float InTotalNodeWeight)
 {
-	FStackCustomAttributes TempAttributes;
+	UE::Anim::FStackAttributeContainer TempAttributes;
 
 	const FAnimationPoseData SourceAnimationPoseData(*const_cast<FCompactPose*>(&SourcePose), *const_cast<FBlendedCurve*>(&SourceCurve), TempAttributes);
 	FAnimationPoseData BlendedAnimationPoseData(BlendedPose, BlendedCurve, TempAttributes);
@@ -1487,18 +1500,356 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FComp
 	SlotEvaluatePose(SlotNodeName, SourceAnimationPoseData, InSourceWeight, BlendedAnimationPoseData, InBlendWeight, InTotalNodeWeight);
 }
 
+
+void FAnimInstanceProxy::SlotEvaluatePoseWithBlendProfiles(const FName& SlotNodeName, const FAnimationPoseData& SourceAnimationPoseData, float InSourceWeight, FAnimationPoseData& OutBlendedAnimationPoseData, float InBlendWeight)
+{
+	const FCompactPose& SourcePose = SourceAnimationPoseData.GetPose();
+	const FBlendedCurve& SourceCurve = SourceAnimationPoseData.GetCurve();
+	const UE::Anim::FStackAttributeContainer& SourceAttributes = SourceAnimationPoseData.GetAttributes();
+
+	FCompactPose& BlendedPose = OutBlendedAnimationPoseData.GetPose();
+	FBlendedCurve& BlendedCurve = OutBlendedAnimationPoseData.GetCurve();
+	UE::Anim::FStackAttributeContainer& BlendedAttributes = OutBlendedAnimationPoseData.GetAttributes();
+
+	if (InBlendWeight <= ZERO_ANIMWEIGHT_THRESH)
+	{
+		BlendedPose = SourcePose;
+		BlendedCurve = SourceCurve;
+		BlendedAttributes = SourceAttributes;
+		return;
+	}
+
+	// Get the array of per bone weight totals.
+	FBlendProfileScratchData& BlendProfileScratchData = FBlendProfileScratchData::Get();
+	TArray<TArray<float>>& PerBoneWeights = BlendProfileScratchData.PerBoneWeights;
+	TArray<float>& PerBoneWeightTotals = BlendProfileScratchData.PerBoneWeightTotals;
+	TArray<float>& PerBoneWeightTotalsAdditive = BlendProfileScratchData.PerBoneWeightTotalsAdditive;
+	TArray<float>& BoneBlendProfileScales = BlendProfileScratchData.BoneBlendProfileScales;
+	const int32 NumBones = RequiredBones->GetCompactPoseNumBones();
+	PerBoneWeightTotals.Reset(NumBones);
+	PerBoneWeightTotals.AddUninitialized(NumBones);
+	for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+	{
+		PerBoneWeightTotals[BoneIndex] = 0.0f;
+	}
+	PerBoneWeightTotalsAdditive = PerBoneWeightTotals;
+	PerBoneWeights.Reset(GetMontageEvaluationData().Num());
+
+	//------------------------------------------
+	// Figure out what poses we need to blend.
+	//------------------------------------------
+	// Make a list of all the montages that use the slot we're interested in.
+	// Split this in an additive and non additive list.
+	check(GetMontageEvaluationData().Num() < 255); // Make sure we're in limits and not blending more than 255 poses (that would indicate another issue anyway)
+	TArray<FSlotEvaluationPose>& Poses = BlendProfileScratchData.Poses;
+	TArray<FSlotEvaluationPose>& AdditivePoses = BlendProfileScratchData.AdditivePoses;
+	TArray<uint8, TInlineAllocator<8>>& PoseIndices = BlendProfileScratchData.PoseIndices;
+	TArray<uint8, TInlineAllocator<8>>& AdditivePoseIndices = BlendProfileScratchData.AdditivePoseIndices;
+	TArray<float, TInlineAllocator<8>>& BlendingWeights = BlendProfileScratchData.BlendingWeights;
+	TArray<const FCompactPose*, TInlineAllocator<8>>& BlendingPoses = BlendProfileScratchData.BlendingPoses;
+	TArray<const FBlendedCurve*, TInlineAllocator<8>>& BlendingCurves = BlendProfileScratchData.BlendingCurves;
+	TArray<const UE::Anim::FStackAttributeContainer*, TInlineAllocator<8>>& BlendingAttributes = BlendProfileScratchData.BlendingAttributes;
+	Poses.Reset();
+	AdditivePoses.Reset();
+	PoseIndices.Reset();
+	AdditivePoseIndices.Reset();
+	BlendingWeights.Reset();
+	BlendingPoses.Reset();
+	BlendingCurves.Reset();
+	BlendingAttributes.Reset();
+
+	// Gather all the poses we're interested in.
+	int32 CurrentPoseIndex = 0;
+	float NonAdditiveTotalWeight = 0.0f;
+	float AdditiveTotalWeight = 0.0f;
+	for (int32 Index = 0; Index < GetMontageEvaluationData().Num(); ++Index)
+	{
+		const FMontageEvaluationState& EvalState = GetMontageEvaluationData()[Index];
+		const UAnimMontage* Montage = EvalState.Montage.Get();
+		if (Montage && Montage->IsValidSlot(SlotNodeName))
+		{
+			const UBlendProfile* BlendProfile = EvalState.ActiveBlendProfile;
+			const FAnimTrack* AnimTrack = Montage->GetAnimationData(SlotNodeName);
+			const EAdditiveAnimationType AdditiveAnimType = AnimTrack->IsAdditive()
+				? (AnimTrack->IsRotationOffsetAdditive() ? AAT_RotationOffsetMeshSpace : AAT_LocalSpaceBase)
+				: AAT_None;
+
+			// Bone array has to be allocated prior to calling GetPoseFromAnimTrack.
+			FSlotEvaluationPose NewPose(EvalState.BlendInfo.GetBlendedValue(), AdditiveAnimType);
+			NewPose.Pose.SetBoneContainer(RequiredBones.Get());
+			NewPose.Curve.InitFrom(*RequiredBones);
+
+			// Extract pose from Track.
+			FAnimExtractContext ExtractionContext(static_cast<double>(EvalState.MontagePosition), Montage->HasRootMotion() && RootMotionMode != ERootMotionMode::NoRootMotionExtraction, EvalState.DeltaTimeRecord);
+			FAnimationPoseData NewAnimationPoseData(NewPose);
+			AnimTrack->GetAnimationPose(NewAnimationPoseData, ExtractionContext);
+
+			// Add montage curves.
+			FBlendedCurve MontageCurve;
+			MontageCurve.InitFrom(*RequiredBones);
+			Montage->EvaluateCurveData(MontageCurve, EvalState.MontagePosition);
+			NewPose.Curve.Combine(MontageCurve);
+
+			// Capture non-additive poses only in the non-additive pass.
+			if (AdditiveAnimType == AAT_None)
+			{
+				Poses.Add(FSlotEvaluationPose(MoveTemp(NewPose)));
+				PoseIndices.Add(static_cast<uint8>(CurrentPoseIndex));
+				NonAdditiveTotalWeight += NewPose.Weight;
+			}
+			else // Grab additives in the additive pass.
+			{
+				AdditivePoses.Add(FSlotEvaluationPose(MoveTemp(NewPose)));
+				AdditivePoseIndices.Add(static_cast<uint8>(CurrentPoseIndex));
+				AdditiveTotalWeight += NewPose.Weight;
+			}
+
+			PerBoneWeights.AddDefaulted();
+			PerBoneWeights[CurrentPoseIndex].Reset(NumBones);
+			PerBoneWeights[CurrentPoseIndex].AddUninitialized(NumBones);
+			const float PoseWeight = EvalState.BlendInfo.GetBlendedValue();
+			if (BlendProfile)
+			{
+				BlendProfile->FillBoneScalesArray(BoneBlendProfileScales, *RequiredBones);
+				for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+				{
+					PerBoneWeights[CurrentPoseIndex][BoneIndex] = BlendProfile->CalculateBoneWeight(BoneBlendProfileScales[BoneIndex], BlendProfile->Mode, EvalState.BlendInfo, EvalState.BlendStartAlpha, NewPose.Weight, false);
+				}
+			}
+			else //  This pose doesn't use a blend profile, use the pose weight.
+			{
+				for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+				{
+					PerBoneWeights[CurrentPoseIndex][BoneIndex] = PoseWeight;
+				}
+			}
+
+			// Sum up the total weights per bone.
+			if (AdditiveAnimType == AAT_None)
+			{
+				for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+				{
+					PerBoneWeightTotals[BoneIndex] += PerBoneWeights[CurrentPoseIndex][BoneIndex];
+				}
+			}
+			else
+			{
+				for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+				{
+					PerBoneWeightTotalsAdditive[BoneIndex] += PerBoneWeights[CurrentPoseIndex][BoneIndex];
+				}
+			}
+			
+			CurrentPoseIndex++;
+		} // If montage slot is valid.
+	} // For all montage eval data.
+
+	// Register the source pose if we have any, but don't include it in our normalizations.
+	const float SourceWeight = FMath::Clamp(InSourceWeight, 0.0f, 1.0f);
+	const bool bHasSourcePose = (SourceWeight > ZERO_ANIMWEIGHT_THRESH);
+	if (bHasSourcePose)
+	{
+		const int32 SourcePoseIndex = PerBoneWeights.AddDefaulted();
+		PerBoneWeights[SourcePoseIndex].Reset(NumBones);
+		PerBoneWeights[SourcePoseIndex].AddUninitialized(NumBones);
+
+		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+		{
+			PerBoneWeights[SourcePoseIndex][BoneIndex] = SourceWeight;
+		}
+
+		PoseIndices.Add(SourcePoseIndex);
+		CurrentPoseIndex++;
+	}
+	
+	// Normalize non additive weights.
+	const float NormalizeThreshold = bHasSourcePose ? (1.0f + ZERO_ANIMWEIGHT_THRESH) : ZERO_ANIMWEIGHT_THRESH;
+	const int32 NumPosesToNormalize = Poses.Num();
+	for (int32 PoseIndex = 0; PoseIndex < NumPosesToNormalize; ++PoseIndex)
+	{
+		const int32 PoseWeightIndex = PoseIndices[PoseIndex];
+		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+		{
+			const float TotalWeight = PerBoneWeightTotals[BoneIndex];
+			if (TotalWeight > NormalizeThreshold)
+			{
+				PerBoneWeights[PoseWeightIndex][BoneIndex] /= TotalWeight;
+			}
+			else
+			{
+				if (!bHasSourcePose)
+				{
+					PerBoneWeights[PoseWeightIndex][BoneIndex] = 1.0f;
+				}
+			}
+		}
+	}
+
+	// Calculate the source pose weights.
+	if (bHasSourcePose)
+	{
+		const int32 PoseWeightIndex = PoseIndices.Num() - 1;
+		for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+		{
+			float OthersWeightSum = 0.0f;
+			for (int32 PoseIndex = 0; PoseIndex < PoseIndices.Num() - 1; ++PoseIndex)
+			{
+				OthersWeightSum += PerBoneWeights[PoseIndices[PoseIndex]][BoneIndex];
+			}
+
+			PerBoneWeights[PoseIndices[PoseWeightIndex]][BoneIndex] = 1.0f - OthersWeightSum;
+		}
+	}
+
+	// Normalize non additive pose weights, as we need them for blending curves and attributes.
+	if (NonAdditiveTotalWeight > 1.0f + ZERO_ANIMWEIGHT_THRESH)
+	{
+		for (int32 PoseIndex = 0; PoseIndex < Poses.Num(); ++PoseIndex)
+		{
+			Poses[PoseIndex].Weight /= NonAdditiveTotalWeight;
+		}
+	}
+
+	// NOTE: we don't normalize the additive poses.
+
+	//----------------------------------
+	// Build the blend arrays.
+	//----------------------------------
+	const int32 NumPoses = Poses.Num() + (bHasSourcePose ? 1 : 0); // Include the source input pose when doing non-additive blends.
+	BlendingPoses.AddUninitialized(NumPoses);
+	BlendingCurves.AddUninitialized(NumPoses);
+	BlendingAttributes.AddUninitialized(NumPoses);
+	BlendingWeights.AddUninitialized(NumPoses);
+
+	for (int32 Index = 0; Index < Poses.Num(); Index++)
+	{
+		BlendingPoses[Index] = &Poses[Index].Pose;
+		BlendingCurves[Index] = &Poses[Index].Curve;
+		BlendingAttributes[Index] = &Poses[Index].Attributes;
+		BlendingWeights[Index] = Poses[Index].Weight;
+	}
+
+	// Add the source pose to the blends.
+	if (bHasSourcePose)
+	{
+		const int32 SourceIndex = NumPoses - 1;
+		BlendingPoses[SourceIndex] = &SourcePose;
+		BlendingCurves[SourceIndex] = &SourceCurve;
+		BlendingAttributes[SourceIndex] = &SourceAttributes;
+		BlendingWeights[SourceIndex] = (NonAdditiveTotalWeight > 1.0f + ZERO_ANIMWEIGHT_THRESH) ? SourceWeight / NonAdditiveTotalWeight : SourceWeight; // Normalize the source weight if needed.
+	}
+
+	//------------------------------------------
+	// Blend the transforms.
+	//------------------------------------------
+	if (Poses.Num() == 0) // There are only additive poses.
+	{
+		check(AdditivePoseIndices.Num() > 0); // If there are no non-additive poses, there should be at least an additive.
+		BlendedPose = SourcePose;
+		BlendedCurve = SourceCurve;
+		BlendedAttributes = SourceAttributes;
+	}
+	else
+	{
+		// Perform the actual bone transform blending.
+		for (int32 PoseIndex = 0; PoseIndex < NumPoses; ++PoseIndex)
+		{
+			const int32 WeightPoseIndex = PoseIndices[PoseIndex];
+			if (PoseIndex == 0)
+			{
+				for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+				{
+					const FCompactPoseBoneIndex CompactBoneIndex(BoneIndex);
+					BlendTransform<ETransformBlendMode::Overwrite>(
+						(*BlendingPoses[PoseIndex])[CompactBoneIndex],
+						BlendedPose[CompactBoneIndex],
+						PerBoneWeights[WeightPoseIndex][BoneIndex]);
+				}
+			}
+			else
+			{
+				for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+				{
+					const FCompactPoseBoneIndex CompactBoneIndex(BoneIndex);
+					BlendTransform<ETransformBlendMode::Accumulate>(
+						(*BlendingPoses[PoseIndex])[CompactBoneIndex],
+						BlendedPose[CompactBoneIndex],
+						PerBoneWeights[WeightPoseIndex][BoneIndex]);
+				}
+			}
+		}
+
+		BlendedPose.NormalizeRotations();
+	}
+	
+	// Additive blends.
+	for (int32 PoseIndex = 0; PoseIndex < AdditivePoses.Num(); ++PoseIndex)
+	{
+		FCompactPose& AdditivePose = AdditivePoses[PoseIndex].Pose;
+		const int32 WeightPoseIndex = AdditivePoseIndices[PoseIndex];
+		if (AdditivePoses[PoseIndex].AdditiveType == AAT_RotationOffsetMeshSpace)
+		{
+			FAnimationRuntime::ConvertPoseToMeshRotation(BlendedPose);
+
+			// Apply additive.
+			for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+			{
+				const FCompactPoseBoneIndex CompactBoneIndex(BoneIndex);
+				FTransform Additive = AdditivePose[CompactBoneIndex];
+				FTransform::BlendFromIdentityAndAccumulate(BlendedPose[CompactBoneIndex], Additive, ScalarRegister(PerBoneWeights[WeightPoseIndex][BoneIndex]));
+			}
+
+			FAnimationRuntime::ConvertMeshRotationPoseToLocalSpace(BlendedPose);
+		}
+		else
+		{
+			for (int32 BoneIndex = 0; BoneIndex < NumBones; ++BoneIndex)
+			{
+				const FCompactPoseBoneIndex CompactBoneIndex(BoneIndex);
+				FTransform Additive = AdditivePose[CompactBoneIndex];
+				FTransform::BlendFromIdentityAndAccumulate(BlendedPose[CompactBoneIndex], Additive, ScalarRegister(PerBoneWeights[WeightPoseIndex][BoneIndex]));
+			}
+		}
+
+		BlendedPose.NormalizeRotations();
+	} // For each additive pose.
+	
+	//------------------------------------------
+	// Blend curves and attributes.
+	//------------------------------------------
+	// Non-additives.
+	if (BlendingCurves.Num() > 0)
+	{
+		BlendCurves(BlendingCurves, BlendingWeights, OutBlendedAnimationPoseData.GetCurve());
+	}
+
+	if (BlendingAttributes.Num() > 0)
+	{
+		UE::Anim::Attributes::BlendAttributes(BlendingAttributes, BlendingWeights, OutBlendedAnimationPoseData.GetAttributes());
+	}
+
+	// Additives.
+	for (int32 PoseIndex = 0; PoseIndex < AdditivePoses.Num(); ++PoseIndex)
+	{
+		FSlotEvaluationPose& AdditivePose = AdditivePoses[PoseIndex];
+		const FAnimationPoseData AdditiveAnimationPoseData(AdditivePose);
+		OutBlendedAnimationPoseData.GetCurve().Accumulate(AdditiveAnimationPoseData.GetCurve(), AdditivePose.Weight);
+		UE::Anim::Attributes::AccumulateAttributes(AdditiveAnimationPoseData.GetAttributes(), OutBlendedAnimationPoseData.GetAttributes(), AdditivePose.Weight, AdditivePose.AdditiveType);
+	}
+}
+
 void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnimationPoseData& SourceAnimationPoseData, float InSourceWeight, FAnimationPoseData& OutBlendedAnimationPoseData, float InBlendWeight, float InTotalNodeWeight)
 {
 	const FCompactPose& SourcePose = SourceAnimationPoseData.GetPose();
 	const FBlendedCurve& SourceCurve = SourceAnimationPoseData.GetCurve();
-	const FStackCustomAttributes& SourceAttributes = SourceAnimationPoseData.GetAttributes();
+	const UE::Anim::FStackAttributeContainer& SourceAttributes = SourceAnimationPoseData.GetAttributes();
 	
 	FCompactPose& BlendedPose = OutBlendedAnimationPoseData.GetPose();
 	FBlendedCurve& BlendedCurve = OutBlendedAnimationPoseData.GetCurve();
-	FStackCustomAttributes& BlendedAttributes = OutBlendedAnimationPoseData.GetAttributes();
-	
-	//Accessing MontageInstances from this function is not safe (as this can be called during Parallel Anim Evaluation!
-	//Any montage data you need to add should be part of MontageEvaluationData
+	UE::Anim::FStackAttributeContainer& BlendedAttributes = OutBlendedAnimationPoseData.GetAttributes();
+
+	// Accessing MontageInstances from this function is not safe (as this can be called during Parallel Anim Evaluation!
+	// Any montage data you need to add should be part of MontageEvaluationData
 	// nothing to blend, just get it out
 	if (InBlendWeight <= ZERO_ANIMWEIGHT_THRESH)
 	{
@@ -1508,16 +1859,36 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnim
 		return;
 	}
 
+	// Check if we are blending a montage using a blend profile, if so take a special code path for this.
+	for (const FMontageEvaluationState& EvalState : GetMontageEvaluationData())
+	{
+		if (EvalState.Montage.IsValid() && EvalState.ActiveBlendProfile && EvalState.Montage->IsValidSlot(SlotNodeName))
+		{
+			SlotEvaluatePoseWithBlendProfiles(SlotNodeName, SourceAnimationPoseData, InSourceWeight, OutBlendedAnimationPoseData, InBlendWeight);
+			return;
+		}
+	}
+
 	// Split our data into additive and non additive.
-	TArray<FSlotEvaluationPose> AdditivePoses;
-	TArray<FSlotEvaluationPose> NonAdditivePoses;
+	FBlendProfileScratchData& BlendProfileScratchData = FBlendProfileScratchData::Get();
+	TArray<FSlotEvaluationPose>& AdditivePoses = BlendProfileScratchData.Poses;
+	TArray<FSlotEvaluationPose>& NonAdditivePoses = BlendProfileScratchData.AdditivePoses;
+	TArray<float, TInlineAllocator<8>>& BlendingWeights = BlendProfileScratchData.BlendingWeights;
+	TArray<const FCompactPose*, TInlineAllocator<8>>& BlendingPoses = BlendProfileScratchData.BlendingPoses;
+	TArray<const FBlendedCurve*, TInlineAllocator<8>>& BlendingCurves = BlendProfileScratchData.BlendingCurves;
+	TArray<const UE::Anim::FStackAttributeContainer*, TInlineAllocator<8>>& BlendingAttributes = BlendProfileScratchData.BlendingAttributes;
+	NonAdditivePoses.Reset();
+	AdditivePoses.Reset();
+	BlendingWeights.Reset();
+	BlendingPoses.Reset();
+	BlendingCurves.Reset();
+	BlendingAttributes.Reset();
 
 	// first pass we go through collect weights and valid montages. 
 #if DEBUG_MONTAGEINSTANCE_WEIGHT
 	float TotalWeight = 0.f;
 #endif // DEBUG_MONTAGEINSTANCE_WEIGHT
-
-	for (const FMontageEvaluationState& EvalState : MontageEvaluationData)
+	for (const FMontageEvaluationState& EvalState : GetMontageEvaluationData())
 	{
 		// If MontageEvaluationData is not valid anymore, pass-through AnimSlot.
 		// This can happen if InitAnim pushes a RefreshBoneTransforms when not rendered,
@@ -1540,27 +1911,29 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnim
 				? (AnimTrack->IsRotationOffsetAdditive() ? AAT_RotationOffsetMeshSpace : AAT_LocalSpaceBase)
 				: AAT_None;
 
-			FSlotEvaluationPose NewPose(EvalState.MontageWeight, AdditiveAnimType);
+			const float MontageWeight = EvalState.BlendInfo.GetBlendedValue();
+			FSlotEvaluationPose NewPose(MontageWeight, AdditiveAnimType);
 			
 			// Bone array has to be allocated prior to calling GetPoseFromAnimTrack
-			NewPose.Pose.SetBoneContainer(&RequiredBones);
-			NewPose.Curve.InitFrom(RequiredBones);
+			NewPose.Pose.SetBoneContainer(RequiredBones.Get());
+			NewPose.Curve.InitFrom(*RequiredBones);
 
 			// Extract pose from Track
-			FAnimExtractContext ExtractionContext(EvalState.MontagePosition, Montage->HasRootMotion() && RootMotionMode != ERootMotionMode::NoRootMotionExtraction);
+			FAnimExtractContext ExtractionContext(static_cast<double>(EvalState.MontagePosition), Montage->HasRootMotion() && RootMotionMode != ERootMotionMode::NoRootMotionExtraction, EvalState.DeltaTimeRecord);
 
 			FAnimationPoseData NewAnimationPoseData(NewPose);
 			AnimTrack->GetAnimationPose(NewAnimationPoseData, ExtractionContext);
 
 			// add montage curves 
 			FBlendedCurve MontageCurve;
-			MontageCurve.InitFrom(RequiredBones);
+			MontageCurve.InitFrom(*RequiredBones);
 			Montage->EvaluateCurveData(MontageCurve, EvalState.MontagePosition);
 			NewPose.Curve.Combine(MontageCurve);
 
 #if DEBUG_MONTAGEINSTANCE_WEIGHT
-			TotalWeight += EvalState.MontageWeight;
+			TotalWeight += MontageWeight;
 #endif // DEBUG_MONTAGEINSTANCE_WEIGHT
+
 			if (AdditiveAnimType == AAT_None)
 			{
 				NonAdditivePoses.Add(FSlotEvaluationPose(MoveTemp(NewPose)));
@@ -1569,18 +1942,17 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnim
 			{
 				AdditivePoses.Add(FSlotEvaluationPose(MoveTemp(NewPose)));
 			}
-		}
-	}
+		} // if IsValidSlot
+	} // for all MontageEvaluationData
 
 	// allocate for blending
 	// If source has any weight, add it to the blend array.
 	float const SourceWeight = FMath::Clamp<float>(InSourceWeight, 0.f, 1.f);
 
 #if DEBUG_MONTAGEINSTANCE_WEIGHT
-	ensure (FMath::IsNearlyEqual(InTotalNodeWeight, TotalWeight, KINDA_SMALL_NUMBER));
+	ensure (FMath::IsNearlyEqual(InTotalNodeWeight, TotalWeight, UE_KINDA_SMALL_NUMBER));
 #endif // DEBUG_MONTAGEINSTANCE_WEIGHT
 	ensure (InTotalNodeWeight > ZERO_ANIMWEIGHT_THRESH);
-
 	if (InTotalNodeWeight > (1.f + ZERO_ANIMWEIGHT_THRESH))
 	{
 		// Re-normalize additive poses
@@ -1606,22 +1978,13 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnim
 			BlendedPose = SourcePose;
 			BlendedCurve = SourceCurve;
 			BlendedAttributes = SourceAttributes;
-		}
-		// Otherwise we need to blend non additive poses together
-		else
+		}		
+		else // Otherwise we need to blend non additive poses together
 		{
-			int32 const NumPoses = NonAdditivePoses.Num() + ((SourceWeight > ZERO_ANIMWEIGHT_THRESH) ? 1 : 0);
-
-			TArray<const FCompactPose*, TInlineAllocator<8>> BlendingPoses;
+			const int32 NumPoses = NonAdditivePoses.Num() + ((SourceWeight > ZERO_ANIMWEIGHT_THRESH) ? 1 : 0);
 			BlendingPoses.AddUninitialized(NumPoses);
-
-			TArray<float, TInlineAllocator<8>> BlendWeights;
-			BlendWeights.AddUninitialized(NumPoses);
-
-			TArray<const FBlendedCurve*, TInlineAllocator<8>> BlendingCurves;
+			BlendingWeights.AddUninitialized(NumPoses);
 			BlendingCurves.AddUninitialized(NumPoses);
-
-			TArray<const FStackCustomAttributes*, TInlineAllocator<8>> BlendingAttributes;
 			BlendingAttributes.AddUninitialized(NumPoses);
 
 			for (int32 Index = 0; Index < NonAdditivePoses.Num(); Index++)
@@ -1629,20 +1992,20 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnim
 				BlendingPoses[Index] = &NonAdditivePoses[Index].Pose;
 				BlendingCurves[Index] = &NonAdditivePoses[Index].Curve;
 				BlendingAttributes[Index] = &NonAdditivePoses[Index].Attributes;
-				BlendWeights[Index] = NonAdditivePoses[Index].Weight;
+				BlendingWeights[Index] = NonAdditivePoses[Index].Weight;
 			}
 
 			if (SourceWeight > ZERO_ANIMWEIGHT_THRESH)
 			{
-				int32 const SourceIndex = BlendWeights.Num() - 1;
+				const int32 SourceIndex = NumPoses - 1;
 				BlendingPoses[SourceIndex] = &SourcePose;
 				BlendingCurves[SourceIndex] = &SourceCurve;
 				BlendingAttributes[SourceIndex] = &SourceAttributes;
-				BlendWeights[SourceIndex] = SourceWeight;
+				BlendingWeights[SourceIndex] = SourceWeight;
 			}
 
-			// now time to blend all montages
-			FAnimationRuntime::BlendPosesTogetherIndirect(BlendingPoses, BlendingCurves, BlendingAttributes, BlendWeights, OutBlendedAnimationPoseData);
+			// Blend all montages.
+			FAnimationRuntime::BlendPosesTogetherIndirect(BlendingPoses, BlendingCurves, BlendingAttributes, BlendingWeights, OutBlendedAnimationPoseData);
 		}
 	}
 
@@ -1656,9 +2019,6 @@ void FAnimInstanceProxy::SlotEvaluatePose(const FName& SlotNodeName, const FAnim
 			FAnimationRuntime::AccumulateAdditivePose(OutBlendedAnimationPoseData, AdditiveAnimationPoseData, AdditivePose.Weight, AdditivePose.AdditiveType);
 		}
 	}
-
-	// Normalize rotations after blending/accumulation
-	BlendedPose.NormalizeRotations();
 }
 
 //to debug montage weight
@@ -1675,26 +2035,28 @@ void FAnimInstanceProxy::GetSlotWeight(const FName& SlotNodeName, float& out_Slo
 #if DEBUGMONTAGEWEIGHT
 	float TotalDesiredWeight = 0.f;
 #endif
+
 	// first get all the montage instance weight this slot node has
-	for (const FMontageEvaluationState& EvalState : MontageEvaluationData)
+	for (const FMontageEvaluationState& EvalState : GetMontageEvaluationData())
 	{
 		if (EvalState.Montage.IsValid())
 		{
 			const UAnimMontage* const Montage = EvalState.Montage.Get();
 			if (Montage->IsValidSlot(SlotNodeName))
 			{
-				NewSlotNodeWeight += EvalState.MontageWeight;
+				const float MontageWeight = EvalState.BlendInfo.GetBlendedValue();
+				NewSlotNodeWeight += MontageWeight;
 				if (!Montage->IsValidAdditiveSlot(SlotNodeName))
 				{
-					NonAdditiveTotalWeight += EvalState.MontageWeight;
+					NonAdditiveTotalWeight += MontageWeight;
 				}
 
 #if DEBUGMONTAGEWEIGHT			
 				TotalDesiredWeight += EvalState->DesiredWeight;
 #endif
 #if ENABLE_ANIM_LOGGING
-			UE_LOG(LogAnimation, Verbose, TEXT("GetSlotWeight : Owner: %s, AnimMontage: %s,  (DesiredWeight:%0.2f, Weight:%0.2f)"),
-						*GetActorName(), *EvalState.Montage->GetName(), EvalState.DesiredWeight, EvalState.MontageWeight);
+				UE_LOG(LogAnimation, Verbose, TEXT("GetSlotWeight : Owner: %s, AnimMontage: %s,  (DesiredWeight:%0.2f, Weight:%0.2f)"),
+							*GetActorName(), *EvalState.Montage->GetName(), EvalState.BlendInfo.GetDesiredValue(), MontageWeight);
 #endif
 			}
 		}
@@ -1735,10 +2097,10 @@ void FAnimInstanceProxy::GetSlotWeight(const FName& SlotNodeName, float& out_Slo
 const FMontageEvaluationState* FAnimInstanceProxy::GetActiveMontageEvaluationState() const
 {
 	// Start from end, as most recent instances are added at the end of the queue.
-	int32 const NumInstances = MontageEvaluationData.Num();
+	int32 const NumInstances = GetMontageEvaluationData().Num();
 	for (int32 InstanceIndex = NumInstances - 1; InstanceIndex >= 0; InstanceIndex--)
 	{
-		const FMontageEvaluationState& EvaluationData = MontageEvaluationData[InstanceIndex];
+		const FMontageEvaluationState& EvaluationData = GetMontageEvaluationData()[InstanceIndex];
 		if (EvaluationData.bIsActive)
 		{
 			return &EvaluationData;
@@ -1746,6 +2108,16 @@ const FMontageEvaluationState* FAnimInstanceProxy::GetActiveMontageEvaluationSta
 	}
 
 	return nullptr;
+}
+
+TMap<FName, UE::Anim::FSlotInertializationRequest>& FAnimInstanceProxy::GetSlotGroupInertializationRequestMap()
+{
+	if (bUseMainInstanceMontageEvaluationData && GetMainInstanceProxy())
+	{
+		return GetMainInstanceProxy()->SlotGroupInertializationRequestMap;
+	}
+
+	return SlotGroupInertializationRequestMap;
 }
 
 void FAnimInstanceProxy::GatherDebugData(FNodeDebugData& DebugData)
@@ -1762,16 +2134,18 @@ void FAnimInstanceProxy::GatherDebugData_WithRoot(FNodeDebugData& DebugData, FAn
 	}
 
 	// Gather debug data for Cached Poses.
-	TArray<FAnimNode_SaveCachedPose*>& SavedPoseQueue = SavedPoseQueueMap.FindChecked(InLayerName);
-	for (FAnimNode_SaveCachedPose* PoseNode : SavedPoseQueue)
+	if(TArray<FAnimNode_SaveCachedPose*>* SavedPoseQueue = SavedPoseQueueMap.Find(InLayerName))
 	{
-		PoseNode->GatherDebugData(DebugData);
+		for (FAnimNode_SaveCachedPose* PoseNode : *SavedPoseQueue)
+		{
+			PoseNode->GatherDebugData(DebugData);
+		}
 	}
 }
 
 #if ENABLE_ANIM_DRAW_DEBUG
 
-void FAnimInstanceProxy::AnimDrawDebugOnScreenMessage(const FString& DebugMessage, const FColor& Color, const FVector2D& TextScale)
+void FAnimInstanceProxy::AnimDrawDebugOnScreenMessage(const FString& DebugMessage, const FColor& Color, const FVector2D& TextScale, ESceneDepthPriorityGroup DepthPriority)
 {
 	FQueuedDrawDebugItem DrawDebugItem;
 
@@ -1779,11 +2153,25 @@ void FAnimInstanceProxy::AnimDrawDebugOnScreenMessage(const FString& DebugMessag
 	DrawDebugItem.Message = DebugMessage;
 	DrawDebugItem.Color = Color;
 	DrawDebugItem.TextScale = TextScale;
+	DrawDebugItem.DepthPriority = DepthPriority;
 
 	QueuedDrawDebugItems.Add(DrawDebugItem);
 }
 
-void FAnimInstanceProxy::AnimDrawDebugDirectionalArrow(const FVector& LineStart, const FVector& LineEnd, float ArrowSize, const FColor& Color, bool bPersistentLines, float LifeTime, float Thickness)
+void FAnimInstanceProxy::AnimDrawDebugInWorldMessage(const FString& DebugMessage, const FVector& TextLocation, const FColor& Color, float TextScale)
+{
+	FQueuedDrawDebugItem DrawDebugItem;
+
+	DrawDebugItem.ItemType = EDrawDebugItemType::InWorldMessage;
+	DrawDebugItem.Message = DebugMessage;
+	DrawDebugItem.StartLoc = TextLocation;
+	DrawDebugItem.Color = Color;
+	DrawDebugItem.TextScale.X = TextScale;
+
+	QueuedDrawDebugItems.Add(DrawDebugItem);
+}
+
+void FAnimInstanceProxy::AnimDrawDebugDirectionalArrow(const FVector& LineStart, const FVector& LineEnd, float ArrowSize, const FColor& Color, bool bPersistentLines, float LifeTime, float Thickness, ESceneDepthPriorityGroup DepthPriority)
 {
 	FQueuedDrawDebugItem DrawDebugItem;
 
@@ -1795,11 +2183,12 @@ void FAnimInstanceProxy::AnimDrawDebugDirectionalArrow(const FVector& LineStart,
 	DrawDebugItem.bPersistentLines = bPersistentLines;
 	DrawDebugItem.LifeTime = LifeTime;
 	DrawDebugItem.Thickness = Thickness;
+	DrawDebugItem.DepthPriority = DepthPriority;
 
 	QueuedDrawDebugItems.Add(DrawDebugItem);
 }
 
-void FAnimInstanceProxy::AnimDrawDebugSphere(const FVector& Center, float Radius, int32 Segments, const FColor& Color, bool bPersistentLines, float LifeTime, float Thickness)
+void FAnimInstanceProxy::AnimDrawDebugSphere(const FVector& Center, float Radius, int32 Segments, const FColor& Color, bool bPersistentLines, float LifeTime, float Thickness, ESceneDepthPriorityGroup DepthPriority)
 {
 	FQueuedDrawDebugItem DrawDebugItem;
 
@@ -1811,11 +2200,12 @@ void FAnimInstanceProxy::AnimDrawDebugSphere(const FVector& Center, float Radius
 	DrawDebugItem.bPersistentLines = bPersistentLines;
 	DrawDebugItem.LifeTime = LifeTime;
 	DrawDebugItem.Thickness = Thickness;
+	DrawDebugItem.DepthPriority = DepthPriority;
 
 	QueuedDrawDebugItems.Add(DrawDebugItem);
 }
 
-void FAnimInstanceProxy::AnimDrawDebugCoordinateSystem(FVector const& AxisLoc, FRotator const& AxisRot, float Scale, bool bPersistentLines, float LifeTime, float Thickness)
+void FAnimInstanceProxy::AnimDrawDebugCoordinateSystem(FVector const& AxisLoc, FRotator const& AxisRot, float Scale, bool bPersistentLines, float LifeTime, float Thickness, ESceneDepthPriorityGroup DepthPriority)
 {
 	FQueuedDrawDebugItem DrawDebugItem;
 
@@ -1826,11 +2216,12 @@ void FAnimInstanceProxy::AnimDrawDebugCoordinateSystem(FVector const& AxisLoc, F
 	DrawDebugItem.bPersistentLines = bPersistentLines;
 	DrawDebugItem.LifeTime = LifeTime;
 	DrawDebugItem.Thickness = Thickness;
+	DrawDebugItem.DepthPriority = DepthPriority;
 
 	QueuedDrawDebugItems.Add(DrawDebugItem);
 }
 
-void FAnimInstanceProxy::AnimDrawDebugLine(const FVector& StartLoc, const FVector& EndLoc, const FColor& Color, bool bPersistentLines, float LifeTime, float Thickness)
+void FAnimInstanceProxy::AnimDrawDebugLine(const FVector& StartLoc, const FVector& EndLoc, const FColor& Color, bool bPersistentLines, float LifeTime, float Thickness, ESceneDepthPriorityGroup DepthPriority)
 {
 	FQueuedDrawDebugItem DrawDebugItem;
 
@@ -1841,11 +2232,12 @@ void FAnimInstanceProxy::AnimDrawDebugLine(const FVector& StartLoc, const FVecto
 	DrawDebugItem.bPersistentLines = bPersistentLines;
 	DrawDebugItem.LifeTime = LifeTime;
 	DrawDebugItem.Thickness = Thickness;
+	DrawDebugItem.DepthPriority = DepthPriority;
 
 	QueuedDrawDebugItems.Add(DrawDebugItem);
 }
 
-void FAnimInstanceProxy::AnimDrawDebugPlane(const FTransform& BaseTransform, float Radii, const FColor& Color, bool bPersistentLines /*= false*/, float LifeTime /*= -1.f*/, float Thickness /*= 0.f*/)
+void FAnimInstanceProxy::AnimDrawDebugPlane(const FTransform& BaseTransform, float Radii, const FColor& Color, bool bPersistentLines /*= false*/, float LifeTime /*= -1.f*/, float Thickness /*= 0.f*/, ESceneDepthPriorityGroup DepthPriority)
 {
 	// just draw two triangle from [-Radii,-Radii] to [Radii, Radii]
 	FQueuedDrawDebugItem DrawDebugItem;
@@ -1855,6 +2247,7 @@ void FAnimInstanceProxy::AnimDrawDebugPlane(const FTransform& BaseTransform, flo
 	DrawDebugItem.bPersistentLines = bPersistentLines;
 	DrawDebugItem.LifeTime = LifeTime;
 	DrawDebugItem.Thickness = Thickness;
+	DrawDebugItem.DepthPriority = DepthPriority;
 
 	DrawDebugItem.StartLoc = BaseTransform.TransformPosition(FVector(-Radii, -Radii, 0));
 	DrawDebugItem.EndLoc = BaseTransform.TransformPosition(FVector(-Radii, Radii, 0));
@@ -1876,11 +2269,84 @@ void FAnimInstanceProxy::AnimDrawDebugPlane(const FTransform& BaseTransform, flo
 	DrawDebugItem.EndLoc = BaseTransform.TransformPosition(FVector(Radii, -Radii, 0));
 	QueuedDrawDebugItems.Add(DrawDebugItem);
 }
+
+void FAnimInstanceProxy::AnimDrawDebugPoint(const FVector& Loc, float Size, const FColor& Color, bool bPersistentLines, float LifeTime, ESceneDepthPriorityGroup DepthPriority)
+{
+	FQueuedDrawDebugItem DrawDebugItem;
+
+	DrawDebugItem.ItemType = EDrawDebugItemType::Point;
+	DrawDebugItem.StartLoc = Loc;
+	DrawDebugItem.Color = Color;
+	DrawDebugItem.Size = Size;
+	DrawDebugItem.bPersistentLines = bPersistentLines;
+	DrawDebugItem.LifeTime = LifeTime;
+	DrawDebugItem.DepthPriority = DepthPriority;
+
+	QueuedDrawDebugItems.Add(DrawDebugItem);
+}
+
+void FAnimInstanceProxy::AnimDrawDebugCircle(const FVector& Center, float Radius, int32 Segments, const FColor& Color, const FVector& UpVector, bool bPersistentLines, float LifeTime, ESceneDepthPriorityGroup DepthPriority, float Thickness)
+{
+	FQueuedDrawDebugItem DrawDebugItem;
+
+	DrawDebugItem.ItemType = EDrawDebugItemType::Circle;
+	DrawDebugItem.Center = Center;
+	DrawDebugItem.Radius = Radius;
+	DrawDebugItem.Segments = Segments;
+	DrawDebugItem.Color = Color;
+	// We're using EndLoc as our direction unit vector.
+	DrawDebugItem.EndLoc = UpVector.GetSafeNormal();
+	DrawDebugItem.bPersistentLines = bPersistentLines;
+	DrawDebugItem.LifeTime = LifeTime;
+	DrawDebugItem.DepthPriority = DepthPriority;
+	DrawDebugItem.Thickness = Thickness;
+
+	QueuedDrawDebugItems.Add(DrawDebugItem);
+}
+
+void FAnimInstanceProxy::AnimDrawDebugCone(const FVector& Center, float Length, const FVector& Direction, float AngleWidth, float AngleHeight, int32 Segments, const FColor & Color, bool bPersistentLines, float LifeTime, ESceneDepthPriorityGroup DepthPriority, float Thickness)
+{
+	FQueuedDrawDebugItem DrawDebugItem;
+
+	DrawDebugItem.ItemType = EDrawDebugItemType::Cone;
+	DrawDebugItem.Center = Center;
+	DrawDebugItem.Length = Length;
+	DrawDebugItem.AngleWidth = AngleWidth;
+	DrawDebugItem.AngleHeight = AngleHeight;
+	// We're using EndLoc as our direction unit vector.
+	DrawDebugItem.Direction = Direction.GetSafeNormal();
+	DrawDebugItem.Segments = Segments;
+	DrawDebugItem.Color = Color;
+	DrawDebugItem.bPersistentLines = bPersistentLines;
+	DrawDebugItem.LifeTime = LifeTime;
+	DrawDebugItem.DepthPriority = DepthPriority;
+	DrawDebugItem.Thickness = Thickness;
+
+	QueuedDrawDebugItems.Add(DrawDebugItem);
+}
+
+void FAnimInstanceProxy::AnimDrawDebugCapsule(const FVector& Center, float HalfHeight, float Radius, const FRotator& Rotation, const FColor& Color, bool bPersistentLines /*= false*/, float LifeTime /*= -1.f*/, float Thickness /*= 0.f*/)
+{
+	FQueuedDrawDebugItem DrawDebugItem;
+
+	DrawDebugItem.ItemType = EDrawDebugItemType::Capsule;
+	DrawDebugItem.Center = Center;
+	DrawDebugItem.Size = HalfHeight;
+	DrawDebugItem.Radius = Radius;
+	DrawDebugItem.Rotation = Rotation;
+	DrawDebugItem.Color = Color;
+	DrawDebugItem.bPersistentLines = bPersistentLines;
+	DrawDebugItem.LifeTime = LifeTime;
+	DrawDebugItem.Thickness = Thickness;
+
+	QueuedDrawDebugItems.Add(DrawDebugItem);
+}
+
 #endif // ENABLE_ANIM_DRAW_DEBUG
 
-float FAnimInstanceProxy::GetInstanceAssetPlayerLength(int32 AssetPlayerIndex)
+float FAnimInstanceProxy::GetInstanceAssetPlayerLength(int32 AssetPlayerIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
+	if(const FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
 	{
 		return PlayerNode->GetCurrentAssetLength();
 	}
@@ -1888,9 +2354,9 @@ float FAnimInstanceProxy::GetInstanceAssetPlayerLength(int32 AssetPlayerIndex)
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceAssetPlayerTime(int32 AssetPlayerIndex)
+float FAnimInstanceProxy::GetInstanceAssetPlayerTime(int32 AssetPlayerIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
+	if(const FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
 	{
 		return PlayerNode->GetCurrentAssetTimePlayRateAdjusted();
 	}
@@ -1898,9 +2364,9 @@ float FAnimInstanceProxy::GetInstanceAssetPlayerTime(int32 AssetPlayerIndex)
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFraction(int32 AssetPlayerIndex)
+float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFraction(int32 AssetPlayerIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
+	if(const FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
 	{
 		float Length = PlayerNode->GetCurrentAssetLength();
 
@@ -1913,9 +2379,9 @@ float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFraction(int32 AssetPlayerIn
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFromEndFraction(int32 AssetPlayerIndex)
+float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFromEndFraction(int32 AssetPlayerIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
+	if(const FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
 	{
 		float Length = PlayerNode->GetCurrentAssetLength();
 
@@ -1928,9 +2394,9 @@ float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFromEndFraction(int32 AssetP
 	return 1.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFromEnd(int32 AssetPlayerIndex)
+float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFromEnd(int32 AssetPlayerIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
+	if(const FAnimNode_AssetPlayerBase* PlayerNode = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(AssetPlayerIndex))
 	{
 		return PlayerNode->GetCurrentAssetLength() - PlayerNode->GetCurrentAssetTimePlayRateAdjusted();
 	}
@@ -1938,9 +2404,9 @@ float FAnimInstanceProxy::GetInstanceAssetPlayerTimeFromEnd(int32 AssetPlayerInd
 	return MAX_flt;
 }
 
-float FAnimInstanceProxy::GetInstanceMachineWeight(int32 MachineIndex)
+float FAnimInstanceProxy::GetInstanceMachineWeight(int32 MachineIndex) const
 {
-	if (FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if (const FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
 	{
 		return GetRecordedMachineWeight(MachineInstance->StateMachineIndexInClass);
 	}
@@ -1948,9 +2414,9 @@ float FAnimInstanceProxy::GetInstanceMachineWeight(int32 MachineIndex)
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceStateWeight(int32 MachineIndex, int32 StateIndex)
+float FAnimInstanceProxy::GetInstanceStateWeight(int32 MachineIndex, int32 StateIndex) const
 {
-	if(FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if(const FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
 	{
 		return GetRecordedStateWeight(MachineInstance->StateMachineIndexInClass, StateIndex);
 	}
@@ -1958,9 +2424,9 @@ float FAnimInstanceProxy::GetInstanceStateWeight(int32 MachineIndex, int32 State
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceCurrentStateElapsedTime(int32 MachineIndex)
+float FAnimInstanceProxy::GetInstanceCurrentStateElapsedTime(int32 MachineIndex) const
 {
-	if(FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if(const FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
 	{
 		return MachineInstance->GetCurrentStateElapsedTime();
 	}
@@ -1968,9 +2434,9 @@ float FAnimInstanceProxy::GetInstanceCurrentStateElapsedTime(int32 MachineIndex)
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceTransitionCrossfadeDuration(int32 MachineIndex, int32 TransitionIndex)
+float FAnimInstanceProxy::GetInstanceTransitionCrossfadeDuration(int32 MachineIndex, int32 TransitionIndex) const
 {
-	if(FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if(const FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
 	{
 		if(MachineInstance->IsValidTransitionIndex(TransitionIndex))
 		{
@@ -1981,14 +2447,13 @@ float FAnimInstanceProxy::GetInstanceTransitionCrossfadeDuration(int32 MachineIn
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceTransitionTimeElapsed(int32 MachineIndex, int32 TransitionIndex)
+float FAnimInstanceProxy::GetInstanceTransitionTimeElapsed(int32 MachineIndex, int32 TransitionIndex) const
 {
-	// Just an alias for readability in the anim graph
-	if(FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if(const FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
 	{
 		if(MachineInstance->IsValidTransitionIndex(TransitionIndex))
 		{
-			for(FAnimationActiveTransitionEntry& ActiveTransition : MachineInstance->ActiveTransitionArray)
+			for(const FAnimationActiveTransitionEntry& ActiveTransition : MachineInstance->ActiveTransitionArray)
 			{
 				if(ActiveTransition.SourceTransitionIndices.Contains(TransitionIndex))
 				{
@@ -2001,13 +2466,13 @@ float FAnimInstanceProxy::GetInstanceTransitionTimeElapsed(int32 MachineIndex, i
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetInstanceTransitionTimeElapsedFraction(int32 MachineIndex, int32 TransitionIndex)
+float FAnimInstanceProxy::GetInstanceTransitionTimeElapsedFraction(int32 MachineIndex, int32 TransitionIndex) const
 {
-	if(FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if(const FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
 	{
 		if(MachineInstance->IsValidTransitionIndex(TransitionIndex))
 		{
-			for(FAnimationActiveTransitionEntry& ActiveTransition : MachineInstance->ActiveTransitionArray)
+			for(const FAnimationActiveTransitionEntry& ActiveTransition : MachineInstance->ActiveTransitionArray)
 			{
 				if(ActiveTransition.SourceTransitionIndices.Contains(TransitionIndex))
 				{
@@ -2020,39 +2485,29 @@ float FAnimInstanceProxy::GetInstanceTransitionTimeElapsedFraction(int32 Machine
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetRelevantAnimTimeRemaining(int32 MachineIndex, int32 StateIndex)
+float FAnimInstanceProxy::GetRelevantAnimTimeRemaining(int32 MachineIndex, int32 StateIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* AssetPlayer = GetRelevantAssetPlayerFromState(MachineIndex, StateIndex))
+	if (const FAnimNode_StateMachine* StateMachine = GetStateMachineInstance(MachineIndex))
 	{
-		if(AssetPlayer->GetAnimAsset())
-		{
-			return AssetPlayer->GetCurrentAssetLength() - AssetPlayer->GetCurrentAssetTimePlayRateAdjusted();
-		}
+		return StateMachine->GetRelevantAnimTimeRemaining(this, StateIndex);
 	}
 
 	return MAX_flt;
 }
 
-float FAnimInstanceProxy::GetRelevantAnimTimeRemainingFraction(int32 MachineIndex, int32 StateIndex)
+float FAnimInstanceProxy::GetRelevantAnimTimeRemainingFraction(int32 MachineIndex, int32 StateIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* AssetPlayer = GetRelevantAssetPlayerFromState(MachineIndex, StateIndex))
+	if (const FAnimNode_StateMachine* StateMachine = GetStateMachineInstance(MachineIndex))
 	{
-		if(AssetPlayer->GetAnimAsset())
-		{
-			float Length = AssetPlayer->GetCurrentAssetLength();
-			if(Length > 0.0f)
-			{
-				return (Length - AssetPlayer->GetCurrentAssetTimePlayRateAdjusted()) / Length;
-			}
-		}
+		return StateMachine->GetRelevantAnimTimeRemainingFraction(this, StateIndex);
 	}
 
 	return 1.0f;
 }
 
-float FAnimInstanceProxy::GetRelevantAnimLength(int32 MachineIndex, int32 StateIndex)
+float FAnimInstanceProxy::GetRelevantAnimLength(int32 MachineIndex, int32 StateIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* AssetPlayer = GetRelevantAssetPlayerFromState(MachineIndex, StateIndex))
+	if(const FAnimNode_AssetPlayerRelevancyBase* AssetPlayer = GetRelevantAssetPlayerInterfaceFromState(MachineIndex, StateIndex))
 	{
 		if(AssetPlayer->GetAnimAsset())
 		{
@@ -2063,9 +2518,9 @@ float FAnimInstanceProxy::GetRelevantAnimLength(int32 MachineIndex, int32 StateI
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetRelevantAnimTime(int32 MachineIndex, int32 StateIndex)
+float FAnimInstanceProxy::GetRelevantAnimTime(int32 MachineIndex, int32 StateIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* AssetPlayer = GetRelevantAssetPlayerFromState(MachineIndex, StateIndex))
+	if(const FAnimNode_AssetPlayerRelevancyBase* AssetPlayer = GetRelevantAssetPlayerInterfaceFromState(MachineIndex, StateIndex))
 	{
 		return AssetPlayer->GetCurrentAssetTimePlayRateAdjusted();
 	}
@@ -2073,9 +2528,9 @@ float FAnimInstanceProxy::GetRelevantAnimTime(int32 MachineIndex, int32 StateInd
 	return 0.0f;
 }
 
-float FAnimInstanceProxy::GetRelevantAnimTimeFraction(int32 MachineIndex, int32 StateIndex)
+float FAnimInstanceProxy::GetRelevantAnimTimeFraction(int32 MachineIndex, int32 StateIndex) const
 {
-	if(FAnimNode_AssetPlayerBase* AssetPlayer = GetRelevantAssetPlayerFromState(MachineIndex, StateIndex))
+	if(const FAnimNode_AssetPlayerRelevancyBase* AssetPlayer = GetRelevantAssetPlayerInterfaceFromState(MachineIndex, StateIndex))
 	{
 		float Length = AssetPlayer->GetCurrentAssetLength();
 		if(Length > 0.0f)
@@ -2087,29 +2542,254 @@ float FAnimInstanceProxy::GetRelevantAnimTimeFraction(int32 MachineIndex, int32 
 	return 0.0f;
 }
 
-FAnimNode_AssetPlayerBase* FAnimInstanceProxy::GetRelevantAssetPlayerFromState(int32 MachineIndex, int32 StateIndex)
+TArray<FMontageEvaluationState>& FAnimInstanceProxy::GetMontageEvaluationData()
 {
-	FAnimNode_AssetPlayerBase* ResultPlayer = nullptr;
-	if(FAnimNode_StateMachine* MachineInstance = GetStateMachineInstance(MachineIndex))
+	if (bUseMainInstanceMontageEvaluationData && GetMainInstanceProxy())
 	{
-		float MaxWeight = 0.0f;
-		const FBakedAnimationState& State = MachineInstance->GetStateInfo(StateIndex);
-		for(const int32& PlayerIdx : State.PlayerNodeIndices)
+		return GetMainInstanceProxy()->MontageEvaluationData;
+	}
+
+	return MontageEvaluationData;
+}
+
+const TArray<FMontageEvaluationState>& FAnimInstanceProxy::GetMontageEvaluationData() const
+{
+	if (bUseMainInstanceMontageEvaluationData && GetMainInstanceProxy())
+	{
+		return GetMainInstanceProxy()->MontageEvaluationData;
+	}
+
+	return MontageEvaluationData;
+}
+bool FAnimInstanceProxy::WasAnimNotifyStateActiveInAnyState(TSubclassOf<UAnimNotifyState> AnimNotifyStateType) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent && NotifyEvent->NotifyStateClass 
+			&& NotifyEvent->NotifyStateClass->IsA(AnimNotifyStateType))
 		{
-			if(FAnimNode_AssetPlayerBase* Player = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(PlayerIdx))
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyStateActiveInStateMachine(int32 MachineIndex, TSubclassOf<UAnimNotifyState> AnimNotifyStateType) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent && NotifyEvent->NotifyStateClass && NotifyEvent->NotifyStateClass->IsA(AnimNotifyStateType))
+		{
+			return UAnimNotifyStateMachineInspectionLibrary::IsStateMachineInEventContext(Ref, MachineIndex);
+		}
+	}
+	return false;
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyStateActiveInSourceState(int32 MachineIndex, int32 StateIndex, TSubclassOf<UAnimNotifyState> AnimNotifyStateType) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent && NotifyEvent->NotifyStateClass && NotifyEvent->NotifyStateClass->IsA(AnimNotifyStateType))
+		{
+			return UAnimNotifyStateMachineInspectionLibrary::IsStateInStateMachineInEventContext(Ref, MachineIndex, StateIndex);
+		}
+	}
+	return false;
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyTriggeredInSourceState(int32 MachineIndex, int32 StateIndex, TSubclassOf<UAnimNotify> AnimNotifyType) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent && NotifyEvent->Notify && NotifyEvent->Notify->IsA(AnimNotifyType))
+		{
+			return UAnimNotifyStateMachineInspectionLibrary::IsStateInStateMachineInEventContext(Ref, MachineIndex, StateIndex);
+		}
+	}
+	return false;
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyNameTriggeredInSourceState(int32 MachineIndex, int32 StateIndex, FName NotifyName) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent)
+		{
+			FName LookupName = NotifyEvent->NotifyName;
+			if (Ref.GetMirrorDataTable())
 			{
-				if(!Player->bIgnoreForRelevancyTest && Player->GetCachedBlendWeight() > MaxWeight)
+				const FName* MirroredName = Ref.GetMirrorDataTable()->AnimNotifyToMirrorAnimNotifyMap.Find(LookupName);
+				if (MirroredName)
 				{
-					MaxWeight = Player->GetCachedBlendWeight();
-					ResultPlayer = Player;
+					LookupName = *MirroredName; 
 				}
+			}
+			if(LookupName == NotifyName)
+			{
+				return UAnimNotifyStateMachineInspectionLibrary::IsStateInStateMachineInEventContext(Ref, MachineIndex, StateIndex);
 			}
 		}
 	}
-	return ResultPlayer;
+	return false;
 }
 
-FAnimNode_StateMachine* FAnimInstanceProxy::GetStateMachineInstance(int32 MachineIndex)
+bool FAnimInstanceProxy::WasAnimNotifyTriggeredInStateMachine(int32 MachineIndex,TSubclassOf<UAnimNotify> AnimNotifyType) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent && NotifyEvent->Notify && NotifyEvent->Notify->IsA(AnimNotifyType))
+		{
+			return UAnimNotifyStateMachineInspectionLibrary::IsStateMachineInEventContext(Ref, MachineIndex);
+		}
+	}
+	return false;
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyTriggeredInAnyState(TSubclassOf<UAnimNotify> AnimNotifyType) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent && NotifyEvent->Notify && NotifyEvent->Notify->IsA(AnimNotifyType))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyNameTriggeredInAnyState(FName NotifyName) const
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent)
+		{
+			FName LookupName = NotifyEvent->NotifyName;
+			if (Ref.GetMirrorDataTable())
+			{
+				const FName* MirroredName = Ref.GetMirrorDataTable()->AnimNotifyToMirrorAnimNotifyMap.Find(LookupName);
+				if (MirroredName)
+				{
+					LookupName = *MirroredName; 
+				}
+			}
+			if(LookupName == NotifyName)
+			{
+				return true;
+			}
+		}
+	}
+	return false; 
+}
+
+bool FAnimInstanceProxy::WasAnimNotifyNameTriggeredInStateMachine(int32 MachineIndex, FName NotifyName)
+{
+	for (const FAnimNotifyEventReference& Ref : ActiveAnimNotifiesSinceLastTick)
+	{
+		const FAnimNotifyEvent* NotifyEvent = Ref.GetNotify();
+		if (NotifyEvent)
+		{
+			FName LookupName = NotifyEvent->NotifyName;
+			if (Ref.GetMirrorDataTable())
+			{
+				const FName* MirroredName = Ref.GetMirrorDataTable()->AnimNotifyToMirrorAnimNotifyMap.Find(LookupName);
+				if (MirroredName)
+				{
+					LookupName = *MirroredName; 
+				}
+			}
+			if(LookupName == NotifyName)
+			{
+				return UAnimNotifyStateMachineInspectionLibrary::IsStateMachineInEventContext(Ref, MachineIndex);
+			}
+		}
+	}
+	return false;
+}
+
+bool FAnimInstanceProxy::RequestTransitionEvent(const FName& EventName, const double RequestTimeout, const ETransitionRequestQueueMode& QueueMode, const ETransitionRequestOverwriteMode& OverwriteMode)
+{
+	FTransitionEvent NewTransitionEvent(EventName, RequestTimeout, QueueMode, OverwriteMode);
+
+	if (!NewTransitionEvent.IsValidRequest())
+	{
+		return false;
+	}
+	
+	ForEachStateMachine([NewTransitionEvent](FAnimNode_StateMachine& StateMachine)
+	{
+		StateMachine.RequestTransitionEvent(NewTransitionEvent);
+	});
+
+	return true;
+}
+
+bool FAnimInstanceProxy::QueryTransitionEvent(int32 MachineIndex, int32 TransitionIndex, const FName& EventName) const
+{
+	const FAnimNode_StateMachine* StateMachine = GetStateMachineInstance(MachineIndex);
+	if (StateMachine)
+	{
+		return StateMachine->QueryTransitionEvent(TransitionIndex, EventName);
+	}
+	return false;
+}
+
+void FAnimInstanceProxy::ClearTransitionEvents(const FName& EventName)
+{
+	ForEachStateMachine([EventName](FAnimNode_StateMachine& StateMachine)
+	{
+		StateMachine.ClearTransitionEvents(EventName);
+	});
+}
+
+void FAnimInstanceProxy::ClearAllTransitionEvents()
+{
+	ForEachStateMachine([](FAnimNode_StateMachine& StateMachine)
+	{
+		StateMachine.ClearAllTransitionEvents();
+	});
+}
+
+bool FAnimInstanceProxy::QueryAndMarkTransitionEvent(int32 MachineIndex, int32 TransitionIndex, const FName& EventName)
+{
+	if (AnimClassInterface)
+	{
+		const TArray<FStructProperty*>& AnimNodeProperties = AnimClassInterface->GetAnimNodeProperties();
+
+		FStructProperty* Property = AnimNodeProperties[AnimNodeProperties.Num() - 1 - MachineIndex];
+		if (Property && Property->Struct->IsChildOf(FAnimNode_StateMachine::StaticStruct()))
+		{
+			FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
+			if (StateMachine)
+			{
+				return StateMachine->QueryAndMarkTransitionEvent(TransitionIndex, EventName);
+			}
+		}
+	}
+
+	return false;
+}
+
+const FAnimNode_AssetPlayerRelevancyBase* FAnimInstanceProxy::GetRelevantAssetPlayerInterfaceFromState(int32 MachineIndex, int32 StateIndex) const
+{
+	if (const FAnimNode_StateMachine* StateMachine = GetStateMachineInstance(MachineIndex))
+	{
+		return StateMachine->GetRelevantAssetPlayerInterfaceFromState(this, StateMachine->GetStateInfo(StateIndex));
+	}
+
+	return nullptr;
+}
+
+const FAnimNode_StateMachine* FAnimInstanceProxy::GetStateMachineInstance(int32 MachineIndex) const
 {
 	if (AnimClassInterface)
 	{
@@ -2291,13 +2971,13 @@ void FAnimInstanceProxy::BindNativeDelegates()
 	}
 }
 
-const FBakedAnimationStateMachine* FAnimInstanceProxy::GetMachineDescription(IAnimClassInterface* AnimBlueprintClass, FAnimNode_StateMachine* MachineInstance)
+const FBakedAnimationStateMachine* FAnimInstanceProxy::GetMachineDescription(IAnimClassInterface* AnimBlueprintClass, const FAnimNode_StateMachine* MachineInstance)
 {
 	const TArray<FBakedAnimationStateMachine>& BakedStateMachines = AnimBlueprintClass->GetBakedStateMachines();
 	return BakedStateMachines.IsValidIndex(MachineInstance->StateMachineIndexInClass) ? &(BakedStateMachines[MachineInstance->StateMachineIndexInClass]) : nullptr;
 }
 
-FAnimNode_StateMachine* FAnimInstanceProxy::GetStateMachineInstanceFromName(FName MachineName)
+const FAnimNode_StateMachine* FAnimInstanceProxy::GetStateMachineInstanceFromName(FName MachineName) const
 {
 	if (AnimClassInterface)
 	{
@@ -2307,7 +2987,7 @@ FAnimNode_StateMachine* FAnimInstanceProxy::GetStateMachineInstanceFromName(FNam
 			FStructProperty* Property = AnimNodeProperties[AnimNodeProperties.Num() - 1 - MachineIndex];
 			if (Property && Property->Struct->IsChildOf(FAnimNode_StateMachine::StaticStruct()))
 			{
-				FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
+				const FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
 				if (StateMachine)
 				{
 					if (const FBakedAnimationStateMachine* MachineDescription = GetMachineDescription(AnimClassInterface, StateMachine))
@@ -2325,7 +3005,7 @@ FAnimNode_StateMachine* FAnimInstanceProxy::GetStateMachineInstanceFromName(FNam
 	return nullptr;
 }
 
-const FBakedAnimationStateMachine* FAnimInstanceProxy::GetStateMachineInstanceDesc(FName MachineName)
+const FBakedAnimationStateMachine* FAnimInstanceProxy::GetStateMachineInstanceDesc(FName MachineName) const
 {
 	if (AnimClassInterface)
 	{
@@ -2353,7 +3033,7 @@ const FBakedAnimationStateMachine* FAnimInstanceProxy::GetStateMachineInstanceDe
 	return nullptr;
 }
 
-int32 FAnimInstanceProxy::GetStateMachineIndex(FName MachineName)
+int32 FAnimInstanceProxy::GetStateMachineIndex(FName MachineName) const
 {
 	if (AnimClassInterface)
 	{
@@ -2363,7 +3043,7 @@ int32 FAnimInstanceProxy::GetStateMachineIndex(FName MachineName)
 			FStructProperty* Property = AnimNodeProperties[AnimNodeProperties.Num() - 1 - MachineIndex];
 			if(Property && Property->Struct->IsChildOf(FAnimNode_StateMachine::StaticStruct()))
 			{
-				FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
+				const FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
 				if(StateMachine)
 				{
 					if (const FBakedAnimationStateMachine* MachineDescription = GetMachineDescription(AnimClassInterface, StateMachine))
@@ -2381,7 +3061,7 @@ int32 FAnimInstanceProxy::GetStateMachineIndex(FName MachineName)
 	return INDEX_NONE;
 }
 
-void FAnimInstanceProxy::GetStateMachineIndexAndDescription(FName InMachineName, int32& OutMachineIndex, const FBakedAnimationStateMachine** OutMachineDescription)
+int32  FAnimInstanceProxy::GetStateMachineIndex(FAnimNode_StateMachine* StateMachine) const
 {
 	if (AnimClassInterface)
 	{
@@ -2391,7 +3071,28 @@ void FAnimInstanceProxy::GetStateMachineIndexAndDescription(FName InMachineName,
 			FStructProperty* Property = AnimNodeProperties[AnimNodeProperties.Num() - 1 - MachineIndex];
 			if (Property && Property->Struct->IsChildOf(FAnimNode_StateMachine::StaticStruct()))
 			{
-				FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
+				FAnimNode_StateMachine* CurStateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
+				if (CurStateMachine == StateMachine)
+				{
+					return MachineIndex;
+				}
+			}
+		}
+	}
+	return INDEX_NONE; 	
+}
+
+void FAnimInstanceProxy::GetStateMachineIndexAndDescription(FName InMachineName, int32& OutMachineIndex, const FBakedAnimationStateMachine** OutMachineDescription) const
+{
+	if (AnimClassInterface)
+	{
+		const TArray<FStructProperty*>& AnimNodeProperties = AnimClassInterface->GetAnimNodeProperties();
+		for (int32 MachineIndex = 0; MachineIndex < AnimNodeProperties.Num(); MachineIndex++)
+		{
+			FStructProperty* Property = AnimNodeProperties[AnimNodeProperties.Num() - 1 - MachineIndex];
+			if (Property && Property->Struct->IsChildOf(FAnimNode_StateMachine::StaticStruct()))
+			{
+				const FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
 				if (StateMachine)
 				{
 					if (const FBakedAnimationStateMachine* MachineDescription = GetMachineDescription(AnimClassInterface, StateMachine))
@@ -2418,7 +3119,7 @@ void FAnimInstanceProxy::GetStateMachineIndexAndDescription(FName InMachineName,
 	}
 }
 
-int32 FAnimInstanceProxy::GetInstanceAssetPlayerIndex(FName MachineName, FName StateName, FName AssetName)
+int32 FAnimInstanceProxy::GetInstanceAssetPlayerIndex(FName MachineName, FName StateName, FName AssetName) const
 {
 	if (AnimClassInterface)
 	{
@@ -2436,7 +3137,7 @@ int32 FAnimInstanceProxy::GetInstanceAssetPlayerIndex(FName MachineName, FName S
 						FStructProperty* AssetPlayerProperty = AnimNodeProperties[AnimNodeProperties.Num() - 1 - State.PlayerNodeIndices[PlayerIndex]];
 						if(AssetPlayerProperty && AssetPlayerProperty->Struct->IsChildOf(FAnimNode_AssetPlayerBase::StaticStruct()))
 						{
-							FAnimNode_AssetPlayerBase* AssetPlayer = AssetPlayerProperty->ContainerPtrToValuePtr<FAnimNode_AssetPlayerBase>(AnimInstanceObject);
+							const FAnimNode_AssetPlayerBase* AssetPlayer = AssetPlayerProperty->ContainerPtrToValuePtr<FAnimNode_AssetPlayerBase>(AnimInstanceObject);
 							if(AssetPlayer)
 							{
 								if(AssetName == NAME_None || AssetPlayer->GetAnimAsset()->GetFName() == AssetName)
@@ -2456,12 +3157,12 @@ int32 FAnimInstanceProxy::GetInstanceAssetPlayerIndex(FName MachineName, FName S
 
 float FAnimInstanceProxy::GetRecordedMachineWeight(const int32 InMachineClassIndex) const
 {
-	return MachineWeightArrays[GetSyncGroupReadIndex()][InMachineClassIndex];
+	return MachineWeightArrays[GetBufferReadIndex()][InMachineClassIndex];
 }
 
 void FAnimInstanceProxy::RecordMachineWeight(const int32 InMachineClassIndex, const float InMachineWeight)
 {
-	MachineWeightArrays[GetSyncGroupWriteIndex()][InMachineClassIndex] = InMachineWeight;
+	MachineWeightArrays[GetBufferWriteIndex()][InMachineClassIndex] = InMachineWeight;
 }
 
 float FAnimInstanceProxy::GetRecordedStateWeight(const int32 InMachineClassIndex, const int32 InStateIndex) const
@@ -2471,7 +3172,7 @@ float FAnimInstanceProxy::GetRecordedStateWeight(const int32 InMachineClassIndex
 	if(BaseIndexPtr)
 	{
 		const int32 StateIndex = *BaseIndexPtr + InStateIndex;
-		return StateWeightArrays[GetSyncGroupReadIndex()][StateIndex];
+		return StateWeightArrays[GetBufferReadIndex()][StateIndex];
 	}
 
 	return 0.0f;
@@ -2484,7 +3185,7 @@ void FAnimInstanceProxy::RecordStateWeight(const int32 InMachineClassIndex, cons
 	if(BaseIndexPtr)
 	{
 		const int32 StateIndex = *BaseIndexPtr + InStateIndex;
-		StateWeightArrays[GetSyncGroupWriteIndex()][StateIndex] = InStateWeight;
+		StateWeightArrays[GetBufferWriteIndex()][StateIndex] = InStateWeight;
 	}
 
 #if WITH_EDITORONLY_DATA
@@ -2512,7 +3213,7 @@ void FAnimInstanceProxy::ResetDynamics()
 #if ANIM_TRACE_ENABLED
 void FAnimInstanceProxy::TraceMontageEvaluationData(const FAnimationUpdateContext& InContext, const FName& InSlotName)
 {
-	for (const FMontageEvaluationState& MontageEvaluationState : MontageEvaluationData)
+	for (const FMontageEvaluationState& MontageEvaluationState : GetMontageEvaluationData())
 	{
 		if (MontageEvaluationState.Montage != nullptr && MontageEvaluationState.Montage->IsValidSlot(InSlotName))
 		{
@@ -2535,7 +3236,30 @@ void FAnimInstanceProxy::TraceMontageEvaluationData(const FAnimationUpdateContex
 }
 #endif
 
-TArray<FAnimNode_AssetPlayerBase*> FAnimInstanceProxy::GetInstanceAssetPlayers(const FName& GraphName)
+TArray<const FAnimNode_AssetPlayerBase*> FAnimInstanceProxy::GetInstanceAssetPlayers(const FName& GraphName) const
+{
+	TArray<const FAnimNode_AssetPlayerBase*> Nodes;
+
+	// Retrieve all asset player nodes from the (named) Animation Layer Graph
+	if (AnimClassInterface)
+	{
+		const TMap<FName, FGraphAssetPlayerInformation>& GrapInformationMap = AnimClassInterface->GetGraphAssetPlayerInformation();
+		if (const FGraphAssetPlayerInformation* Information = GrapInformationMap.Find(GraphName))
+		{
+			for (const int32& NodeIndex : Information->PlayerNodeIndices)
+			{
+				if (const FAnimNode_AssetPlayerBase* Node = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(NodeIndex))
+				{
+					Nodes.Add(Node);
+				}
+			}
+		}
+	}
+
+	return Nodes;
+}
+
+TArray<FAnimNode_AssetPlayerBase*> FAnimInstanceProxy::GetMutableInstanceAssetPlayers(const FName& GraphName)
 {
 	TArray<FAnimNode_AssetPlayerBase*> Nodes;
 
@@ -2547,7 +3271,52 @@ TArray<FAnimNode_AssetPlayerBase*> FAnimInstanceProxy::GetInstanceAssetPlayers(c
 		{
 			for (const int32& NodeIndex : Information->PlayerNodeIndices)
 			{
-				if (FAnimNode_AssetPlayerBase* Node = GetNodeFromIndex<FAnimNode_AssetPlayerBase>(NodeIndex))
+				if (FAnimNode_AssetPlayerBase* Node = GetMutableNodeFromIndex<FAnimNode_AssetPlayerBase>(NodeIndex))
+				{
+					Nodes.Add(Node);
+				}
+			}
+		}
+	}
+
+	return Nodes;
+}
+TArray<const FAnimNode_AssetPlayerRelevancyBase*> FAnimInstanceProxy::GetInstanceRelevantAssetPlayers(const FName& GraphName) const
+{
+	TArray<const FAnimNode_AssetPlayerRelevancyBase*> Nodes;
+
+	// Retrieve all asset player nodes from the (named) Animation Layer Graph
+	if (AnimClassInterface)
+	{
+		const TMap<FName, FGraphAssetPlayerInformation>& GrapInformationMap = AnimClassInterface->GetGraphAssetPlayerInformation();
+		if (const FGraphAssetPlayerInformation* Information = GrapInformationMap.Find(GraphName))
+		{
+			for (const int32& NodeIndex : Information->PlayerNodeIndices)
+			{
+				if (const FAnimNode_AssetPlayerRelevancyBase* Node = GetNodeFromIndex<FAnimNode_AssetPlayerRelevancyBase>(NodeIndex))
+				{
+					Nodes.Add(Node);
+				}
+			}
+		}
+	}
+
+	return Nodes;
+}
+
+TArray<FAnimNode_AssetPlayerRelevancyBase*> FAnimInstanceProxy::GetMutableInstanceRelevantAssetPlayers(const FName& GraphName)
+{
+	TArray<FAnimNode_AssetPlayerRelevancyBase*> Nodes;
+
+	// Retrieve all asset player nodes from the (named) Animation Layer Graph	
+	if (AnimClassInterface)
+	{
+		const TMap<FName, FGraphAssetPlayerInformation>& GrapInformationMap = AnimClassInterface->GetGraphAssetPlayerInformation();
+		if (const FGraphAssetPlayerInformation* Information = GrapInformationMap.Find(GraphName))
+		{
+			for (const int32& NodeIndex : Information->PlayerNodeIndices)
+			{
+				if (FAnimNode_AssetPlayerRelevancyBase* Node = GetMutableNodeFromIndex<FAnimNode_AssetPlayerRelevancyBase>(NodeIndex))
 				{
 					Nodes.Add(Node);
 				}
@@ -2559,17 +3328,85 @@ TArray<FAnimNode_AssetPlayerBase*> FAnimInstanceProxy::GetInstanceAssetPlayers(c
 }
 
 #if WITH_EDITOR
+void FAnimInstanceProxy::RecordNodeVisit(int32 TargetNodeIndex, int32 SourceNodeIndex, float BlendWeight)
+{
+	UpdatedNodesThisFrame.Emplace(SourceNodeIndex, TargetNodeIndex, BlendWeight);
+}
+
+void FAnimInstanceProxy::RecordNodeAttribute(const FAnimInstanceProxy& InSourceProxy, int32 InTargetNodeIndex, int32 InSourceNodeIndex, FName InAttribute)
+{
+	TArray<FAnimBlueprintDebugData::FAttributeRecord>& InputAttributeRecords = NodeInputAttributesThisFrame.FindOrAdd(InTargetNodeIndex);
+	InputAttributeRecords.Emplace(InSourceNodeIndex, InAttribute);
+
+	if(&InSourceProxy == this)
+	{
+		TArray<FAnimBlueprintDebugData::FAttributeRecord>& OutputAttributeRecords = NodeOutputAttributesThisFrame.FindOrAdd(InSourceNodeIndex);
+		OutputAttributeRecords.Emplace(InTargetNodeIndex, InAttribute);
+	}
+}
+
 void FAnimInstanceProxy::RegisterWatchedPose(const FCompactPose& Pose, int32 LinkID)
 {
-	if(bIsBeingDebugged)
+	RegisterWatchedPose(Pose, FBlendedCurve(), LinkID);
+}
+
+void FAnimInstanceProxy::RegisterWatchedPose(const FCompactPose& Pose, const FBlendedCurve& InCurve, int32 LinkID)
+{
+	if (bIsBeingDebugged)
 	{
-		for (FAnimNodePoseWatch& PoseWatch : PoseWatchEntriesForThisFrame)
+		FAnimBlueprintDebugData* DebugData = GetAnimBlueprintDebugData();
+		if (DebugData)
 		{
-			if (PoseWatch.NodeID == LinkID)
+			if (USkeletalMeshComponent* SkelMeshComponent = GetSkelMeshComponent())
 			{
-				PoseWatch.PoseInfo->CopyBonesFrom(Pose);
-				PoseWatch.Object = GetAnimInstanceObject();
-				break;
+				for (FAnimNodePoseWatch& PoseWatch : DebugData->AnimNodePoseWatch)
+				{
+					if (PoseWatch.PoseWatch && PoseWatch.NodeID == LinkID)
+					{
+						PoseWatch.Object = GetAnimInstanceObject();
+						PoseWatch.PoseWatch->SetIsNodeEnabled(true);
+
+						/*
+						for (FCompactPoseBoneIndex BoneIndex : Pose.ForEachBoneIndex())
+						{
+							FMeshPoseBoneIndex MeshBoneIndex = Pose.GetBoneContainer().MakeMeshPoseIndex(BoneIndex);
+
+							int32 ParentIndex = Pose.GetBoneContainer().GetParentBoneIndex(MeshBoneIndex.GetInt());
+
+							if (ParentIndex == INDEX_NONE)
+							{
+								WorldTransforms[MeshBoneIndex.GetInt()] = Pose[BoneIndex] * MeshComponent->GetComponentTransform();
+							}
+							else
+							{
+								WorldTransforms[MeshBoneIndex.GetInt()] = Pose[BoneIndex] * WorldTransforms[ParentIndex];
+							}
+							BoneColors[MeshBoneIndex.GetInt()] = BoneColor;
+						}
+						*/
+
+						TArray<FTransform> BoneTransforms;
+						BoneTransforms.AddUninitialized(Pose.GetBoneContainer().GetNumBones());
+
+						TArray<FBoneIndexType> TmpRequiredBones;
+						TmpRequiredBones.Reserve(Pose.GetBoneContainer().GetNumBones());
+
+						for (FCompactPoseBoneIndex BoneIndex : Pose.ForEachBoneIndex())
+						{
+							FMeshPoseBoneIndex MeshBoneIndex = Pose.GetBoneContainer().MakeMeshPoseIndex(BoneIndex);
+
+							BoneTransforms[MeshBoneIndex.GetInt()] = Pose[BoneIndex];
+							TmpRequiredBones.Add(MeshBoneIndex.GetInt());
+						}
+
+						PoseWatch.SetPose(TmpRequiredBones, BoneTransforms);
+						PoseWatch.SetCurves(InCurve);
+						PoseWatch.SetWorldTransform(SkelMeshComponent->GetComponentTransform());
+
+						TRACE_ANIM_POSE_WATCH(*this, PoseWatch.PoseWatchPoseElement, PoseWatch.NodeID, PoseWatch.GetBoneTransforms(), PoseWatch.GetCurves(), PoseWatch.GetRequiredBones(), PoseWatch.GetWorldTransform(), PoseWatch.PoseWatchPoseElement->GetIsVisible());
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -2577,22 +3414,68 @@ void FAnimInstanceProxy::RegisterWatchedPose(const FCompactPose& Pose, int32 Lin
 
 void FAnimInstanceProxy::RegisterWatchedPose(const FCSPose<FCompactPose>& Pose, int32 LinkID)
 {
+	RegisterWatchedPose(Pose, FBlendedCurve(), LinkID);
+}
+
+void FAnimInstanceProxy::RegisterWatchedPose(const FCSPose<FCompactPose>& Pose, const FBlendedCurve& InCurve, int32 LinkID)
+{
 	if (bIsBeingDebugged)
 	{
-		for (FAnimNodePoseWatch& PoseWatch : PoseWatchEntriesForThisFrame)
+		FAnimBlueprintDebugData* DebugData = GetAnimBlueprintDebugData();
+		if (DebugData)
 		{
-			if (PoseWatch.NodeID == LinkID)
+			if (USkeletalMeshComponent* SkelMeshComponent = GetSkelMeshComponent())
 			{
-				FCompactPose TempPose;
-				FCSPose<FCompactPose>::ConvertComponentPosesToLocalPoses(Pose, TempPose);
-				PoseWatch.PoseInfo->CopyBonesFrom(TempPose);
-				PoseWatch.Object = GetAnimInstanceObject();
-				break;
+				for (FAnimNodePoseWatch& PoseWatch : DebugData->AnimNodePoseWatch)
+				{
+					if (PoseWatch.PoseWatch && PoseWatch.NodeID == LinkID)
+					{
+						FCompactPose TempPose;
+						FCSPose<FCompactPose>::ConvertComponentPosesToLocalPoses(Pose, TempPose);
+						PoseWatch.Object = GetAnimInstanceObject();
+						PoseWatch.PoseWatch->SetIsNodeEnabled(true);
+
+						const TArray<FTransform, FAnimStackAllocator>& BoneTransforms = TempPose.GetBones();
+						const TArray<FBoneIndexType>& TmpRequiredBones = TempPose.GetBoneContainer().GetBoneIndicesArray();
+						PoseWatch.SetPose(TmpRequiredBones, BoneTransforms);
+						PoseWatch.SetCurves(InCurve);
+						PoseWatch.SetWorldTransform(SkelMeshComponent->GetComponentTransform());
+
+						TRACE_ANIM_POSE_WATCH(*this, PoseWatch.PoseWatchPoseElement, PoseWatch.NodeID, PoseWatch.GetBoneTransforms(), PoseWatch.GetCurves(), PoseWatch.GetRequiredBones(), PoseWatch.GetWorldTransform(), PoseWatch.PoseWatchPoseElement->GetIsVisible());
+						break;
+					}
+				}
 			}
 		}
 	}
 }
 #endif
+
+FPoseSnapshot& FAnimInstanceProxy::AddPoseSnapshot(FName SnapshotName)
+{
+	FPoseSnapshot* PoseSnapshot = PoseSnapshots.FindByPredicate([SnapshotName](const FPoseSnapshot& PoseData) { return PoseData.SnapshotName == SnapshotName; });
+	if (PoseSnapshot)
+	{
+		// Recycle an existing snapshot
+		PoseSnapshot->Reset();
+	}
+	else
+	{
+		// Add a new empty snapshot
+		PoseSnapshot = &PoseSnapshots[PoseSnapshots.AddDefaulted()];
+	}
+	PoseSnapshot->SnapshotName = SnapshotName;
+	return *PoseSnapshot;
+}
+
+void FAnimInstanceProxy::RemovePoseSnapshot(FName SnapshotName)
+{
+	int32 Index = PoseSnapshots.IndexOfByPredicate([SnapshotName](const FPoseSnapshot& PoseData) { return PoseData.SnapshotName == SnapshotName; });
+	if (Index != INDEX_NONE)
+	{
+		PoseSnapshots.RemoveAtSwap(Index);
+	}
+}
 
 const FPoseSnapshot* FAnimInstanceProxy::GetPoseSnapshot(FName SnapshotName) const
 {
@@ -2622,41 +3505,26 @@ void FAnimInstanceProxy::UpdateCurvesToEvaluationContext(const FAnimationEvaluat
 
 	ResetAnimationCurves();
 
-	if(InContext.Curve.UIDToArrayIndexLUT != nullptr)
+	InContext.Curve.ForEachElement([this](const UE::Anim::FCurveElement& InCurveElement)
 	{
-		const TArray<uint16>& UIDToArrayIndexLookupTable = RequiredBones.GetUIDToArrayLookupTable();
-		const TArray<FName>& UIDToNameLookupTable = RequiredBones.GetUIDToNameLookupTable();
-		const TArray<FAnimCurveType>& UIDToCurveTypeLookupTable = RequiredBones.GetUIDToCurveTypeLookupTable();
-	
-		check(UIDToArrayIndexLookupTable.Num() == InContext.Curve.UIDToArrayIndexLUT->Num());
+		AnimationCurves[(uint8)EAnimCurveType::AttributeCurve].Add(InCurveElement.Name, InCurveElement.Value);
+	});
 
-		for (int32 CurveUID = 0; CurveUID < UIDToArrayIndexLookupTable.Num(); ++CurveUID)
+	UE::Anim::FNamedValueArrayUtils::Intersection(InContext.Curve, RequiredBones->GetCurveFlags(), 
+		[this](const UE::Anim::FCurveElement& InCurveElement, const UE::Anim::FCurveElementFlags& InCurveFlagsElement)
 		{
-			uint16 ArrayIndex = UIDToArrayIndexLookupTable[CurveUID];
-		
-			if (ArrayIndex != MAX_uint16 && 
-				ensureAlwaysMsgf(InContext.Curve.CurveWeights.IsValidIndex(ArrayIndex), TEXT("%s Animation Instance contains out of bound UIDList."), *AnimInstanceObject->GetClass()->GetName()) &&
-				InContext.Curve.ValidCurveWeights[ArrayIndex])
+			if(EnumHasAnyFlags(InCurveFlagsElement.Flags | InCurveElement.Flags, UE::Anim::ECurveElementFlags::MorphTarget))
 			{
-				const FName& CurveName = UIDToNameLookupTable[CurveUID];
-				const FAnimCurveType& CurveType = UIDToCurveTypeLookupTable[CurveUID];
-				const float CurveWeight = InContext.Curve.CurveWeights[ArrayIndex];
-				
-				AnimationCurves[(uint8)EAnimCurveType::AttributeCurve].Add(CurveName, CurveWeight);
-
-				if(CurveType.bMorphtarget)
-				{
-					AnimationCurves[(uint8)EAnimCurveType::MorphTargetCurve].Add(CurveName, CurveWeight);
-				}
-
-				if(CurveType.bMaterial)
-				{
-					MaterialParametersToClear.Remove(CurveName);
-					AnimationCurves[(uint8)EAnimCurveType::MaterialCurve].Add(CurveName, CurveWeight);
-				}
+				AnimationCurves[(uint8)EAnimCurveType::MorphTargetCurve].Add(InCurveElement.Name, InCurveElement.Value);
 			}
-		}
-	}
+
+			if(EnumHasAnyFlags(InCurveFlagsElement.Flags | InCurveElement.Flags, UE::Anim::ECurveElementFlags::Material))
+			{
+				const uint32 HashedName = GetTypeHash(InCurveElement.Name);
+				MaterialParametersToClear.RemoveByHash(HashedName, InCurveElement.Name);
+				AnimationCurves[(uint8)EAnimCurveType::MaterialCurve].AddByHash(HashedName, InCurveElement.Name, InCurveElement.Value);
+			}
+		});
 }
 
 void FAnimInstanceProxy::UpdateCurvesPostEvaluation(USkeletalMeshComponent* SkelMeshComp)
@@ -2694,7 +3562,7 @@ bool FAnimInstanceProxy::HasActiveCurves() const
 	return false;
 }
 
-void FAnimInstanceProxy::AddCurveValue(const FSmartNameMapping& Mapping, const FName& CurveName, float Value)
+void FAnimInstanceProxy::AddCurveValue(const FName& CurveName, float Value, bool bMorphtarget, bool bMaterial)
 {
 	DECLARE_SCOPE_HIERARCHICAL_COUNTER_FUNC()
 
@@ -2712,35 +3580,31 @@ void FAnimInstanceProxy::AddCurveValue(const FSmartNameMapping& Mapping, const F
 		AnimationCurves[(uint8)EAnimCurveType::AttributeCurve].Add(CurveName, Value);
 	}
 
-	const FCurveMetaData* CurveMetaData = Mapping.GetCurveMetaData(CurveName);
-	if (CurveMetaData)
+	if (bMorphtarget)
 	{
-		if (CurveMetaData->Type.bMorphtarget)
+		CurveValPtr = AnimationCurves[(uint8)EAnimCurveType::MorphTargetCurve].Find(CurveName);
+		if (CurveValPtr)
 		{
-			CurveValPtr = AnimationCurves[(uint8)EAnimCurveType::MorphTargetCurve].Find(CurveName);
-			if (CurveValPtr)
-			{
-				// sum up, in the future we might normalize, but for now this just sums up
-				// this won't work well if all of them have full weight - i.e. additive 
-				*CurveValPtr = Value;
-			}
-			else
-			{
-				AnimationCurves[(uint8)EAnimCurveType::MorphTargetCurve].Add(CurveName, Value);
-			}
+			// sum up, in the future we might normalize, but for now this just sums up
+			// this won't work well if all of them have full weight - i.e. additive 
+			*CurveValPtr = Value;
 		}
-		if (CurveMetaData->Type.bMaterial)
+		else
 		{
-			MaterialParametersToClear.RemoveSwap(CurveName);
-			CurveValPtr = AnimationCurves[(uint8)EAnimCurveType::MaterialCurve].Find(CurveName);
-			if (CurveValPtr)
-			{
-				*CurveValPtr = Value;
-			}
-			else
-			{
-				AnimationCurves[(uint8)EAnimCurveType::MaterialCurve].Add(CurveName, Value);
-			}
+			AnimationCurves[(uint8)EAnimCurveType::MorphTargetCurve].Add(CurveName, Value);
+		}
+	}
+	if (bMaterial)
+	{
+		MaterialParametersToClear.Remove(CurveName);
+		CurveValPtr = AnimationCurves[(uint8)EAnimCurveType::MaterialCurve].Find(CurveName);
+		if (CurveValPtr)
+		{
+			*CurveValPtr = Value;
+		}
+		else
+		{
+			AnimationCurves[(uint8)EAnimCurveType::MaterialCurve].Add(CurveName, Value);
 		}
 	}
 }
@@ -2794,7 +3658,10 @@ void FAnimInstanceProxy::EvaluateInputProxy(FAnimInstanceProxy* InputProxy, FPos
 {
 	if (InputProxy)
 	{
-		InputProxy->Evaluate(Output);
+		if(!InputProxy->Evaluate(Output))
+		{
+			Output.ResetToRefPose();
+		}
 	}
 }
 
@@ -2808,4 +3675,24 @@ void FAnimInstanceProxy::ResetCounterInputProxy(FAnimInstanceProxy* InputProxy)
 	}
 }
 
+void FAnimInstanceProxy::ForEachStateMachine(const TFunctionRef<void(FAnimNode_StateMachine&)>& Functor)
+{
+	if (AnimClassInterface)
+	{
+		const TArray<FStructProperty*>& AnimNodeProperties = AnimClassInterface->GetAnimNodeProperties();
+		for (int32 MachineIndex = 0; MachineIndex < AnimNodeProperties.Num(); MachineIndex++)
+		{
+			FStructProperty* Property = AnimNodeProperties[AnimNodeProperties.Num() - 1 - MachineIndex];
+			if (Property && Property->Struct->IsChildOf(FAnimNode_StateMachine::StaticStruct()))
+			{
+				FAnimNode_StateMachine* StateMachine = Property->ContainerPtrToValuePtr<FAnimNode_StateMachine>(AnimInstanceObject);
+				if (StateMachine)
+				{
+					Functor(*StateMachine);
+				}
+			}
+		}
+	}
+}
 #undef LOCTEXT_NAMESPACE
+

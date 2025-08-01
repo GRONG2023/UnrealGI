@@ -5,14 +5,15 @@
 	=============================================================================*/
 
 #include "D3D12RHIPrivate.h"
+#include "RHIUtilities.h"
 
 // MSFT: Need to make sure sampler state is thread safe
 // Cache of Sampler States; we store pointers to both as we don't want the TMap to be artificially
 // modifying ref counts if not needed; so we manage that ourselves
 FCriticalSection GD3D12SamplerStateCacheLock;
 
-DECLARE_CYCLE_STAT(TEXT("Graphics: Find or Create time"), STAT_PSOGraphicsFindOrCreateTime, STATGROUP_D3D12PipelineState);
-DECLARE_CYCLE_STAT(TEXT("Compute: Find or Create time"), STAT_PSOComputeFindOrCreateTime, STATGROUP_D3D12PipelineState);
+DECLARE_CYCLE_STAT_WITH_FLAGS(TEXT("Graphics: Find or Create time"), STAT_PSOGraphicsFindOrCreateTime, STATGROUP_D3D12PipelineState, EStatFlags::Verbose);
+DECLARE_CYCLE_STAT_WITH_FLAGS(TEXT("Compute: Find or Create time"), STAT_PSOComputeFindOrCreateTime, STATGROUP_D3D12PipelineState, EStatFlags::Verbose);
 
 static D3D12_TEXTURE_ADDRESS_MODE TranslateAddressMode(ESamplerAddressMode AddressMode)
 {
@@ -223,6 +224,30 @@ FSamplerStateRHIRef FD3D12DynamicRHI::RHICreateSamplerState(const FSamplerStateI
 	});
 }
 
+int32 GD3D12SamplerWarningThreshold = 10;
+static FAutoConsoleVariableRef CVarD3D12SamplerWarningThreshold(
+	TEXT("D3D12.SamplerWarningThreshold"),
+	GD3D12SamplerWarningThreshold,
+	TEXT("Threshold to start warning about creating too many sampler states")
+);
+
+static void LogSamplerStateWarning(const FSamplerStateInitializerRHI& Initializer)
+{
+	UE_LOG(LogD3D12RHI, Warning,
+		TEXT("Approaching SamplerState limit: FSamplerStateInitializerRHI(Filter: %d, AddressU: %d, AddressV: %d, AddressW: %d, MipBias: %f, MinMipLevel: %f, MaxMipLevel: %f, MaxAnisotropy: %d, BorderColor: %d, SamplerComparisonFunction: %d)"),
+		Initializer.Filter.GetIntValue(),
+		Initializer.AddressU.GetIntValue(),
+		Initializer.AddressV.GetIntValue(),
+		Initializer.AddressW.GetIntValue(),
+		Initializer.MipBias,
+		Initializer.MinMipLevel,
+		Initializer.MaxMipLevel,
+		Initializer.MaxAnisotropy,
+		Initializer.BorderColor,
+		Initializer.SamplerComparisonFunction.GetIntValue()
+	);
+}
+
 FD3D12SamplerState* FD3D12Device::CreateSampler(const FSamplerStateInitializerRHI& Initializer)
 {
 	D3D12_SAMPLER_DESC SamplerDesc;
@@ -285,6 +310,11 @@ FD3D12SamplerState* FD3D12Device::CreateSampler(const FSamplerStateInitializerRH
 		// 16-bit IDs are used for faster hashing
 		check(SamplerID < 0xffff);
 
+		if (static_cast<int32>(SamplerID + 1) > (D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE - GD3D12SamplerWarningThreshold))
+		{
+			LogSamplerStateWarning(Initializer);
+		}
+
 		FD3D12SamplerState* NewSampler = new FD3D12SamplerState(this, SamplerDesc, static_cast<uint16>(SamplerID));
 
 		SamplerMap.Add(SamplerDesc, NewSampler);
@@ -309,7 +339,7 @@ FRasterizerStateRHIRef FD3D12DynamicRHI::RHICreateRasterizerState(const FRasteri
 	RasterizerDesc.SlopeScaledDepthBias = Initializer.SlopeScaleDepthBias;
 	RasterizerDesc.FrontCounterClockwise = true;
 	RasterizerDesc.DepthBias = FMath::FloorToInt(Initializer.DepthBias * (float)(1 << 24));
-	RasterizerDesc.DepthClipEnable = true;
+	RasterizerDesc.DepthClipEnable = Initializer.DepthClipMode == ERasterizerDepthClipMode::DepthClip;
 	RasterizerDesc.MultisampleEnable = Initializer.bAllowMSAA;
 
 	return RasterizerState;
@@ -323,7 +353,6 @@ bool FD3D12RasterizerState::GetInitializer(struct FRasterizerStateInitializerRHI
 	check(Desc.DepthBias == FMath::FloorToInt(Init.DepthBias * static_cast<float>(1 << 24)));
 	Init.SlopeScaleDepthBias = Desc.SlopeScaledDepthBias;
 	Init.bAllowMSAA = !!Desc.MultisampleEnable;
-	Init.bEnableLineAA = false;
 	return true;
 }
 
@@ -454,6 +483,102 @@ bool FD3D12BlendState::GetInitializer(class FBlendStateInitializerRHI& Init)
 			| ((Src.RenderTargetWriteMask & D3D12_COLOR_WRITE_ENABLE_ALPHA) ? CW_ALPHA : 0));
 	}
 	Init.bUseIndependentRenderTargetBlendStates = !!Desc.IndependentBlendEnable;
+	Init.bUseAlphaToCoverage = !!Desc.AlphaToCoverageEnable;
+	return true;
+}
+
+uint64 FD3D12DynamicRHI::RHIComputePrecachePSOHash(const FGraphicsPipelineStateInitializer& Initializer)
+{
+	// When compute precache PSO hash we assume a valid state precache PSO hash is already provided
+	checkf(Initializer.StatePrecachePSOHash != 0, TEXT("Initializer should have a valid state precache PSO hash set when computing the full initializer PSO hash"));
+
+	// All members which are not part of the state objects and influence the PSO on D3D12
+	struct FNonStateHashKey
+	{
+		uint64							StatePrecachePSOHash;
+
+		EPrimitiveType					PrimitiveType;
+		uint32							RenderTargetsEnabled;
+		FGraphicsPipelineStateInitializer::TRenderTargetFormats RenderTargetFormats;
+		EPixelFormat					DepthStencilTargetFormat;
+		uint16							NumSamples;
+		EConservativeRasterization		ConservativeRasterization;
+		bool							bDepthBounds;
+		uint8							MultiViewCount;
+		bool							bHasFragmentDensityAttachment;
+		EVRSShadingRate					ShadingRate;
+	} HashKey;
+
+	FMemory::Memzero(&HashKey, sizeof(FNonStateHashKey));
+
+	HashKey.StatePrecachePSOHash			= Initializer.StatePrecachePSOHash;
+
+	HashKey.PrimitiveType					= Initializer.PrimitiveType;
+	HashKey.RenderTargetsEnabled			= Initializer.RenderTargetsEnabled;
+	HashKey.RenderTargetFormats				= Initializer.RenderTargetFormats;
+	HashKey.DepthStencilTargetFormat		= Initializer.DepthStencilTargetFormat;
+	HashKey.NumSamples						= Initializer.NumSamples;
+	HashKey.ConservativeRasterization		= Initializer.ConservativeRasterization;
+	HashKey.bDepthBounds					= Initializer.bDepthBounds;
+	HashKey.MultiViewCount					= Initializer.MultiViewCount;
+	HashKey.bHasFragmentDensityAttachment	= Initializer.bHasFragmentDensityAttachment;
+	HashKey.ShadingRate						= Initializer.ShadingRate;
+
+	return CityHash64((const char*)&HashKey, sizeof(FNonStateHashKey));
+}
+
+bool FD3D12DynamicRHI::RHIMatchPrecachePSOInitializers(const FGraphicsPipelineStateInitializer& LHS, const FGraphicsPipelineStateInitializer& RHS)
+{
+	// first check non pointer objects
+	if (LHS.ImmutableSamplerState != RHS.ImmutableSamplerState ||
+		LHS.PrimitiveType != RHS.PrimitiveType ||
+		LHS.bDepthBounds != RHS.bDepthBounds ||
+		LHS.MultiViewCount != RHS.MultiViewCount ||
+		LHS.ShadingRate != RHS.ShadingRate ||
+		LHS.bHasFragmentDensityAttachment != RHS.bHasFragmentDensityAttachment ||
+		LHS.RenderTargetsEnabled != RHS.RenderTargetsEnabled ||
+		LHS.RenderTargetFormats != RHS.RenderTargetFormats ||
+		LHS.DepthStencilTargetFormat != RHS.DepthStencilTargetFormat ||
+		LHS.NumSamples != RHS.NumSamples ||
+		LHS.ConservativeRasterization != RHS.ConservativeRasterization)
+	{
+		return false;
+	}
+
+	// check the RHI shaders (pointer check for shaders should be fine)
+	if (LHS.BoundShaderState.GetVertexShader() != RHS.BoundShaderState.GetVertexShader() ||
+		LHS.BoundShaderState.GetPixelShader() != RHS.BoundShaderState.GetPixelShader() ||
+		LHS.BoundShaderState.GetMeshShader() != RHS.BoundShaderState.GetMeshShader() ||
+		LHS.BoundShaderState.GetAmplificationShader() != RHS.BoundShaderState.GetAmplificationShader() ||
+		LHS.BoundShaderState.GetGeometryShader() != RHS.BoundShaderState.GetGeometryShader())
+	{
+		return false;
+	}
+
+	// Compare the d3d12 vertex elements without the stride
+	FD3D12VertexElements LHSVertexElements;
+	if (LHS.BoundShaderState.VertexDeclarationRHI)
+	{
+		LHSVertexElements = ((FD3D12VertexDeclaration*)LHS.BoundShaderState.VertexDeclarationRHI)->VertexElements;
+	}
+	FD3D12VertexElements RHSVertexElements;
+	if (RHS.BoundShaderState.VertexDeclarationRHI)
+	{
+		RHSVertexElements = ((FD3D12VertexDeclaration*)RHS.BoundShaderState.VertexDeclarationRHI)->VertexElements;
+	}
+	if (LHSVertexElements != RHSVertexElements)
+	{
+		return false;
+	}
+
+	// Check actual state content (each initializer can have it's own state and not going through a factory)
+	if (!MatchRHIState<FRHIBlendState, FBlendStateInitializerRHI>(LHS.BlendState, RHS.BlendState) ||
+		!MatchRHIState<FRHIRasterizerState, FRasterizerStateInitializerRHI>(LHS.RasterizerState, RHS.RasterizerState) ||
+		!MatchRHIState<FRHIDepthStencilState, FDepthStencilStateInitializerRHI>(LHS.DepthStencilState, RHS.DepthStencilState))
+	{
+		return false;
+	}
+
 	return true;
 }
 
@@ -474,18 +599,18 @@ FGraphicsPipelineStateRHIRef FD3D12DynamicRHI::RHICreateGraphicsPipelineState(co
 		return Found;
 	}
 #endif
-	// TODO: Remove the need for BoundShaderState objects. Currently they are needed for the Root Signature.
-	FBoundShaderStateRHIRef const BSS = RHICreateBoundShaderState(
-		Initializer.BoundShaderState.VertexDeclarationRHI,
-		Initializer.BoundShaderState.VertexShaderRHI,
-		TESSELLATION_SHADER(Initializer.BoundShaderState.HullShaderRHI),
-		TESSELLATION_SHADER(Initializer.BoundShaderState.DomainShaderRHI),
-		Initializer.BoundShaderState.PixelShaderRHI,
-		GEOMETRY_SHADER(Initializer.BoundShaderState.GeometryShaderRHI));
+
+	TRACE_CPUPROFILER_EVENT_SCOPE(FD3D12DynamicRHI::RHICreateGraphicsPipelineState);
+
+	const FD3D12RootSignature* RootSignature = GetAdapter().GetRootSignature(Initializer.BoundShaderState);
+
+	if (!RootSignature || !RootSignature->GetRootSignature())
+	{
+		UE_LOG(LogD3D12RHI, Error, TEXT("Unexpected null root signature at graphics pipeline creation time"));
+		return nullptr;
+	}
 
 	// Next try to find the PSO based on the hash of its desc.
-	FD3D12BoundShaderState* const BoundShaderState = FD3D12DynamicRHI::ResourceCast(BSS.GetReference());
-	const FD3D12RootSignature* RootSignature = BoundShaderState->pRootSignature;
 
 	FD3D12LowLevelGraphicsPipelineStateDesc LowLevelDesc;
 #if D3D12RHI_USE_HIGH_LEVEL_PSO_CACHE
@@ -523,35 +648,55 @@ TRefCountPtr<FRHIComputePipelineState> FD3D12DynamicRHI::RHICreateComputePipelin
 		return Found;
 	}
 #endif
+
+	const FD3D12RootSignature* RootSignature = ComputeShader->RootSignature;
+
+	if (!RootSignature || !RootSignature->GetRootSignature())
+	{
+		UE_LOG(LogD3D12RHI, Error, TEXT("Unexpected null root signature at compute pipeline creation time (shader hash %s)"), *ComputeShader->GetHash().ToString());
+		return nullptr;
+	}
+
 	// Next try to find the PSO based on the hash of its desc.
 	FD3D12ComputePipelineStateDesc LowLevelDesc;
-	Found = PSOCache.FindInLoadedCache(ComputeShader, LowLevelDesc);
+	Found = PSOCache.FindInLoadedCache(ComputeShader, RootSignature, LowLevelDesc);
 	if (Found)
 	{
 		return Found;
 	}
 
+	TRACE_CPUPROFILER_EVENT_SCOPE(FD3D12DynamicRHI::RHICreateComputePipelineState);
+
 	// We need to actually create a PSO.
-	return PSOCache.CreateAndAdd(ComputeShader, LowLevelDesc);
+	return PSOCache.CreateAndAdd(ComputeShader, RootSignature, LowLevelDesc);
 }
 
 FD3D12SamplerState::FD3D12SamplerState(FD3D12Device* InParent, const D3D12_SAMPLER_DESC& Desc, uint16 SamplerID)
 	: FD3D12DeviceChild(InParent)
 	, ID(SamplerID)
 {
-	Descriptor.ptr = 0;
-	FD3D12OfflineDescriptorManager& DescriptorAllocator = GetParentDevice()->GetSamplerDescriptorAllocator();
-	Descriptor = DescriptorAllocator.AllocateHeapSlot(DescriptorHeapIndex);
+	FD3D12OfflineDescriptorManager& OfflineAllocator = GetParentDevice()->GetOfflineDescriptorManager(ERHIDescriptorHeapType::Sampler);
+	OfflineDescriptor = OfflineAllocator.AllocateHeapSlot();
 
-	GetParentDevice()->CreateSamplerInternal(Desc, Descriptor);
+	GetParentDevice()->CreateSamplerInternal(Desc, OfflineDescriptor);
+
+#if PLATFORM_SUPPORTS_BINDLESS_RENDERING
+	BindlessHandle = GetParentDevice()->GetBindlessDescriptorManager().AllocateAndInitialize(this);
+#endif
 }
 
 FD3D12SamplerState::~FD3D12SamplerState()
 {
-	if (Descriptor.ptr)
+	if (OfflineDescriptor)
 	{
-		FD3D12OfflineDescriptorManager& DescriptorAllocator = GetParentDevice()->GetSamplerDescriptorAllocator();
-		DescriptorAllocator.FreeHeapSlot(Descriptor, DescriptorHeapIndex);
-		Descriptor.ptr = 0;
+		FD3D12OfflineDescriptorManager& OfflineAllocator = GetParentDevice()->GetOfflineDescriptorManager(ERHIDescriptorHeapType::Sampler);
+		OfflineAllocator.FreeHeapSlot(OfflineDescriptor);
+
+#if PLATFORM_SUPPORTS_BINDLESS_RENDERING
+		if (BindlessHandle.IsValid())
+		{
+			GetParentDevice()->GetBindlessDescriptorManager().DeferredFreeFromDestructor(BindlessHandle);
+		}
+#endif
 	}
 }

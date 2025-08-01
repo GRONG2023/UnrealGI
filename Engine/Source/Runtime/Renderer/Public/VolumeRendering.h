@@ -46,40 +46,33 @@ struct FVolumeBounds
 /** Vertex shader used to write to a range of slices of a 3d volume texture. */
 class FWriteToSliceVS : public FGlobalShader
 {
-	DECLARE_EXPORTED_SHADER_TYPE(FWriteToSliceVS,Global,ENGINE_API);
+	DECLARE_EXPORTED_GLOBAL_SHADER(FWriteToSliceVS, ENGINE_API);
 public:
+	FWriteToSliceVS();
+	FWriteToSliceVS(const ShaderMetaType::CompiledShaderInitializerType& Initializer);
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) 
-	{ 
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5); 
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
 
-	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment )
-	{
-		FGlobalShader::ModifyCompilationEnvironment( Parameters, OutEnvironment );
-		OutEnvironment.CompilerFlags.Add( CFLAG_VertexToGeometryShader );
-	}
-
-	FWriteToSliceVS(const ShaderMetaType::CompiledShaderInitializerType& Initializer):
-		FGlobalShader(Initializer)
-	{
-		UVScaleBias.Bind(Initializer.ParameterMap, TEXT("UVScaleBias"));
-		MinZ.Bind(Initializer.ParameterMap, TEXT("MinZ"));
-	}
-
-	FWriteToSliceVS() {}
-
-	template <typename TRHICommandList>
-	void SetParameters(TRHICommandList& RHICmdList, const FVolumeBounds& VolumeBounds, FIntVector VolumeResolution)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, const FVolumeBounds& VolumeBounds, const FIntVector& VolumeResolution)
 	{
 		const float InvVolumeResolutionX = 1.0f / VolumeResolution.X;
 		const float InvVolumeResolutionY = 1.0f / VolumeResolution.Y;
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundVertexShader(), UVScaleBias, FVector4(
+		SetShaderValue(BatchedParameters, UVScaleBias, FVector4f(
 			(VolumeBounds.MaxX - VolumeBounds.MinX) * InvVolumeResolutionX,
 			(VolumeBounds.MaxY - VolumeBounds.MinY) * InvVolumeResolutionY,
 			VolumeBounds.MinX * InvVolumeResolutionX,
 			VolumeBounds.MinY * InvVolumeResolutionY));
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundVertexShader(), MinZ, VolumeBounds.MinZ);
+		SetShaderValue(BatchedParameters, MinZ, VolumeBounds.MinZ);
+	}
+
+	template <typename TRHICommandList>
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
+	void SetParameters(TRHICommandList& RHICmdList, const FVolumeBounds& VolumeBounds, const FIntVector& VolumeResolution)
+	{
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, VolumeBounds, VolumeResolution);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundVertexShader(), BatchedParameters);
 	}
 
 private:
@@ -90,25 +83,25 @@ private:
 /** Geometry shader used to write to a range of slices of a 3d volume texture. */
 class FWriteToSliceGS : public FGlobalShader
 {
-	DECLARE_EXPORTED_SHADER_TYPE(FWriteToSliceGS,Global,ENGINE_API);
+	DECLARE_EXPORTED_GLOBAL_SHADER(FWriteToSliceGS, ENGINE_API);
 public:
+	FWriteToSliceGS();
+	FWriteToSliceGS(const ShaderMetaType::CompiledShaderInitializerType& Initializer);
 
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters) 
-	{ 
-		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5) && RHISupportsGeometryShaders(Parameters.Platform); 
-	}
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters);
 
-	FWriteToSliceGS(const ShaderMetaType::CompiledShaderInitializerType& Initializer):
-		FGlobalShader(Initializer)
+	void SetParameters(FRHIBatchedShaderParameters& BatchedParameters, int32 MinZValue)
 	{
-		MinZ.Bind(Initializer.ParameterMap, TEXT("MinZ"));
+		SetShaderValue(BatchedParameters, MinZ, MinZValue);
 	}
-	FWriteToSliceGS() {}
 
 	template <typename TRHICommandList>
+	UE_DEPRECATED(5.3, "SetParameters with FRHIBatchedShaderParameters should be used.")
 	void SetParameters(TRHICommandList& RHICmdList, int32 MinZValue)
 	{
-		SetShaderValue(RHICmdList, RHICmdList.GetBoundGeometryShader(), MinZ, MinZValue);
+		FRHIBatchedShaderParameters& BatchedParameters = RHICmdList.GetScratchShaderParameters();
+		SetParameters(BatchedParameters, MinZValue);
+		RHICmdList.SetBatchedShaderParameters(RHICmdList.GetBoundGeometryShader(), BatchedParameters);
 	}
 
 private:
@@ -119,32 +112,10 @@ private:
 extern ENGINE_API void RasterizeToVolumeTexture(FRHICommandList& RHICmdList, FVolumeBounds VolumeBounds);
 
 /** Vertex buffer used for rendering into a volume texture. */
-class FVolumeRasterizeVertexBuffer : public FVertexBuffer
+class ENGINE_API FVolumeRasterizeVertexBuffer : public FVertexBuffer
 {
 public:
-
-	virtual void InitRHI() override
-	{
-		// Used as a non-indexed triangle strip, so 4 vertices per quad
-		const uint32 Size = 4 * sizeof(FScreenVertex);
-		FRHIResourceCreateInfo CreateInfo;
-		void* Buffer = nullptr;
-		VertexBufferRHI = RHICreateAndLockVertexBuffer(Size, BUF_Static, CreateInfo, Buffer);		
-		FScreenVertex* DestVertex = (FScreenVertex*)Buffer;
-
-		// Setup a full - render target quad
-		// A viewport and UVScaleBias will be used to implement rendering to a sub region
-		DestVertex[0].Position = FVector2D(1, -GProjectionSignY);
-		DestVertex[0].UV = FVector2D(1, 1);
-		DestVertex[1].Position = FVector2D(1, GProjectionSignY);
-		DestVertex[1].UV = FVector2D(1, 0);
-		DestVertex[2].Position = FVector2D(-1, -GProjectionSignY);
-		DestVertex[2].UV = FVector2D(0, 1);
-		DestVertex[3].Position = FVector2D(-1, GProjectionSignY);
-		DestVertex[3].UV = FVector2D(0, 0);
-
-		RHIUnlockVertexBuffer(VertexBufferRHI);      
-	}
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 };
 
 extern ENGINE_API TGlobalResource<FVolumeRasterizeVertexBuffer> GVolumeRasterizeVertexBuffer;

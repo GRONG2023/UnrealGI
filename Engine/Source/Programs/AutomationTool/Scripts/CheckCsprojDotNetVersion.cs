@@ -1,13 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 using System;
-using System.Collections.Generic;
-using System.Text;
 using System.IO;
-using AutomationTool;
-using UnrealBuildTool;
-using System.Text.RegularExpressions;
-using Tools.DotNETCommon;
 using System.Linq;
+using System.Text.RegularExpressions;
+using AutomationTool;
+using EpicGames.Core;
+using UnrealBuildBase;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
+using System.Collections.Generic;
 
 class CheckCsprojDotNetVersion : BuildCommand
 {
@@ -20,57 +22,62 @@ class CheckCsprojDotNetVersion : BuildCommand
 			throw new AutomationException("-TargetVersion was not specified.");
 		}
 
-		string[] DesiredTargetVersions = DesiredTargetVersionParam.Split('+');
+		HashSet<string> DesiredTargetVersions = new HashSet<string>(DesiredTargetVersionParam.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
 
-		CommandUtils.LogInformation("Scanning for all csproj's...");
+		Logger.LogInformation("Scanning for all csproj's...");
 		// Check for all csproj's in the engine dir
-		DirectoryReference EngineDir = CommandUtils.EngineDirectory;
+		DirectoryReference EngineDir = Unreal.EngineDirectory;
 
 		// grab the targeted version.,
 		Regex FrameworkRegex = new Regex("<TargetFrameworkVersion>v(\\d\\.\\d\\.?\\d?)<\\/TargetFrameworkVersion>");
 		Regex PossibleAppConfigRegex = new Regex("<TargetFrameworkProfile>(.+)<\\/TargetFrameworkProfile>");
 		Regex AppConfigRegex = new Regex("<supportedRuntime version=\"v(\\d\\.\\d\\.?\\d?)\" sku=\"\\.NETFramework,Version=v(\\d\\.\\d\\.?\\d?),Profile=(.+)\"\\/>");
-        Regex DotNetCoreRegex = new Regex("<TargetFramework>(netcoreapp2.0|netstandard2.0)<\\/TargetFramework>");
-        foreach (FileReference CsProj in DirectoryReference.EnumerateFiles(EngineDir, "*.csproj", SearchOption.AllDirectories))
-        {
-            if (CsProj.ContainsName("ThirdParty", EngineDir) ||
-                (CsProj.ContainsName("UE4TemplateProject", EngineDir) && CsProj.GetFileName().Equals("ProjectTemplate.csproj")) ||
-                CsProj.GetFileNameWithoutExtension().ToLower().Contains("_mono") ||
-                CsProj.GetFileNameWithoutExtension().ToLower().Contains("unrealvs") ||
+		Regex NetCoreRegex = new Regex("<TargetFramework>(.*)<\\/TargetFramework>");
+		foreach (FileReference CsProj in DirectoryReference.EnumerateFiles(EngineDir, "*.csproj", SearchOption.AllDirectories))
+		{
+			if (CsProj.ContainsName("ThirdParty", EngineDir) ||
+				(CsProj.ContainsName("UE4TemplateProject", EngineDir) && CsProj.GetFileName().Equals("ProjectTemplate.csproj")) ||
+				CsProj.GetFileNameWithoutExtension().ToLower().Contains("_mono") ||
+				CsProj.ContainsName("UnrealVS", EngineDir) ||
 				CsProj.ContainsName("DatasmithRevitExporter", EngineDir) ||
-				CsProj.ContainsName("DatasmithNavisworksExporter", EngineDir))
+				CsProj.ContainsName("DatasmithNavisworksExporter", EngineDir) ||
+				CsProj.ContainsName("CSVTools", EngineDir))
+			{
+				continue;
+			}
 
-            {
-                continue;
-            }
+			// read in the file
+			string Contents = File.ReadAllText(CsProj.FullName);
 
-            // read in the file
-            string Contents = File.ReadAllText(CsProj.FullName);
-            Match Match = DotNetCoreRegex.Match(Contents);
-            // Check if we're a _NETCore app, ignore these.
-            if (Match.Success)
-            {
-                continue;
-            }
+			// Check if we're a _NETCore app
+			Match Match = NetCoreRegex.Match(Contents);
+			if (Match.Success)
+			{
+				string TargetedVersion = Regex.Replace(Match.Groups[1].Value, "-.*$", "");
+				if (!DesiredTargetVersions.Contains(TargetedVersion))
+				{
+					Logger.LogWarning("Targeted Framework version for project: {CsProj} was not {Arg1}! Targeted Version: {TargetedVersion}", CsProj, String.Join("/", DesiredTargetVersions), TargetedVersion);
+				}
+				continue;
+			}
 
-
-            Match = FrameworkRegex.Match(Contents);
-            if (Match.Success)
+			Match = FrameworkRegex.Match(Contents);
+			if (Match.Success)
 			{
 				string TargetedVersion = Match.Groups[1].Value;
 				// make sure we match, throw warning otherwise
 				if (!DesiredTargetVersions.Any(DesiredTargetVersion => DesiredTargetVersion.Equals(TargetedVersion, StringComparison.InvariantCultureIgnoreCase)))
 				{
-					CommandUtils.LogWarning("Targeted Framework version for project: {0} was not {1}! Targeted Version: {2}", CsProj, String.Join("/", DesiredTargetVersions), TargetedVersion);
+					Logger.LogWarning("Targeted Framework version for project: {CsProj} was not {Arg1}! Targeted Version: {TargetedVersion}", CsProj, String.Join("/", DesiredTargetVersions), TargetedVersion);
 				}
 			}
 			// if we don't have a TargetFrameworkVersion, check for the existence of TargetFrameworkProfile.
 			else
 			{
-                Match = PossibleAppConfigRegex.Match(Contents);
+				Match = PossibleAppConfigRegex.Match(Contents);
 				if (!Match.Success)
 				{
-					CommandUtils.LogInformation("No TargetFrameworkVersion or TargetFrameworkProfile found for project {0}, is it a mono project? If not, does it compile properly?", CsProj);
+					Logger.LogInformation("No TargetFrameworkVersion or TargetFrameworkProfile found for project {CsProj}, does it compile properly?", CsProj);
 					continue;
 				}
 
@@ -79,16 +86,16 @@ class CheckCsprojDotNetVersion : BuildCommand
 				string Profile = Match.Groups[1].Value;
 				if (!FileReference.Exists(AppConfigFile))
 				{
-					CommandUtils.LogInformation("Found TargetFrameworkProfile but no associated app.config containing the version for project {0}.", CsProj);
+					Logger.LogInformation("Found TargetFrameworkProfile but no associated app.config containing the version for project {CsProj}.", CsProj);
 					continue;
 				}
 
 				// read in the app config
 				Contents = File.ReadAllText(AppConfigFile.FullName);
-                Match = AppConfigRegex.Match(Contents);
+				Match = AppConfigRegex.Match(Contents);
 				if (!Match.Success)
 				{
-					CommandUtils.LogInformation("Couldn't find a supportedRuntime match for the version in the app.config for project {0}.", CsProj);
+					Logger.LogInformation("Couldn't find a supportedRuntime match for the version in the app.config for project {CsProj}.", CsProj);
 					continue;
 				}
 
@@ -102,21 +109,21 @@ class CheckCsprojDotNetVersion : BuildCommand
 				// not sure how this is possible, but check for it anyway
 				if (!ProfileString.Equals(Profile, StringComparison.InvariantCultureIgnoreCase))
 				{
-					CommandUtils.LogWarning("The TargetFrameworkProfile in csproj {0} ({1}) doesn't match the sku in it's app.config ({2}).", CsProj, Profile, ProfileString);
+					Logger.LogWarning("The TargetFrameworkProfile in csproj {CsProj} ({Profile}) doesn't match the sku in it's app.config ({ProfileString}).", CsProj, Profile, ProfileString);
 					continue;
 				}
 
 				// if the version numbers don't match the app.config is probably corrupt.
 				if (!Version1String.Equals(Version2String, StringComparison.InvariantCultureIgnoreCase))
 				{
-					CommandUtils.LogWarning("The supportedRunTimeVersion ({0}) and the sku version ({1}) in the app.config for project {2} don't match.", Version1String, Version2String, CsProj);
+					Logger.LogWarning("The supportedRunTimeVersion ({Version1String}) and the sku version ({Version2String}) in the app.config for project {CsProj} don't match.", Version1String, Version2String, CsProj);
 					continue;
 				}
 
 				// make sure the versions match
 				if (!(DesiredTargetVersions.Any(DesiredTargetVersion => DesiredTargetVersion.Equals(Version1String, StringComparison.InvariantCultureIgnoreCase))))
 				{
-					CommandUtils.LogWarning("Targeted Framework version for project: {0} was not {1}! Targeted Version: {2}", CsProj, String.Join("/", DesiredTargetVersions), Version1String);
+					Logger.LogWarning("Targeted Framework version for project: {CsProj} was not {Arg1}! Targeted Version: {Version1String}", CsProj, String.Join("/", DesiredTargetVersions), Version1String);
 				}
 			}
 		}

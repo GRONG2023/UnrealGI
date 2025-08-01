@@ -1,18 +1,52 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Customizations/ColorStructCustomization.h"
-#include "UObject/UnrealType.h"
-#include "Widgets/Text/STextBlock.h"
-#include "EngineGlobals.h"
-#include "Engine/Engine.h"
-#include "Editor.h"
-#include "ScopedTransaction.h"
-#include "Widgets/Colors/SColorBlock.h"
-#include "DetailWidgetRow.h"
+
+#include "Customizations/MathStructCustomizations.h"
+#include "Delegates/Delegate.h"
 #include "DetailLayoutBuilder.h"
-#include "IPropertyUtilities.h"
-#include "Widgets/Colors/SColorPicker.h"
+#include "DetailWidgetRow.h"
+#include "Editor.h"
+#include "Editor/EditorEngine.h"
+#include "Engine/Engine.h"
+#include "Fonts/SlateFontInfo.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/SlateDelegates.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "IPropertyTypeCustomization.h"
+#include "IPropertyUtilities.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Margin.h"
+#include "Layout/WidgetPath.h"
+#include "Math/Vector2D.h"
+#include "Math/Vector4.h"
+#include "Misc/Attribute.h"
+#include "PropertyHandle.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateTypes.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Class.h"
+#include "UObject/Field.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/Colors/SColorBlock.h"
+#include "Widgets/Colors/SColorPicker.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/SOverlay.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/SWindow.h"
+#include "Widgets/Text/STextBlock.h"
+
+struct FGeometry;
 
 
 #define LOCTEXT_NAMESPACE "FColorStructCustomization"
@@ -29,7 +63,7 @@ void FColorStructCustomization::CustomizeHeader(TSharedRef<class IPropertyHandle
 	StructPropertyHandle = InStructPropertyHandle;
 
 	bIsLinearColor = CastFieldChecked<FStructProperty>(StructPropertyHandle->GetProperty())->Struct->GetFName() == NAME_LinearColor;
-	bIgnoreAlpha = StructPropertyHandle->GetProperty()->HasMetaData(TEXT("HideAlphaChannel"));
+	bIgnoreAlpha = TypeSupportsAlpha() == false || StructPropertyHandle->GetProperty()->HasMetaData(TEXT("HideAlphaChannel"));
 	
 	if (StructPropertyHandle->GetProperty()->HasMetaData(TEXT("sRGB")))
 	{
@@ -45,13 +79,8 @@ void FColorStructCustomization::CustomizeHeader(TSharedRef<class IPropertyHandle
 
 void FColorStructCustomization::MakeHeaderRow(TSharedRef<class IPropertyHandle>& InStructPropertyHandle, FDetailWidgetRow& Row)
 {
-	// We'll set up reset to default ourselves
-	const bool bDisplayResetToDefault = false;
-	const FText DisplayNameOverride = FText::GetEmpty();
-	const FText DisplayToolTipOverride = FText::GetEmpty();
-	
 	TSharedPtr<SWidget> ColorWidget;
-	float ContentWidth = 250.0f;
+	float ContentWidth = 125.0f;
 
 	TWeakPtr<IPropertyHandle> StructWeakHandlePtr = StructPropertyHandle;
 
@@ -67,7 +96,7 @@ void FColorStructCustomization::MakeHeaderRow(TSharedRef<class IPropertyHandle>&
 
 	Row.NameContent()
 	[
-		StructPropertyHandle->CreatePropertyNameWidget(DisplayNameOverride, DisplayToolTipOverride, bDisplayResetToDefault)
+		StructPropertyHandle->CreatePropertyNameWidget()
 	]
 	.ValueContent()
 	.MinDesiredWidth(ContentWidth)
@@ -77,51 +106,59 @@ void FColorStructCustomization::MakeHeaderRow(TSharedRef<class IPropertyHandle>&
 }
 
 
+FColorStructCustomization::~FColorStructCustomization()
+{
+	if (TransactionIndex.IsSet())
+	{
+		GEditor->EndTransaction();
+	}
+}
+
 TSharedRef<SWidget> FColorStructCustomization::CreateColorWidget(TWeakPtr<IPropertyHandle> StructWeakHandlePtr)
 {
-	FSlateFontInfo NormalText = IDetailLayoutBuilder::GetDetailFont();
-
-	return SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot()
+	return
+		SNew(SBox)
+		.Padding(FMargin(0,0,4.0f,0.0f))
 		.VAlign(VAlign_Center)
-		.Padding(0.0f, 2.0f)
 		[
-			SNew(SOverlay)
-			+SOverlay::Slot()
-			[
-				// Displays the color with alpha unless it is ignored
-				SAssignNew(ColorPickerParentWidget, SColorBlock)
-				.Color(this, &FColorStructCustomization::OnGetColorForColorBlock)
-				.ShowBackgroundForAlpha(true)
-				.IgnoreAlpha(bIgnoreAlpha)
-				.OnMouseButtonDown(this, &FColorStructCustomization::OnMouseButtonDownColorBlock)
-				.Size(FVector2D(35.0f, 12.0f))
-				.IsEnabled(this, &FColorStructCustomization::IsValueEnabled, StructWeakHandlePtr)
-			]
-			+SOverlay::Slot()
-			.HAlign(HAlign_Center)
+			SAssignNew(ColorWidgetBackgroundBorder, SBorder)
+			.Padding(1)
+			.BorderImage(FAppStyle::Get().GetBrush("ColorPicker.RoundedSolidBackground"))
+			.BorderBackgroundColor(this, &FColorStructCustomization::GetColorWidgetBorderColor)
 			.VAlign(VAlign_Center)
 			[
-				SNew(STextBlock)
-				.Text(NSLOCTEXT("PropertyEditor", "MultipleValues", "Multiple Values"))
-				.Font(NormalText)
-				.ColorAndOpacity(FSlateColor(FLinearColor::Black)) // we know the background is always white, so can safely set this to black
-				.Visibility(this, &FColorStructCustomization::GetMultipleValuesTextVisibility)
+				SNew(SOverlay)
+				+ SOverlay::Slot()
+				.VAlign(VAlign_Center)
+				[
+					SAssignNew(ColorPickerParentWidget, SColorBlock)
+					.AlphaBackgroundBrush(FAppStyle::Get().GetBrush("ColorPicker.RoundedAlphaBackground"))
+					.Color(this, &FColorStructCustomization::OnGetColorForColorBlock)
+					.ShowBackgroundForAlpha(true)
+					.AlphaDisplayMode(bIgnoreAlpha ? EColorBlockAlphaDisplayMode::Ignore : EColorBlockAlphaDisplayMode::Separate)
+					.OnMouseButtonDown(this, &FColorStructCustomization::OnMouseButtonDownColorBlock)
+					.Size(FVector2D(70.0f, 20.0f))
+					.CornerRadius(FVector4(4.0f,4.0f,4.0f,4.0f))
+					.IsEnabled(this, &FColorStructCustomization::IsValueEnabled, StructWeakHandlePtr)
+				]
+				+ SOverlay::Slot()
+				.VAlign(VAlign_Center)
+				[
+					SNew(SBorder)
+					.Visibility(this, &FColorStructCustomization::GetMultipleValuesTextVisibility)
+					.BorderImage(FAppStyle::Get().GetBrush("ColorPicker.MultipleValuesBackground"))
+					.VAlign(VAlign_Center)
+					.ForegroundColor(FAppStyle::Get().GetWidgetStyle<FEditableTextBoxStyle>("NormalEditableTextBox").ForegroundColor)
+					.Padding(FMargin(12.0f, 2.0f))
+					[
+						SNew(STextBlock)
+						.Text(NSLOCTEXT("PropertyEditor", "MultipleValues", "Multiple Values"))
+						.Font(IDetailLayoutBuilder::GetDetailFont())
+					]
+				]
 			]
-		]
-		+ SHorizontalBox::Slot()
-		.VAlign(VAlign_Center)
-		.Padding(0.0f, 2.0f)
-		[
-			// Displays the color without alpha
-			SNew(SColorBlock)
-			.Color(this, &FColorStructCustomization::OnGetColorForColorBlock)
-			.ShowBackgroundForAlpha(false)
-			.IgnoreAlpha(true)
-			.OnMouseButtonDown(this, &FColorStructCustomization::OnMouseButtonDownColorBlock)
-			.Size(FVector2D(35.0f, 12.0f))
 		];
-}
+	}
 
 
 void FColorStructCustomization::GetSortedChildren(TSharedRef<IPropertyHandle> InStructPropertyHandle, TArray< TSharedRef<IPropertyHandle> >& OutChildren)
@@ -171,18 +208,13 @@ void FColorStructCustomization::GetSortedChildren(TSharedRef<IPropertyHandle> In
 	}
 }
 
-
-void FColorStructCustomization::CreateColorPicker(bool bUseAlpha)
+void FColorStructCustomization::GatherSavedPreColorPickerColors()
 {
-	GEditor->BeginTransaction(FText::Format(LOCTEXT("SetColorProperty", "Edit {0}"), StructPropertyHandle->GetPropertyDisplayName()));
-
-	int32 NumObjects = StructPropertyHandle->GetNumOuterObjects();
-
 	SavedPreColorPickerColors.Empty();
 	TArray<FString> PerObjectValues;
 	StructPropertyHandle->GetPerObjectValues(PerObjectValues);
 
-	for (int32 ObjectIndex = 0; ObjectIndex < NumObjects; ++ObjectIndex)
+	for (int32 ObjectIndex = 0; ObjectIndex < PerObjectValues.Num(); ++ObjectIndex)
 	{
 		if (bIsLinearColor)
 		{
@@ -197,6 +229,13 @@ void FColorStructCustomization::CreateColorPicker(bool bUseAlpha)
 			SavedPreColorPickerColors.Add(FLinearOrSrgbColor(Color));
 		}
 	}
+}
+
+void FColorStructCustomization::CreateColorPicker(bool bUseAlpha)
+{
+	TransactionIndex = GEditor->BeginTransaction(FText::Format(LOCTEXT("SetColorProperty", "Edit {0}"), StructPropertyHandle->GetPropertyDisplayName()));
+
+	GatherSavedPreColorPickerColors();
 
 	FLinearColor InitialColor;
 	GetColorAsLinear(InitialColor);
@@ -216,7 +255,7 @@ void FColorStructCustomization::CreateColorPicker(bool bUseAlpha)
 		PickerArgs.OnColorPickerWindowClosed = FOnWindowClosed::CreateSP(this, &FColorStructCustomization::OnColorPickerWindowClosed);
 		PickerArgs.OnInteractivePickBegin = FSimpleDelegate::CreateSP(this, &FColorStructCustomization::OnColorPickerInteractiveBegin);
 		PickerArgs.OnInteractivePickEnd = FSimpleDelegate::CreateSP(this, &FColorStructCustomization::OnColorPickerInteractiveEnd);
-		PickerArgs.InitialColorOverride = InitialColor;
+		PickerArgs.InitialColor = InitialColor;
 		PickerArgs.ParentWidget = ColorPickerParentWidget;
 		PickerArgs.OptionalOwningDetailsView = ColorPickerParentWidget;
 		FWidgetPath ParentWidgetPath;
@@ -232,29 +271,9 @@ void FColorStructCustomization::CreateColorPicker(bool bUseAlpha)
 
 TSharedRef<SColorPicker> FColorStructCustomization::CreateInlineColorPicker(TWeakPtr<IPropertyHandle> StructWeakHandlePtr)
 {
-	GEditor->BeginTransaction(FText::Format(LOCTEXT("SetColorProperty", "Edit {0}"), StructPropertyHandle->GetPropertyDisplayName()));
+	TransactionIndex = GEditor->BeginTransaction(FText::Format(LOCTEXT("SetColorProperty", "Edit {0}"), StructPropertyHandle->GetPropertyDisplayName()));
 
-	int32 NumObjects = StructPropertyHandle->GetNumOuterObjects();
-
-	SavedPreColorPickerColors.Empty();
-	TArray<FString> PerObjectValues;
-	StructPropertyHandle->GetPerObjectValues(PerObjectValues);
-
-	for (int32 ObjectIndex = 0; ObjectIndex < NumObjects; ++ObjectIndex)
-	{
-		if (bIsLinearColor)
-		{
-			FLinearColor Color;
-			Color.InitFromString(PerObjectValues[ObjectIndex]);
-			SavedPreColorPickerColors.Add(FLinearOrSrgbColor(Color));	
-		}
-		else
-		{
-			FColor Color;
-			Color.InitFromString(PerObjectValues[ObjectIndex]);
-			SavedPreColorPickerColors.Add(FLinearOrSrgbColor(Color));
-		}
-	}
+	GatherSavedPreColorPickerColors();
 
 	FLinearColor InitialColor;
 	GetColorAsLinear(InitialColor);
@@ -277,8 +296,7 @@ TSharedRef<SColorPicker> FColorStructCustomization::CreateInlineColorPicker(TWea
 		.IsEnabled(this, &FColorStructCustomization::IsValueEnabled, StructWeakHandlePtr);
 }
 
-
-void FColorStructCustomization::OnSetColorFromColorPicker(FLinearColor NewColor)
+void FColorStructCustomization::SetLastPickerColorString(const FLinearColor NewColor)
 {
 	if (bIsLinearColor)
 	{
@@ -290,6 +308,11 @@ void FColorStructCustomization::OnSetColorFromColorPicker(FLinearColor NewColor)
 		FColor NewFColor = NewColor.ToFColor(bSRGB);
 		LastPickerColorString = NewFColor.ToString();
 	}
+}
+
+void FColorStructCustomization::OnSetColorFromColorPicker(FLinearColor NewColor)
+{
+	SetLastPickerColorString(NewColor);
 
 	EPropertyValueSetFlags::Type PropertyFlags = EPropertyValueSetFlags::NotTransactable;
 	PropertyFlags |= bIsInteractive ? EPropertyValueSetFlags::InteractiveChange : 0;
@@ -297,7 +320,7 @@ void FColorStructCustomization::OnSetColorFromColorPicker(FLinearColor NewColor)
 	StructPropertyHandle->NotifyFinishedChangingProperties();
 }
 
-void FColorStructCustomization::ResetColors()
+TArray<FString> FColorStructCustomization::ConvertToPerObjectColors(const TArray<FLinearOrSrgbColor>& Colors) const
 {
 	TArray<FString> PerObjectColors;
 
@@ -314,6 +337,13 @@ void FColorStructCustomization::ResetColors()
 		}
 	}
 
+	return PerObjectColors;
+}
+
+void FColorStructCustomization::ResetColors()
+{
+	TArray<FString> PerObjectColors = ConvertToPerObjectColors(SavedPreColorPickerColors);
+
 	if (PerObjectColors.Num() > 0)
 	{
 		// See @TODO in FColorStructCustomization::OnColorPickerWindowClosed
@@ -328,6 +358,7 @@ void FColorStructCustomization::OnColorPickerCancelled(FLinearColor OriginalColo
 	LastPickerColorString.Reset();
 
 	GEditor->CancelTransaction(0);
+	TransactionIndex.Reset();
 }
 
 void FColorStructCustomization::OnColorPickerWindowClosed(const TSharedRef<SWindow>& Window)
@@ -345,6 +376,7 @@ void FColorStructCustomization::OnColorPickerWindowClosed(const TSharedRef<SWind
 	}
 
 	GEditor->EndTransaction();
+	TransactionIndex.Reset();
 }
 
 
@@ -367,6 +399,20 @@ FLinearColor FColorStructCustomization::OnGetColorForColorBlock() const
 	return Color;
 }
 
+
+FSlateColor FColorStructCustomization::OnGetSlateColorForBlock() const
+{
+	FLinearColor Color = OnGetColorForColorBlock();
+	Color.A = 1;
+	return FSlateColor(Color);
+}
+
+FSlateColor FColorStructCustomization::GetColorWidgetBorderColor() const
+{
+	static const FSlateColor HoveredColor = FAppStyle::Get().GetSlateColor("Colors.Hover");
+	static const FSlateColor DefaultColor = FAppStyle::Get().GetSlateColor("Colors.InputOutline");
+	return ColorWidgetBackgroundBorder->IsHovered() ? HoveredColor : DefaultColor;
+}
 
 FPropertyAccess::Result FColorStructCustomization::GetColorAsLinear(FLinearColor& OutColor) const
 {
@@ -402,7 +448,7 @@ EVisibility FColorStructCustomization::GetMultipleValuesTextVisibility() const
 {
 	FLinearColor Color;
 	const FPropertyAccess::Result ValueResult = GetColorAsLinear(Color);
-	return (ValueResult == FPropertyAccess::MultipleValues) ? EVisibility::Visible : EVisibility::Collapsed;
+	return (ValueResult == FPropertyAccess::MultipleValues) ? EVisibility::HitTestInvisible : EVisibility::Collapsed;
 }
 
 

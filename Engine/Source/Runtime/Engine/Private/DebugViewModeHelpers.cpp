@@ -3,31 +3,79 @@
 /*=============================================================================
 	DebugViewModeHelpers.cpp: debug view shader helpers.
 =============================================================================*/
+
 #include "DebugViewModeHelpers.h"
 #include "DebugViewModeInterface.h"
 #include "Materials/MaterialInterface.h"
-#include "Materials/Material.h"
-#include "MaterialShaderType.h"
+#include "MaterialDomain.h"
 #include "MeshMaterialShader.h"
+#include "RenderingThread.h"
 #include "ShaderCompiler.h"
 #include "Misc/ScopedSlowTask.h"
 #include "Misc/FeedbackContext.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "Components/PrimitiveComponent.h"
 #include "ActorEditorUtils.h"
+#include "DataDrivenShaderPlatformInfo.h"
 
 #define LOCTEXT_NAMESPACE "LogDebugViewMode"
 
-#if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+static TAutoConsoleVariable<bool> CVarEnableDebugViewModeHelpers(
+	TEXT("DebugViewModeHelpers.Enable"),
+	true,
+	TEXT("Specifies whether to enable the debug view mode shaders. Typically only disabled for a special case editor build, if it doesn't require them"),
+	ECVF_Default);
+
+const TCHAR* DebugViewShaderModeToString(EDebugViewShaderMode InShaderMode)
+{
+	switch (InShaderMode)
+	{
+	case DVSM_None:
+		return TEXT("DVSM_None");
+	case DVSM_ShaderComplexity:
+		return TEXT("DVSM_ShaderComplexity");
+	case DVSM_ShaderComplexityContainedQuadOverhead:
+		return TEXT("DVSM_ShaderComplexityContainedQuadOverhead");
+	case DVSM_ShaderComplexityBleedingQuadOverhead:
+		return TEXT("DVSM_ShaderComplexityBleedingQuadOverhead");
+	case DVSM_QuadComplexity:
+		return TEXT("DVSM_QuadComplexity");
+	case DVSM_PrimitiveDistanceAccuracy:
+		return TEXT("DVSM_PrimitiveDistanceAccuracy");
+	case DVSM_MeshUVDensityAccuracy:
+		return TEXT("DVSM_MeshUVDensityAccuracy");
+	case DVSM_MaterialTextureScaleAccuracy:
+		return TEXT("DVSM_MaterialTextureScaleAccuracy");
+	case DVSM_OutputMaterialTextureScales:
+		return TEXT("DVSM_OutputMaterialTextureScales");
+	case DVSM_RequiredTextureResolution:
+		return TEXT("DVSM_RequiredTextureResolution");
+	case DVSM_VirtualTexturePendingMips:
+		return TEXT("DVSM_VirtualTexturePendingMips");
+	case DVSM_LODColoration:
+		return TEXT("DVSM_LODColoration");
+	case DVSM_VisualizeGPUSkinCache:
+		return TEXT("DVSM_VisualizeGPUSkinCache");
+	default:
+		return TEXT("DVSM_None");
+	}
+}
+
+#if WITH_DEBUG_VIEW_MODES
 
 static bool PlatformSupportsDebugViewShaders(EShaderPlatform Platform)
 {
 	// List of platforms that have been tested and proved functional.
-	return Platform == SP_VULKAN_SM5 || Platform == SP_PCD3D_SM5 || Platform == SP_METAL_SM5_NOTESS || Platform == SP_METAL_SM5;
+	return FDataDrivenShaderPlatformInfo::GetSupportsDebugViewShaders(Platform);
 }
 
 bool AllowDebugViewVSDSHS(EShaderPlatform Platform)
 {
+	if(!CVarEnableDebugViewModeHelpers.GetValueOnAnyThread())
+	{
+		return false;
+	}
 	return IsPCPlatform(Platform); 
 }
 
@@ -49,16 +97,17 @@ bool AllowDebugViewShaderMode(EDebugViewShaderMode ShaderMode, EShaderPlatform P
 	case DVSM_ShaderComplexityContainedQuadOverhead:
 	case DVSM_ShaderComplexityBleedingQuadOverhead:
 	case DVSM_QuadComplexity:
-		return FeatureLevel >= ERHIFeatureLevel::SM5 && (bForceQuadOverdraw || (PlatformSupportsDebugViewShaders(Platform) && !IsMetalPlatform(Platform))); // Last one to fix for Metal then remove this Metal check.
+		return (bForceQuadOverdraw || (PlatformSupportsDebugViewShaders(Platform) && !IsMetalPlatform(Platform))); // Last one to fix for Metal then remove this Metal check.
 	case DVSM_PrimitiveDistanceAccuracy:
 	case DVSM_MeshUVDensityAccuracy:
 		return FeatureLevel >= ERHIFeatureLevel::SM5 && (bForceStreamingAccuracy || PlatformSupportsDebugViewShaders(Platform));
 	case DVSM_MaterialTextureScaleAccuracy:
 	case DVSM_RequiredTextureResolution:
 	case DVSM_OutputMaterialTextureScales:
+	case DVSM_VirtualTexturePendingMips:
 		return FeatureLevel >= ERHIFeatureLevel::SM5 && (bForceTextureStreamingBuild || PlatformSupportsDebugViewShaders(Platform));
-	case DVSM_RayTracingDebug:
-		return FeatureLevel >= ERHIFeatureLevel::SM5 ;
+	case DVSM_VisualizeGPUSkinCache:
+		return PlatformSupportsDebugViewShaders(Platform);
 	default:
 		return false;
 	}
@@ -67,32 +116,26 @@ bool AllowDebugViewShaderMode(EDebugViewShaderMode ShaderMode, EShaderPlatform P
 #endif
 }
 
-bool ShouldCompileDebugViewModeShader(EDebugViewShaderMode ShaderMode, const FMeshMaterialShaderPermutationParameters& Parameters)
+bool ShouldCompileDebugViewModeShader(const FMeshMaterialShaderPermutationParameters& Parameters)
 {
+	if(!CVarEnableDebugViewModeHelpers.GetValueOnAnyThread())
+	{
+		return false;
+	}
+
+	if (!PlatformSupportsDebugViewShaders(Parameters.Platform))
+	{
+		return false;
+	}
+
+	if (Parameters.MaterialParameters.FeatureLevel < ERHIFeatureLevel::SM5)
+	{
+		return false;
+	}
+
 	if (!EnumHasAllFlags(Parameters.Flags, EShaderPermutationFlags::HasEditorOnlyData))
 	{
 		// Debug view shaders only in editor
-		return false;
-	}
-
-	if (!AllowDebugViewShaderMode(ShaderMode, Parameters.Platform, Parameters.MaterialParameters.FeatureLevel))
-	{
-		// Don't support this mode
-		return false;
-	}
-
-	const FDebugViewModeInterface* DebugViewModeInterface = FDebugViewModeInterface::GetInterface(ShaderMode);
-	if (!DebugViewModeInterface->bNeedsMaterialProperties &&
-		!Parameters.MaterialParameters.bIsDefaultMaterial &&
-		FDebugViewModeInterface::AllowFallbackToDefaultMaterial(Parameters.MaterialParameters.TessellationMode, Parameters.MaterialParameters.bHasVertexPositionOffsetConnected, Parameters.MaterialParameters.bHasPixelDepthOffsetConnected))
-	{
-		// We can replace this material with the default material
-		return false;
-	}
-
-	if (DebugViewModeInterface->bNeedsOnlyLocalVertexFactor && Parameters.VertexFactoryType->GetFName() != TEXT("FLocalVertexFactory"))
-	{
-		// This debug view mode only needed for local vertex factory
 		return false;
 	}
 
@@ -221,7 +264,7 @@ bool GetUsedMaterialsInWorld(UWorld* InWorld, OUT TSet<UMaterialInterface*>& Out
 			}
 
 			TInlineComponentArray<UPrimitiveComponent*> Primitives;
-			Actor->GetComponents<UPrimitiveComponent>(Primitives);
+			Actor->GetComponents(Primitives);
 
 			for (UPrimitiveComponent* Primitive : Primitives)
 			{
@@ -276,52 +319,69 @@ bool CompileDebugViewModeShaders(EDebugViewShaderMode ShaderMode, EMaterialQuali
 	{
 		return false;
 	}
+	
+	EShaderPlatform Platform = GetFeatureLevelShaderPlatform(FeatureLevel);
 
-	TSet<UMaterialInterface*> PendingMaterials = Materials;
-	while (PendingMaterials.Num() > 0)
+	FMaterialShaderTypes ShaderTypes;
+	DebugViewModeInterface->AddShaderTypes(FeatureLevel, LocalVertexFactory, ShaderTypes);
+
+	TArray<FMaterial*> PendingMaterials;
+	PendingMaterials.Reserve(Materials.Num());
+
+	for (TSet<UMaterialInterface*>::TIterator It(Materials); It; ++It)
 	{
-		for(TSet<UMaterialInterface*>::TIterator It(PendingMaterials); It; ++It )
+		UMaterialInterface* MaterialInterface = *It;
+		check(MaterialInterface); // checked for null in GetTextureStreamingBuildMaterials
+		
+		FMaterial* Material = MaterialInterface->GetMaterialResource(FeatureLevel, QualityLevel);
+		if (!Material)
 		{
-			UMaterialInterface* MaterialInterface = *It;
-			check(MaterialInterface); // checked for null in GetTextureStreamingBuildMaterials
-
-			const FMaterial* Material = MaterialInterface->GetMaterialResource(FeatureLevel, QualityLevel);
-			bool bMaterialFinished = true;
-			if (Material && Material->GetGameThreadShaderMap())
-			{
-				if (!DebugViewModeInterface->bNeedsMaterialProperties &&
-					FDebugViewModeInterface::AllowFallbackToDefaultMaterial(Material))
-				{
-					Material = UMaterial::GetDefaultMaterial(MD_Surface)->GetMaterialResource(FeatureLevel, QualityLevel);
-					check(Material);
-				}
-
-				FMaterialShaderTypes ShaderTypes;
-				DebugViewModeInterface->AddShaderTypes(FeatureLevel, Material->GetTessellationMode(), LocalVertexFactory, ShaderTypes);
-				if (Material->ShouldCacheShaders(ShaderTypes, LocalVertexFactory) && !Material->HasShaders(ShaderTypes, LocalVertexFactory))
-				{
-					bMaterialFinished = false;
-				}
-			}
-
-			if (bMaterialFinished)
-			{
-				It.RemoveCurrent();
-			}
+			continue;
 		}
 
-		if (PendingMaterials.Num() > 0)
+		// Remove materials incompatible with debug view modes (e.g. landscape materials can only be compiled with the landscape VF)
+		if (Material->GetMaterialDomain() != MD_Surface || Material->IsUsedWithLandscape())
 		{
-			FPlatformProcess::Sleep(0.1f);
-			GShaderCompilingManager->ProcessAsyncResults(false, false);
-			if (GWarn->ReceivedUserCancel())
-			{
-				break;
-			}
+			It.RemoveCurrent();
+			continue;
+		}
+		
+		// If material needs the shaders for this platform cached, begin the operation.
+		if (Material->GetGameThreadShaderMap()
+			&& Material->ShouldCacheShaders(Platform, ShaderTypes, LocalVertexFactory)
+			&& !Material->HasShaders(ShaderTypes, LocalVertexFactory))
+		{
+			Material->CacheShaders(Platform, EMaterialShaderPrecompileMode::Default);
+			PendingMaterials.Push(Material);
 		}
 	}
 
-	return PendingMaterials.Num() == 0;
+	bool bAllMaterialsCompiledSuccessfully = true;
+	while (PendingMaterials.Num() > 0)
+	{
+		FMaterial* Material = PendingMaterials.Last();
+
+		// Check if material has completed compiling the shaders.
+		if (Material->IsCompilationFinished())
+		{
+			bAllMaterialsCompiledSuccessfully &= Material->HasShaders(ShaderTypes, LocalVertexFactory);
+			PendingMaterials.Pop();
+			continue;
+		}
+
+		// Are we asked to cancel the operation?
+		if (GWarn->ReceivedUserCancel())
+		{
+			bAllMaterialsCompiledSuccessfully = false;
+			break;
+		}
+
+		// Wait a little then try again.
+		FPlatformProcess::Sleep(0.1f);
+		GShaderCompilingManager->ProcessAsyncResults(false, false);
+	}
+
+	return bAllMaterialsCompiledSuccessfully;
 
 #else
 	return false;

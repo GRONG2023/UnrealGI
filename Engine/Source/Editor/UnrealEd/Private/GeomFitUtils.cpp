@@ -23,29 +23,13 @@
 #include "MeshDescription.h"
 #include "StaticMeshAttributes.h"
 #include "Settings/EditorExperimentalSettings.h"
-
-#define LOCAL_EPS (0.01f)
-static void AddVertexIfNotPresent(TArray<FVector> &vertices, FVector &newVertex)
-{
-	bool isPresent = 0;
-
-	for(int32 i=0; i<vertices.Num() && !isPresent; i++)
-	{
-		float diffSqr = (newVertex - vertices[i]).SizeSquared();
-		if(diffSqr < LOCAL_EPS * LOCAL_EPS)
-			isPresent = 1;
-	}
-
-	if(!isPresent)
-		vertices.Add(newVertex);
-
-}
+#include "CompGeom/FitKDOP3.h"
 
 static bool PromptToRemoveExistingCollision(UStaticMesh* StaticMesh)
 {
 	check(StaticMesh);
 	UBodySetup* bs = StaticMesh->GetBodySetup();
-	if(bs && (bs->AggGeom.GetElementCount() > 0))
+	if (bs && (bs->AggGeom.GetElementCount() > 0))
 	{
 		// If we already have some simplified collision for this mesh - check before we clobber it.
 		/*const EAppReturnType::Type ret = FMessageDialog::Open(EAppMsgType::YesNoCancel, NSLOCTEXT("UnrealEd", "StaticMeshAlreadyHasGeom", "Static Mesh already has simple collision.\nDo you want to replace it?"));
@@ -72,9 +56,6 @@ static bool PromptToRemoveExistingCollision(UStaticMesh* StaticMesh)
 // This function takes the current collision model, and fits a k-DOP around it.
 // It uses the array of k unit-length direction vectors to define the k bounding planes.
 
-// THIS FUNCTION REPLACES EXISTING SIMPLE COLLISION MODEL WITH KDOP
-#define MY_FLTMAX (3.402823466e+38F)
-
 int32 GenerateKDopAsSimpleCollision(UStaticMesh* StaticMesh, const TArray<FVector> &Dirs)
 {
 	// Make sure rendering is done - so we are not changing data being used by collision drawing.
@@ -87,103 +68,30 @@ int32 GenerateKDopAsSimpleCollision(UStaticMesh* StaticMesh, const TArray<FVecto
 
 	UBodySetup* bs = StaticMesh->GetBodySetup();
 
-	// Do k- specific stuff.
-	int32 kCount = Dirs.Num();
-	TArray<float> maxDist;
-	for(int32 i=0; i<kCount; i++)
-		maxDist.Add(-MY_FLTMAX);
-
-	// Construct temporary UModel for kdop creation. We keep no refs to it, so it can be GC'd.
-	auto TempModel = NewObject<UModel>();
-	TempModel->Initialize(nullptr, 1);
-
-	// For each vertex, project along each kdop direction, to find the max in that direction.
 	const FStaticMeshLODResources& RenderData = StaticMesh->GetRenderData()->LODResources[0];
-	for(int32 i=0; i<RenderData.GetNumVertices(); i++)
-	{
-		for(int32 j=0; j<kCount; j++)
-		{
-			float dist = RenderData.VertexBuffers.PositionVertexBuffer.VertexPosition(i) | Dirs[j];
-			maxDist[j] = FMath::Max(dist, maxDist[j]);
-		}
-	}
-
-	// Inflate kdop to ensure it is no degenerate
-	const float MinSize = 0.1f;
-	for(int32 i=0; i<kCount; i++)
-	{
-		maxDist[i] += MinSize;
-	}
-
-	// Now we have the planes of the kdop, we work out the face polygons.
-	TArray<FPlane> planes;
-	for(int32 i=0; i<kCount; i++)
-		planes.Add( FPlane(Dirs[i], maxDist[i]) );
-
-	for(int32 i=0; i<planes.Num(); i++)
-	{
-		FPoly*	Polygon = new(TempModel->Polys->Element) FPoly();
-		FVector Base, AxisX, AxisY;
-
-		Polygon->Init();
-		Polygon->Normal = planes[i];
-		Polygon->Normal.FindBestAxisVectors(AxisX,AxisY);
-
-		Base = planes[i] * planes[i].W;
-
-		new(Polygon->Vertices) FVector(Base + AxisX * HALF_WORLD_MAX + AxisY * HALF_WORLD_MAX);
-		new(Polygon->Vertices) FVector(Base + AxisX * HALF_WORLD_MAX - AxisY * HALF_WORLD_MAX);
-		new(Polygon->Vertices) FVector(Base - AxisX * HALF_WORLD_MAX - AxisY * HALF_WORLD_MAX);
-		new(Polygon->Vertices) FVector(Base - AxisX * HALF_WORLD_MAX + AxisY * HALF_WORLD_MAX);
-
-		for(int32 j=0; j<planes.Num(); j++)
-		{
-			if(i != j)
-			{
-				if(!Polygon->Split(-FVector(planes[j]), planes[j] * planes[j].W))
-				{
-					Polygon->Vertices.Empty();
-					break;
-				}
-			}
-		}
-
-		if(Polygon->Vertices.Num() < 3)
-		{
-			// If poly resulted in no verts, remove from array
-			TempModel->Polys->Element.RemoveAt(TempModel->Polys->Element.Num()-1);
-		}
-		else
-		{
-			// Other stuff...
-			Polygon->iLink = i;
-			Polygon->CalcNormal(1);
-		}
-	}
-
-	if(TempModel->Polys->Element.Num() < 4)
-	{
-		TempModel = NULL;
-		return INDEX_NONE;
-	}
-
-	// Build bounding box.
-	TempModel->BuildBound();
-
-	// Build BSP for the brush.
-	FBSPOps::bspBuild(TempModel,FBSPOps::BSP_Good,15,70,1,0);
-	FBSPOps::bspRefresh(TempModel,1);
-	FBSPOps::bspBuildBounds(TempModel);
+	TArray<FVector> HullVertices;
+	UE::Geometry::FitKDOPVertices3<double>(Dirs, RenderData.GetNumVertices(),
+		[&](int32 VertIdx) { return (FVector)RenderData.VertexBuffers.PositionVertexBuffer.VertexPosition(VertIdx); }, HullVertices);
 
 	bs->Modify();
 
-	bs->CreateFromModel(TempModel, false);
+	// Create new GUID
+	bs->InvalidatePhysicsData();
+
+	FKConvexElem ConvexElem;
+	ConvexElem.VertexData = HullVertices;
+	// Note: UpdateElemBox also computes the convex hull indices
+	ConvexElem.UpdateElemBox();
+
+	bs->AggGeom.ConvexElems.Add(ConvexElem);
 	
 	// create all body instances
 	RefreshCollisionChange(*StaticMesh);
 
 	// Mark staticmesh as dirty, to help make sure it gets saved.
 	StaticMesh->MarkPackageDirty();
+
+	StaticMesh->bCustomizedCollision = true;	//mark the static mesh for collision customization
 
 	return bs->AggGeom.ConvexElems.Num() - 1;
 }
@@ -209,7 +117,7 @@ int32 GenerateBoxAsSimpleCollision(UStaticMesh* StaticMesh)
 	// Calculate bounding Box.
 	FVector Center, Extents;
 	StaticMesh->GetMeshDescription(0)->ComputeBoundingBox().GetCenterAndExtents(Center, Extents);
-	Extents *= bs->BuildScale3D;
+	Extents *= (FVector)bs->BuildScale3D;
 
 	bs->Modify();
 
@@ -252,25 +160,25 @@ static void CalcBoundingSphere(const FMeshDescription* MeshDescription, FSphere&
 
 	FStaticMeshConstAttributes Attributes(*MeshDescription);
 
-	TVertexAttributesConstRef<FVector> VertexPositions = Attributes.GetVertexPositions();
+	TVertexAttributesConstRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
 
 	bool bFirstVertex = true;
 	for (const FVertexID VertexID : MeshDescription->Vertices().GetElementIDs())
 	{
-		FVector p = VertexPositions[VertexID] * LimitVec;
+		FVector p = (FVector)VertexPositions[VertexID] * LimitVec;
 		if (bFirstVertex)
 		{
 			// First, find AABB, remembering furthest points in each dir.
 			Box.Min = p;
 			Box.Max = Box.Min;
 
-			MinIx[0] = VertexPositions[VertexID];
-			MinIx[1] = VertexPositions[VertexID];
-			MinIx[2] = VertexPositions[VertexID];
+			MinIx[0] = (FVector)VertexPositions[VertexID];
+			MinIx[1] = (FVector)VertexPositions[VertexID];
+			MinIx[2] = (FVector)VertexPositions[VertexID];
 
-			MaxIx[0] = VertexPositions[VertexID];
-			MaxIx[1] = VertexPositions[VertexID];
-			MaxIx[2] = VertexPositions[VertexID];
+			MaxIx[0] = (FVector)VertexPositions[VertexID];
+			MaxIx[1] = (FVector)VertexPositions[VertexID];
+			MaxIx[2] = (FVector)VertexPositions[VertexID];
 			bFirstVertex = false;
 			continue;
 		}
@@ -279,36 +187,36 @@ static void CalcBoundingSphere(const FMeshDescription* MeshDescription, FSphere&
 		if (p.X < Box.Min.X)
 		{
 			Box.Min.X = p.X;
-			MinIx[0] = VertexPositions[VertexID];
+			MinIx[0] = (FVector)VertexPositions[VertexID];
 		}
 		else if (p.X > Box.Max.X)
 		{
 			Box.Max.X = p.X;
-			MaxIx[0] = VertexPositions[VertexID];
+			MaxIx[0] = (FVector)VertexPositions[VertexID];
 		}
 
 		// Y //
 		if (p.Y < Box.Min.Y)
 		{
 			Box.Min.Y = p.Y;
-			MinIx[1] = VertexPositions[VertexID];
+			MinIx[1] = (FVector)VertexPositions[VertexID];
 		}
 		else if (p.Y > Box.Max.Y)
 		{
 			Box.Max.Y = p.Y;
-			MaxIx[1] = VertexPositions[VertexID];
+			MaxIx[1] = (FVector)VertexPositions[VertexID];
 		}
 
 		// Z //
 		if (p.Z < Box.Min.Z)
 		{
 			Box.Min.Z = p.Z;
-			MinIx[2] = VertexPositions[VertexID];
+			MinIx[2] = (FVector)VertexPositions[VertexID];
 		}
 		else if (p.Z > Box.Max.Z)
 		{
 			Box.Max.Z = p.Z;
-			MaxIx[2] = VertexPositions[VertexID];
+			MaxIx[2] = (FVector)VertexPositions[VertexID];
 		}
 	}
 
@@ -338,7 +246,7 @@ static void CalcBoundingSphere(const FMeshDescription* MeshDescription, FSphere&
 	// Now check each point lies within this sphere. If not - expand it a bit.
 	for (const FVertexID VertexID : MeshDescription->Vertices().GetElementIDs())
 	{
-		const FVector cToP = (VertexPositions[VertexID] * LimitVec) - sphere.Center;
+		const FVector cToP = ((FVector)VertexPositions[VertexID] * LimitVec) - sphere.Center;
 
 		const float pr2 = cToP.SizeSquared();
 
@@ -367,11 +275,11 @@ static void CalcBoundingSphere2(const FMeshDescription* MeshDescription, FSphere
 	sphere.W = 0.0f;
 
 	FStaticMeshConstAttributes Attributes(*MeshDescription);
-	TVertexAttributesConstRef<FVector> VertexPositions = Attributes.GetVertexPositions();
+	TVertexAttributesConstRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
 
 	for (const FVertexID VertexID : MeshDescription->Vertices().GetElementIDs())
 	{
-		float Dist = FVector::DistSquared(VertexPositions[VertexID] * LimitVec, sphere.Center);
+		float Dist = FVector::DistSquared((FVector)VertexPositions[VertexID] * LimitVec, sphere.Center);
 		if (Dist > sphere.W)
 			sphere.W = Dist;
 	}
@@ -389,7 +297,7 @@ int32 GenerateSphereAsSimpleCollision(UStaticMesh* StaticMesh)
 
 	UBodySetup* bs = StaticMesh->GetBodySetup();
 	FSphere bSphere, bSphere2, bestSphere;
-	FVector unitVec = bs->BuildScale3D;
+	FVector unitVec = (FVector)bs->BuildScale3D;
 
 	// Calculate bounding sphere.
 	FMeshDescription* MeshDescription = StaticMesh->GetMeshDescription(0);
@@ -444,7 +352,7 @@ static void CalcBoundingSphyl(const FMeshDescription* MeshDescription, FSphere& 
 	sphere.Center = Center;
 
 	// Work out best axis aligned orientation (longest side)
-	float Extent = Extents.GetMax();
+	double Extent = Extents.GetMax();
 	if (Extent == Extents.X)
 	{
 		rotation = FRotator(90.f, 0.f, 0.f);
@@ -466,12 +374,12 @@ static void CalcBoundingSphyl(const FMeshDescription* MeshDescription, FSphere& 
 	float r2 = FMath::Square(r);
 	
 	FStaticMeshConstAttributes Attributes(*MeshDescription);
-	TVertexAttributesConstRef<FVector> VertexPositions = Attributes.GetVertexPositions();
+	TVertexAttributesConstRef<FVector3f> VertexPositions = Attributes.GetVertexPositions();
 
 	// Now check each point lies within this the radius. If not - expand it a bit.
 	for (const FVertexID VertexID : MeshDescription->Vertices().GetElementIDs())
 	{
-		FVector cToP = (VertexPositions[VertexID] * LimitVec) - sphere.Center;
+		FVector cToP = ((FVector)VertexPositions[VertexID] * LimitVec) - sphere.Center;
 		cToP = rotation.UnrotateVector(cToP);
 
 		const float pr2 = cToP.SizeSquared2D();	// Ignore Z here...
@@ -492,7 +400,7 @@ static void CalcBoundingSphyl(const FMeshDescription* MeshDescription, FSphere& 
 	// Now check each point lies within the length. If not - expand it a bit.
 	for (const FVertexID VertexID : MeshDescription->Vertices().GetElementIDs())
 	{
-		FVector cToP = (VertexPositions[VertexID] * LimitVec) - sphere.Center;
+		FVector cToP = ((FVector)VertexPositions[VertexID] * LimitVec) - sphere.Center;
 		cToP = rotation.UnrotateVector(cToP);
 
 		// If this point is outside our current bounding sphyl's length
@@ -510,7 +418,7 @@ static void CalcBoundingSphyl(const FMeshDescription* MeshDescription, FSphere& 
 				FMath::SphereDistToLine(cOrigin, r, cToP, (bFlip ? FVector(0.f, 0.f, 1.f) : FVector(0.f, 0.f, -1.f)), cPoint);
 
 				// Don't accept zero as a valid diff when we know it's outside the sphere (saves needless retest on further iterations of like points)
-				hl += FMath::Max(FMath::Abs(cToP.Z - cPoint.Z), 1.e-6f);
+				hl += FMath::Max<float>(FMath::Abs(cToP.Z - cPoint.Z), 1.e-6f);
 			}
 		}
 	}
@@ -533,7 +441,7 @@ int32 GenerateSphylAsSimpleCollision(UStaticMesh* StaticMesh)
 	FSphere sphere;
 	float length;
 	FRotator rotation;
-	FVector unitVec = bs->BuildScale3D;
+	FVector unitVec = (FVector)bs->BuildScale3D;
 
 	// Calculate bounding box.
 	FMeshDescription* MeshDescription = StaticMesh->GetMeshDescription(0);
@@ -623,11 +531,22 @@ void RefreshCollisionChanges(const TArray<UStaticMesh*>& StaticMeshes)
 	FEditorSupportDelegates::RedrawAllViewports.Broadcast();
 }
 
-/* *************************** DEPRECATED ******************************** */
-void RefreshCollisionChange(const UStaticMesh* StaticMesh)
+void RefreshCollisionChangeComponentsOnly(UStaticMesh& StaticMesh)
 {
-	if (StaticMesh)
+	TRACE_CPUPROFILER_EVENT_SCOPE(RefreshCollisionChangeComponentsOnly)
+
+	for (FThreadSafeObjectIterator Iter(UStaticMeshComponent::StaticClass()); Iter; ++Iter)
 	{
-		RefreshCollisionChange(const_cast<UStaticMesh&>(*StaticMesh));
+		UStaticMeshComponent* StaticMeshComponent = Cast<UStaticMeshComponent>(*Iter);
+		if (StaticMeshComponent->GetStaticMesh() == &StaticMesh)
+		{
+			// it needs to recreate IF it already has been created
+			if (StaticMeshComponent->IsPhysicsStateCreated())
+			{
+				StaticMeshComponent->RecreatePhysicsState();
+			}
+		}
 	}
+
+	FEditorSupportDelegates::RedrawAllViewports.Broadcast();
 }

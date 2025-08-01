@@ -2,6 +2,8 @@
 
 #include "Table.h"
 
+#include "Logging/MessageLog.h"
+
 // Insights
 #include "Insights/Table/ViewModels/TableCellValueFormatter.h"
 #include "Insights/Table/ViewModels/TableCellValueGetter.h"
@@ -18,7 +20,7 @@ namespace Insights
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 FTable::FTable()
-	: Name()
+	: DisplayName()
 	, Description()
 	, Columns()
 	, ColumnIdToPtrMapping()
@@ -49,11 +51,11 @@ int32 FTable::GetColumnPositionIndex(const FName& ColumnId) const
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FTable::SetColumns(const TArray<TSharedRef<Insights::FTableColumn>>& InColumns)
+void FTable::SetColumns(const TArray<TSharedRef<FTableColumn>>& InColumns)
 {
 	Columns.Reset(InColumns.Num());
 	ColumnIdToPtrMapping.Reset();
-	for (TSharedRef<Insights::FTableColumn> ColumnRef : InColumns)
+	for (TSharedRef<FTableColumn> ColumnRef : InColumns)
 	{
 		AddColumn(ColumnRef);
 	}
@@ -70,11 +72,17 @@ void FTable::AddColumn(TSharedRef<FTableColumn> ColumnRef)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+const FName FTable::GetHierarchyColumnId()
+{
+	static const FName HierarchyColumnId(TEXT("_Hierarchy"));
+	return HierarchyColumnId;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void FTable::AddHierarchyColumn(int32 ColumnIndex, const TCHAR* ColumnName)
 {
-	const FName HierarchyColumnId(TEXT("_Hierarchy"));
-
-	TSharedRef<FTableColumn> ColumnRef = MakeShared<FTableColumn>(HierarchyColumnId);
+	TSharedRef<FTableColumn> ColumnRef = MakeShared<FTableColumn>(GetHierarchyColumnId());
 	FTableColumn& Column = *ColumnRef;
 
 	Column.SetIndex(ColumnIndex);
@@ -120,39 +128,86 @@ void FTable::GetVisibleColumns(TArray<TSharedRef<FTableColumn>>& InArray) const
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-void FTable::GetVisibleColumnsData(const TArray<Insights::FBaseTreeNodePtr>& InNodes, FString& OutData) const
+void FTable::GetVisibleColumnsData(const TArray<FBaseTreeNodePtr>& InNodes, const FName& LogListingName, TCHAR Separator, bool bIncludeHeaders, FString& OutData) const
 {
-	constexpr TCHAR Separator = TEXT('\t');
+	constexpr TCHAR LineEnd = TEXT('\n');
+	constexpr TCHAR QuotationMarkBegin = TEXT('\"');
+	constexpr TCHAR QuotationMarkEnd = TEXT('\"');
 
-	TArray<TSharedRef<Insights::FTableColumn>> VisibleColumns;
+	TArray<TSharedRef<FTableColumn>> VisibleColumns;
 	GetVisibleColumns(VisibleColumns);
 
 	// Table headers
-	for (const TSharedRef<Insights::FTableColumn>& ColumnRef : VisibleColumns)
+	if (bIncludeHeaders)
 	{
-		OutData += ColumnRef->GetShortName().ToString().ReplaceCharWithEscapedChar() + Separator;
+		bool bIsFirstColumn = true;
+		for (const TSharedRef<FTableColumn>& ColumnRef : VisibleColumns)
+		{
+			if (bIsFirstColumn)
+			{
+				bIsFirstColumn = false;
+			}
+			else
+			{
+				OutData += Separator;
+			}
+			FString Value = ColumnRef->GetShortName().ToString().ReplaceCharWithEscapedChar();
+			int32 CharIndex;
+			if (Value.FindChar(Separator, CharIndex))
+			{
+				OutData += QuotationMarkBegin;
+				OutData += Value;
+				OutData += QuotationMarkEnd;
+			}
+			else
+			{
+				OutData += Value;
+			}
+		}
+		OutData += LineEnd;
 	}
 
-	if (OutData.Len() > 0)
+	constexpr int32 MaxRows = 100000;
+	int32 NumItems = InNodes.Num();
+	if (NumItems > MaxRows)
 	{
-		OutData.RemoveAt(OutData.Len() - 1, 1, false);
-		OutData.AppendChar(TEXT('\n'));
+		NumItems = MaxRows;
+
+		FMessageLog ReportMessageLog((LogListingName != NAME_None) ? LogListingName : TEXT("Other"));
+		ReportMessageLog.Warning(FText::Format(LOCTEXT("TooManyRows", "Too many rows selected. Only the first {0} will be copied."), NumItems));
+		ReportMessageLog.Notify();
 	}
 
 	// Selected items
-	for (Insights::FBaseTreeNodePtr Node : InNodes)
+	for (int Index = 0; Index < NumItems; Index++)
 	{
-		for (const TSharedRef<Insights::FTableColumn>& ColumnRef : VisibleColumns)
-		{
-			FText NodeText = ColumnRef->GetValueAsText(*Node);
-			OutData += NodeText.ToString().ReplaceCharWithEscapedChar() + Separator;
-		}
+		const FBaseTreeNodePtr& Node = InNodes[Index];
 
-		if (OutData.Len() > 0)
+		bool bIsFirstColumn = true;
+		for (const TSharedRef<FTableColumn>& ColumnRef : VisibleColumns)
 		{
-			OutData.RemoveAt(OutData.Len() - 1, 1, false);
-			OutData.AppendChar(TEXT('\n'));
+			if (bIsFirstColumn)
+			{
+				bIsFirstColumn = false;
+			}
+			else
+			{
+				OutData += Separator;
+			}
+			FString Value = ColumnRef->GetValueAsSerializableString(*Node).ReplaceCharWithEscapedChar();
+			int32 CharIndex;
+			if (Value.FindChar(Separator, CharIndex))
+			{
+				OutData += QuotationMarkBegin;
+				OutData += Value;
+				OutData += QuotationMarkEnd;
+			}
+			else
+			{
+				OutData += Value;
+			}
 		}
+		OutData += LineEnd;
 	}
 }
 

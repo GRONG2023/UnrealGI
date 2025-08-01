@@ -1,22 +1,43 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SceneComponentDetails.h"
-#include "UObject/Class.h"
-#include "Components/SceneComponent.h"
-#include "GameFramework/Actor.h"
-#include "Engine/Blueprint.h"
-#include "Components/LightComponentBase.h"
-#include "Engine/BlueprintGeneratedClass.h"
-#include "Engine/SimpleConstructionScript.h"
-#include "Engine/SCS_Node.h"
-#include "DetailLayoutBuilder.h"
-#include "IDetailsView.h"
-#include "DetailCategoryBuilder.h"
-#include "Customizations/MobilityCustomization.h"
-#include "PropertyRestriction.h"
+
+#include "AssetSelection.h"
 #include "ComponentTransformDetails.h"
-#include "Engine/InheritableComponentHandler.h"
 #include "ComponentUtils.h"
+#include "Components/ActorComponent.h"
+#include "Components/LightComponentBase.h"
+#include "Components/SceneComponent.h"
+#include "Containers/Array.h"
+#include "Containers/EnumAsByte.h"
+#include "Customizations/MobilityCustomization.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/EngineTypes.h"
+#include "Engine/InheritableComponentHandler.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "GameFramework/Actor.h"
+#include "HAL/PlatformMath.h"
+#include "IDetailsView.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Misc/AssertionMacros.h"
+#include "PropertyHandle.h"
+#include "PropertyRestriction.h"
+#include "Templates/Casts.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/Class.h"
+#include "UObject/NameTypes.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/ReflectedTypeAccessors.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/WeakObjectPtr.h"
+#include "UObject/WeakObjectPtrTemplates.h"
 
 #define LOCTEXT_NAMESPACE "SceneComponentDetails"
 
@@ -147,73 +168,75 @@ void FSceneComponentDetails::CustomizeDetails( IDetailLayoutBuilder& DetailBuild
 
 	// Put mobility property in Transform section
 	IDetailCategoryBuilder& TransformCategory = DetailBuilder.EditCategory( "TransformCommon", LOCTEXT("TransformCommonCategory", "Transform"), ECategoryPriority::Transform );
-	TSharedPtr<IPropertyHandle> MobilityHandle = DetailBuilder.GetProperty("Mobility");
+	TSharedRef<IPropertyHandle> MobilityHandle = DetailBuilder.GetProperty("Mobility");
 
-	uint8 RestrictedMobilityBits = 0u;
-	bool bAnySelectedIsLight = false;
-
-	TArray< TWeakObjectPtr<UObject> > SelectedSceneComponents;
-
-	// see if any of the selected objects have mobility restrictions
-	DetailBuilder.GetObjectsBeingCustomized( SelectedSceneComponents );
-
-	for (TArray<TWeakObjectPtr<UObject>>::TConstIterator ObjectIt(SelectedSceneComponents); ObjectIt; ++ObjectIt)
+	if(MobilityHandle->IsValidHandle())
 	{
-		if (!ObjectIt->IsValid())
-		{
-			continue;
-		}
+		uint8 RestrictedMobilityBits = 0u;
+		bool bAnySelectedIsLight = false;
 
-		USceneComponent const* SceneComponent = Cast<USceneComponent>((*ObjectIt).Get());
-		if (SceneComponent == NULL)
-		{
-			continue;
-		}
+		TArray< TWeakObjectPtr<UObject> > SelectedSceneComponents;
 
-		if (SceneComponent->IsA(ULightComponentBase::StaticClass()))
-		{
-			bAnySelectedIsLight = true;
-		}
+		// see if any of the selected objects have mobility restrictions
+		DetailBuilder.GetObjectsBeingCustomized(SelectedSceneComponents);
 
-		// if we haven't restricted the "Static" option yet
-		if (!(RestrictedMobilityBits & FMobilityCustomization::StaticMobilityBitMask))
+		for (TArray<TWeakObjectPtr<UObject>>::TConstIterator ObjectIt(SelectedSceneComponents); ObjectIt; ++ObjectIt)
 		{
-			FText RestrictReason;
-			if (IsMobilitySettingProhibited(EComponentMobility::Static, SceneComponent, RestrictReason))
+			if (!ObjectIt->IsValid())
 			{
-				 TSharedPtr<FPropertyRestriction> StaticRestriction = MakeShareable(new FPropertyRestriction(MoveTemp(RestrictReason)));
-				 const UEnum* const ComponentMobilityEnum = StaticEnum<EComponentMobility::Type>();		
-				 StaticRestriction->AddDisabledValue(ComponentMobilityEnum->GetNameStringByValue((uint8)EComponentMobility::Static));
-				 MobilityHandle->AddRestriction(StaticRestriction.ToSharedRef());
+				continue;
+			}
 
-				 RestrictedMobilityBits |= FMobilityCustomization::StaticMobilityBitMask;
-			}			
-		}
-
-		// if we haven't restricted the "Stationary" option yet
-		if (!(RestrictedMobilityBits & FMobilityCustomization::StationaryMobilityBitMask))
-		{
-			FText RestrictReason;
-			if (IsMobilitySettingProhibited(EComponentMobility::Stationary, SceneComponent, RestrictReason))
+			USceneComponent const* SceneComponent = Cast<USceneComponent>((*ObjectIt).Get());
+			if (SceneComponent == NULL)
 			{
-				TSharedPtr<FPropertyRestriction> StationaryRestriction = MakeShareable(new FPropertyRestriction(MoveTemp(RestrictReason)));
-				const UEnum* const ComponentMobilityEnum = StaticEnum<EComponentMobility::Type>();
-				StationaryRestriction->AddDisabledValue(ComponentMobilityEnum->GetNameStringByValue((uint8)EComponentMobility::Stationary));
-				MobilityHandle->AddRestriction(StationaryRestriction.ToSharedRef());
+				continue;
+			}
 
-				RestrictedMobilityBits |= FMobilityCustomization::StationaryMobilityBitMask;
+			if (SceneComponent->IsA(ULightComponentBase::StaticClass()))
+			{
+				bAnySelectedIsLight = true;
+			}
+
+			// if we haven't restricted the "Static" option yet
+			if (!(RestrictedMobilityBits & FMobilityCustomization::StaticMobilityBitMask))
+			{
+				FText RestrictReason;
+				if (IsMobilitySettingProhibited(EComponentMobility::Static, SceneComponent, RestrictReason))
+				{
+					TSharedPtr<FPropertyRestriction> StaticRestriction = MakeShareable(new FPropertyRestriction(MoveTemp(RestrictReason)));
+					const UEnum* const ComponentMobilityEnum = StaticEnum<EComponentMobility::Type>();
+					StaticRestriction->AddDisabledValue(ComponentMobilityEnum->GetNameStringByValue((uint8)EComponentMobility::Static));
+					MobilityHandle->AddRestriction(StaticRestriction.ToSharedRef());
+
+					RestrictedMobilityBits |= FMobilityCustomization::StaticMobilityBitMask;
+				}
+			}
+
+			// if we haven't restricted the "Stationary" option yet
+			if (!(RestrictedMobilityBits & FMobilityCustomization::StationaryMobilityBitMask))
+			{
+				FText RestrictReason;
+				if (IsMobilitySettingProhibited(EComponentMobility::Stationary, SceneComponent, RestrictReason))
+				{
+					TSharedPtr<FPropertyRestriction> StationaryRestriction = MakeShareable(new FPropertyRestriction(MoveTemp(RestrictReason)));
+					const UEnum* const ComponentMobilityEnum = StaticEnum<EComponentMobility::Type>();
+					StationaryRestriction->AddDisabledValue(ComponentMobilityEnum->GetNameStringByValue((uint8)EComponentMobility::Stationary));
+					MobilityHandle->AddRestriction(StationaryRestriction.ToSharedRef());
+
+					RestrictedMobilityBits |= FMobilityCustomization::StationaryMobilityBitMask;
+				}
+			}
+
+			// no need to go through all of them if we can't restrict any more
+			if ((RestrictedMobilityBits & FMobilityCustomization::StaticMobilityBitMask) && (RestrictedMobilityBits & FMobilityCustomization::StationaryMobilityBitMask))
+			{
+				break;
 			}
 		}
 
-		// no need to go through all of them if we can't restrict any more
-		if ((RestrictedMobilityBits & FMobilityCustomization::StaticMobilityBitMask) && (RestrictedMobilityBits & FMobilityCustomization::StationaryMobilityBitMask))
-		{
-			break;
-		}
+		TransformCategory.AddCustomBuilder(MakeShared<FMobilityCustomization>(MobilityHandle, RestrictedMobilityBits, bAnySelectedIsLight));
 	}
-
-	MobilityCustomization = MakeShareable(new FMobilityCustomization);
-	MobilityCustomization->CreateMobilityCustomization(TransformCategory, MobilityHandle, RestrictedMobilityBits, bAnySelectedIsLight);
 
 	// Only display bHiddenInGame if the property is being flattened in to an Actor.
 	// Details panel for BP component will have the base class be the Actor due to how the SKismetInspector works, but in that case we

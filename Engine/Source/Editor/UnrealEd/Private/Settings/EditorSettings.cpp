@@ -1,19 +1,26 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Settings/EditorSettings.h"
+
+#include "CoreGlobals.h"
 #include "HAL/FileManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformMisc.h"
+#include "Interfaces/IProjectManager.h"
+#include "Internationalization/Internationalization.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Misc/ConfigCacheIni.h"
 #include "Misc/ScopedSlowTask.h"
+#include "UObject/NameTypes.h"
+#include "UObject/UnrealNames.h"
 #include "UObject/UnrealType.h"
-#include "Interfaces/IProjectManager.h"
 
 UEditorSettings::UEditorSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 	bCopyStarterContentPreference = false;
-	bEditorAnalyticsEnabled_DEPRECATED = true;
 	AutoScalabilityWorkScaleAmount = 1;
 
 	// Read the current state of the environment variables and cache it.
@@ -67,6 +74,9 @@ void UEditorSettings::PostEditChangeProperty( struct FPropertyChangedEvent& Prop
 		if (GlobalLocalDDCPath.Path.IsEmpty())
 		{
 			FPlatformMisc::DeleteStoredValue(TEXT("Epic Games"), TEXT("GlobalDataCachePath"), TEXT("UE-LocalDataCachePath"));
+			
+			// empty registry key means use environment, so re-fetch it now
+			GlobalLocalDDCPath.Path = FPlatformMisc::GetEnvironmentVariable(TEXT("UE-LocalDataCachePath"));
 		}
 		else
 		{
@@ -78,6 +88,9 @@ void UEditorSettings::PostEditChangeProperty( struct FPropertyChangedEvent& Prop
 		if (GlobalSharedDDCPath.Path.IsEmpty())
 		{
 			FPlatformMisc::DeleteStoredValue(TEXT("Epic Games"), TEXT("GlobalDataCachePath"), TEXT("UE-SharedDataCachePath"));
+			
+			// empty registry key means use environment, so re-fetch it now
+			GlobalSharedDDCPath.Path = FPlatformMisc::GetEnvironmentVariable(TEXT("UE-SharedDataCachePath"));
 		}
 		else
 		{
@@ -89,6 +102,9 @@ void UEditorSettings::PostEditChangeProperty( struct FPropertyChangedEvent& Prop
 		if (GlobalS3DDCPath.Path.IsEmpty())
 		{
 			FPlatformMisc::DeleteStoredValue(TEXT("Epic Games"), TEXT("GlobalDataCachePath"), TEXT("UE-S3DataCachePath"));
+			
+			// empty registry key means use environment, so re-fetch it now
+			GlobalS3DDCPath.Path = FPlatformMisc::GetEnvironmentVariable(TEXT("UE-S3DataCachePath"));
 		}
 		else
 		{
@@ -113,11 +129,14 @@ void UEditorSettings::LoadScalabilityBenchmark()
 		GConfig->GetInt(Section, TEXT("ViewDistanceQuality"), Temporary.ViewDistanceQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("AntiAliasingQuality"), Temporary.AntiAliasingQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("ShadowQuality"), Temporary.ShadowQuality, GEditorSettingsIni);
+		GConfig->GetInt(Section, TEXT("GlobalIlluminationQuality"), Temporary.GlobalIlluminationQuality, GEditorSettingsIni);
+		GConfig->GetInt(Section, TEXT("ReflectionQuality"), Temporary.ReflectionQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("PostProcessQuality"), Temporary.PostProcessQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("TextureQuality"), Temporary.TextureQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("EffectsQuality"), Temporary.EffectsQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("FoliageQuality"), Temporary.FoliageQuality, GEditorSettingsIni);
 		GConfig->GetInt(Section, TEXT("ShadingQuality"), Temporary.ShadingQuality, GEditorSettingsIni);
+		GConfig->GetInt(Section, TEXT("LandscapeQuality"), Temporary.LandscapeQuality, GEditorSettingsIni);
 		EngineBenchmarkResult = Temporary;
 	}
 }
@@ -137,11 +156,14 @@ void UEditorSettings::AutoApplyScalabilityBenchmark()
 	GConfig->SetInt(Section, TEXT("ViewDistanceQuality"), Temporary.ViewDistanceQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("AntiAliasingQuality"), Temporary.AntiAliasingQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("ShadowQuality"), Temporary.ShadowQuality, GEditorSettingsIni);
+	GConfig->SetInt(Section, TEXT("GlobalIlluminationQuality"), Temporary.GlobalIlluminationQuality, GEditorSettingsIni);
+	GConfig->SetInt(Section, TEXT("ReflectionQuality"), Temporary.ReflectionQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("PostProcessQuality"), Temporary.PostProcessQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("TextureQuality"), Temporary.TextureQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("EffectsQuality"), Temporary.EffectsQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("FoliageQuality"), Temporary.FoliageQuality, GEditorSettingsIni);
 	GConfig->SetInt(Section, TEXT("ShadingQuality"), Temporary.ShadingQuality, GEditorSettingsIni);
+	GConfig->SetInt(Section, TEXT("LandscapeQuality"), Temporary.LandscapeQuality, GEditorSettingsIni);
 
 	Scalability::SetQualityLevels(Temporary);
 	Scalability::SaveState(GEditorSettingsIni);

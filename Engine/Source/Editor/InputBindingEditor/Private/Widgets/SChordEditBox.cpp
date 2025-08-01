@@ -1,17 +1,32 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Widgets/SChordEditBox.h"
-#include "SlateOptMacros.h"
-#include "Widgets/SBoxPanel.h"
+
 #include "Framework/Application/SlateApplication.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Misc/Attribute.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/SlateColor.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/Images/SImage.h"
-#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SMenuAnchor.h"
 #include "Widgets/Layout/SBorder.h"
-#include "Widgets/Input/SButton.h"
-#include "EditorStyleSet.h"
-#include "Widgets/SChordEditor.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SChordEditor.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
+struct FGeometry;
 
 
 #define LOCTEXT_NAMESPACE "SChordEditBox"
@@ -22,11 +37,14 @@
 
 void SChordEditBox::Construct( const FArguments& InArgs, TSharedPtr<FUICommandInfo> InputCommand, EMultipleKeyBindingIndex InChordIndex)
 {
-	BorderImageNormal = FEditorStyle::GetBrush( "EditableTextBox.Background.Normal" );
-	BorderImageHovered = FEditorStyle::GetBrush( "EditableTextBox.Background.Hovered" );
-	BorderImageFocused = FEditorStyle::GetBrush( "EditableTextBox.Background.Focused" );
-
 	static const FName InvertedForegroundName("InvertedForeground");
+	static const FName EditableTextBoBackgroundNormal("EditableTextBox.Background.Normal");
+	static const FName EditableTextBoBackgroundHovered("EditableTextBox.Background.Hovered");
+	static const FName EditableTextBoBackgroundFocused("EditableTextBox.Background.Focused");
+
+	BorderImageNormal = FAppStyle::GetBrush(EditableTextBoBackgroundNormal);
+	BorderImageHovered = FAppStyle::GetBrush(EditableTextBoBackgroundHovered);
+	BorderImageFocused = FAppStyle::GetBrush(EditableTextBoBackgroundFocused);
 
 	ChildSlot
 	[
@@ -42,7 +60,7 @@ void SChordEditBox::Construct( const FArguments& InArgs, TSharedPtr<FUICommandIn
 				.VAlign(VAlign_Center)
 				.Padding( FMargin( 4.0f, 2.0f ) )
 				.BorderImage( this, &SChordEditBox::GetBorderImage )
-				.ForegroundColor( FEditorStyle::GetSlateColor(InvertedForegroundName) )
+				.ForegroundColor( FAppStyle::GetSlateColor(InvertedForegroundName) )
 				[
 					SNew( SHorizontalBox )
 					+ SHorizontalBox::Slot()
@@ -63,7 +81,7 @@ void SChordEditBox::Construct( const FArguments& InArgs, TSharedPtr<FUICommandIn
 						// Remove binding button
 						SNew(SButton)
 						.Visibility( this, &SChordEditBox::GetChordRemoveButtonVisibility )
-						.ButtonStyle( FEditorStyle::Get(), "NoBorder" )
+						.ButtonStyle( FAppStyle::Get(), "NoBorder" )
 						.ContentPadding(0)
 						.OnClicked( this, &SChordEditBox::OnChordRemoveButtonClicked )
 						.ForegroundColor( FSlateColor::UseForeground() )
@@ -71,7 +89,7 @@ void SChordEditBox::Construct( const FArguments& InArgs, TSharedPtr<FUICommandIn
 						.ToolTipText(LOCTEXT("ChordEditButtonRemove_ToolTip", "Remove this binding") )
 						[
 							SNew( SImage )
-							.Image( FEditorStyle::GetBrush( "Symbols.X" ) )
+							.Image( FAppStyle::GetBrush( "Symbols.X" ) )
 							.ColorAndOpacity( FLinearColor(.7f,0,0,.75f) )
 						]
 					]
@@ -110,9 +128,9 @@ FText SChordEditBox::GetNotificationMessage() const
 
 void SChordEditBox::OnChordEditorLostFocus()
 {
-	if( (!ChordAcceptButton.IsValid() || ChordAcceptButton->HasMouseCapture() == false) && !ChordEditor->IsTyping() )
+	if( (!ChordAcceptButton.IsValid() || ChordAcceptButton->HasMouseCapture() == false) && !ChordEditor->IsTyping() && !ChordEditor->HasConflict() )
 	{
-		if( ChordEditor->IsEditing() && ChordEditor->IsEditedChordValid() && !ChordEditor->HasConflict() )
+		if( ChordEditor->IsEditing() && ChordEditor->IsEditedChordValid() )
 		{
 			ChordEditor->CommitNewChord();
 		}
@@ -200,7 +218,7 @@ FReply SChordEditBox::OnAcceptNewChordButtonClicked()
 TSharedRef<SWidget> SChordEditBox::OnGetContentForConflictPopup()
 {
 	return SNew(SBorder)
-		.BorderImage( FEditorStyle::GetBrush("NotificationList.ItemBackground")  )
+		.BorderImage( FAppStyle::GetBrush("NotificationList.ItemBackground")  )
 		[
 			SNew( SVerticalBox )
 
@@ -233,7 +251,7 @@ TSharedRef<SWidget> SChordEditBox::OnGetContentForConflictPopup()
 								.AutoWidth()
 								[
 									SNew( SImage )
-										.Image( FEditorStyle::GetBrush( "Symbols.Check" ) )
+										.Image( FAppStyle::GetBrush( "Symbols.Check" ) )
 										.ColorAndOpacity( FLinearColor(0,.7f,0,.75f) )
 								]
 

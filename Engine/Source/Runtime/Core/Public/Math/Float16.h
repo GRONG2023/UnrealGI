@@ -8,6 +8,8 @@
 #include "Math/Float32.h"
 #include "Serialization/MemoryLayout.h"
 
+template <typename T> struct TCanBulkSerialize;
+
 /**
 * 16 bit float components and conversion
 *
@@ -22,28 +24,20 @@
 * 0<E<31, M=any		== (1 + M / 2^10) * 2^(E-15)
 * E=31, M=0			== Infinity
 * E=31, M!=0		== NAN
+* 
+* conversion from 32 bit float is with RTNE (round to nearest even)
 *
+* Legacy code truncated in the conversion.  SetTruncate can be used for backwards compatibility.
+* 
 */
 class FFloat16
 {
 public:
-	union
-	{
-		struct
-		{
-#if PLATFORM_LITTLE_ENDIAN
-			uint16	Mantissa : 10;
-			uint16	Exponent : 5;
-			uint16	Sign : 1;
-#else
-			uint16	Sign : 1;
-			uint16	Exponent : 5;
-			uint16	Mantissa : 10;			
-#endif
-		} Components;
 
-		uint16	Encoded;
-	};
+	/* Float16 can store values in [-MaxF16Float,MaxF16Float] */
+	constexpr static float MaxF16Float = 65504.f;
+
+	uint16 Encoded;
 
 	/** Default constructor */
 	FFloat16();
@@ -63,21 +57,51 @@ public:
 	/** Convert from Fp16 to Fp32. */
 	operator float() const;
 
-	/** Convert from Fp32 to Fp16. */
+	/** Convert from Fp32 to Fp16, round-to-nearest-even. (RTNE)
+	Stores values out of range as +-Inf */
 	void Set(float FP32Value);
 	
-	/**
-	 * Convert from Fp32 to Fp16 without doing any checks if
-	 * the Fp32 exponent is too large or too small. This is a
-	 * faster alternative to Set() when you know the values
-	 * within the single precision float don't need the checks.
-	 *
-	 * @param FP32Value Single precision float to be set as half precision.
-	 */
-	void SetWithoutBoundsChecks(const float FP32Value);
+	/*Convert from Fp32 to Fp16, round-to-nearest-even. (RTNE)
+	Clamps values out of range as +-MaxF16Float */
+	void SetClamped(float FP32Value)
+	{
+		Set( FMath::Clamp(FP32Value,-MaxF16Float,MaxF16Float) );
+	}
+
+	/** Convert from Fp32 to Fp16, truncating low bits. 
+	(backward-compatible conversion; was used by Set() previously)
+	Clamps values out of range to [-MaxF16Float,MaxF16Float] */
+	void SetTruncate(float FP32Value);
+
+	/** Set to 0.0 **/
+	void SetZero()
+	{
+		Encoded = 0;
+	}
+	
+	/** Set to 1.0 **/
+	void SetOne()
+	{
+		Encoded = 0x3c00;
+	}
+
+	/** Return float clamp in [0,MaxF16Float] , no negatives or infinites or nans returned **/
+	FFloat16 GetClampedNonNegativeAndFinite() const;
+	
+	/** Return float clamp in [-MaxF16Float,MaxF16Float] , no infinites or nans returned **/
+	FFloat16 GetClampedFinite() const;
 
 	/** Convert from Fp16 to Fp32. */
 	float GetFloat() const;
+
+	/** Is the float negative without converting
+	NOTE: returns true for negative zero! */
+	bool IsNegative() const
+	{
+		// negative if sign bit is on
+		// can be tested with int compare
+		return (int16)Encoded < 0;
+	}
 
 	/**
 	 * Serializes the FFloat16.
@@ -133,19 +157,55 @@ FORCEINLINE FFloat16::operator float() const
 }
 
 
+// NOTE: Set() on values out of F16 max range store them as +-Inf
 FORCEINLINE void FFloat16::Set(float FP32Value)
 {
+	// FPlatformMath::StoreHalf follows RTNE (round-to-nearest-even) rounding default convention
+	FPlatformMath::StoreHalf(&Encoded, FP32Value);
+}
+
+
+
+FORCEINLINE float FFloat16::GetFloat() const
+{
+	return FPlatformMath::LoadHalf(&Encoded);
+}
+
+
+// NOTE: SetTruncate() on values out of F16 max range store them as +-Inf
+FORCEINLINE void FFloat16::SetTruncate(float FP32Value)
+{
+
+	union
+	{
+		struct
+		{
+#if PLATFORM_LITTLE_ENDIAN
+			uint16	Mantissa : 10;
+			uint16	Exponent : 5;
+			uint16	Sign : 1;
+#else
+			uint16	Sign : 1;
+			uint16	Exponent : 5;
+			uint16	Mantissa : 10;			
+#endif
+		} Components;
+
+		uint16	Encoded;
+	} FP16;
+
+
 	FFloat32 FP32(FP32Value);
 
 	// Copy sign-bit
-	Components.Sign = FP32.Components.Sign;
+	FP16.Components.Sign = FP32.Components.Sign;
 
 	// Check for zero, denormal or too small value.
 	if (FP32.Components.Exponent <= 112)			// Too small exponent? (0+127-15)
 	{
 		// Set to 0.
-		Components.Exponent = 0;
-		Components.Mantissa = 0;
+		FP16.Components.Exponent = 0;
+		FP16.Components.Mantissa = 0;
 
          // Exponent unbias the single, then bias the halfp
          const int32 NewExp = FP32.Components.Exponent - 127 + 15;
@@ -153,11 +213,11 @@ FORCEINLINE void FFloat16::Set(float FP32Value)
          if ( (14 - NewExp) <= 24 ) // Mantissa might be non-zero
          {
              uint32 Mantissa = FP32.Components.Mantissa | 0x800000; // Hidden 1 bit
-             Components.Mantissa = (uint16)(Mantissa >> (14 - NewExp));
+             FP16.Components.Mantissa = (uint16)(Mantissa >> (14 - NewExp));
 			 // Check for rounding
-             if ( (Mantissa >> (13 - NewExp)) & 1 )
+             if ( (Mantissa >> (13 - NewExp)) & 1 ) //-V1051
 			 {
-                 Encoded++; // Round, might overflow into exp bit, but this is OK
+                 FP16.Encoded++; // Round, might overflow into exp bit, but this is OK
 			 }
          }
 	}
@@ -165,66 +225,61 @@ FORCEINLINE void FFloat16::Set(float FP32Value)
 	else if (FP32.Components.Exponent >= 143)		// Too large exponent? (31+127-15)
 	{
 		// Set to 65504.0 (max value)
-		Components.Exponent = 30;
-		Components.Mantissa = 1023;
+		FP16.Components.Exponent = 30;
+		FP16.Components.Mantissa = 1023;
 	}
 	// Handle normal number.
 	else
 	{
-		Components.Exponent = uint16(int32(FP32.Components.Exponent) - 127 + 15);
-		Components.Mantissa = uint16(FP32.Components.Mantissa >> 13);
+		FP16.Components.Exponent = uint16(int32(FP32.Components.Exponent) - 127 + 15);
+		FP16.Components.Mantissa = uint16(FP32.Components.Mantissa >> 13);
 	}
+
+	Encoded = FP16.Encoded;
+}
+
+/** Return float clamp in [0,MaxF16Float] , no negatives or infinites or nans returned **/
+FORCEINLINE FFloat16 FFloat16::GetClampedNonNegativeAndFinite() const
+{
+	FFloat16 ReturnValue;
+	
+	if ( Encoded < 0x7c00 ) // normal and non-negative, just pass through
+		ReturnValue.Encoded = Encoded;
+	else if ( Encoded == 0x7c00 ) // infinity turns into largest normal
+		ReturnValue.Encoded = 0x7bff;
+	else // NaNs or anything negative turns into 0
+		ReturnValue.Encoded = 0;
+
+	return ReturnValue;
 }
 
 
-FORCEINLINE void FFloat16::SetWithoutBoundsChecks(const float FP32Value)
-{
-	const FFloat32 FP32(FP32Value);
+/** Return float clamp in [-MaxF16Float,MaxF16Float] , no infinites or nans returned **/
+FORCEINLINE FFloat16 FFloat16::GetClampedFinite() const
+{	
+	FFloat16 ReturnValue;
 
-	// Make absolutely sure that you never pass in a single precision floating
-	// point value that may actually need the checks. If you are not 100% sure
-	// of that just use Set().
-
-	Components.Sign = FP32.Components.Sign;
-	Components.Exponent = uint16(int32(FP32.Components.Exponent) - 127 + 15);
-	Components.Mantissa = uint16(FP32.Components.Mantissa >> 13);
-}
-
-
-FORCEINLINE float FFloat16::GetFloat() const
-{
-	FFloat32	Result;
-
-	Result.Components.Sign = Components.Sign;
-	if (Components.Exponent == 0)
+	if ( (Encoded&0x7c00) == 0x7c00 )
 	{
-		uint32 Mantissa = Components.Mantissa;
-		if(Mantissa == 0)
+		// inf or nan
+		if ( Encoded == 0x7C00 ) //+inf
 		{
-			// Zero.
-			Result.Components.Exponent = 0;
-			Result.Components.Mantissa = 0;
+			ReturnValue.Encoded = 0x7bff; // max finite
+		}
+		else if ( Encoded == 0xFC00 ) //-inf
+		{
+			ReturnValue.Encoded = 0xfbff; // max finite negative
 		}
 		else
 		{
-			// Denormal.
-			uint32 MantissaShift = 10 - (uint32)FMath::TruncToInt(FMath::Log2((float)Mantissa));
-			Result.Components.Exponent = 127 - (15 - 1) - MantissaShift;
-			Result.Components.Mantissa = Mantissa << (MantissaShift + 23 - 10);
+			// nan
+			ReturnValue.Encoded = 0;
 		}
-	}
-	else if (Components.Exponent == 31)		// 2^5 - 1
-	{
-		// Infinity or NaN. Set to 65504.0
-		Result.Components.Exponent = 142;
-		Result.Components.Mantissa = 8380416;
 	}
 	else
 	{
-		// Normal number.
-		Result.Components.Exponent = int32(Components.Exponent) - 15 + 127; // Stored exponents are biased by half their range.
-		Result.Components.Mantissa = uint32(Components.Mantissa) << 13;
+		ReturnValue.Encoded = Encoded;
 	}
-
-	return Result.FloatValue;
+	
+	return ReturnValue;
 }

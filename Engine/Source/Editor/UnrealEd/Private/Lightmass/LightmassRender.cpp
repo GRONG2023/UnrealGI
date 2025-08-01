@@ -10,8 +10,11 @@
 #include "Misc/Paths.h"
 #include "Misc/Guid.h"
 #include "RenderingThread.h"
+#include "MaterialDomain.h"
 #include "MaterialShared.h"
 #include "Materials/Material.h"
+#include "Materials/MaterialAttributeDefinitionMap.h"
+#include "Materials/MaterialRenderProxy.h"
 #include "CanvasItem.h"
 #include "CanvasTypes.h"
 #include "Engine/TextureRenderTarget2D.h"
@@ -25,8 +28,15 @@
 #include "LandscapeMaterialInstanceConstant.h"
 #include "EngineModule.h"
 #include "EngineUtils.h"
+#include "TextureResource.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLightmassRender, Error, All);
+
+extern bool Lightmass_IsSubstrateEnabled()
+{
+	static const auto CVar = IConsoleManager::Get().FindTConsoleVariableDataInt(TEXT("r.Substrate"));
+	return CVar && CVar->GetValueOnAnyThread() > 0;
+}
 
 // FLightmassMaterialCompiler - A proxy compiler that overrides various compiler functions for potential problem expressions.
 struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
@@ -44,6 +54,12 @@ struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
 
 	virtual FMaterialShadingModelField GetMaterialShadingModels() const override
 	{ 
+		// not used by Lightmass
+		return MSM_MAX;
+	}
+
+	virtual FMaterialShadingModelField GetCompiledShadingModels() const override
+	{
 		// not used by Lightmass
 		return MSM_MAX;
 	}
@@ -93,13 +109,18 @@ struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
 		return Compiler->Constant2(0.0f,0.0f);
 	}
 
+	virtual int32 ParticleSpriteRotation() override
+	{
+		return Compiler->Constant2(0.0f, 0.0f);
+	}
+
 	virtual int32 WorldPosition(EWorldPositionIncludedOffsets WorldPositionIncludedOffsets) override
 	{
 		//UE_LOG(LogLightmassRender, Log, TEXT("Lightmass material compiler has encountered WorldPosition... Forcing constant (0.0f,0.0f,0.0f)."));
 		return Compiler->Constant3(0.0f,0.0f,0.0f);
 	}
 
-	virtual int32 ObjectWorldPosition() override
+	virtual int32 ObjectWorldPosition(EPositionOrigin OriginType) override
 	{
 		//UE_LOG(LogLightmassRender, Log, TEXT("Lightmass material compiler has encountered ObjectWorldPosition... Forcing constant (0.0f,0.0f,0.0f)."));
 		return Compiler->Constant3(0.0f,0.0f,0.0f);
@@ -127,7 +148,7 @@ struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
 		return Compiler->Constant(1.0f);
 	}
 
-	virtual int32 ActorWorldPosition() override
+	virtual int32 ActorWorldPosition(EPositionOrigin OriginType) override
 	{
 		return Compiler->Constant3(0.0f,0.0f,0.0f);
 	}
@@ -174,16 +195,6 @@ struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
 		return Compiler->Constant4(1.0f,1.0f,1.0f,1.0f);
 	}
 
-	virtual int32 PreSkinVertexOffset() override
-	{
-		return Compiler->Constant3(0.f, 0.f, 0.f);
-	}
-
-	virtual int32 PostSkinVertexOffset() override
-	{
-		return Compiler->Constant3(0.f, 0.f, 0.f);
-	}
-
 	virtual int32 PreSkinnedPosition() override
 	{
 		return Compiler->Constant3(0.f,0.f,0.f);
@@ -211,6 +222,11 @@ struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
 		return Compiler->Constant(0.0f);
 	}
 
+	virtual int32 DecalColor() override
+	{
+		return Compiler->Constant4(1.0f, 1.0f, 1.0f, 1.0f);
+	}
+
 	virtual int32 DecalLifetimeOpacity() override
 	{
 		return Compiler->Constant(0.0f);
@@ -234,7 +250,7 @@ struct FLightmassMaterialCompiler : public FProxyMaterialCompiler
 class FLightmassMaterialProxy : public FMaterial, public FMaterialRenderProxy
 {
 public:
-	FLightmassMaterialProxy(): FMaterial()
+	FLightmassMaterialProxy(): FMaterial(), FMaterialRenderProxy(TEXT("FLightmassMaterialProxy"))
 	{
 		SetQualityLevelProperties(GMaxRHIFeatureLevel);
 	}
@@ -244,6 +260,7 @@ public:
 	{
 		if (InMaterialInterface)
 		{
+			bSubstrateEnabled = Lightmass_IsSubstrateEnabled();
 			MaterialInterface = InMaterialInterface;
 			Material = MaterialInterface ? MaterialInterface->GetMaterial() : NULL;
 			PropertyToCompile = InPropertyToCompile;
@@ -275,7 +292,7 @@ public:
 		}
 	}
 
-	virtual TArrayView<UObject* const> GetReferencedTextures() const override
+	virtual TArrayView<const TObjectPtr<UObject>> GetReferencedTextures() const override
 	{
 		return ReferencedTextures;
 	}
@@ -330,24 +347,9 @@ public:
 		return UMaterial::GetDefaultMaterial(MD_Surface)->GetRenderProxy();
 	}
 
-	virtual bool GetVectorValue(const FHashedMaterialParameterInfo& ParameterInfo, FLinearColor* OutValue, const FMaterialRenderContext& Context) const override
+	virtual bool GetParameterValue(EMaterialParameterType Type, const FHashedMaterialParameterInfo& ParameterInfo, FMaterialParameterValue& OutValue, const FMaterialRenderContext& Context) const override
 	{
-		return MaterialInterface->GetRenderProxy()->GetVectorValue(ParameterInfo, OutValue, Context);
-	}
-
-	virtual bool GetScalarValue(const FHashedMaterialParameterInfo& ParameterInfo, float* OutValue, const FMaterialRenderContext& Context) const override
-	{
-		return MaterialInterface->GetRenderProxy()->GetScalarValue(ParameterInfo, OutValue, Context);
-	}
-
-	virtual bool GetTextureValue(const FHashedMaterialParameterInfo& ParameterInfo,const UTexture** OutValue, const FMaterialRenderContext& Context) const override
-	{
-		return MaterialInterface->GetRenderProxy()->GetTextureValue(ParameterInfo,OutValue,Context);
-	}
-
-	virtual bool GetTextureValue(const FHashedMaterialParameterInfo& ParameterInfo, const URuntimeVirtualTexture** OutValue, const FMaterialRenderContext& Context) const override
-	{
-		return MaterialInterface->GetRenderProxy()->GetTextureValue(ParameterInfo, OutValue, Context);
+		return MaterialInterface->GetRenderProxy()->GetParameterValue(Type, ParameterInfo, OutValue, Context);
 	}
 
 	// Material properties.
@@ -366,8 +368,6 @@ public:
 	/** helper for CompilePropertyAndSetMaterialProperty() */
 	int32 CompilePropertyAndSetMaterialPropertyWithoutCast(EMaterialProperty Property, FMaterialCompiler* Compiler) const
 	{
-		EMaterialProperty DiffuseInput = MP_BaseColor;
-
 		// MAKE SURE THIS MATCHES THE CHART IN WillFillData
 		// 						  RETURNED VALUES (F16 'textures')
 		// 	BLEND MODE  | DIFFUSE     | SPECULAR     | EMISSIVE    | NORMAL    | TRANSMISSIVE              |
@@ -378,15 +378,46 @@ public:
 		// 	Additive    | 0 (EMPTY)   | 0 (EMPTY)    | Emissive    | 0 (EMPTY) | (Emsv | Diffuse)*Opacity  |
 		// 	Modulative  | 0 (EMPTY)   | 0 (EMPTY)    | Emissive    | 0 (EMPTY) | Emsv | Diffuse            |
 		// 	------------+-------------+--------------+-------------+-----------+---------------------------|
+
+		const uint32 ForceCast_Exact_Replicate = MFCF_ForceCast | MFCF_ExactMatch | MFCF_ReplicateValue;
+		const EMaterialProperty DiffuseInput = MP_BaseColor;
+
+		if (bSubstrateEnabled)
+		{
+			uint8 BlendMode = static_cast<uint8>(MaterialInterface->GetBlendMode());
+			ESubstrateMaterialExportContext SubstrateMaterialExportContext = IsOpaqueOrMaskedBlendMode(*MaterialInterface) ? ESubstrateMaterialExportContext::SMEC_Opaque : ESubstrateMaterialExportContext::SMEC_Translucent;
+
+			if (Usage == EMaterialShaderMapUsage::LightmassExportDiffuse)
+			{
+				Compiler->SetSubstrateMaterialExportType(SME_Diffuse, SubstrateMaterialExportContext, BlendMode);
+			}
+			else if (Usage == EMaterialShaderMapUsage::LightmassExportNormal)
+			{
+				Compiler->SetSubstrateMaterialExportType(SME_Normal, SubstrateMaterialExportContext, BlendMode);
+			}
+			else if (Usage == EMaterialShaderMapUsage::LightmassExportOpacity)
+			{
+				Compiler->SetSubstrateMaterialExportType(SME_Transmittance, SubstrateMaterialExportContext, BlendMode);
+			}
+			else if (Usage == EMaterialShaderMapUsage::LightmassExportEmissive)
+			{
+				Compiler->SetSubstrateMaterialExportType(SME_Emissive, SubstrateMaterialExportContext, BlendMode);
+			}
+		}
+
 		if( Property == MP_EmissiveColor )
 		{
 			UMaterial* ProxyMaterial = MaterialInterface->GetMaterial();
-			EBlendMode BlendMode = MaterialInterface->GetBlendMode();
 			bool bIsMaterialUnlit = MaterialInterface->GetShadingModels().IsUnlit();
+			const bool bIsOpaque = IsOpaqueBlendMode(*MaterialInterface);
+			const bool bIsMasked = IsMaskedBlendMode(*MaterialInterface);
+			const bool bIsModulate = IsModulateBlendMode(*MaterialInterface);
+			const bool bIsTranslucentOnly = IsTranslucentOnlyBlendMode(*MaterialInterface);
+			const bool bIsAlphaHoldout = IsAlphaHoldoutBlendMode(*MaterialInterface);
+			const bool bIsAdditive = IsAdditiveBlendMode(*MaterialInterface);
+			const bool bIsAlphaComposite = IsAlphaCompositeBlendMode(*MaterialInterface);
 			check(ProxyMaterial);
 			FLightmassMaterialCompiler ProxyCompiler(Compiler);
-
-			const uint32 ForceCast_Exact_Replicate = MFCF_ForceCast | MFCF_ExactMatch | MFCF_ReplicateValue;
 
 			switch (PropertyToCompile)
 			{
@@ -395,14 +426,14 @@ public:
 				return Compiler->Max(MaterialInterface->CompileProperty(&ProxyCompiler,MP_EmissiveColor, ForceCast_Exact_Replicate), Compiler->Constant3(0, 0, 0));
 			case MP_DiffuseColor:
 				// Only return for Opaque and Masked...
-				if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
+				if (bIsOpaque || bIsMasked)
 				{
 					return Compiler->Saturate(MaterialInterface->CompileProperty(&ProxyCompiler, DiffuseInput, ForceCast_Exact_Replicate));
 				}
 				break;
 			case MP_SpecularColor: 
 				// Only return for Opaque and Masked...
-				if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
+				if (bIsOpaque || bIsMasked)
 				{
 					return Compiler->AppendVector(
 						Compiler->Saturate(MaterialInterface->CompileProperty(&ProxyCompiler, MP_SpecularColor, ForceCast_Exact_Replicate)), 
@@ -411,22 +442,22 @@ public:
 				break;
 			case MP_Normal:
 				// Only return for Opaque and Masked...
-				if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
+				if (bIsOpaque || bIsMasked)
 				{
 					return MaterialInterface->CompileProperty(&ProxyCompiler, MP_Normal, ForceCast_Exact_Replicate);
 				}
 				break;
 			
 			case MP_Opacity:
-				if (BlendMode == BLEND_Masked)
+				if (bIsMasked)
 				{
 					return MaterialInterface->CompileProperty(&ProxyCompiler, MP_OpacityMask);
 				}
-				else if (IsTranslucentBlendMode((EBlendMode)BlendMode) && ProxyMaterial->GetCastShadowAsMasked())
+				else if (IsTranslucentBlendMode(*MaterialInterface) && ProxyMaterial->GetCastShadowAsMasked())
 				{
 					return MaterialInterface->CompileProperty(&ProxyCompiler, MP_Opacity);
 				}
-				else if (BlendMode == BLEND_Modulate)
+				else if (bIsModulate)
 				{
 					if (bIsMaterialUnlit)
 					{
@@ -437,7 +468,7 @@ public:
 						return Compiler->Saturate(MaterialInterface->CompileProperty(Compiler, DiffuseInput, ForceCast_Exact_Replicate));
 					}
 				}
-				else if ((BlendMode == BLEND_Translucent) || (BlendMode == BLEND_Additive) || (BlendMode == BLEND_AlphaComposite) || (BlendMode == BLEND_AlphaHoldout))
+				else if (bIsTranslucentOnly || bIsAdditive || bIsAlphaComposite || bIsAlphaHoldout)
 				{
 					int32 ColoredOpacity = INDEX_NONE;
 					if (bIsMaterialUnlit)
@@ -453,13 +484,24 @@ public:
 				break;
 			case MP_ShadingModel:
 				return MaterialInterface->CompileProperty(&ProxyCompiler, MP_ShadingModel);
+			case MP_FrontMaterial:
+				if (bSubstrateEnabled)
+				{
+					// When using Substrate, material property always compile from material. 
+					// We cannot use rediction so instead we instruct the compiler the type of data export we are looking for.
+					return MaterialInterface->CompileProperty(&ProxyCompiler, MP_FrontMaterial);
+				}
+				else
+				{
+					return ProxyCompiler.SubstrateCreateAndRegisterNullMaterial();
+				}
 			default:
 				return Compiler->Constant(1.0f);
 			}
 	
 			return Compiler->Constant(0.0f);
 		}
-		else if( Property == MP_WorldPositionOffset || Property == MP_PixelDepthOffset )
+		else if (Property == MP_WorldPositionOffset || Property == MP_PixelDepthOffset || Property == MP_Displacement)
 		{
 			//This property MUST return 0 as a default or during the process of rendering textures out for lightmass to use, pixels will be off by 1.
 			return Compiler->Constant(0.0f);
@@ -471,7 +513,28 @@ public:
 		}
 		else if (Property == MP_ShadingModel)
 		{
-			return MaterialInterface->CompileProperty(Compiler, MP_ShadingModel);
+			return MaterialInterface->CompileProperty(Compiler, MP_ShadingModel); // useless with Substrate
+		}
+		// When using Substrate, we need to actually compile more root node inputs, 
+		// and then we handle what needs to actually be exported from the shader code (see SUBSTRATE_MATERIAL_EXPORT_TYPE).
+		else if (Property == MP_OpacityMask)
+		{
+			return MaterialInterface->CompileProperty(Compiler, MP_OpacityMask);
+		}
+		else if (Property == MP_SurfaceThickness)
+		{
+			return MaterialInterface->CompileProperty(Compiler, MP_SurfaceThickness);
+		}
+		else if (Property == MP_FrontMaterial)
+		{
+			if (bSubstrateEnabled)
+			{
+				return MaterialInterface->CompileProperty(Compiler, MP_FrontMaterial);
+			}
+			else
+			{
+				return Compiler->SubstrateCreateAndRegisterNullMaterial();
+			}
 		}
 		else
 		{
@@ -501,6 +564,14 @@ public:
 		if (MaterialInterface)
 		{
 			return MaterialInterface->IsTwoSided();
+		}
+		return false;
+	}
+	virtual bool IsThinSurface() const override
+	{
+		if (MaterialInterface)
+		{
+			return MaterialInterface->IsThinSurface();
 		}
 		return false;
 	}
@@ -546,6 +617,8 @@ public:
 	}
 	virtual bool IsMasked() const override									{ return false; }
 	virtual enum EBlendMode GetBlendMode() const override					{ return BLEND_Opaque; }
+	virtual enum ERefractionMode GetRefractionMode() const override			{ return Material ? (ERefractionMode)Material->RefractionMethod : RM_None; }
+	virtual bool GetRootNodeOverridesDefaultRefraction()const override		{ return Material ? Material->bRootNodeOverridesDefaultDistortion : false; }
 	virtual FMaterialShadingModelField GetShadingModels() const override	{ return MSM_Unlit; }
 	virtual bool IsShadingModelFromMaterialExpression() const override		{ return false; }
 	virtual float GetOpacityMaskClipValue() const override					{ return 0.5f; }
@@ -578,34 +651,44 @@ public:
 	bool IsMaterialInputConnected(UMaterial* InMaterial, EMaterialProperty MaterialInput)
 	{
 		bool bConnected = false;
+		UMaterialEditorOnlyData* MaterialEditorOnly = InMaterial->GetEditorOnlyData();
 
-		switch (MaterialInput)
+		if (bSubstrateEnabled)
 		{
-		case MP_EmissiveColor:
-			bConnected = InMaterial->EmissiveColor.Expression != NULL;
-			break;
-		case MP_DiffuseColor:
-			bConnected = InMaterial->BaseColor.Expression != NULL;
-			break;
-		case MP_SpecularColor:
-			bConnected = InMaterial->Specular.Expression != NULL;
-			break;
-		case MP_Normal:
-			bConnected = InMaterial->Normal.Expression != NULL;
-			break;
-		case MP_Opacity:
-			bConnected = InMaterial->Opacity.Expression != NULL;
-			break;
-		case MP_OpacityMask:
-			bConnected = InMaterial->OpacityMask.Expression != NULL;
-			break;
-		default:
-			break;
+			// Material attribute do not override the FrontMaterial input
+			bConnected = MaterialEditorOnly->FrontMaterial.Expression != nullptr;
+		}
+		else
+		{
+			switch (MaterialInput)
+			{
+			case MP_EmissiveColor:
+				bConnected = MaterialEditorOnly->EmissiveColor.Expression != nullptr;
+				break;
+			case MP_DiffuseColor:
+				bConnected = MaterialEditorOnly->BaseColor.Expression != nullptr;
+				break;
+			case MP_SpecularColor:
+				bConnected = MaterialEditorOnly->Specular.Expression != nullptr;
+				break;
+			case MP_Normal:
+				bConnected = MaterialEditorOnly->Normal.Expression != nullptr;
+				break;
+			case MP_Opacity:
+				bConnected = MaterialEditorOnly->Opacity.Expression != nullptr;
+				break;
+			case MP_OpacityMask:
+				bConnected = MaterialEditorOnly->OpacityMask.Expression != nullptr;
+				break;
+			default:
+				break;
+			}
+
+			// Note: only checking to see whether the entire material attributes connection exists.  
+			// This means materials using the material attributes input will export more attributes than is necessary.
+			bConnected = InMaterial->bUseMaterialAttributes ? MaterialEditorOnly->MaterialAttributes.Expression != NULL : bConnected;
 		}
 
-		// Note: only checking to see whether the entire material attributes connection exists.  
-		// This means materials using the material attributes input will export more attributes than is necessary.
-		bConnected = InMaterial->bUseMaterialAttributes ? InMaterial->MaterialAttributes.Expression != NULL : bConnected;
 		return bConnected;
 	}
 
@@ -626,78 +709,118 @@ public:
 		OutUniformValue.B = 0.0f;
 		OutUniformValue.A = 0.0f;
 
-		EBlendMode BlendMode = MaterialInterface->GetBlendMode();
-		bool bIsMaterialUnlit = MaterialInterface->GetShadingModels().IsUnlit();
-		
 		check(Material);
 		bool bExpressionIsNULL = false;
-		switch (PropertyToCompile)
+
+		if (bSubstrateEnabled)
 		{
-		case MP_EmissiveColor:
-			// Emissive is ALWAYS returned...
-			bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
-			break;
-		case MP_DiffuseColor:
-			// Only return for Opaque and Masked...
-			if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
+			const bool bIsOpaque = IsOpaqueBlendMode(*MaterialInterface);
+			const bool bIsMasked = IsMaskedBlendMode(*MaterialInterface);
+
+			switch (Usage)
 			{
-				bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
-			}
-			break;
-		case MP_SpecularColor: 
-			// Only return for Opaque and Masked...
-			if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
-			{
-				bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
-				OutUniformValue.A = 15.0f;
-			}
-			break;
-		case MP_Normal:
-			// Only return for Opaque and Masked...
-			if (BlendMode == BLEND_Opaque || BlendMode == BLEND_Masked)
-			{
-				bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
-				OutUniformValue.B = 1.0f;	// Default normal is (0,0,1)
-			}
-			break;
-		case MP_Opacity:
-			if (BlendMode == BLEND_Masked)
-			{
-				bExpressionIsNULL = !IsMaterialInputConnected(Material, MP_OpacityMask);
-				OutUniformValue.R = 1.0f;
-				OutUniformValue.G = 1.0f;
-				OutUniformValue.B = 1.0f;
-				OutUniformValue.A = 1.0f;
-			}
-			else
-			if ((BlendMode == BLEND_Modulate) ||
-				(BlendMode == BLEND_Translucent) || 
-				(BlendMode == BLEND_Additive) ||
-				(BlendMode == BLEND_AlphaComposite) ||
-				(BlendMode == BLEND_AlphaHoldout))
-			{
-				bool bColorInputIsNULL = false;
-				if (bIsMaterialUnlit)
+			case EMaterialShaderMapUsage::LightmassExportEmissive:
+				bExpressionIsNULL = !IsMaterialInputConnected(Material, MP_FrontMaterial);
+				break;
+			case EMaterialShaderMapUsage::LightmassExportDiffuse:
+				if (bIsOpaque || bIsMasked)
 				{
-					bColorInputIsNULL = !IsMaterialInputConnected(Material, MP_EmissiveColor);
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, MP_FrontMaterial);
+				}
+				break;
+			case EMaterialShaderMapUsage::LightmassExportOpacity:
+				if (!bIsOpaque)
+				{
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, MP_FrontMaterial);
+					OutUniformValue.A = 15.0f;
+				}
+				break;
+			case EMaterialShaderMapUsage::LightmassExportNormal:
+				if (bIsOpaque || bIsMasked)
+				{
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, MP_FrontMaterial);
+					OutUniformValue.B = 1.0f;	// Default normal is (0,0,1)
+				}
+				break;
+			default:
+				UE_LOG(LogLightmassRender, Error, TEXT("WillGenerateUniformData - cannot export a requested property for %s"), *(Material->GetPathName()));
+				break;
+			}
+		}
+		else
+		{
+			const bool bIsOpaqueOrMasked = IsOpaqueOrMaskedBlendMode(*MaterialInterface);
+			bool bIsMaterialUnlit = MaterialInterface->GetShadingModels().IsUnlit();
+			EBlendMode BlendMode = MaterialInterface->GetBlendMode();
+
+			switch (PropertyToCompile)
+			{
+			case MP_EmissiveColor:
+				// Emissive is ALWAYS returned...
+				bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
+				break;
+			case MP_DiffuseColor:
+				// Only return for Opaque and Masked...
+				if (bIsOpaqueOrMasked)
+				{
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
+				}
+				break;
+			case MP_SpecularColor: 
+				// Only return for Opaque and Masked...
+				if (bIsOpaqueOrMasked)
+				{
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
+					OutUniformValue.A = 15.0f;
+				}
+				break;
+			case MP_Normal:
+				// Only return for Opaque and Masked...
+				if (bIsOpaqueOrMasked)
+				{
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, PropertyToCompile);
+					OutUniformValue.B = 1.0f;	// Default normal is (0,0,1)
+				}
+				break;
+			case MP_Opacity:
+				if (BlendMode == BLEND_Masked)
+				{
+					bExpressionIsNULL = !IsMaterialInputConnected(Material, MP_OpacityMask);
+					OutUniformValue.R = 1.0f;
+					OutUniformValue.G = 1.0f;
+					OutUniformValue.B = 1.0f;
+					OutUniformValue.A = 1.0f;
 				}
 				else
+				if ((BlendMode == BLEND_Modulate) ||
+					(BlendMode == BLEND_Translucent) || 
+					(BlendMode == BLEND_Additive) ||
+					(BlendMode == BLEND_AlphaComposite) ||
+					(BlendMode == BLEND_AlphaHoldout))
 				{
-					bColorInputIsNULL = !IsMaterialInputConnected(Material, MP_DiffuseColor);
+					bool bColorInputIsNULL = false;
+					if (bIsMaterialUnlit)
+					{
+						bColorInputIsNULL = !IsMaterialInputConnected(Material, MP_EmissiveColor);
+					}
+					else
+					{
+						bColorInputIsNULL = !IsMaterialInputConnected(Material, MP_DiffuseColor);
+					}
+					if (BlendMode == BLEND_Translucent
+						|| BlendMode == BLEND_Additive
+						|| BlendMode == BLEND_AlphaComposite
+						|| BlendMode == BLEND_AlphaHoldout)
+					{
+						bExpressionIsNULL = bColorInputIsNULL && !IsMaterialInputConnected(Material, PropertyToCompile);
+					}
+					else
+					{
+						bExpressionIsNULL = bColorInputIsNULL;
+					}
 				}
-				if (BlendMode == BLEND_Translucent
-					|| BlendMode == BLEND_Additive
-					|| BlendMode == BLEND_AlphaComposite
-					|| BlendMode == BLEND_AlphaHoldout)
-				{
-					bExpressionIsNULL = bColorInputIsNULL && !IsMaterialInputConnected(Material, PropertyToCompile);
-				}
-				else
-				{
-					bExpressionIsNULL = bColorInputIsNULL;
-				}
+				break;
 			}
-			break;
 		}
 
 		return bExpressionIsNULL;
@@ -754,7 +877,7 @@ public:
 		return true;
 	}
 
-	static bool WillFillData(EBlendMode InBlendMode, EMaterialProperty InMaterialProperty)
+	static bool WillFillData(EBlendMode InBlendMode, EMaterialProperty InMaterialProperty, bool bSubstrateEnabled)
 	{
 		// MAKE SURE THIS MATCHES THE CHART IN CompileProperty
 		// 						  RETURNED VALUES (F16 'textures')
@@ -767,9 +890,34 @@ public:
 		// 	Modulative  | 0 (EMPTY)   | 0 (EMPTY)    | Emissive    | 0 (EMPTY) | Emsv | Diffuse            |
 		// 	------------+-------------+--------------+-------------+-----------+---------------------------|
 
+		// Emissive will always fill data.
 		if (InMaterialProperty == MP_EmissiveColor)
 		{
 			return true;
+		}
+
+		if (bSubstrateEnabled)
+		{
+			switch (InMaterialProperty)
+			{
+			case MP_DiffuseColor:
+			{
+				return InBlendMode == BLEND_Opaque || InBlendMode == BLEND_Masked;
+			}
+			case MP_Normal:
+			{
+				return InBlendMode == BLEND_Opaque || InBlendMode == BLEND_Masked;
+			}
+			case MP_Opacity:
+			{
+				return InBlendMode != BLEND_Opaque;
+				break;
+			}
+			default:
+			{
+				UE_LOG(LogLightmassRender, Error, TEXT("FLightmassMaterialProxy::WillFillData - cannot export a requested property for"));
+			}
+			}
 		}
 
 		switch (InBlendMode)
@@ -841,15 +989,22 @@ public:
 		}
 	}
 
+	virtual bool CheckInValidStateForCompilation(class FMaterialCompiler* Compiler) const override
+	{
+		return Material && Material->CheckInValidStateForCompilation(Compiler);
+	}
+
 private:
 	/** The material interface for this proxy */
 	UMaterialInterface* MaterialInterface;
 	UMaterial* Material;
-	TArray<UObject*> ReferencedTextures;
+	TArray<TObjectPtr<UObject>> ReferencedTextures;
 	/** The property to compile for rendering the sample */
 	EMaterialProperty PropertyToCompile;
 	/** Stores which exported attribute this proxy is compiling for. */
 	EMaterialShaderMapUsage::Type Usage;
+	/** If Substrate is enabled, we need to specify things differently since redirection cannot straiforwardly be used*/
+	bool bSubstrateEnabled;
 };
 
 FMaterialExportDataEntry::~FMaterialExportDataEntry()
@@ -898,22 +1053,23 @@ void FLightmassMaterialRenderer::BeginGenerateMaterialData(
 	if (BaseMaterial)
 	{
 		check(!MaterialExportData.Contains(InMaterial));
+		const bool bSubstrateEnabled = Lightmass_IsSubstrateEnabled();
 
 		FMaterialExportDataEntry& MaterialData = MaterialExportData.Add(InMaterial, FMaterialExportDataEntry(ChannelName));
 
-		if (FLightmassMaterialProxy::WillFillData(BlendMode, MP_DiffuseColor))
+		if (FLightmassMaterialProxy::WillFillData(BlendMode, MP_DiffuseColor, bSubstrateEnabled))
 		{
 			MaterialData.DiffuseMaterialProxy = new FLightmassMaterialProxy();
 			MaterialData.DiffuseMaterialProxy->BeginCompiling(InMaterial, MP_DiffuseColor, EMaterialShaderMapUsage::LightmassExportDiffuse);
 		}
 
-		if (FLightmassMaterialProxy::WillFillData(BlendMode, MP_EmissiveColor))
+		if (FLightmassMaterialProxy::WillFillData(BlendMode, MP_EmissiveColor, bSubstrateEnabled))
 		{
 			MaterialData.EmissiveMaterialProxy = new FLightmassMaterialProxy();
 			MaterialData.EmissiveMaterialProxy->BeginCompiling(InMaterial, MP_EmissiveColor, EMaterialShaderMapUsage::LightmassExportEmissive);
 		}
 
-		if (FLightmassMaterialProxy::WillFillData(BlendMode, MP_Opacity))
+		if (FLightmassMaterialProxy::WillFillData(BlendMode, MP_Opacity, bSubstrateEnabled))
 		{
 			// Landscape opacity is generated from the hole mask, not the material
 			if (!bIsLandscapeMaterial)
@@ -923,7 +1079,7 @@ void FLightmassMaterialRenderer::BeginGenerateMaterialData(
 			}
 		}
 
-		if (bInWantNormals && FLightmassMaterialProxy::WillFillData(BlendMode, MP_Normal))
+		if (bInWantNormals && FLightmassMaterialProxy::WillFillData(BlendMode, MP_Normal, bSubstrateEnabled))
 		{
 			MaterialData.NormalMaterialProxy = new FLightmassMaterialProxy();
 			MaterialData.NormalMaterialProxy->BeginCompiling(InMaterial, MP_Normal, EMaterialShaderMapUsage::LightmassExportNormal);
@@ -958,8 +1114,11 @@ bool FLightmassMaterialRenderer::GenerateMaterialData(
 	check(BaseMaterial);
 
 	EBlendMode BlendMode = InMaterial.GetBlendMode();
+	const bool bSubstrateEnabled = Lightmass_IsSubstrateEnabled();
+
 	FMaterialShadingModelField ShadingModels = InMaterial.GetShadingModels();
- 	if (!ShadingModels.HasShadingModel(MSM_DefaultLit) &&
+ 	if (!bSubstrateEnabled &&		// Shading models are irrelevant when using Substrate
+		!ShadingModels.HasShadingModel(MSM_DefaultLit) &&
 		!ShadingModels.HasShadingModel(MSM_Unlit) &&
 		!ShadingModels.HasShadingModel(MSM_Subsurface) &&
 		!ShadingModels.HasShadingModel(MSM_PreintegratedSkin) &&
@@ -973,8 +1132,10 @@ bool FLightmassMaterialRenderer::GenerateMaterialData(
 	// Set the blend mode
 	static_assert(EBlendMode::BLEND_MAX == (EBlendMode)Lightmass::BLEND_MAX, "Debug type sizes must match.");
 	OutMaterialData.BlendMode = (Lightmass::EBlendMode)((int32)BlendMode);
+
 	// Set the two-sided flag
 	OutMaterialData.bTwoSided = (uint32)InMaterial.IsTwoSided();
+	OutMaterialData.bIsThinSurface = (uint32)InMaterial.IsThinSurface();
 	OutMaterialData.OpacityMaskClipValue = InMaterial.GetOpacityMaskClipValue();
 	// Cast shadow as masked feature need to access transmission texture. Only allow
 	// if transmission/opacity data exists
@@ -985,7 +1146,8 @@ bool FLightmassMaterialRenderer::GenerateMaterialData(
 	const bool bIsLandscapeMaterial = InMaterial.IsA<ULandscapeMaterialInstanceConstant>();
 
 	// due to landscape using an expanded mesh, we have to mask out the edge data even on opaque components (sigh)
-	if (bIsLandscapeMaterial && OutMaterialData.BlendMode == Lightmass::BLEND_Opaque)
+	const bool bIsOpaque = OutMaterialData.BlendMode == Lightmass::BLEND_Opaque;
+	if (bIsLandscapeMaterial && bIsOpaque)
 	{
 		OutMaterialData.BlendMode = Lightmass::BLEND_Masked;
 	}
@@ -1129,7 +1291,7 @@ bool FLightmassMaterialRenderer::GenerateMaterialPropertyData(
 		// If the ShaderMap is NULL that's because it failed to compile, which is ok as the default material will be used for exporting
 		check(!MaterialProxy->GetGameThreadShaderMap() || MaterialProxy->GetGameThreadShaderMap()->IsValidForRendering());
 
-		//@todo UE4. The format may be determined by the material property...
+		//@todo The format may be determined by the material property...
 		// For example, if Diffuse doesn't need to be F16 it can create a standard RGBA8 target.
 		EPixelFormat Format = PF_FloatRGBA;
 		if (MaterialProxy->GetRenderTargetFormatAndSize(InMaterialProperty, Format, InMaterial.GetExportResolutionScale(), InOutSizeX, InOutSizeY))
@@ -1149,10 +1311,12 @@ bool FLightmassMaterialRenderer::GenerateMaterialPropertyData(
 
 				// Prefetch all virtual textures so that we have content available
 				//todo[vt]: Move this to calling function to avoid multiple prefetches
-				if (UseVirtualTexturing(GMaxRHIFeatureLevel))
+				if (UseVirtualTexturing(GMaxRHIShaderPlatform))
 				{					
 					const ERHIFeatureLevel::Type FeatureLevel = GMaxRHIFeatureLevel;
 					const FVector2D ScreenSpaceSize(InOutSizeX, InOutSizeY);
+
+					UE::RenderCommandPipe::FSyncScope SyncScope;
 
 					ENQUEUE_RENDER_COMMAND(LoadTiles)(
 						[FeatureLevel, ScreenSpaceSize](FRHICommandListImmediate& RHICmdList)
@@ -1244,7 +1408,7 @@ bool FLightmassMaterialRenderer::CreateRenderTarget(EPixelFormat InFormat, int32
 		RenderTarget->ClearColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.0f);
 		RenderTarget->InitCustomFormat(InSizeX, InSizeY, InFormat, false);
 
-		Canvas = new FCanvas(RenderTarget->GameThread_GetRenderTargetResource(), NULL, 0, 0, 0, GMaxRHIFeatureLevel);
+		Canvas = new FCanvas(RenderTarget->GameThread_GetRenderTargetResource(), NULL, FGameTime(), GMaxRHIFeatureLevel);
 		check(Canvas);
 	}
 

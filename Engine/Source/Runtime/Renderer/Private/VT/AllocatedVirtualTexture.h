@@ -17,7 +17,9 @@ class FVirtualTextureSystem;
 class FAllocatedVirtualTexture final : public IAllocatedVirtualTexture
 {
 public:
-	FAllocatedVirtualTexture(FVirtualTextureSystem* InSystem,
+	FAllocatedVirtualTexture(
+		FRHICommandListBase& RHICmdList,
+		FVirtualTextureSystem* InSystem,
 		uint32 InFrame,
 		const FAllocatedVTDescription& InDesc,
 		FVirtualTextureProducer* const* InProducers,
@@ -29,14 +31,14 @@ public:
 
 	virtual ~FAllocatedVirtualTexture();
 
-	void Release(FVirtualTextureSystem* System);
-
-	inline void IncrementRefCount() { RefCount.Increment(); }
 	inline uint32 GetFrameAllocated() const { return FrameAllocated; }
 
 	void AssignVirtualAddress(uint32 vAddress);
 
+	void LockOrUnlockTiles(FVirtualTextureSystem* InSystem, bool bLock) const;
+
 	// begin IAllocatedVirtualTexture
+	virtual uint32 GetPersistentHash() const override { return PersistentHash; }
 	virtual uint32 GetNumPageTableTextures() const override;
 	virtual FRHITexture* GetPageTableTexture(uint32 InPageTableIndex) const override;
 	virtual FRHITexture* GetPageTableIndirectionTexture() const override;
@@ -45,7 +47,8 @@ public:
 	virtual FRHIShaderResourceView* GetPhysicalTextureSRV(uint32 InLayerIndex, bool bSRGB) const override;
 	virtual void GetPackedPageTableUniform(FUintVector4* OutUniform) const override;
 	virtual void GetPackedUniform(FUintVector4* OutUniform, uint32 LayerIndex) const override;
-	virtual void Destroy(FVirtualTextureSystem* System) override;
+	virtual void Destroy(FVirtualTextureSystem* InSystem) override;
+	virtual bool TryMapLockedTiles(FVirtualTextureSystem* InSystem) const override;
 	// end IAllocatedVirtualTexture
 
 	inline FVirtualTextureSpace* GetSpace() const { return Space; }
@@ -60,15 +63,13 @@ public:
 	inline uint32 GetProducerTextureLayerMaskForPageTableLayer(uint32 InLayerIndex) const { return UniquePageTableLayers[InLayerIndex].ProducerTextureLayerMask; }
 	inline uint32 GetProducerPhysicalGroupIndexForPageTableLayer(uint32 InLayerIndex) const { return UniquePageTableLayers[InLayerIndex].ProducerPhysicalGroupIndex; }
 
-	inline uint32 GetVirtualPageX() const { return VirtualPageX; }
-	inline uint32 GetVirtualPageY() const { return VirtualPageY; }
-
 private:
+	uint32 CalculatePersistentHash(FAllocatedVTDescription const& InDesc, FVirtualTextureProducer* const* InProducers) const;
 	uint32 AddUniqueProducer(FVirtualTextureProducerHandle const& InHandle, const FVirtualTextureProducer* InProducer);
-	uint32 AddUniquePhysicalSpace(FVirtualTexturePhysicalSpace* InPhysicalSpace, uint32 InUniqueProducerIndex, uint32 InProducerPhysicalSpaceIndex);
+	uint32 AddUniquePhysicalSpace(FRHICommandListBase& RHICmdList, FVirtualTexturePhysicalSpace* InPhysicalSpace, uint32 InUniqueProducerIndex, uint32 InProducerPhysicalSpaceIndex);
 
-	FThreadSafeCounter RefCount;
 	uint32 FrameAllocated;
+	uint32 PersistentHash;
 
 	FVirtualTextureSpace* Space;
 
@@ -102,6 +103,8 @@ private:
 	};
 	FTextureLayerDesc TextureLayers[VIRTUALTEXTURE_SPACE_MAXLAYERS];
 
-	uint32 VirtualPageX;
-	uint32 VirtualPageY;
+	// The fallback color to use on each texture layer when unmapped.
+	// This is stored as linear UNorm instead of full FLinearColor since that is what the shader uses.
+	// That means that HDR formats will be clamped.
+	uint32 FallbackColorPerTextureLayer[VIRTUALTEXTURE_SPACE_MAXLAYERS];
 };

@@ -8,11 +8,14 @@ using UnrealBuildTool;
 using System.Threading;
 using System.Text.RegularExpressions;
 using System.Linq;
+using EpicGames.Core;
 
 namespace Gauntlet
 {
 	public class AndroidBuild : IBuild
 	{
+		public int PreferenceOrder { get { return 0; } }
+
 		public UnrealTargetConfiguration Configuration { get; protected set; }
 
 		public string SourceApkPath;
@@ -23,11 +26,17 @@ namespace Gauntlet
 
 		public BuildFlags Flags { get; protected set; }
 
+		public string Flavor { get { return ""; } }
+
 		public UnrealTargetPlatform Platform { get { return UnrealTargetPlatform.Android; } }
 
 		public bool Is32Bit { get; protected set; }
 
-		public AndroidBuild(UnrealTargetConfiguration InConfig, string InAndroidPackageName, string InApkPath, Dictionary<string, string> InFilesToInstall, BuildFlags InFlags, bool InIs32Bit)
+		public bool UsesExternalFilesDir { get; protected set; }
+
+		public bool UsesPublicLogs { get; protected set; }
+
+		public AndroidBuild(UnrealTargetConfiguration InConfig, string InAndroidPackageName, string InApkPath, Dictionary<string, string> InFilesToInstall, BuildFlags InFlags, bool InIs32Bit, bool bInUsesExternalFilesDir, bool bInUsesPublicLogs)
 		{
 			Configuration = InConfig;
 			AndroidPackageName = InAndroidPackageName;
@@ -35,6 +44,8 @@ namespace Gauntlet
 			FilesToInstall = InFilesToInstall;
 			Flags = InFlags;
 			Is32Bit = InIs32Bit;
+			UsesExternalFilesDir = bInUsesExternalFilesDir;
+			UsesPublicLogs = bInUsesPublicLogs;
 		}
 
 		public bool CanSupportRole(UnrealTargetRole RoleType)
@@ -98,11 +109,23 @@ namespace Gauntlet
 				var SourceApkMatch = Regex.Match(BatContents, @" install\s+(.+\.apk)");
 				if ( SourceApkMatch.Groups.Count <= 0)
 				{
-					Log.Warning("Could not parse install command from {0}", Fi.FullName);
+					Log.Warning(KnownLogEvents.Gauntlet_BuildDropEvent, "Could not parse install command from {File}", Fi.FullName);
 					continue;
 				}
 				string SourceApkPath = Path.Combine(AbsPath,SourceApkMatch.Groups[1].ToString());
 				
+				bool bUsesExternalFilesDir = false;
+				bool bUsesPublicLogs = false;
+				// parse APK's metadata for some build details
+				{
+					AndroidPlatform.GetPackageInfo(SourceApkPath, false);
+					// Establish remote directory usage
+					string ApkUsesExternalFilesDir = AndroidPlatform.GetMetadataValue("bUseExternalFilesDir");
+					string ApkUsesPublicLogs = AndroidPlatform.GetMetadataValue("bPublicLogFiles");
+					bUsesExternalFilesDir = ApkUsesExternalFilesDir != null ? ApkUsesExternalFilesDir.Contains("1") : false;
+					bUsesPublicLogs = ApkUsesPublicLogs != null ? ApkUsesPublicLogs.Contains("1") : false;
+				}
+
 				// save com.companyname.product
 				string AndroidPackageName = Regex.Match(BatContents, @"uninstall\s+(com\..+)").Groups[1].ToString();
 
@@ -114,19 +137,19 @@ namespace Gauntlet
 	
 				if (string.IsNullOrEmpty(SourceApkPath))
 				{
-					Log.Warning("No APK found for build at {0}", Fi.FullName);
+					Log.Warning(KnownLogEvents.Gauntlet_BuildDropEvent, "No APK found for build at {File}", Fi.FullName);
 					continue;
 				}
 
 				if (!File.Exists(SourceApkPath))
 				{
-					Log.Warning("Resolved APK name but it doesn't exist {0}", SourceApkPath);
+					Log.Warning(KnownLogEvents.Gauntlet_BuildDropEvent, "Resolved APK name but it doesn't exist {File}", SourceApkPath);
 					continue;
 				}
 
 				if (string.IsNullOrEmpty(AndroidPackageName))
 				{
-					Log.Warning("No product name found for build at {0}", Fi.FullName);
+					Log.Warning(KnownLogEvents.Gauntlet_BuildDropEvent, "No product name found for build at {File}", Fi.FullName);
 					continue;
 				}
 
@@ -147,7 +170,7 @@ namespace Gauntlet
 					Flags |= BuildFlags.NotBulk;
 				}
 
-				AndroidBuild NewBuild = new AndroidBuild(UnrealConfig, AndroidPackageName, SourceApkPath, FilesToInstall, Flags, PackageIs32Bit);
+				AndroidBuild NewBuild = new AndroidBuild(UnrealConfig, AndroidPackageName, SourceApkPath, FilesToInstall, Flags, PackageIs32Bit, bUsesExternalFilesDir, bUsesPublicLogs);
 
 				DiscoveredBuilds.Add(NewBuild);
 

@@ -1,26 +1,37 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "NavigationData.h"
+
+#include "AssetCompilingManager.h"
 #include "EngineGlobals.h"
 #include "AI/Navigation/NavAgentInterface.h"
 #include "Components/PrimitiveComponent.h"
 #include "AI/NavDataGenerator.h"
 #include "NavigationSystem.h"
+#include "NavFilters/NavigationQueryFilter.h"
 #include "Engine/Engine.h"
 #include "NavAreas/NavArea.h"
 #include "AI/Navigation/NavAreaBase.h"
 #include "VisualLogger/VisualLogger.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavigationData)
 
 // set to NAVMESHVER_LANDSCAPE_HEIGHT at the moment of refactoring navigation
 // code out of the engine module. No point in using RecastNavMesh versioning 
 // for NavigationData
 #define NAVDATAVER_LATEST 13	
 
+static TAutoConsoleVariable<int32> CVarDestroyNavDataInCleanUpAndMarkPendingKill(
+	TEXT("ai.DestroyNavDataInCleanUpAndMarkPendingKill"),
+	1,
+	TEXT("If set to 1 NavData will be destroyed in CleanUpAndMarkPendingKill rather than being marked as garbage.\n"),
+	ECVF_Default);
+
 //----------------------------------------------------------------------//
 // FPathFindingQuery
 //----------------------------------------------------------------------//
-FPathFindingQuery::FPathFindingQuery(const UObject* InOwner, const ANavigationData& InNavData, const FVector& Start, const FVector& End, FSharedConstNavQueryFilter SourceQueryFilter, FNavPathSharedPtr InPathInstanceToFill, const float CostLimit) :
-	FPathFindingQueryData(InOwner, Start, End, SourceQueryFilter, 0 /*InNavDataFlags*/, true /*bInAllowPartialPaths*/, CostLimit),
+FPathFindingQuery::FPathFindingQuery(const UObject* InOwner, const ANavigationData& InNavData, const FVector& Start, const FVector& End, FSharedConstNavQueryFilter SourceQueryFilter, FNavPathSharedPtr InPathInstanceToFill, const FVector::FReal CostLimit, const bool bInRequireNavigableEndLocation) :
+	FPathFindingQueryData(InOwner, Start, End, SourceQueryFilter, 0 /*InNavDataFlags*/, true /*bInAllowPartialPaths*/, CostLimit, bInRequireNavigableEndLocation),
 	NavData(&InNavData), PathInstanceToFill(InPathInstanceToFill), NavAgentProperties(InNavData.GetConfig())
 {
 	if (!QueryFilter.IsValid() && NavData.IsValid())
@@ -29,19 +40,9 @@ FPathFindingQuery::FPathFindingQuery(const UObject* InOwner, const ANavigationDa
 	}
 }
 
-FPathFindingQuery::FPathFindingQuery(const INavAgentInterface& InNavAgent, const ANavigationData& InNavData, const FVector& Start, const FVector& End, FSharedConstNavQueryFilter SourceQueryFilter, FNavPathSharedPtr InPathInstanceToFill, const float CostLimit) :
-	FPathFindingQueryData(Cast<UObject>(&InNavAgent), Start, End, SourceQueryFilter, 0 /*InNavDataFlags*/, true /*bInAllowPartialPaths*/, CostLimit),
+FPathFindingQuery::FPathFindingQuery(const INavAgentInterface& InNavAgent, const ANavigationData& InNavData, const FVector& Start, const FVector& End, FSharedConstNavQueryFilter SourceQueryFilter, FNavPathSharedPtr InPathInstanceToFill, const FVector::FReal CostLimit, const bool bInRequireNavigableEndLocation) :
+	FPathFindingQueryData(Cast<UObject>(&InNavAgent), Start, End, SourceQueryFilter, 0 /*InNavDataFlags*/, true /*bInAllowPartialPaths*/, CostLimit, bInRequireNavigableEndLocation),
 	NavData(&InNavData), PathInstanceToFill(InPathInstanceToFill), NavAgentProperties(InNavAgent.GetNavAgentPropertiesRef())
-{
-	if (!QueryFilter.IsValid() && NavData.IsValid())
-	{
-		QueryFilter = NavData->GetDefaultQueryFilter();
-	}
-}
-
-FPathFindingQuery::FPathFindingQuery(const FPathFindingQuery& Source) :
-	FPathFindingQueryData(Source.Owner.Get(), Source.StartLocation, Source.EndLocation, Source.QueryFilter, Source.NavDataFlags, Source.bAllowPartialPaths, Source.CostLimit),
-	NavData(Source.NavData), PathInstanceToFill(Source.PathInstanceToFill), NavAgentProperties(Source.NavAgentProperties)
 {
 	if (!QueryFilter.IsValid() && NavData.IsValid())
 	{
@@ -82,7 +83,7 @@ FPathFindingQuery::FPathFindingQuery(FNavPathSharedRef PathToRecalculate, const 
 	}
 }
 
-float FPathFindingQuery::ComputeCostLimitFromHeuristic(const FVector& StartPos, const FVector& EndPos, const float HeuristicScale, const float CostLimitFactor, const float MinimumCostLimit) const
+FVector::FReal FPathFindingQuery::ComputeCostLimitFromHeuristic(const FVector& StartPos, const FVector& EndPos, const FVector::FReal HeuristicScale, const FVector::FReal CostLimitFactor, const FVector::FReal MinimumCostLimit)
 {
 	if (CostLimitFactor == FLT_MAX)
 	{
@@ -90,8 +91,8 @@ float FPathFindingQuery::ComputeCostLimitFromHeuristic(const FVector& StartPos, 
 	}
 	else
 	{
-		const float OriginalHeuristicEstimate = HeuristicScale * FVector::Dist(StartPos, EndPos);
-		return FMath::Clamp(CostLimitFactor * OriginalHeuristicEstimate, MinimumCostLimit, FLT_MAX);
+		const FVector::FReal OriginalHeuristicEstimate = HeuristicScale * FVector::Dist(StartPos, EndPos);
+		return FMath::Clamp(CostLimitFactor * OriginalHeuristicEstimate, MinimumCostLimit, TNumericLimits<FVector::FReal>::Max());
 	}
 }
 
@@ -100,7 +101,7 @@ float FPathFindingQuery::ComputeCostLimitFromHeuristic(const FVector& StartPos, 
 //----------------------------------------------------------------------//
 uint32 FAsyncPathFindingQuery::LastPathFindingUniqueID = INVALID_NAVQUERYID;
 
-FAsyncPathFindingQuery::FAsyncPathFindingQuery(const UObject* InOwner, const ANavigationData& InNavData, const FVector& Start, const FVector& End, const FNavPathQueryDelegate& Delegate, FSharedConstNavQueryFilter SourceQueryFilter, const float CostLimit)
+FAsyncPathFindingQuery::FAsyncPathFindingQuery(const UObject* InOwner, const ANavigationData& InNavData, const FVector& Start, const FVector& End, const FNavPathQueryDelegate& Delegate, FSharedConstNavQueryFilter SourceQueryFilter, const FVector::FReal CostLimit)
 : FPathFindingQuery(InOwner, InNavData, Start, End, SourceQueryFilter)
 , QueryID(GetUniqueID())
 , OnDoneDelegate(Delegate)
@@ -141,7 +142,7 @@ ANavigationData::ANavigationData(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 	, bEnableDrawing(false)
 	, bForceRebuildOnLoad(false)
-	, bAutoDestroyWhenNoNavigation(true)
+	, bAutoDestroyWhenNoNavigation(false)
 	, bCanBeMainNavData(true)
 	, bCanSpawnOnRebuild(true)
 	, RuntimeGeneration(ERuntimeGenerationType::LegacyGeneration) //TODO: set to a valid value once bRebuildAtRuntime_DEPRECATED is removed
@@ -166,19 +167,23 @@ ANavigationData::ANavigationData(const FObjectInitializer& ObjectInitializer)
 	USceneComponent* SceneComponent = CreateDefaultSubobject<USceneComponent>(TEXT("SceneComp"));
 	RootComponent = SceneComponent;
 	RootComponent->Mobility = EComponentMobility::Static;
+
+#if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+#endif
 }
 
 uint16 ANavigationData::GetNextUniqueID()
 {
 	static FThreadSafeCounter StaticID(INVALID_NAVDATA);
-	return StaticID.Increment();
+	return IntCastChecked<uint16>(StaticID.Increment());
 }
 
 void ANavigationData::PostInitProperties()
 {
 	Super::PostInitProperties();
 
-	if (IsPendingKill() == true)
+	if (!IsValid(this))
 	{
 		return;
 	}
@@ -194,7 +199,9 @@ void ANavigationData::PostInitProperties()
 	{
 		bNetLoadOnClient = FNavigationSystem::ShouldLoadNavigationOnClient(*this);
 		RequestRegistration();
+#if UE_ENABLE_DEBUG_DRAWING
 		RenderingComp = ConstructRenderingComponent();
+#endif // UE_ENABLE_DEBUG_DRAWING
 	}
 }
 
@@ -218,12 +225,6 @@ void ANavigationData::PostInitializeComponents()
 void ANavigationData::PostLoad() 
 {
 	Super::PostLoad();
-
-	if ((GetLinkerUE4Version() < VER_UE4_ADD_MODIFIERS_RUNTIME_GENERATION) &&
-		(RuntimeGeneration == ERuntimeGenerationType::LegacyGeneration))
-	{
-		RuntimeGeneration = bRebuildAtRuntime_DEPRECATED ? ERuntimeGenerationType::Dynamic : ERuntimeGenerationType::Static;
-	}
 
 	InstantiateAndRegisterRenderingComponent();
 
@@ -269,7 +270,7 @@ void ANavigationData::TickActor(float DeltaTime, enum ELevelTick TickType, FActo
 					switch (Result)
 					{
 					case EPathObservationResult::NoLongerObserving:
-						ObservedPaths.RemoveAtSwap(PathIndex, 1, /*bAllowShrinking=*/false);
+						ObservedPaths.RemoveAtSwap(PathIndex, 1, EAllowShrinking::No);
 						break;
 
 					case EPathObservationResult::NoChange:
@@ -287,7 +288,7 @@ void ANavigationData::TickActor(float DeltaTime, enum ELevelTick TickType, FActo
 				}
 				else
 				{
-					ObservedPaths.RemoveAtSwap(PathIndex, 1, /*bAllowShrinking=*/false);
+					ObservedPaths.RemoveAtSwap(PathIndex, 1, EAllowShrinking::No);
 				}
 			}
 
@@ -300,7 +301,7 @@ void ANavigationData::TickActor(float DeltaTime, enum ELevelTick TickType, FActo
 
 	if (RepathRequests.Num() > 0)
 	{
-		float TimeStamp = GetWorldTimeStamp();
+		double TimeStamp = GetWorldTimeStamp();
 		const UWorld* World = GetWorld();
 
 		// @todo batch-process it!
@@ -366,12 +367,14 @@ void ANavigationData::TickActor(float DeltaTime, enum ELevelTick TickType, FActo
 	}
 }
 
+#if WITH_EDITOR
 void ANavigationData::RerunConstructionScripts()
 {
 	Super::RerunConstructionScripts();
 
 	InstantiateAndRegisterRenderingComponent();
 }
+#endif
 
 void ANavigationData::OnRegistered() 
 { 
@@ -388,8 +391,8 @@ void ANavigationData::OnUnregistered()
 
 void ANavigationData::InstantiateAndRegisterRenderingComponent()
 {
-#if !UE_BUILD_SHIPPING
-	if (!IsPendingKill() && (RenderingComp == NULL || RenderingComp->IsPendingKill()))
+#if UE_ENABLE_DEBUG_DRAWING
+	if (IsValid(this) && !IsValid(RenderingComp))
 	{
 		const bool bRootIsRenderComp = (RenderingComp == RootComponent);
 		if (RenderingComp)
@@ -411,7 +414,7 @@ void ANavigationData::InstantiateAndRegisterRenderingComponent()
 			RootComponent = RenderingComp;
 		}
 	}
-#endif // !UE_BUILD_SHIPPING
+#endif // UE_ENABLE_DEBUG_DRAWING
 }
 
 void ANavigationData::PurgeUnusedPaths()
@@ -423,12 +426,12 @@ void ANavigationData::PurgeUnusedPaths()
 	FScopeLock PathLock(&ActivePathsLock);
 
 	const int32 Count = ActivePaths.Num();
-	FNavPathWeakPtr* WeakPathPtr = (ActivePaths.GetData() + Count - 1);
-	for (int32 i = Count - 1; i >= 0; --i, --WeakPathPtr)
+	for (int32 PathIndex = Count - 1; PathIndex >= 0; --PathIndex)
 	{
+		FNavPathWeakPtr* WeakPathPtr = &ActivePaths[PathIndex];
 		if (WeakPathPtr->IsValid() == false)
 		{
-			ActivePaths.RemoveAtSwap(i, 1, /*bAllowShrinking=*/false);
+			ActivePaths.RemoveAtSwap(PathIndex, 1, EAllowShrinking::No);
 		}
 	}
 }
@@ -500,12 +503,26 @@ void ANavigationData::ApplyWorldOffset(const FVector& InOffset, bool bWorldShift
 void ANavigationData::CleanUpAndMarkPendingKill()
 {
 	CleanUp();
-	SetActorHiddenInGame(true);
 
-	// do NOT destroy here! it can be called from PostLoad and will crash in DestroyActor()
-	GetWorld()->RemoveNetworkActor(this);
-	MarkPendingKill();
-	MarkComponentsAsPendingKill();
+	/* Need to check if the world is valid since, when this is called from Serialize, the World won't be set and Destroy will do nothing, 
+	 * in which case it will crash when it tries to register with the NavSystem in UNavigationSystemV1::ProcessRegistrationCandidates. */
+	if (CVarDestroyNavDataInCleanUpAndMarkPendingKill.GetValueOnAnyThread() && IsValid(GetWorld()))
+	{
+		Destroy();
+	}
+	else
+	{
+		SetActorHiddenInGame(true);
+
+		if (UWorld* World = GetWorld())
+		{
+			// This part is not thread-safe and should only happen on the GT...
+			check(IsInGameThread());
+			World->RemoveNetworkActor(this);
+		}
+		MarkAsGarbage();
+		MarkComponentsAsGarbage();
+	}
 }
 
 bool ANavigationData::SupportsRuntimeGeneration() const
@@ -524,10 +541,22 @@ void ANavigationData::ConditionalConstructGenerator()
 
 void ANavigationData::RebuildAll()
 {
+	const double LoadTime = FPlatformTime::Seconds();
+	LoadBeforeGeneratorRebuild();
+	FAssetCompilingManager::Get().FinishAllCompilation();
+	UE_LOG(LogNavigationDataBuild, Display, TEXT("   %s load time: %.2fs"), ANSI_TO_TCHAR(__FUNCTION__), (FPlatformTime::Seconds() - LoadTime));
+	
 	ConditionalConstructGenerator(); //recreate generator
 	
 	if (NavDataGenerator.IsValid())
 	{
+#if WITH_EDITOR		
+		if (!IsBuildingOnLoad())
+		{
+			MarkPackageDirty();
+		}
+#endif // WITH_EDITOR
+
 		NavDataGenerator->RebuildAll();
 	}
 }
@@ -633,12 +662,12 @@ TArray<FBox> ANavigationData::GetNavigableBoundsInLevel(ULevel* InLevel) const
 	return Result;
 }
 
-void ANavigationData::DrawDebugPath(FNavigationPath* Path, FColor PathColor, UCanvas* Canvas, bool bPersistent, const uint32 NextPathPointIndex) const
+void ANavigationData::DrawDebugPath(FNavigationPath* Path, const FColor PathColor, UCanvas* Canvas, const bool bPersistent, const float LifeTime, const uint32 NextPathPointIndex) const
 {
-	Path->DebugDraw(this, PathColor, Canvas, bPersistent, NextPathPointIndex);
+	Path->DebugDraw(this, PathColor, Canvas, bPersistent, LifeTime, NextPathPointIndex);
 }
 
-float ANavigationData::GetWorldTimeStamp() const
+double ANavigationData::GetWorldTimeStamp() const
 {
 	const UWorld* World = GetWorld();
 	return World ? World->GetTimeSeconds() : 0.f;
@@ -667,7 +696,7 @@ void ANavigationData::OnNavAreaAdded(const UClass* NavAreaClass, int32 AgentInde
 		{
 			SupportedAreas[i].AreaClass = NavAreaClass;
 			AreaClassToIdMap.Add(NavAreaClass, SupportedAreas[i].AreaID);
-			UE_VLOG_UELOG(this, LogNavigation, Verbose, TEXT("%s updated area %s with ID %d"), *GetName(), *AreaClassName, SupportedAreas[i].AreaID);
+			UE_VLOG_UELOG(this, LogNavigation, Verbose, TEXT("%s: updated area %s with ID %d"), *GetFullName(), *AreaClassName, SupportedAreas[i].AreaID);
 			return;
 		}
 	}
@@ -817,7 +846,7 @@ void ANavigationData::RemoveQueryFilter(TSubclassOf<UNavigationQueryFilter> Filt
 
 uint32 ANavigationData::LogMemUsed() const
 {
-	uint32 ActivePathsMemSize = 0;
+	SIZE_T ActivePathsMemSize = 0;
 	{
 		// Paths can be registered from async pathfinding thread
 		// while logging is requested on main thread (console command)
@@ -825,8 +854,8 @@ uint32 ANavigationData::LogMemUsed() const
 		ActivePathsMemSize = ActivePaths.GetAllocatedSize();
 	}
 
-	const uint32 MemUsed = ActivePathsMemSize + SupportedAreas.GetAllocatedSize() +
-		QueryFilters.GetAllocatedSize() + AreaClassToIdMap.GetAllocatedSize();
+	const uint32 MemUsed = IntCastChecked<uint32>(ActivePathsMemSize + SupportedAreas.GetAllocatedSize() +
+		QueryFilters.GetAllocatedSize() + AreaClassToIdMap.GetAllocatedSize());
 
 	UE_VLOG_UELOG(this, LogNavigation, Display, TEXT("%s: ANavigationData: %u\n    self: %d"), *GetName(), MemUsed, sizeof(ANavigationData));
 
@@ -836,4 +865,44 @@ uint32 ANavigationData::LogMemUsed() const
 	}
 
 	return MemUsed;
+}
+
+//------------------------------------------------------------------------//
+// deprecated functions
+//------------------------------------------------------------------------//
+void ANavigationData::DrawDebugPath(FNavigationPath* Path, FColor PathColor, UCanvas* Canvas, bool bPersistent, const uint32 NextPathPointIndex) const
+{
+	DrawDebugPath(Path, PathColor, Canvas, bPersistent, -1.f, NextPathPointIndex);
+}
+
+ENavigationQueryResult::Type ANavigationData::CalcPathCost(const FVector& PathStart, const FVector& PathEnd, float& OutPathCost, FSharedConstNavQueryFilter QueryFilter, const UObject* Querier) const
+{
+	FVector::FReal PathCost = OutPathCost;
+
+	const ENavigationQueryResult::Type Result = CalcPathCost(PathStart, PathEnd, PathCost, QueryFilter, Querier);
+	OutPathCost = UE_REAL_TO_FLOAT_CLAMPED(PathCost);
+
+	return Result;
+}
+
+ENavigationQueryResult::Type ANavigationData::CalcPathLength(const FVector& PathStart, const FVector& PathEnd, float& OutPathLength, FSharedConstNavQueryFilter QueryFilter, const UObject* Querier) const
+{
+	FVector::FReal PathLength = OutPathLength;
+
+	const ENavigationQueryResult::Type Result = CalcPathLength(PathStart, PathEnd, PathLength, QueryFilter, Querier);
+	OutPathLength = UE_REAL_TO_FLOAT_CLAMPED(PathLength);
+
+	return Result;
+}
+
+ENavigationQueryResult::Type ANavigationData::CalcPathLengthAndCost(const FVector& PathStart, const FVector& PathEnd, float& OutPathLength, float& OutPathCost, FSharedConstNavQueryFilter QueryFilter, const UObject* Querier) const
+{
+	FVector::FReal PathLength = OutPathLength;
+	FVector::FReal PathCost = OutPathCost;
+
+	const ENavigationQueryResult::Type Result = CalcPathLengthAndCost(PathStart, PathEnd, PathLength, PathCost, QueryFilter, Querier);
+	OutPathLength = UE_REAL_TO_FLOAT_CLAMPED(PathLength);
+	OutPathCost = UE_REAL_TO_FLOAT_CLAMPED(PathCost);
+
+	return Result;
 }

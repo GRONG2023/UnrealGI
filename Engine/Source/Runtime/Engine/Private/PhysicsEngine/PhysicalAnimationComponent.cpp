@@ -1,16 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "PhysicsEngine/PhysicalAnimationComponent.h"
+#include "Chaos/ImplicitFwd.h"
 #include "SceneManagement.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Physics/Experimental/PhysScene_Chaos.h"
 #include "PhysicsEngine/PhysicsAsset.h"
-#include "PhysXPublic.h"
-#include "Physics/PhysicsInterfaceCore.h"
 #include "Chaos/ChaosConstraintSettings.h"
-#include "Chaos/ParticleHandle.h"
 #include "Chaos/Sphere.h"
-#include "ChaosCheck.h"
+#include "PhysicsEngine/ConstraintInstance.h"
 #include "PhysicsProxy/SingleParticlePhysicsProxy.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(PhysicalAnimationComponent)
 
 const FConstraintProfileProperties UPhysicalAnimationComponent::PhysicalAnimationProfile = []()
 {
@@ -179,33 +180,17 @@ FTransform UPhysicalAnimationComponent::GetBodyTargetTransform(FName BodyName) c
 {
 	if (SkeletalMeshComponent)
 	{
-
 		for (int32 DataIdx = 0; DataIdx < DriveData.Num(); ++DataIdx)
 		{
 			const FPhysicalAnimationData& PhysAnimData = DriveData[DataIdx];
 			const FPhysicalAnimationInstanceData& InstanceData = RuntimeInstanceData[DataIdx];
 			if (BodyName == PhysAnimData.BodyName)
 			{
-#if PHYSICS_INTERFACE_PHYSX
-				if (PxRigidDynamic* TargetActor = InstanceData.TargetActor)
-				{
-					PxTransform PKinematicTarget;
-					if (TargetActor->getKinematicTarget(PKinematicTarget))
-					{
-						return P2UTransform(PKinematicTarget);
-					}
-					else
-					{
-						return P2UTransform(TargetActor->getGlobalPose());
-					}
-				}
-#elif WITH_CHAOS
 				if (FPhysicsActorHandle TargetActor = InstanceData.TargetActor)
 				{
 					// TODO: If kinematic targets implemented, fetch target and don't use position.
 					return FTransform(TargetActor->GetGameThreadAPI().R(), TargetActor->GetGameThreadAPI().X());
 				}
-#endif
 
 				break;
 			}
@@ -230,7 +215,7 @@ FTransform ComputeWorldSpaceTargetTM(const USkeletalMeshComponent& SkeletalMeshC
 
 FTransform ComputeLocalSpaceTargetTM(const USkeletalMeshComponent& SkeletalMeshComponent, const UPhysicsAsset& PhysAsset, const TArray<FTransform>& LocalTransforms, int32 BoneIndex)
 {
-	const FReferenceSkeleton& RefSkeleton = SkeletalMeshComponent.SkeletalMesh->GetRefSkeleton();
+	const FReferenceSkeleton& RefSkeleton = SkeletalMeshComponent.GetSkeletalMeshAsset()->GetRefSkeleton();
 	FTransform AccumulatedDelta = LocalTransforms[BoneIndex];
 	int32 CurBoneIdx = BoneIndex;
 	while ((CurBoneIdx = RefSkeleton.GetParentIndex(CurBoneIdx)) != INDEX_NONE)
@@ -272,14 +257,13 @@ FTransform ComputeTargetTM(const FPhysicalAnimationData& PhysAnimData, const USk
 void UPhysicalAnimationComponent::UpdateTargetActors(ETeleportType TeleportType)
 {
 	UPhysicsAsset* PhysAsset = SkeletalMeshComponent ? SkeletalMeshComponent->GetPhysicsAsset() : nullptr;
-	if (PhysAsset && SkeletalMeshComponent->SkeletalMesh)
+	if (PhysAsset && SkeletalMeshComponent->GetSkeletalMeshAsset())
 	{
-		const FReferenceSkeleton& RefSkeleton = SkeletalMeshComponent->SkeletalMesh->GetRefSkeleton();
+		const FReferenceSkeleton& RefSkeleton = SkeletalMeshComponent->GetSkeletalMeshAsset()->GetRefSkeleton();
 
 		// Note we use GetEditableComponentSpaceTransforms because we need to update target actors in the midst of the 
 		// various anim ticks, before buffers are flipped (which happens in the skel mesh component's post-physics tick)
 		const TArray<FTransform>& SpaceBases = SkeletalMeshComponent->GetEditableComponentSpaceTransforms();
-
 
 		FPhysicsCommand::ExecuteWrite(SkeletalMeshComponent, [&]()
 		{
@@ -288,29 +272,14 @@ void UPhysicalAnimationComponent::UpdateTargetActors(ETeleportType TeleportType)
 			{
 				const FPhysicalAnimationData& PhysAnimData = DriveData[DataIdx];
 				FPhysicalAnimationInstanceData& InstanceData = RuntimeInstanceData[DataIdx];
-#if PHYSICS_INTERFACE_PHYSX
-				if (PxRigidDynamic* TargetActor = InstanceData.TargetActor)
-				{
-					const int32 BoneIdx = RefSkeleton.FindBoneIndex(PhysAnimData.BodyName);
-					if (BoneIdx != INDEX_NONE)	//It's possible the skeletal mesh has changed out from under us. In that case we should probably reset, but at the very least don't do work on non-existent bones
-					{
-						const FTransform TargetTM = ComputeTargetTM(PhysAnimData, *SkeletalMeshComponent, *PhysAsset, LocalTransforms, SpaceBases, BoneIdx);
-						TargetActor->setKinematicTarget(U2PTransform(TargetTM));	//TODO: this doesn't work with sub-stepping!
-						
-						if(TeleportType == ETeleportType::TeleportPhysics)
-						{
-							TargetActor->setGlobalPose(U2PTransform(TargetTM));	//Note that we still set the kinematic target because physx doesn't clear this
-						}
-						
-					}
-				}
-#else
+
 				if (FPhysicsActorHandle TargetActor = InstanceData.TargetActor)
 				{
 					const int32 BoneIdx = RefSkeleton.FindBoneIndex(PhysAnimData.BodyName);
 					if (BoneIdx != INDEX_NONE)	//It's possible the skeletal mesh has changed out from under us. In that case we should probably reset, but at the very least don't do work on non-existent bones
 					{
 						const FTransform TargetTM = ComputeTargetTM(PhysAnimData, *SkeletalMeshComponent, *PhysAsset, LocalTransforms, SpaceBases, BoneIdx);
+						// todo(chaos): Calling SetKinematicTarget_AssumesLocked before SetGlobalPose_AssumesLocked is unnessary for chaos. We should fix this when PhysX is removed.
 						FPhysicsInterface::SetKinematicTarget_AssumesLocked(TargetActor, TargetTM);
 
 						if (TeleportType == ETeleportType::TeleportPhysics)
@@ -319,7 +288,6 @@ void UPhysicalAnimationComponent::UpdateTargetActors(ETeleportType TeleportType)
 						}
 					}
 				}
-#endif
 			}
 		});
 	}
@@ -351,13 +319,11 @@ void SetMotorStrength(FConstraintInstance& ConstraintInstance, const FPhysicalAn
 	float VelocityStrengthMultiplier = StrengthMultiplier;
 	float OrientationStrengthMultiplier = StrengthMultiplier;
 	float AngularVelocityStrengthMultiplier = StrengthMultiplier;
-#if WITH_CHAOS
-	// Chaos has it's own global adjustments
+
 	PositionStrengthMultiplier *= Chaos::ConstraintSettings::LinearDriveStiffnessScale();
 	VelocityStrengthMultiplier *= Chaos::ConstraintSettings::LinearDriveDampingScale();
 	OrientationStrengthMultiplier *= Chaos::ConstraintSettings::AngularDriveStiffnessScale();
 	AngularVelocityStrengthMultiplier *= Chaos::ConstraintSettings::AngularDriveDampingScale();
-#endif
 
 	ConstraintInstance.SetAngularDriveParams(
 		PhysAnimData.OrientationStrength * OrientationStrengthMultiplier, 
@@ -392,7 +358,7 @@ void UPhysicalAnimationComponent::UpdatePhysicsEngineImp()
 {
 	bPhysicsEngineNeedsUpdating = false;
 	UPhysicsAsset* PhysAsset = SkeletalMeshComponent ? SkeletalMeshComponent->GetPhysicsAsset() : nullptr;
-	if(PhysAsset && SkeletalMeshComponent->SkeletalMesh)
+	if(PhysAsset && SkeletalMeshComponent->GetSkeletalMeshAsset())
 	{
 		//TODO: This is hacky and assumes constraints can only be added and not removed. True for now, but bad in general!
 		const int32 NumData = DriveData.Num();
@@ -403,9 +369,8 @@ void UPhysicalAnimationComponent::UpdatePhysicsEngineImp()
 		// Note we use GetEditableComponentSpaceTransforms because we need to update target actors in the midst of the 
 		// various anim ticks, before buffers are flipped (which happens in the skel mesh component's post-physics tick)
 		const TArray<FTransform>& SpaceBases = SkeletalMeshComponent->GetEditableComponentSpaceTransforms();
-		const FReferenceSkeleton& RefSkeleton = SkeletalMeshComponent->SkeletalMesh->GetRefSkeleton();
+		const FReferenceSkeleton& RefSkeleton = SkeletalMeshComponent->GetSkeletalMeshAsset()->GetRefSkeleton();
 
-#if WITH_PHYSX
 		FPhysicsCommand::ExecuteWrite(SkeletalMeshComponent, [&]()
 		{
 			TArray<FTransform> LocalTransforms = SkeletalMeshComponent->GetBoneSpaceTransforms();
@@ -432,7 +397,6 @@ void UPhysicalAnimationComponent::UpdatePhysicsEngineImp()
 					int32 ChildBodyIdx = PhysAsset->FindBodyIndex(PhysAnimData.BodyName);
 					if (FBodyInstance* ChildBody = (ChildBodyIdx == INDEX_NONE ? nullptr : SkeletalMeshComponent->Bodies[ChildBodyIdx]))
 					{
-#if WITH_CHAOS || WITH_IMMEDIATE_PHYSX
 						if (FPhysicsActorHandle ActorHandle = ChildBody->ActorHandle)
 						{
 							FPhysScene* Scene = ChildBody->GetPhysicsScene();
@@ -447,14 +411,15 @@ void UPhysicalAnimationComponent::UpdatePhysicsEngineImp()
 							FActorCreationParams Params;
 							Params.bSimulatePhysics = false;
 							Params.bQueryOnly = false;
+							Params.bUpdateKinematicFromSimulation = false;
 							Params.Scene = Scene;
 							Params.bStatic = false;
 							Params.InitialTM = TargetTM;
 							FPhysicsInterface::CreateActor(Params, KineActor);
 							
 							// Chaos requires our particles have geometry.
-							auto Sphere = MakeUnique<Chaos::FImplicitSphere3>(FVector(0,0,0), 0);
-							KineActor->GetGameThreadAPI().SetGeometry(MoveTemp(Sphere));
+							auto Sphere = MakeImplicitObjectPtr<Chaos::FImplicitSphere3>(FVector(0,0,0), 0);
+							KineActor->GetGameThreadAPI().SetGeometry(Sphere);
 
 							KineActor->GetGameThreadAPI().SetUserData(nullptr);
 
@@ -465,43 +430,11 @@ void UPhysicalAnimationComponent::UpdatePhysicsEngineImp()
 							InstanceData.TargetActor = KineActor;
 
 							ConstraintInstance->InitConstraint_AssumesLocked(ChildBody->ActorHandle, InstanceData.TargetActor, 1.f);
-					}
-
-#elif PHYSICS_INTERFACE_PHYSX
-						if (PxRigidActor* PRigidActor = FPhysicsInterface_PhysX::GetPxRigidActor_AssumesLocked(ChildBody->ActorHandle))
-						{
-							ConstraintInstance->SetRefFrame(EConstraintFrame::Frame1, FTransform::Identity);
-							ConstraintInstance->SetRefFrame(EConstraintFrame::Frame2, FTransform::Identity);
-
-							const FTransform TargetTM = ComputeTargetTM(PhysAnimData, *SkeletalMeshComponent, *PhysAsset, LocalTransforms, SpaceBases, ChildBody->InstanceBoneIndex);
-
-							// Create kinematic actor we are going to create joint with. This will be moved around with calls to SetLocation/SetRotation.
-							PxScene* PScene = PRigidActor->getScene();
-							PxRigidDynamic* KineActor = PScene->getPhysics().createRigidDynamic(U2PTransform(TargetTM));
-							KineActor->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC, true);
-							KineActor->setMass(1.0f);
-							KineActor->setMassSpaceInertiaTensor(PxVec3(1.0f, 1.0f, 1.0f));
-
-							// No bodyinstance
-							KineActor->userData = NULL;
-
-							// Add to Scene
-							PScene->addActor(*KineActor);
-
-							// Save reference to the kinematic actor.
-							InstanceData.TargetActor = KineActor;
-
-							FPhysicsActorHandle TargetRef;
-							TargetRef.SyncActor = InstanceData.TargetActor;
-							
-							ConstraintInstance->InitConstraint_AssumesLocked(ChildBody->ActorHandle, TargetRef, 1.f);
 						}
-#endif
 					}
 				}
 			}
 		});
-#endif
 	}
 }
 
@@ -548,23 +481,12 @@ void UPhysicalAnimationComponent::ReleasePhysicsEngine()
 
 			if(Instance.TargetActor)
 			{
-#if PHYSICS_INTERFACE_PHYSX
-				PxScene* PScene = Instance.TargetActor->getScene();
-				if(PScene)
-				{
-					SCOPED_SCENE_WRITE_LOCK(PScene);
-					PScene->removeActor(*Instance.TargetActor);
-				}
-				Instance.TargetActor->release();
-				Instance.TargetActor = nullptr;
-#else
 				FChaosScene* PhysScene = FChaosEngineInterface::GetCurrentScene(Instance.TargetActor);
 				if (ensure(PhysScene))
 				{
 					FPhysInterface_Chaos::ReleaseActor(Instance.TargetActor, PhysScene);
 				}
 				Instance.TargetActor = nullptr;
-#endif
 			}
 		}
 
@@ -581,12 +503,9 @@ void UPhysicalAnimationComponent::DebugDraw(FPrimitiveDrawInterface* PDI) const
 	{
 		if (PhysAnimData.TargetActor)
 		{
-#if PHYSICS_INTERFACE_PHYSX
-			PDI->DrawPoint(P2UVector(PhysAnimData.TargetActor->getGlobalPose().p), TargetActorColor, 3.f, SDPG_World);
-#elif WITH_CHAOS
 			PDI->DrawPoint(PhysAnimData.TargetActor->GetGameThreadAPI().X(), TargetActorColor, 3.f, SDPG_World);
-#endif
 		}
 	}
 }
 #endif
+

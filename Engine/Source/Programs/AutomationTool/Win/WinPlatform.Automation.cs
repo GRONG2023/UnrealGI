@@ -4,22 +4,107 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.IO;
+using System.Text.RegularExpressions;
 using AutomationTool;
 using UnrealBuildTool;
 using Microsoft.Win32;
 using System.Diagnostics;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using System.Runtime.Versioning;
+using System.Threading.Tasks;
+using System.Reflection.PortableExecutable;
+using Microsoft.Extensions.Logging;
 
-public abstract class BaseWinPlatform : Platform
+using static AutomationTool.CommandUtils;
+
+public class Win64Platform : Platform
 {
-	public BaseWinPlatform(UnrealTargetPlatform P)
-		: base(P)
+	public Win64Platform()
+		: base(UnrealTargetPlatform.Win64)
 	{
 	}
+
+	protected Win64Platform(UnrealTargetPlatform PlatformType)
+		: base(PlatformType)
+	{
+	}
+
+	public override DeviceInfo[] GetDevices()
+	{
+		List<DeviceInfo> Devices = new List<DeviceInfo>();
+
+		if (HostPlatform.Current.HostEditorPlatform == UnrealTargetPlatform.Win64)
+		{
+			DeviceInfo LocalMachine = new DeviceInfo(UnrealTargetPlatform.Win64, Unreal.MachineName, Unreal.MachineName,
+				Environment.OSVersion.Version.ToString(), "Computer", true, true);
+
+			Devices.Add(LocalMachine);
+
+			Devices.AddRange(SteamDeckSupport.GetDevices(UnrealTargetPlatform.Win64));
+		}
+
+		return Devices.ToArray();
+	}
+
+	public override void PlatformSetupParams(ref ProjectParams Params)
+	{
+		base.PlatformSetupParams(ref Params);
+
+		// use a custom deployment handler if one is requested
+		Params.PreModifyDeploymentContextCallback = new Action<ProjectParams, DeploymentContext>((ProjectParams Params, DeploymentContext SC) =>
+		{
+			if (SC.CustomDeployment == null)
+			{			
+				string CustomDeploymentName = null;
+
+				ConfigHierarchy EngineIni = ConfigCache.ReadHierarchy(ConfigHierarchyType.Engine, Params.RawProjectPath.Directory, PlatformType, SC.CustomConfig);
+				EngineIni.GetString("/Script/WindowsTargetPlatform.WindowsTargetSettings", "CustomDeployment", out CustomDeploymentName);
+
+				if (string.IsNullOrEmpty(CustomDeploymentName))
+				{
+					CustomDeploymentName = Params.CustomDeploymentHandler;
+				}
+
+				if (!string.IsNullOrEmpty(CustomDeploymentName))
+				{
+					SC.CustomDeployment = CustomDeploymentHandler.Create(CustomDeploymentName, this);
+				}
+			}			
+		});
+	}
+
+	public override void Deploy(ProjectParams Params, DeploymentContext SC)
+	{
+		// We only care about deploying for SteamDeck
+		if (Params.Devices.Count == 1 && GetDevices().FirstOrDefault(x => x.Id == Params.DeviceNames[0])?.Type == "SteamDeck")
+		{
+			SteamDeckSupport.Deploy(UnrealTargetPlatform.Win64, Params, SC);
+		}
+	}
+
+	public override IProcessResult RunClient(ERunOptions ClientRunFlags, string ClientApp, string ClientCmdLine, ProjectParams Params)
+	{
+		if (Params.Devices.Count == 1 && GetDevices().FirstOrDefault(x => x.Id == Params.DeviceNames[0])?.Type == "SteamDeck")
+		{
+			return SteamDeckSupport.RunClient(UnrealTargetPlatform.Win64, ClientRunFlags, ClientApp, ClientCmdLine, Params);
+		}
+
+		return base.RunClient(ClientRunFlags, ClientApp, ClientCmdLine, Params);
+	}
+
 	protected override string GetPlatformExeExtension()
 	{
 		return ".exe";
 	}
+
+	public override bool IsSupported { get { return true; } }
+
+	public virtual UnrealTargetPlatform? BootstrapExePlatform
+	{
+		get { return null; }
+	}
+
 
 	public override void GetFilesToDeployOrStage(ProjectParams Params, DeploymentContext SC)
 	{
@@ -27,7 +112,7 @@ public abstract class BaseWinPlatform : Platform
 
 		if (SC.bStageCrashReporter)
 		{
-			FileReference ReceiptFileName = TargetReceipt.GetDefaultPath(CommandUtils.EngineDirectory, "CrashReportClient", SC.StageTargetPlatform.PlatformType, UnrealTargetConfiguration.Shipping, null);
+			FileReference ReceiptFileName = TargetReceipt.GetDefaultPath(Unreal.EngineDirectory, "CrashReportClient", CrashReportPlatform ?? SC.StageTargetPlatform.PlatformType, UnrealTargetConfiguration.Shipping, null);
 			if(FileReference.Exists(ReceiptFileName))
 			{
 				TargetReceipt Receipt = TargetReceipt.Read(ReceiptFileName);
@@ -56,7 +141,7 @@ public abstract class BaseWinPlatform : Platform
 		}
 		else
 		{
-			CommandUtils.LogLog("Can't find cloud directory {0}", ProjectCloudPath.FullName);
+			Logger.LogDebug("Can't find cloud directory {Arg0}", ProjectCloudPath.FullName);
 		}
 
 		// Stage the bootstrap executable
@@ -106,9 +191,19 @@ public abstract class BaseWinPlatform : Platform
 				}
 			}
 		}
+
+		if (Params.Prereqs)
+		{
+			SC.StageFile(StagedFileType.NonUFS, FileReference.Combine(SC.EngineRoot, "Extras", "Redist", "en-us", "UEPrereqSetup_x64.exe"));
+		}
+
+		if (!string.IsNullOrWhiteSpace(Params.AppLocalDirectory))
+		{
+			StageAppLocalDependencies(Params, SC, "Win64");
+		}
 	}
 
-    public override void ExtractPackage(ProjectParams Params, string SourcePath, string DestinationPath)
+	public override void ExtractPackage(ProjectParams Params, string SourcePath, string DestinationPath)
     {
     }
 
@@ -120,7 +215,8 @@ public abstract class BaseWinPlatform : Platform
 
 	void StageBootstrapExecutable(DeploymentContext SC, string ExeName, FileReference TargetFile, StagedFileReference StagedRelativeTargetPath, string StagedArguments)
 	{
-		FileReference InputFile = FileReference.Combine(SC.LocalRoot, "Engine", "Binaries", SC.PlatformDir, String.Format("BootstrapPackagedGame-{0}-Shipping.exe", SC.PlatformDir));
+		UnrealTargetPlatform BootstrapPlatform = (BootstrapExePlatform ?? SC.StageTargetPlatform.PlatformType);
+		FileReference InputFile = FileReference.Combine(SC.LocalRoot, "Engine", "Binaries", BootstrapPlatform.ToString(), String.Format("BootstrapPackagedGame-{0}-Shipping.exe", BootstrapPlatform));
 		if(FileReference.Exists(InputFile))
 		{
 			// Create the new bootstrap program
@@ -131,10 +227,10 @@ public abstract class BaseWinPlatform : Platform
 			CommandUtils.CopyFile(InputFile.FullName, IntermediateFile.FullName);
 			CommandUtils.SetFileAttributes(IntermediateFile.FullName, ReadOnly: false);
 	
-			// currently the icon updating doesn't run under mono
-			if (UnrealBuildTool.BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64 ||
-				UnrealBuildTool.BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win32)
+			if (UnrealBuildTool.BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
 			{
+				Logger.LogInformation("Patching bootstrap executable; {Arg0}", IntermediateFile.FullName);
+
 				// Get the icon from the build directory if possible
 				GroupIconResource GroupIcon = null;
 				if(FileReference.Exists(FileReference.Combine(SC.ProjectRoot, "Build/Windows/Application.ico")))
@@ -159,6 +255,10 @@ public abstract class BaseWinPlatform : Platform
 					Update.SetData(ExecArgsResourceId, ResourceType.RawData, Encoding.Unicode.GetBytes(StagedArguments + "\0"));
 				}
 			}
+			else
+			{
+				Logger.LogInformation("Skipping patching of bootstrap executable (unsupported host platform)");
+			}
 
 			// Copy it to the staging directory
 			SC.StageFile(StagedFileType.SystemNonUFS, IntermediateFile, new StagedFileReference(ExeName));
@@ -167,7 +267,7 @@ public abstract class BaseWinPlatform : Platform
 
 	public override string GetCookPlatform(bool bDedicatedServer, bool bIsClientOnly)
 	{
-		const string NoEditorCookPlatform = "WindowsNoEditor";
+		const string NoEditorCookPlatform = "Windows";
 		const string ServerCookPlatform = "WindowsServer";
 		const string ClientCookPlatform = "WindowsClient";
 
@@ -187,7 +287,7 @@ public abstract class BaseWinPlatform : Platform
 
 	public override string GetEditorCookPlatform()
 	{
-		return "Windows";
+		return "WindowsEditor";
 	}
 	
 	public override string GetPlatformPakCommandLine(ProjectParams Params, DeploymentContext SC)
@@ -212,7 +312,7 @@ public abstract class BaseWinPlatform : Platform
 			FileReference IconFile = FileReference.Combine(Params.RawProjectPath.Directory, "Build", "Windows", "Application.ico");
 			if(FileReference.Exists(IconFile))
 			{
-				CommandUtils.LogInformation("Updating executable with custom icon from {0}", IconFile);
+				Logger.LogInformation("Updating executable with custom icon from {IconFile}", IconFile);
 
 				GroupIconResource GroupIcon = GroupIconResource.FromIco(IconFile.FullName);
 
@@ -236,7 +336,7 @@ public abstract class BaseWinPlatform : Platform
 
 	public override bool UseAbsLog
 	{
-		get { return BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64 || BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win32; }
+		get { return BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64; }
 	}
 
 	public override bool CanHostPlatform(UnrealTargetPlatform Platform)
@@ -287,7 +387,7 @@ public abstract class BaseWinPlatform : Platform
 			}
 			else
 			{
-				LogWarning("Unable to deploy AppLocalDirectory dependencies. No such path: {0}", BaseAppLocalDependenciesPath);
+				Logger.LogWarning("Unable to deploy AppLocalDirectory dependencies. No such path: {BaseAppLocalDependenciesPath}", BaseAppLocalDependenciesPath);
 			}
 		}
 	}
@@ -299,7 +399,7 @@ public abstract class BaseWinPlatform : Platform
 		List<StagedFileReference> FilesInTargetDir = SC.FilesToStage.NonUFSFiles.Keys.Where(x => x.IsUnderDirectory(StagedBinariesDir) && (x.HasExtension(".exe") || x.HasExtension(".dll"))).ToList();
 		if(FilesInTargetDir.Count > 0)
 		{
-			LogInformation("Copying AppLocal dependencies from {0} to {1}", BaseAppLocalDependenciesPath, StagedBinariesDir);
+			Logger.LogInformation("Copying AppLocal dependencies from {BaseAppLocalDependenciesPath} to {StagedBinariesDir}", BaseAppLocalDependenciesPath, StagedBinariesDir);
 
 			// Stage files in subdirs
 			foreach (DirectoryReference DependencyDirectory in DirectoryReference.EnumerateDirectories(BaseAppLocalDependenciesPath))
@@ -313,8 +413,33 @@ public abstract class BaseWinPlatform : Platform
     /// Try to get the SYMSTORE.EXE path from the given Windows SDK version
     /// </summary>
     /// <returns>Path to SYMSTORE.EXE</returns>
+	[SupportedOSPlatform("windows")]
     private static FileReference GetSymStoreExe()
     {
+		// Trying first to look for auto sdk latest WindowsKits debugger tools
+		DirectoryReference HostAutoSdkDir = null;
+		if (UEBuildPlatformSDK.TryGetHostPlatformAutoSDKDir(out HostAutoSdkDir))
+		{
+			DirectoryReference WindowsKitsDebuggersDirAutoSdk = DirectoryReference.Combine(HostAutoSdkDir, "Win64", "Windows Kits", "Debuggers");
+
+			if (DirectoryReference.Exists(WindowsKitsDebuggersDirAutoSdk))
+			{
+				// Defaulting to the x86 because of a known issue with the latest x64 version
+				// x64 version gets the errorcode STATUS_ENTRYPOINT_NOT_FOUND on some configurations
+				FileReference SymStoreExe32 = FileReference.Combine(WindowsKitsDebuggersDirAutoSdk, "x86", "SymStore.exe");
+				if (FileReference.Exists(SymStoreExe32))
+				{
+					return SymStoreExe32;
+				}
+
+				FileReference SymStoreExe64 = FileReference.Combine(WindowsKitsDebuggersDirAutoSdk, "x64", "SymStore.exe");
+				if (FileReference.Exists(SymStoreExe64))
+				{
+					return SymStoreExe64;
+				}
+			}
+		}
+
 		List<KeyValuePair<string, DirectoryReference>> WindowsSdkDirs = WindowsExports.GetWindowsSdkDirs();
 		foreach (DirectoryReference WindowsSdkDir in WindowsSdkDirs.Select(x => x.Value))
 		{
@@ -333,8 +458,35 @@ public abstract class BaseWinPlatform : Platform
 		throw new AutomationException("Unable to find a Windows SDK installation containing PDBSTR.EXE");
     }
 
+	[SupportedOSPlatform("windows")]
 	public static bool TryGetPdbCopyLocation(out FileReference OutLocation)
 	{
+		// Trying first to look for auto sdk latest WindowsKits debugger tools
+		DirectoryReference HostAutoSdkDir = null;
+		if (UEBuildPlatformSDK.TryGetHostPlatformAutoSDKDir(out HostAutoSdkDir))
+		{
+			DirectoryReference WindowsKitsDebuggersDirAutoSdk = DirectoryReference.Combine(HostAutoSdkDir, "Win64", "Windows Kits", "Debuggers");
+
+			if (DirectoryReference.Exists(WindowsKitsDebuggersDirAutoSdk))
+			{
+				// Defaulting to the x86 because of a known issue with the latest x64 version
+				// x64 version gets the errorcode STATUS_ENTRYPOINT_NOT_FOUND on some configurations
+				FileReference PdbCopyExe32 = FileReference.Combine(WindowsKitsDebuggersDirAutoSdk, "x86", "PdbCopy.exe");
+				if (FileReference.Exists(PdbCopyExe32))
+				{
+					OutLocation = PdbCopyExe32;
+					return true;
+				}
+
+				FileReference PdbCopyExe64 = FileReference.Combine(WindowsKitsDebuggersDirAutoSdk, "x64", "PdbCopy.exe");
+				if (FileReference.Exists(PdbCopyExe64))
+				{
+					OutLocation = PdbCopyExe64;
+					return true;
+				}
+			}
+		}
+
 		// Try to find an installation of the Windows 10 SDK
 		List<KeyValuePair<string, DirectoryReference>> WindowsSdkDirs = WindowsExports.GetWindowsSdkDirs();
 		foreach (DirectoryReference WindowsSdkDir in WindowsSdkDirs.Select(x => x.Value))
@@ -368,6 +520,7 @@ public abstract class BaseWinPlatform : Platform
 		return false;
 	}
 
+	[SupportedOSPlatform("windows")]
 	public override void StripSymbols(FileReference SourceFile, FileReference TargetFile)
 	{
 		bool bStripInPlace = false;
@@ -390,7 +543,7 @@ public abstract class BaseWinPlatform : Platform
 		StartInfo.Arguments = String.Format("\"{0}\" \"{1}\" -p", SourceFile.FullName, TargetFile.FullName);
 		StartInfo.UseShellExecute = false;
 		StartInfo.CreateNoWindow = true;
-		Utils.RunLocalProcessAndLogOutput(StartInfo);
+		Utils.RunLocalProcessAndLogOutput(StartInfo, Log.Logger);
 
 		if (bStripInPlace)
 		{
@@ -400,16 +553,21 @@ public abstract class BaseWinPlatform : Platform
 		}
 	}
 
-	public override bool PublishSymbols(DirectoryReference SymbolStoreDirectory, List<FileReference> Files, string Product, string BuildVersion = null)
+	[SupportedOSPlatform("windows")]
+	public override bool PublishSymbols(DirectoryReference SymbolStoreDirectory, List<FileReference> Files,
+			bool bIndexSources, List<FileReference> SourceFiles,
+			string Product, string Branch, int Change, string BuildVersion = null)
     {
-        // Get the SYMSTORE.EXE path, using the latest SDK version we can find.
-        FileReference SymStoreExe = GetSymStoreExe();
+		Logger.LogInformation("Publishing symbols to \"{SymbolStoreDirectory}\" (source indexing: {bIndexSources})", SymbolStoreDirectory, bIndexSources);
+
+		// Get the SYMSTORE.EXE path, using the latest SDK version we can find.
+		FileReference SymStoreExe = GetSymStoreExe();
 
 		List<FileReference> FilesToAdd = Files.Where(x => x.HasExtension(".pdb") || x.HasExtension(".exe") || x.HasExtension(".dll")).ToList();
 		if(FilesToAdd.Count > 0)
 		{
 			DateTime Start = DateTime.Now;
-			DirectoryReference TempSymStoreDir = DirectoryReference.Combine(RootDirectory, "Saved", "SymStore");
+			DirectoryReference TempSymStoreDir = DirectoryReference.Combine(Unreal.RootDirectory, "Saved", "SymStore");
 
 			if (DirectoryReference.Exists(TempSymStoreDir))
 			{
@@ -417,10 +575,26 @@ public abstract class BaseWinPlatform : Platform
 				DirectoryReference.CreateDirectory(TempSymStoreDir);
 			}
 
+			DirectoryReference TempSymStoreIndexedDir = DirectoryReference.Combine(Unreal.RootDirectory, "Engine", "Intermediate", "SymStoreIndexed");
+
 			string TempFileName = Path.GetTempFileName();
 			try
 			{
-				File.WriteAllLines(TempFileName, FilesToAdd.Select(x => x.FullName), Encoding.ASCII);
+				IEnumerable<FileReference> SymbolsToIndex = Enumerable.Empty<FileReference>();
+				IEnumerable<FileReference> SymbolsAfterIndexing = Enumerable.Empty<FileReference>();
+
+				if (bIndexSources)
+				{
+					// Skip read-only PDBs as we won't be able to add data to them. They are likely to be symbols for third-party libraries checked into the source control.
+					SymbolsToIndex = FilesToAdd.Where(x => x.HasExtension(".pdb") && !(new FileInfo(x.FullName).IsReadOnly));
+
+					// We can't write to the original symbol files because they may have been generated by a different build step,
+					// and clobbering such build products is considered an error.
+					// For this reason, we copy the symbol files and modify the copied.
+					SymbolsAfterIndexing = CopySymbolsWithSourceIndexing(TempSymStoreIndexedDir, SymbolsToIndex, SourceFiles, Branch, Change);
+				}
+
+				File.WriteAllLines(TempFileName, FilesToAdd.Except(SymbolsToIndex).Union(SymbolsAfterIndexing).Select(x => x.FullName), Encoding.ASCII);
 
 				// Copy everything to the temp symstore
 				ProcessStartInfo StartInfo = new ProcessStartInfo();
@@ -428,7 +602,7 @@ public abstract class BaseWinPlatform : Platform
 				StartInfo.Arguments = string.Format("add /f \"@{0}\" /s \"{1}\" /t \"{2}\"", TempFileName, TempSymStoreDir, Product);
 				StartInfo.UseShellExecute = false;
 				StartInfo.CreateNoWindow = true;
-				if (Utils.RunLocalProcessAndLogOutput(StartInfo) != 0)
+				if (Utils.RunLocalProcessAndLogOutput(StartInfo, Log.Logger) != 0)
 				{
 					return false;
 				}
@@ -436,9 +610,10 @@ public abstract class BaseWinPlatform : Platform
 			finally
 			{
 				File.Delete(TempFileName);
+				CommandUtils.DeleteDirectory(TempSymStoreIndexedDir);
 			}
 			DateTime CompressDone = DateTime.Now;
-			LogInformation("Took {0}s to compress the symbol files to temp path {1}", (CompressDone - Start).TotalSeconds, TempSymStoreDir);
+			Logger.LogInformation("Took {Arg0}s to compress the symbol files to temp path {TempSymStoreDir}", (CompressDone - Start).TotalSeconds, TempSymStoreDir);
 
 			int CopiedCount = 0;
 
@@ -460,14 +635,14 @@ public abstract class BaseWinPlatform : Platform
 					}
 					catch (Exception Ex)
 					{
-						LogWarning("Failed to write the version file, reason {0}", Ex.ToString());
+						Logger.LogWarning("Failed to write the version file, reason {Arg0}", Ex.ToString());
 					}
 				}
 
 				// Don't bother copying the temp file if the destination file is there already.
 				if (FileReference.Exists(ActualDestinationFile))
 				{
-					LogInformation("Destination file {0} already exists, skipping", ActualDestinationFile.FullName);
+					Logger.LogInformation("Destination file {Arg0} already exists, skipping", ActualDestinationFile.FullName);
 					continue;
 				}
 
@@ -493,13 +668,13 @@ public abstract class BaseWinPlatform : Platform
 					// Either way, it's fine to just continue on.
 					if (FileReference.Exists(ActualDestinationFile))
 					{
-						LogInformation("Destination file {0} already exists or was in use, skipping.", ActualDestinationFile.FullName);
+						Logger.LogInformation("Destination file {Arg0} already exists or was in use, skipping.", ActualDestinationFile.FullName);
 						continue;
 					}
 					// If it doesn't exist, we actually failed to copy it entirely.
 					else
 					{
-						LogWarning("Couldn't move temp file {0} to the symbol store at location {1}! Reason: {2}", TempDestinationFile.FullName, ActualDestinationFile.FullName, Ex.ToString());
+						Logger.LogWarning("Couldn't move temp file {Arg0} to the symbol store at location {Arg1}! Reason: {Arg2}", TempDestinationFile.FullName, ActualDestinationFile.FullName, Ex.ToString());
 					}
 				}
 				// Delete the temp one no matter what, don't want them hanging around in the symstore
@@ -508,18 +683,55 @@ public abstract class BaseWinPlatform : Platform
 					FileReference.Delete(TempDestinationFile);
 				}
 			}
-			LogInformation("Took {0}s to copy {1} symbol files to the store at {2}", (DateTime.Now - CompressDone).TotalSeconds, CopiedCount, SymbolStoreDirectory);
+			Logger.LogInformation("Took {Arg0}s to copy {CopiedCount} symbol files to the store at {SymbolStoreDirectory}", (DateTime.Now - CompressDone).TotalSeconds, CopiedCount, SymbolStoreDirectory);
 
 			FileReference PingmeFile = FileReference.Combine(SymbolStoreDirectory, "pingme.txt");
 			if (!FileReference.Exists(PingmeFile))
 			{
-				LogInformation("Creating {0} to mark path as three-tiered symbol location", PingmeFile);
+				Logger.LogInformation("Creating {PingmeFile} to mark path as three-tiered symbol location", PingmeFile);
 				File.WriteAllText(PingmeFile.FullName, "Exists to mark this as a three-tiered symbol location");
 			}
 		}
 			
 		return true;
     }
+
+	[SupportedOSPlatform("windows")]
+	private IEnumerable<FileReference> CopySymbolsWithSourceIndexing(DirectoryReference TargetDirectory, IEnumerable<FileReference> SymbolFiles,
+	IEnumerable<FileReference> SourceFiles, string Branch, int Change)
+	{
+		if (DirectoryReference.Exists(TargetDirectory))
+		{
+			CommandUtils.DeleteDirectory(TargetDirectory);
+			DirectoryReference.CreateDirectory(TargetDirectory);
+		}
+
+		List<FileReference> CopiedSymbolFiles = new List<FileReference>();
+
+		// Copy all the symbol files to the given directory.
+		foreach (FileReference File in SymbolFiles)
+		{
+			string RelativePath = File.MakeRelativeTo(Unreal.RootDirectory);
+
+			FileReference DestinationFile = FileReference.Combine(TargetDirectory, RelativePath);
+
+			try
+			{
+				CommandUtils.CopyFile(File.FullName, DestinationFile.FullName);
+			}
+			catch (Exception Ex)
+			{
+				throw new AutomationException("Couldn't copy the pdb file to the temp directory for indexing! Reason: {0}", Ex.ToString());
+			}
+
+			CopiedSymbolFiles.Add(DestinationFile);
+		}
+
+		// Index all symbol files in one go (indexing source code from the source control is shared work between all pdbs).
+		AddSourceIndexToSymbols(CopiedSymbolFiles, SourceFiles, Branch, Change);
+
+		return CopiedSymbolFiles;
+	}
 
 	bool IsSymbolFile(FileReference File)
 	{
@@ -532,6 +744,199 @@ public abstract class BaseWinPlatform : Platform
 			return true;
 		}
 		return false;
+	}
+
+	/// <summary>
+	/// Build a database of source code files in the current Perforce workspace.
+	/// By relying on the standard layout for UE projects i.e. the fact that source code is in Source directories,
+	/// we may very significantly reduce the about of data sent to us from the server.
+	/// </summary>
+	/// <param name="Pattern">Perforce pattern path to query e.g. //UE/Branch/.../Source/...</param>
+	/// <returns></returns>
+	protected static Dictionary<string, P4HaveRecord> BuildSourceDatabase(string Pattern)
+	{
+		List<P4HaveRecord> Files = null;
+
+		P4Connection DefaultConnection = new P4Connection(User: null, Client: null, ServerAndPort: null);
+
+		try
+		{
+			Files = DefaultConnection.HaveFiles(Pattern);
+		}
+		catch (P4Exception e)
+		{
+			Logger.LogError("Failed to fetch source code information from Perforce for '{Pattern}' ({Message}).", Pattern, e.Message);
+
+			return null;
+		}
+
+		return Files.ToDictionary(file => file.ClientFile, file => file, StringComparer.InvariantCultureIgnoreCase);
+	}
+
+	/// <summary>
+	/// 
+	/// </summary>
+	/// <param name="PdbFiles"></param>
+	/// <param name="SourceFiles"></param>
+	/// <param name="Branch"></param>
+	/// <param name="Change"></param>
+	[SupportedOSPlatform("windows")]
+	public void AddSourceIndexToSymbols(IEnumerable<FileReference> PdbFiles, IEnumerable<FileReference> SourceFiles, string Branch, int Change)
+	{
+		Logger.LogInformation("Adding source control information to PDB files...");
+
+		string DepotFilter = ".../Source/...";
+
+		Dictionary<string, P4HaveRecord> SourceDatabase = BuildSourceDatabase(DepotFilter);
+
+		if (SourceDatabase == null)
+		{
+			throw new AutomationException($"Failed to query the source code information for '{DepotFilter}'.");
+		}
+
+		// Get the PDBSTR.EXE path, using the latest SDK version we can find.
+		FileReference PdbStrExe = GetPdbStrExe();
+
+		// Get the path to the generated SRCSRV.INI file
+		FileReference SrcSrvIni = FileReference.Combine(Unreal.RootDirectory, "Engine", "Intermediate", "SrcSrv.ini");
+		DirectoryReference.CreateDirectory(SrcSrvIni.Directory);
+
+		// Generate the SRCSRV.INI file
+		using (StreamWriter Writer = new StreamWriter(SrcSrvIni.FullName))
+		{
+			int MissingFilesCount = 0;
+
+			Writer.WriteLine("SRCSRV: ini------------------------------------------------");
+			Writer.WriteLine("VERSION=1");
+			Writer.WriteLine("VERCTRL=Perforce");
+			Writer.WriteLine("SRCSRV: variables------------------------------------------");
+			Writer.WriteLine("SRCSRVTRG=%sdtrg%");
+			Writer.WriteLine("SRCSRVCMD=%sdcmd%");
+			Writer.WriteLine("SDCMD=p4.exe print -o %srcsrvtrg% \"//%var2%#%var3%\"");
+			Writer.WriteLine("SDTRG=%targ%\\%fnbksl%(%var2%)#%var3%");
+			Writer.WriteLine("SRCSRV: source files ---------------------------------------");
+			foreach (FileReference SourceFile in SourceFiles)
+			{
+				P4HaveRecord SourceInfo;
+
+				if (SourceDatabase.TryGetValue(SourceFile.FullName, out SourceInfo))
+				{
+					Writer.WriteLine("{0}*{1}*{2}", SourceFile.FullName, SourceInfo.DepotFile.Replace("//", ""), SourceInfo.Revision);
+				}
+				else
+				{
+					++MissingFilesCount;
+				}
+			}
+			Writer.WriteLine("SRCSRV: end------------------------------------------------");
+
+			if (MissingFilesCount > 0)
+			{
+				Logger.LogInformation("Skipped {MissingFilesCount} files (out of {SourceFileCount}) for which source control files couldn't be located.", MissingFilesCount, SourceFiles.Count());
+			}
+		}
+
+		// Execute PDBSTR on the PDB files in parallel.
+		Parallel.ForEach(PdbFiles, (PdbFile, State) => { ExecutePdbStrTool(PdbStrExe, PdbFile, SrcSrvIni, State); });
+	}
+
+	/// <summary>
+	/// Executes the PdbStr tool.
+	/// </summary>
+	/// <param name="PdbStrExe">Path to PdbStr.exe</param>
+	/// <param name="PdbFile">The PDB file to embed source information for</param>
+	/// <param name="SrcSrvIni">Ini file containing settings to embed</param>
+	/// <param name="State">The current loop state</param>
+	/// <returns>True if the tool executed successfully</returns>
+	static void ExecutePdbStrTool(FileReference PdbStrExe, FileReference PdbFile, FileReference SrcSrvIni, ParallelLoopState State)
+	{
+		FileInfo PdbInfo = new FileInfo(PdbFile.FullName);
+		FileInfo IniInfo = new FileInfo(SrcSrvIni.FullName);
+
+		using (Process Process = new Process())
+		{
+			List<string> Messages = new List<string>();
+
+			Messages.Add(String.Format("Writing source server data: {0}", PdbFile));
+
+			DataReceivedEventHandler OutputHandler = (s, e) => { if (e.Data != null) { Messages.Add(e.Data); } };
+			Process.StartInfo.FileName = PdbStrExe.FullName;
+			Process.StartInfo.Arguments = String.Format("-w -p:\"{0}\" -i:\"{1}\" -s:srcsrv", PdbFile.FullName, SrcSrvIni.FullName);
+			Process.StartInfo.UseShellExecute = false;
+			Process.StartInfo.RedirectStandardOutput = true;
+			Process.StartInfo.RedirectStandardError = true;
+			Process.StartInfo.RedirectStandardInput = false;
+			Process.StartInfo.CreateNoWindow = true;
+			Process.OutputDataReceived += OutputHandler;
+			Process.ErrorDataReceived += OutputHandler;
+			Process.Start();
+			Process.BeginOutputReadLine();
+			Process.BeginErrorReadLine();
+			Process.WaitForExit();
+
+			if (Process.ExitCode != 0)
+			{
+				Messages.Add($"Failed to embed source server data for {PdbFile} (exit code: {Process.ExitCode})");
+			}
+
+			lock (State)
+			{
+				foreach (string Message in Messages)
+				{
+					Logger.LogInformation("{Text}", Message);
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Try to get the PDBSTR.EXE path from the Windows SDK
+	/// </summary>
+	/// <returns>Path to PDBSTR.EXE</returns>
+	[SupportedOSPlatform("windows")]
+	static FileReference GetPdbStrExe()
+	{
+		List<KeyValuePair<string, DirectoryReference>> WindowsSdkDirs = WindowsExports.GetWindowsSdkDirs();
+
+		// Trying first to look for auto sdk latest WindowsKits debugger tools
+		DirectoryReference HostAutoSdkDir = null;
+		if (UEBuildPlatformSDK.TryGetHostPlatformAutoSDKDir(out HostAutoSdkDir))
+		{
+			DirectoryReference WindowsKitsDebuggersDirAutoSdk = DirectoryReference.Combine(HostAutoSdkDir, "Win64", "Windows Kits", "Debuggers");
+
+			if (DirectoryReference.Exists(WindowsKitsDebuggersDirAutoSdk))
+			{
+				// Defaulting to the x86 because of a known issue with the latest x64 version
+				// x64 version gets the errorcode STATUS_ENTRYPOINT_NOT_FOUND on some configurations
+				FileReference CheckPdbStrExe32 = FileReference.Combine(WindowsKitsDebuggersDirAutoSdk, "x86", "SrcSrv", "PdbStr.exe");
+				if (FileReference.Exists(CheckPdbStrExe32))
+				{
+					return CheckPdbStrExe32;
+				}
+
+				FileReference CheckPdbStrExe64 = FileReference.Combine(WindowsKitsDebuggersDirAutoSdk, "x64", "SrcSrv", "PdbStr.exe");
+				if (FileReference.Exists(CheckPdbStrExe64))
+				{
+					return CheckPdbStrExe64;
+				}
+			}
+		}
+
+		foreach (DirectoryReference WindowsSdkDir in WindowsSdkDirs.Select(x => x.Value))
+		{
+			FileReference CheckPdbStrExe64 = FileReference.Combine(WindowsSdkDir, "Debuggers", "x64", "SrcSrv", "PdbStr.exe");
+			if (FileReference.Exists(CheckPdbStrExe64))
+			{
+				return CheckPdbStrExe64;
+			}
+
+			FileReference CheckPdbStrExe32 = FileReference.Combine(WindowsSdkDir, "Debuggers", "x86", "SrcSrv", "PdbStr.exe");
+			if (FileReference.Exists(CheckPdbStrExe32))
+			{
+				return CheckPdbStrExe32;
+			}
+		}
+		throw new AutomationException("Unable to find a Windows SDK installation containing PDBSTR.EXE");
 	}
 
 	public override string[] SymbolServerDirectoryStructure
@@ -552,56 +957,6 @@ public abstract class BaseWinPlatform : Platform
 		get
 		{
 			return false;
-		}
-	}
-}
-
-public class Win64Platform : BaseWinPlatform
-{
-	public Win64Platform()
-		: base(UnrealTargetPlatform.Win64)
-	{
-	}
-
-	public override bool IsSupported { get { return true; } }
-
-	public override void GetFilesToDeployOrStage(ProjectParams Params, DeploymentContext SC)
-	{
-		base.GetFilesToDeployOrStage(Params, SC);
-		
-		if(Params.Prereqs)
-		{
-			SC.StageFile(StagedFileType.NonUFS, FileReference.Combine(SC.EngineRoot, "Extras", "Redist", "en-us", "UE4PrereqSetup_x64.exe"));
-		}
-
-		if (!string.IsNullOrWhiteSpace(Params.AppLocalDirectory))
-		{
-			StageAppLocalDependencies(Params, SC, "Win64");
-		}
-	}
-}
-
-public class Win32Platform : BaseWinPlatform
-{
-	public Win32Platform()
-		: base(UnrealTargetPlatform.Win32)
-	{
-	}
-
-	public override bool IsSupported { get { return true; } }
-
-	public override void GetFilesToDeployOrStage(ProjectParams Params, DeploymentContext SC)
-	{
-		base.GetFilesToDeployOrStage(Params, SC);
-
-		if (Params.Prereqs)
-		{
-			SC.StageFile(StagedFileType.NonUFS, FileReference.Combine(SC.EngineRoot, "Extras", "Redist", "en-us", "UE4PrereqSetup_x86.exe"));
-		}
-
-		if (!string.IsNullOrWhiteSpace(Params.AppLocalDirectory))
-		{
-			StageAppLocalDependencies(Params, SC, "Win32");
 		}
 	}
 }

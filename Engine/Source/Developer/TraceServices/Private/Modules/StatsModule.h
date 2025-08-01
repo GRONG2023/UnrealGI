@@ -3,9 +3,8 @@
 #pragma once
 
 #include "TraceServices/ModuleService.h"
-#include "UObject/NameTypes.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 class FStatsModule
@@ -14,12 +13,6 @@ class FStatsModule
 public:
 	virtual void GetModuleInfo(FModuleInfo& OutModuleInfo) override;
 	virtual void OnAnalysisBegin(IAnalysisSession& Session) override;
-	virtual void GetLoggers(TArray<const TCHAR *>& OutLoggers) override;
-	virtual const TCHAR* GetCommandLineArgument() override
-	{
-		return nullptr;
-	}
-	virtual void GenerateReports(const IAnalysisSession& Session, const TCHAR* CmdLine, const TCHAR* OutputDirectory) override {}
 };
 
-}
+} // namespace TraceServices

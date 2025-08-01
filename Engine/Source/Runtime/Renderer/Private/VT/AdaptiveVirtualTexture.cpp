@@ -32,7 +32,7 @@ static TAutoConsoleVariable<int32> CVarAVTMaxPageResidency(
 
 static TAutoConsoleVariable<int32> CVarAVTAgeToFree(
 	TEXT("r.VT.AVT.AgeToFree"),
-	300,
+	60,
 	TEXT("Number of frames for an allocation to be unused before it is considered for free"),
 	ECVF_RenderThreadSafe
 );
@@ -52,9 +52,8 @@ static TAutoConsoleVariable<int32> CVarAVTLevelIncrement(
 class FVirtualTextureAddressRedirect : public IVirtualTexture
 {
 public:
-	FVirtualTextureAddressRedirect(FVirtualTextureProducerHandle InProducerHandle, IVirtualTexture* InVirtualTexture, FIntPoint InAddressOffset, int32 InLevelOffset)
-		: ProducerHandle(InProducerHandle)
-		, VirtualTexture(InVirtualTexture)
+	FVirtualTextureAddressRedirect(IVirtualTexture* InVirtualTexture, FIntPoint InAddressOffset, int32 InLevelOffset)
+		: VirtualTexture(InVirtualTexture)
 		, AddressOffset(InAddressOffset)
 		, LevelOffset(InLevelOffset)
 	{
@@ -64,8 +63,19 @@ public:
 	{
 	}
 
+	virtual bool IsPageStreamed(uint8 vLevel, uint32 vAddress) const override
+	{
+		uint64 X = FMath::ReverseMortonCode2_64(vAddress) + (AddressOffset.X >> (vLevel + LevelOffset));
+		uint64 Y = FMath::ReverseMortonCode2_64(vAddress >> 1) + (AddressOffset.Y >> (vLevel + LevelOffset));
+		vAddress = FMath::MortonCode2_64(X) | (FMath::MortonCode2_64(Y) << 1);
+		vLevel = (uint8)(FMath::Max((int32)vLevel + LevelOffset, 0));
+
+		return VirtualTexture->IsPageStreamed(vLevel, vAddress);
+	}
+
 	virtual FVTRequestPageResult RequestPageData(
-		const FVirtualTextureProducerHandle& InProducerHandle,
+		FRHICommandList& RHICmdList,
+		const FVirtualTextureProducerHandle& ProducerHandle,
 		uint8 LayerMask,
 		uint8 vLevel,
 		uint64 vAddress,
@@ -77,14 +87,14 @@ public:
 		vAddress = FMath::MortonCode2_64(X) | (FMath::MortonCode2_64(Y) << 1);
 		vLevel = (uint8)(FMath::Max((int32)vLevel + LevelOffset, 0));
 
-		return VirtualTexture->RequestPageData(ProducerHandle, LayerMask, vLevel, vAddress, Priority);
+		return VirtualTexture->RequestPageData(RHICmdList, ProducerHandle, LayerMask, vLevel, vAddress, Priority);
 	}
 
 	virtual IVirtualTextureFinalizer* ProducePageData(
-		FRHICommandListImmediate& RHICmdList,
+		FRHICommandList& RHICmdList,
 		ERHIFeatureLevel::Type FeatureLevel,
 		EVTProducePageFlags Flags,
-		const FVirtualTextureProducerHandle& InProducerHandle,
+		const FVirtualTextureProducerHandle& ProducerHandle,
 		uint8 LayerMask,
 		uint8 vLevel,
 		uint64 vAddress,
@@ -100,8 +110,21 @@ public:
 		return VirtualTexture->ProducePageData(RHICmdList, FeatureLevel, Flags, ProducerHandle, LayerMask, vLevel, vAddress, RequestHandle, TargetLayers);
 	}
 
+	virtual void GatherProducePageDataTasks(
+		FVirtualTextureProducerHandle const& ProducerHandle,
+		FGraphEventArray& InOutTasks) const override
+	{
+		VirtualTexture->GatherProducePageDataTasks(ProducerHandle, InOutTasks);
+	}
+
+	virtual void GatherProducePageDataTasks(
+		uint64 RequestHandle,
+		FGraphEventArray& InOutTasks) const override
+	{
+		VirtualTexture->GatherProducePageDataTasks(RequestHandle, InOutTasks);
+	}
+
 private:
-	FVirtualTextureProducerHandle ProducerHandle;
 	IVirtualTexture* VirtualTexture;
 	FIntPoint AddressOffset;
 	int32 LevelOffset;
@@ -121,113 +144,110 @@ union FPackedAdaptiveAllocationRequest
 	};
 };
 
-/** Local helper functions. */
-namespace
+/** Allocate a virtual texture for a subset of the full adaptive virtual texture. */
+IAllocatedVirtualTexture* FAdaptiveVirtualTexture::AllocateVirtualTexture(
+	FRHICommandListBase& RHICmdList,
+	FVirtualTextureSystem* InSystem,
+	FAllocatedVTDescription const& InAllocatedDesc,
+	FIntPoint InGridSize,
+	uint8 InForcedSpaceID,
+	int32 InWidthInTiles,
+	int32 InHeightInTiles,
+	FIntPoint InAddressOffset,
+	int32 InLevelOffset)
 {
-	/** Allocate a virtual texture for a subset of the full adaptive virtual texture. */
-	IAllocatedVirtualTexture* AllocateVirtualTexture(
-		FVirtualTextureSystem* InSystem,
-		FAllocatedVTDescription const& InAllocatedDesc,
-		FIntPoint InGridSize,
-		uint8 InForcedSpaceID,
-		int32 InWidthInTiles,
-		int32 InHeightInTiles,
-		FIntPoint InAddressOffset,
-		int32 InLevelOffset)
+	FAllocatedVTDescription AllocatedDesc = InAllocatedDesc;
+
+	// We require bPrivateSpace since there can be only one adaptive VT per space.
+	ensure(AllocatedDesc.bPrivateSpace);
+	AllocatedDesc.bPrivateSpace = true;
+	AllocatedDesc.ForceSpaceID = InForcedSpaceID;
+	AllocatedDesc.IndirectionTextureSize = FMath::Max(InGridSize.X, InGridSize.Y);
+	AllocatedDesc.AdaptiveLevelBias = InLevelOffset;
+
+	for (int32 LayerIndex = 0; LayerIndex < InAllocatedDesc.NumTextureLayers; ++LayerIndex)
 	{
-		FAllocatedVTDescription AllocatedDesc = InAllocatedDesc;
-
-		// We require bPrivateSpace since there can be only one adaptive VT per space.
-		ensure(AllocatedDesc.bPrivateSpace);
-		AllocatedDesc.bPrivateSpace = true;
-		AllocatedDesc.ForceSpaceID = InForcedSpaceID;
-		AllocatedDesc.IndirectionTextureSize = FMath::Max(InGridSize.X, InGridSize.Y);
-
-		for (int32 LayerIndex = 0; LayerIndex < InAllocatedDesc.NumTextureLayers; ++LayerIndex)
+		// Test if we have already written layer with a new handle.
+		// If we have then we already processed this producer in an ealier layer and have nothing more to do.
+		if (AllocatedDesc.ProducerHandle[LayerIndex] != InAllocatedDesc.ProducerHandle[LayerIndex])
 		{
-			// Test if we have already written layer with a new handle.
-			// If we have then we already processed this producer in an ealier layer and have nothing more to do.
-			if (AllocatedDesc.ProducerHandle[LayerIndex] != InAllocatedDesc.ProducerHandle[LayerIndex])
-			{
-				continue;
-			}
-
-			FVirtualTextureProducerHandle ProducerHandle = InAllocatedDesc.ProducerHandle[LayerIndex];
-			FVirtualTextureProducer* Producer = InSystem->FindProducer(ProducerHandle);
-			FVTProducerDescription NewProducerDesc = Producer->GetDescription();
-			NewProducerDesc.BlockWidthInTiles = InWidthInTiles;
-			NewProducerDesc.BlockHeightInTiles = InHeightInTiles;
-			NewProducerDesc.MaxLevel = FMath::CeilLogTwo(FMath::Max(InWidthInTiles, InHeightInTiles));
-
-			IVirtualTexture* VirtualTextureProducer = Producer->GetVirtualTexture();
-			IVirtualTexture* NewVirtualTextureProducer = new FVirtualTextureAddressRedirect(ProducerHandle, VirtualTextureProducer, InAddressOffset, InLevelOffset);
-			FVirtualTextureProducerHandle NewProducerHandle = InSystem->RegisterProducer(NewProducerDesc, NewVirtualTextureProducer);
-
-			// Copy new producer to all subsequent layers.
-			for (int32 WriteLayerIndex = LayerIndex; WriteLayerIndex < InAllocatedDesc.NumTextureLayers; ++WriteLayerIndex)
-			{
-				if (InAllocatedDesc.ProducerHandle[WriteLayerIndex] == ProducerHandle)
-				{
-					AllocatedDesc.ProducerHandle[WriteLayerIndex] = NewProducerHandle;
-				}
-			}
+			continue;
 		}
 
-		return InSystem->AllocateVirtualTexture(AllocatedDesc);
-	}
+		FVirtualTextureProducerHandle ProducerHandle = InAllocatedDesc.ProducerHandle[LayerIndex];
+		FVirtualTextureProducer* Producer = InSystem->FindProducer(ProducerHandle);
+		FVTProducerDescription NewProducerDesc = Producer->GetDescription();
+		NewProducerDesc.BlockWidthInTiles = InWidthInTiles;
+		NewProducerDesc.BlockHeightInTiles = InHeightInTiles;
+		NewProducerDesc.MaxLevel = FMath::CeilLogTwo(FMath::Max(InWidthInTiles, InHeightInTiles));
 
-	/** Destroy an allocated virtual texture and release its producers. */
-	static void DestroyVirtualTexture(FVirtualTextureSystem* InSystem, IAllocatedVirtualTexture* InAllocatedVT)
-	{
-		FAllocatedVTDescription const& Desc = InAllocatedVT->GetDescription();
-		TArray<FVirtualTextureProducerHandle, TInlineAllocator<8>> ProducersToRelease;
-		for (int32 LayerIndex = 0; LayerIndex < Desc.NumTextureLayers; ++LayerIndex)
+		IVirtualTexture* VirtualTextureProducer = Producer->GetVirtualTexture();
+		IVirtualTexture* NewVirtualTextureProducer = new FVirtualTextureAddressRedirect(VirtualTextureProducer, InAddressOffset, InLevelOffset);
+		FVirtualTextureProducerHandle NewProducerHandle = InSystem->RegisterProducer(RHICmdList, NewProducerDesc, NewVirtualTextureProducer);
+
+		// Copy new producer to all subsequent layers.
+		for (int32 WriteLayerIndex = LayerIndex; WriteLayerIndex < InAllocatedDesc.NumTextureLayers; ++WriteLayerIndex)
 		{
-			ProducersToRelease.AddUnique(Desc.ProducerHandle[LayerIndex]);
-		}
-		InSystem->DestroyVirtualTexture(InAllocatedVT);
-		for (int32 ProducerIndex = 0; ProducerIndex < ProducersToRelease.Num(); ++ProducerIndex)
-		{
-			InSystem->ReleaseProducer(ProducersToRelease[ProducerIndex]);
+			if (InAllocatedDesc.ProducerHandle[WriteLayerIndex] == ProducerHandle)
+			{
+				AllocatedDesc.ProducerHandle[WriteLayerIndex] = NewProducerHandle;
+			}
 		}
 	}
 
-	/** Remaps the page mappings from one allocated virtual texture to another. */
-	static void RemapVirtualTexturePages(FVirtualTextureSystem* InSystem, FAllocatedVirtualTexture* OldAllocatedVT, FAllocatedVirtualTexture* NewAllocatedVT, uint32 InFrame)
+	return InSystem->AllocateVirtualTexture(RHICmdList, AllocatedDesc);
+}
+
+/** Destroy an allocated virtual texture and release its producers. */
+void FAdaptiveVirtualTexture::DestroyVirtualTexture(FVirtualTextureSystem* InSystem, IAllocatedVirtualTexture* InAllocatedVT)
+{
+	FAllocatedVTDescription const& Desc = InAllocatedVT->GetDescription();
+	TArray<FVirtualTextureProducerHandle, TInlineAllocator<8>> ProducersToRelease;
+	for (int32 LayerIndex = 0; LayerIndex < Desc.NumTextureLayers; ++LayerIndex)
 	{
-		const uint32 OldVirtualAddress = OldAllocatedVT->GetVirtualAddress();
-		const uint32 NewVirtualAddress = NewAllocatedVT->GetVirtualAddress();
-
-		for (uint32 ProducerIndex = 0u; ProducerIndex < OldAllocatedVT->GetNumUniqueProducers(); ++ProducerIndex)
-		{
-			check(OldAllocatedVT->GetUniqueProducerMipBias(ProducerIndex) == 0);
-			check(NewAllocatedVT->GetUniqueProducerMipBias(ProducerIndex) == 0);
-
-			const FVirtualTextureProducerHandle& OldProducerHandle = OldAllocatedVT->GetUniqueProducerHandle(ProducerIndex);
-			const FVirtualTextureProducerHandle& NewProducerHandle = NewAllocatedVT->GetUniqueProducerHandle(ProducerIndex);
-
-			FVirtualTextureProducer* OldProducer = InSystem->FindProducer(OldProducerHandle);
-			FVirtualTextureProducer* NewProducer = InSystem->FindProducer(NewProducerHandle);
-
-			if (OldProducer->GetDescription().bPersistentHighestMip)
-			{
-				InSystem->ForceUnlockAllTiles(OldProducerHandle, OldProducer);
-			}
-
-			const uint32 SpaceID = OldAllocatedVT->GetSpaceID();
-			const int32 vLevelBias = (int32)NewProducer->GetMaxLevel() - (int32)OldProducer->GetMaxLevel();
-
-			for (uint32 PhysicalGroupIndex = 0u; PhysicalGroupIndex < OldProducer->GetNumPhysicalGroups(); ++PhysicalGroupIndex)
-			{
-				FVirtualTexturePhysicalSpace* PhysicalSpace = OldProducer->GetPhysicalSpaceForPhysicalGroup(PhysicalGroupIndex);
-				FTexturePagePool& PagePool = PhysicalSpace->GetPagePool();
-
-				PagePool.RemapPages(InSystem, SpaceID, PhysicalSpace, OldProducerHandle, OldVirtualAddress, NewProducerHandle, NewVirtualAddress, vLevelBias, InFrame);
-			}
-		}
+		ProducersToRelease.AddUnique(Desc.ProducerHandle[LayerIndex]);
+	}
+	InSystem->DestroyVirtualTexture(InAllocatedVT);
+	for (int32 ProducerIndex = 0; ProducerIndex < ProducersToRelease.Num(); ++ProducerIndex)
+	{
+		InSystem->ReleaseProducer(ProducersToRelease[ProducerIndex]);
 	}
 }
 
+/** Remaps the page mappings from one allocated virtual texture to another. */
+void FAdaptiveVirtualTexture::RemapVirtualTexturePages(FVirtualTextureSystem* InSystem, FAllocatedVirtualTexture* OldAllocatedVT, FAllocatedVirtualTexture* NewAllocatedVT, uint32 InFrame)
+{
+	const uint32 OldVirtualAddress = OldAllocatedVT->GetVirtualAddress();
+	const uint32 NewVirtualAddress = NewAllocatedVT->GetVirtualAddress();
+
+	for (uint32 ProducerIndex = 0u; ProducerIndex < OldAllocatedVT->GetNumUniqueProducers(); ++ProducerIndex)
+	{
+		check(OldAllocatedVT->GetUniqueProducerMipBias(ProducerIndex) == 0);
+		check(NewAllocatedVT->GetUniqueProducerMipBias(ProducerIndex) == 0);
+
+		const FVirtualTextureProducerHandle& OldProducerHandle = OldAllocatedVT->GetUniqueProducerHandle(ProducerIndex);
+		const FVirtualTextureProducerHandle& NewProducerHandle = NewAllocatedVT->GetUniqueProducerHandle(ProducerIndex);
+
+		FVirtualTextureProducer* OldProducer = InSystem->FindProducer(OldProducerHandle);
+		FVirtualTextureProducer* NewProducer = InSystem->FindProducer(NewProducerHandle);
+
+		if (OldProducer->GetDescription().bPersistentHighestMip)
+		{
+			InSystem->ForceUnlockAllTiles(OldProducerHandle, OldProducer);
+		}
+
+		const uint32 SpaceID = OldAllocatedVT->GetSpaceID();
+		const int32 vLevelBias = (int32)NewProducer->GetMaxLevel() - (int32)OldProducer->GetMaxLevel();
+
+		for (uint32 PhysicalGroupIndex = 0u; PhysicalGroupIndex < OldProducer->GetNumPhysicalGroups(); ++PhysicalGroupIndex)
+		{
+			FVirtualTexturePhysicalSpace* PhysicalSpace = OldProducer->GetPhysicalSpaceForPhysicalGroup(PhysicalGroupIndex);
+			FTexturePagePool& PagePool = PhysicalSpace->GetPagePool();
+
+			PagePool.RemapPages(InSystem, SpaceID, PhysicalSpace, OldProducerHandle, OldVirtualAddress, NewProducerHandle, NewVirtualAddress, vLevelBias, InFrame);
+		}
+	}
+}
 
 FAdaptiveVirtualTexture::FAdaptiveVirtualTexture(
 	FAdaptiveVTDescription const& InAdaptiveDesc,
@@ -246,11 +266,11 @@ FAdaptiveVirtualTexture::FAdaptiveVirtualTexture(
 	GridSize = FIntPoint(1 << FMath::Max(AdaptiveGridLevelsX, 0), 1 << FMath::Max(AdaptiveGridLevelsY, 0));
 }
 
-void FAdaptiveVirtualTexture::Init(FVirtualTextureSystem* InSystem)
+void FAdaptiveVirtualTexture::Init(FRHICommandListBase& RHICmdList, FVirtualTextureSystem* InSystem)
 {
 	// Allocate a low mips virtual texture.
 	const int32 LevelOffset = AdaptiveDesc.MaxAdaptiveLevel;
-	AllocatedVirtualTextureLowMips = (FAllocatedVirtualTexture*)AllocateVirtualTexture(InSystem, AllocatedDesc, GridSize, 0xff, GridSize.X, GridSize.Y, FIntPoint::ZeroValue, LevelOffset);
+	AllocatedVirtualTextureLowMips = (FAllocatedVirtualTexture*)AllocateVirtualTexture(RHICmdList, InSystem, AllocatedDesc, GridSize, 0xff, GridSize.X, GridSize.Y, FIntPoint::ZeroValue, LevelOffset);
 }
 
 void FAdaptiveVirtualTexture::Destroy(FVirtualTextureSystem* InSystem)
@@ -276,6 +296,66 @@ IAllocatedVirtualTexture* FAdaptiveVirtualTexture::GetAllocatedVirtualTexture()
 int32 FAdaptiveVirtualTexture::GetSpaceID() const
 {
 	return AllocatedVirtualTextureLowMips->GetSpaceID();
+}
+
+void FAdaptiveVirtualTexture::GetProducers(FIntRect const& InTextureRegion, uint32 InMaxLevel, TArray<FProducerInfo>& OutProducerInfos)
+{
+	const uint32 NumProducers = AllocatedVirtualTextureLowMips->GetNumUniqueProducers();
+
+	OutProducerInfos.Reserve((NumAllocated + 1) * NumProducers);
+	
+	// Add producers from persistent allocated virtual texture.
+	{
+		const uint32 AdaptiveLevelBias = AllocatedVirtualTextureLowMips->GetDescription().AdaptiveLevelBias;
+		
+		// Only add to output array if we have some relevant mips under the InMaxLevel.
+		if (InMaxLevel >= AdaptiveLevelBias)
+		{
+			const int32 Divisor = 1 << AdaptiveLevelBias;
+			const FIntRect RemappedTextureRegion(
+				FIntPoint::DivideAndRoundDown(InTextureRegion.Min, Divisor), 
+				FIntPoint::DivideAndRoundUp(InTextureRegion.Max, Divisor));
+			const uint32 RemappedMaxLevel = InMaxLevel - AdaptiveLevelBias;
+
+			for (uint32 ProducerIndex = 0; ProducerIndex < NumProducers; ++ProducerIndex)
+			{
+		 		OutProducerInfos.Emplace(FProducerInfo{ AllocatedVirtualTextureLowMips->GetUniqueProducerHandle(ProducerIndex), RemappedTextureRegion, RemappedMaxLevel });
+			}
+		}
+	}
+
+	// Add producers from transient allocated virtual textures.
+	for (FAllocation const& Allocation : AllocationSlots)
+	{
+		if (Allocation.AllocatedVT != nullptr)
+		{
+			const uint32 AdaptiveLevelBias = Allocation.AllocatedVT->GetDescription().AdaptiveLevelBias;
+			if (InMaxLevel >= AdaptiveLevelBias)
+			{
+				// Get texture region in the full VT space for this allocated VT.
+				const uint32 X = Allocation.GridIndex % GridSize.X;
+				const uint32 Y = Allocation.GridIndex / GridSize.X;
+				const FIntPoint PageSize(AllocatedDesc.TileSize * AdaptiveDesc.TileCountX / GridSize.X, AllocatedDesc.TileSize * AdaptiveDesc.TileCountY / GridSize.Y);
+				const FIntPoint PageBase(PageSize.X * X, PageSize.Y * Y);
+				const FIntRect AllocationRegion(PageBase - AllocatedDesc.TileBorderSize, PageBase + PageSize + AllocatedDesc.TileBorderSize);
+
+				// Only add to output array if the texture region intersects this allocation region.
+				if (AllocationRegion.Intersect(InTextureRegion))
+				{
+					const int32 Divisor = 1 << AdaptiveLevelBias;
+					const FIntRect RemappedTextureRegion(
+							FIntPoint::DivideAndRoundDown(InTextureRegion.Min - PageBase, Divisor),
+							FIntPoint::DivideAndRoundUp(InTextureRegion.Max - PageBase, Divisor));
+					const uint32 RemappedMaxLevel = InMaxLevel - AdaptiveLevelBias;
+
+					for (uint32 ProducerIndex = 0; ProducerIndex < NumProducers; ++ProducerIndex)
+					{
+						OutProducerInfos.Emplace(FProducerInfo{ Allocation.AllocatedVT->GetUniqueProducerHandle(ProducerIndex), RemappedTextureRegion, RemappedMaxLevel });
+					}
+				}
+			}
+		}
+	}
 }
 
 /** Get hash key for the GridIndexMap. */
@@ -438,7 +518,7 @@ void FAdaptiveVirtualTexture::QueuePackedAllocationRequests(uint32 const* InRequ
 	}
 }
 
-void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 InPackedRequest, uint32 InFrame)
+void FAdaptiveVirtualTexture::Allocate(FRHICommandListBase& RHICmdList, FVirtualTextureSystem* InSystem, uint32 InPackedRequest, uint32 InFrame)
 {
 	FPackedAdaptiveAllocationRequest Request;
 	Request.PackedValue = InPackedRequest;
@@ -455,15 +535,15 @@ void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 I
 
 	// Check if we have space in the page table to allocate. If not then hopefully we can allocate next frame.
 	FVirtualTextureSpace* Space = InSystem->GetSpace(GetSpaceID());
-	if (Space->GetPageTableSize() >= Space->GetDescription().MaxSpaceSize && !Space->GetAllocator().TryAlloc(NewLevel))
+	if (!Space->GetAllocator().TryAlloc(NewLevel))
 	{
 		return;
 	}
 
-	Allocate(InSystem, GridIndex, AllocationIndex, NewLevel, InFrame);
+	Allocate(RHICmdList, InSystem, GridIndex, AllocationIndex, NewLevel, InFrame);
 }
 
-void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 InGridIndex, uint32 InAllocationIndex, uint32 InNewLevel, uint32 InFrame)
+void FAdaptiveVirtualTexture::Allocate(FRHICommandListBase& RHICmdList, FVirtualTextureSystem* InSystem, uint32 InGridIndex, uint32 InAllocationIndex, uint32 InNewLevel, uint32 InFrame)
 {
 	const uint32 X = InGridIndex % GridSize.X;
 	const uint32 Y = InGridIndex / GridSize.X;
@@ -471,7 +551,7 @@ void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 I
 	const int32 LevelOffset = (int32)AdaptiveDesc.MaxAdaptiveLevel - (int32)InNewLevel;
 
 	FAllocatedVirtualTexture* OldAllocatedVT = (InAllocationIndex != INDEX_NONE) ? AllocationSlots[InAllocationIndex].AllocatedVT : nullptr;
-	FAllocatedVirtualTexture* NewAllocatedVT = (FAllocatedVirtualTexture*)AllocateVirtualTexture(InSystem, AllocatedDesc, GridSize, GetSpaceID(), 1 << InNewLevel, 1 << InNewLevel, PageOffset, LevelOffset);
+	FAllocatedVirtualTexture* NewAllocatedVT = (FAllocatedVirtualTexture*)AllocateVirtualTexture(RHICmdList, InSystem, AllocatedDesc, GridSize, GetSpaceID(), 1 << InNewLevel, 1 << InNewLevel, PageOffset, LevelOffset);
 
 	if (OldAllocatedVT != nullptr)
 	{
@@ -487,6 +567,16 @@ void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 I
 		// Mark allocation as used.
 		const uint32 Key = (InFrame << 4) | InNewLevel;
 		LRUHeap.Update(Key, InAllocationIndex);
+
+		// Queue indirection texture update unless this allocation slot is already marked as pending.
+		if (SlotsPendingRootPageMap.Find(InAllocationIndex) == INDEX_NONE)
+		{
+			const uint32 vAddress = NewAllocatedVT->GetVirtualAddress();
+			const uint32 vAddressX = FMath::ReverseMortonCode2(vAddress);
+			const uint32 vAddressY = FMath::ReverseMortonCode2(vAddress >> 1);
+			const uint32 PackedIndirectionValue = (1 << 28) | (InNewLevel << 24) | (vAddressY << 12) | vAddressX;
+			TextureUpdates.Add(FIndirectionTextureUpdate{ X, Y, PackedIndirectionValue });
+		}
 	}
 	else
 	{
@@ -503,6 +593,9 @@ void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 I
 			AllocationSlots[InAllocationIndex].AllocatedVT = NewAllocatedVT;
 		}
 
+		// Add to pending for later indirection texture update.
+		SlotsPendingRootPageMap.Add(InAllocationIndex);
+
 		// Add to allocation structures.
 		GridIndexMap.Add(GetGridIndexHash(InGridIndex), InAllocationIndex);
 		AllocatedVTMap.Add(GetAllocatedVTHash(NewAllocatedVT), InAllocationIndex);
@@ -512,13 +605,6 @@ void FAdaptiveVirtualTexture::Allocate(FVirtualTextureSystem* InSystem, uint32 I
 
 		NumAllocated++;
 	}
-
-	// Queue indirection texture update.
-	const uint32 vAddress = NewAllocatedVT->GetVirtualAddress();
-	const uint32 vAddressX = FMath::ReverseMortonCode2(vAddress);
-	const uint32 vAddressY = FMath::ReverseMortonCode2(vAddress >> 1);
-	const uint32 PackedIndirectionValue = (1 << 28) | (InNewLevel << 24) | (vAddressY << 12) | vAddressX;
-	TextureUpdates.Add(FIndirectionTextureUpdate{ X, Y, PackedIndirectionValue });
 }
 
 void FAdaptiveVirtualTexture::Free(FVirtualTextureSystem* InSystem, uint32 InAllocationIndex, uint32 InFrame)
@@ -533,6 +619,7 @@ void FAdaptiveVirtualTexture::Free(FVirtualTextureSystem* InSystem, uint32 InAll
 	AllocatedVTMap.Remove(GetAllocatedVTHash(OldAllocatedVT), InAllocationIndex);
 	AllocationSlots[InAllocationIndex] = FAllocation(0, nullptr);
 	FreeSlots.Add(InAllocationIndex);
+	SlotsPendingRootPageMap.RemoveAllSwap([InAllocationIndex](int32& V) { return V == InAllocationIndex; });
 
 	NumAllocated--;
 	check(NumAllocated >= 0);
@@ -541,7 +628,7 @@ void FAdaptiveVirtualTexture::Free(FVirtualTextureSystem* InSystem, uint32 InAll
 	TextureUpdates.Add(FIndirectionTextureUpdate{ GridIndex % GridSize.X, GridIndex / GridSize.X, 0 });
 }
 
-bool FAdaptiveVirtualTexture::FreeLRU(FVirtualTextureSystem* InSystem, uint32 InFrame, uint32 InFrameAgeToFree)
+bool FAdaptiveVirtualTexture::FreeLRU(FRHICommandListBase& RHICmdList, FVirtualTextureSystem* InSystem, uint32 InFrame, uint32 InFrameAgeToFree)
 {
 	// Check if top is ready for eviction.
 	const uint32 AllocationIndex = LRUHeap.Top();
@@ -562,7 +649,7 @@ bool FAdaptiveVirtualTexture::FreeLRU(FVirtualTextureSystem* InSystem, uint32 In
 	int32 NewLevel = CurrentLevel - 1;
 	while (NewLevel > 0)
 	{
-		if (Space->GetPageTableSize() < Space->GetDescription().MaxSpaceSize || Space->GetAllocator().TryAlloc(NewLevel))
+		if (Space->GetAllocator().TryAlloc(NewLevel))
 		{
 			break;
 		}
@@ -579,7 +666,7 @@ bool FAdaptiveVirtualTexture::FreeLRU(FVirtualTextureSystem* InSystem, uint32 In
 	{
 		// Reallocate to the selected level.
 		const uint32 GridIndex = AllocationSlots[AllocationIndex].GridIndex;
-		Allocate(InSystem, GridIndex, AllocationIndex, NewLevel, InFrame);
+		Allocate(RHICmdList, InSystem, GridIndex, AllocationIndex, NewLevel, InFrame);
 	}
 
 	return true;
@@ -596,7 +683,7 @@ void FAdaptiveVirtualTexture::UpdateAllocations(FVirtualTextureSystem* InSystem,
 		bool bFreeSuccess = true;
 		for (int32 FreeCount = 0; bFreeSuccess && FreeCount < NumToFree; FreeCount++)
 		{
-			bFreeSuccess = FreeLRU(InSystem, InFrame, FrameAgeToFree);
+			bFreeSuccess = FreeLRU(RHICmdList, InSystem, InFrame, FrameAgeToFree);
 		}
 	}
 	else
@@ -612,7 +699,7 @@ void FAdaptiveVirtualTexture::UpdateAllocations(FVirtualTextureSystem* InSystem,
 		for (int32 FreeCount = 0; bFreeSuccess && FreeCount < NumToFree && Space->GetAllocator().GetNumAllocatedPages() > TargetPages; FreeCount++)
 		{
 			const uint32 FrameAgeToFree = 15; // Hardcoded threshold. Don't release anything used more recently then this.
-			bFreeSuccess = FreeLRU(InSystem, InFrame, FrameAgeToFree);
+			bFreeSuccess = FreeLRU(RHICmdList, InSystem, InFrame, FrameAgeToFree);
 		}
 
 		// Process allocation requests.
@@ -623,8 +710,32 @@ void FAdaptiveVirtualTexture::UpdateAllocations(FVirtualTextureSystem* InSystem,
 			// Randomize request order to prevent feedback from top of the view being prioritized.
 			int32 RequestIndex = FMath::Rand() % RequestsToMap.Num();
 			uint32 PackedRequest = RequestsToMap[RequestIndex];
-			Allocate(InSystem, PackedRequest, InFrame);
-			RequestsToMap.RemoveAtSwap(RequestIndex, 1, false);
+			Allocate(RHICmdList, InSystem, PackedRequest, InFrame);
+			RequestsToMap.RemoveAtSwap(RequestIndex, 1, EAllowShrinking::No);
+		}
+	}
+
+	// Check if any pending allocation slots are now ready.
+	// Pending slots are ones where the virtual texture locked root page(s) remain unmapped.
+	// If the root page is unmapped then we may return bad data from a sample.
+	for (int32 Index = 0; Index < SlotsPendingRootPageMap.Num(); ++Index)
+	{
+		const int32 AllocationSlotIndex = SlotsPendingRootPageMap[Index];
+		FAllocation const& Allocation = AllocationSlots[AllocationSlotIndex];
+		FAllocatedVirtualTexture* AllocatedVT = Allocation.AllocatedVT;
+		if (!InSystem->IsPendingRootPageMap(AllocatedVT))
+		{
+			SlotsPendingRootPageMap.RemoveAtSwap(Index--);
+
+			// Ready for use so that we can now queue the indirection texture update.
+			const uint32 vAddress = AllocatedVT->GetVirtualAddress();
+			const uint32 vAddressX = FMath::ReverseMortonCode2(vAddress);
+			const uint32 vAddressY = FMath::ReverseMortonCode2(vAddress >> 1);
+			const uint32 vLevel = AllocatedVT->GetMaxLevel();
+			const uint32 PackedIndirectionValue = (1 << 28) | (vLevel << 24) | (vAddressY << 12) | vAddressX;
+			const uint32 X = Allocation.GridIndex % GridSize.X;
+			const uint32 Y = Allocation.GridIndex / GridSize.X;
+			TextureUpdates.Add(FIndirectionTextureUpdate{ X, Y, PackedIndirectionValue });
 		}
 	}
 

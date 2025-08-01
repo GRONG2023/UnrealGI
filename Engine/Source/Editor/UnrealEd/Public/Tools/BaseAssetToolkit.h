@@ -8,6 +8,7 @@
 #include "Toolkits/AssetEditorToolkit.h"
 #include "Templates/SharedPointer.h"
 #include "Framework/Docking/TabManager.h"
+#include "AssetEditorViewportLayout.h"
 
 class SDockTab;
 class FSpawnTabArgs;
@@ -17,12 +18,12 @@ class FPreviewScene;
 class FEditorViewportClient;
 class UAssetEditor;
 
-class UNREALED_API FBaseAssetToolkit : public FAssetEditorToolkit
+class FBaseAssetToolkit : public FAssetEditorToolkit
 {
 public:
-	FBaseAssetToolkit(UAssetEditor* InOwningAssetEditor);
+	UNREALED_API FBaseAssetToolkit(UAssetEditor* InOwningAssetEditor);
 
-	~FBaseAssetToolkit();
+	UNREALED_API ~FBaseAssetToolkit();
 	virtual FName GetToolkitFName() const override
 	{
 		return NAME_None;
@@ -40,23 +41,24 @@ public:
 	{
 		return FLinearColor::White;
 	}
-	virtual void RegisterTabSpawners(const TSharedRef<FTabManager>& InTabManager) override;
+	UNREALED_API virtual void RegisterTabSpawners(const TSharedRef<FTabManager>& InTabManager) override;
+	UNREALED_API virtual void UnregisterTabSpawners(const TSharedRef<FTabManager>& InTabManager) override;
 
-
-	virtual const TSharedRef<FTabManager::FLayout> GetDefaultLayout() const;
-	virtual void CreateWidgets();
-	virtual void SetEditingObject(class UObject* InObject);
+	UNREALED_API virtual const TSharedRef<FTabManager::FLayout> GetDefaultLayout() const;
+	UNREALED_API virtual void CreateWidgets();
+	UNREALED_API virtual void SetEditingObject(class UObject* InObject);
+	UNREALED_API virtual void CreateEditorModeManager() override;
 
 public:
-	static const FName ViewportTabID;
-	static const FName DetailsTabID;
+	static UNREALED_API const FName ViewportTabID;
+	static UNREALED_API const FName DetailsTabID;
 
 protected:
-	virtual void RegisterToolbar();
-	virtual TFunction<TSharedRef<SEditorViewport>(void)> GetViewportDelegate();
-	virtual TSharedPtr<FEditorViewportClient> CreateEditorViewportClient() const;
-	TSharedRef<SDockTab> SpawnTab_Viewport(const FSpawnTabArgs& Args);
-	TSharedRef<SDockTab> SpawnTab_Details(const FSpawnTabArgs& Args);
+	UNREALED_API virtual void RegisterToolbar();
+	UNREALED_API virtual AssetEditorViewportFactoryFunction GetViewportDelegate();
+	UNREALED_API virtual TSharedPtr<FEditorViewportClient> CreateEditorViewportClient() const;
+	UNREALED_API TSharedRef<SDockTab> SpawnTab_Viewport(const FSpawnTabArgs& Args);
+	UNREALED_API virtual TSharedRef<SDockTab> SpawnTab_Details(const FSpawnTabArgs& Args);
 
 protected:
 	/** Property View */
@@ -64,7 +66,7 @@ protected:
 	// Tracking the active viewports in this editor.
 	TSharedPtr<class FEditorViewportTabContent> ViewportTabContent;
 	/** Storage for our viewport creation function that will be passed to the viewport layout system*/
-	TFunction<TSharedRef<SEditorViewport>(void)> ViewportDelegate;
+	AssetEditorViewportFactoryFunction ViewportDelegate;
 	TSharedPtr<FEditorViewportClient> ViewportClient;
 	/** Extender for adding to the default layout for this asset editor */
 	TSharedPtr<FLayoutExtender> LayoutExtender;

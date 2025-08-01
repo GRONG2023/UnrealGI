@@ -5,6 +5,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "PrimitiveSceneInfo.h"
 #include "HeadMountedDisplayTypes.h"
+#include "SceneInterface.h"
 
 FLateUpdateManager::FLateUpdateManager()
 	: LateUpdateGameWriteIndex(0)
@@ -33,9 +34,9 @@ void FLateUpdateManager::Setup(const FTransform& ParentToWorld, USceneComponent*
 
 }
 
-void FLateUpdateManager::Apply_RenderThread(FSceneInterface* Scene, const int32 FrameNumber, const FTransform& OldRelativeTransform, const FTransform& NewRelativeTransform)
+void FLateUpdateManager::Apply_RenderThread(FSceneInterface* Scene, const FTransform& OldRelativeTransform, const FTransform& NewRelativeTransform)
 {
-	check(IsInRenderingThread());
+	FRHICommandListBase& RHICmdList = FRHICommandListImmediate::Get();
 
 	if (!UpdateStates[LateUpdateRenderReadIndex].Primitives.Num() || UpdateStates[LateUpdateRenderReadIndex].bSkip)
 	{
@@ -50,13 +51,7 @@ void FLateUpdateManager::Apply_RenderThread(FSceneInterface* Scene, const int32 
 
 	// Apply delta to the cached scene proxies
 	// Also check whether any primitive indices have changed, in case the scene has been modified in the meantime.
-	  
-	// Under HMD late-latching senario, Apply_RenderThread will be called twice in same frame under PreRenderViewFamily_RenderThread and 
-	// LateLatchingViewFamily_RenderThread. We don't want to apply PrimitivePair.Value = -1 directly on UpdateStates[LateUpdateRenderReadIndex].Primitives
-	// because the modification will affect second Apply_RenderThread's logic under LateLatchingViewFamily_RenderThread.
-	// Since the list is very small(only affect stuff attaching to the controller),  we just make a local copy PrimitivesLocal.
-	TMap<FPrimitiveSceneInfo*, int32> PrimitivesLocal = UpdateStates[LateUpdateRenderReadIndex].Primitives;
-	for (auto& PrimitivePair : PrimitivesLocal)
+	for (auto& PrimitivePair : UpdateStates[LateUpdateRenderReadIndex].Primitives)
 	{
 		FPrimitiveSceneInfo* RetrievedSceneInfo = Scene->GetPrimitiveSceneInfo(PrimitivePair.Value);
 		FPrimitiveSceneInfo* CachedSceneInfo = PrimitivePair.Key;
@@ -70,12 +65,8 @@ void FLateUpdateManager::Apply_RenderThread(FSceneInterface* Scene, const int32 
 		}
 		else if (CachedSceneInfo->Proxy)
 		{
-			CachedSceneInfo->Proxy->ApplyLateUpdateTransform(LateUpdateTransform);
+			CachedSceneInfo->Proxy->ApplyLateUpdateTransform(RHICmdList, LateUpdateTransform);
 			PrimitivePair.Value = -1; // Set the cached index to -1 to indicate that this primitive was already processed
-			if (FrameNumber >= 0)
-			{
-				CachedSceneInfo->Proxy->SetPatchingFrameNumber(FrameNumber);
-			}
 		}
 	}
 
@@ -85,16 +76,11 @@ void FLateUpdateManager::Apply_RenderThread(FSceneInterface* Scene, const int32 
 		int32 Index = 0;
 		FPrimitiveSceneInfo* RetrievedSceneInfo;
 		RetrievedSceneInfo = Scene->GetPrimitiveSceneInfo(Index++);
-		while (RetrievedSceneInfo)
+		while(RetrievedSceneInfo)
 		{
-			int32* PrimitiveIndex = PrimitivesLocal.Find(RetrievedSceneInfo);
-			if (RetrievedSceneInfo->Proxy && PrimitiveIndex != nullptr && *PrimitiveIndex >= 0)
+			if (RetrievedSceneInfo->Proxy && UpdateStates[LateUpdateRenderReadIndex].Primitives.Contains(RetrievedSceneInfo) && UpdateStates[LateUpdateRenderReadIndex].Primitives[RetrievedSceneInfo] >= 0)
 			{
-				RetrievedSceneInfo->Proxy->ApplyLateUpdateTransform(LateUpdateTransform);
-				if (FrameNumber >= 0)
-				{
-					RetrievedSceneInfo->Proxy->SetPatchingFrameNumber(FrameNumber);
-				}
+				RetrievedSceneInfo->Proxy->ApplyLateUpdateTransform(RHICmdList, LateUpdateTransform);
 			}
 			RetrievedSceneInfo = Scene->GetPrimitiveSceneInfo(Index++);
 		}

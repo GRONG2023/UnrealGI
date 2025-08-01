@@ -7,6 +7,8 @@
 #include "LocalNotification.h"
 #include "EngineLogs.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BlueprintPlatformLibrary)
+
 void UPlatformGameInstance::PostInitProperties()
 
 {
@@ -16,7 +18,7 @@ void UPlatformGameInstance::PostInitProperties()
     FCoreDelegates::ApplicationHasReactivatedDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationHasReactivatedDelegate_Handler);
     FCoreDelegates::ApplicationWillEnterBackgroundDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationWillEnterBackgroundDelegate_Handler);
     FCoreDelegates::ApplicationHasEnteredForegroundDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationHasEnteredForegroundDelegate_Handler);
-    FCoreDelegates::ApplicationWillTerminateDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationWillTerminateDelegate_Handler);
+    FCoreDelegates::GetApplicationWillTerminateDelegate().AddUObject(this, &UPlatformGameInstance::ApplicationWillTerminateDelegate_Handler);
 	FCoreDelegates::ApplicationShouldUnloadResourcesDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationShouldUnloadResourcesDelegate_Handler);
 	FCoreDelegates::ApplicationReceivedStartupArgumentsDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationReceivedStartupArgumentsDelegate_Handler);
     FCoreDelegates::ApplicationRegisteredForRemoteNotificationsDelegate.AddUObject(this, &UPlatformGameInstance::ApplicationRegisteredForRemoteNotificationsDelegate_Handler);
@@ -34,7 +36,7 @@ void UPlatformGameInstance::BeginDestroy()
 	FCoreDelegates::ApplicationHasReactivatedDelegate.RemoveAll(this);
 	FCoreDelegates::ApplicationWillEnterBackgroundDelegate.RemoveAll(this);
 	FCoreDelegates::ApplicationHasEnteredForegroundDelegate.RemoveAll(this);
-	FCoreDelegates::ApplicationWillTerminateDelegate.RemoveAll(this);
+	FCoreDelegates::GetApplicationWillTerminateDelegate().RemoveAll(this);
  	FCoreDelegates::ApplicationShouldUnloadResourcesDelegate.RemoveAll(this);
  	FCoreDelegates::ApplicationReceivedStartupArgumentsDelegate.RemoveAll(this);
 	FCoreDelegates::ApplicationRegisteredForRemoteNotificationsDelegate.RemoveAll(this);
@@ -161,7 +163,7 @@ void UBlueprintPlatformLibrary::CancelLocalNotificationById(int32 NotificationId
 		return;
 	}
 	
-	UE_LOG(LogBlueprintUserMessages, Log, TEXT("Canceling notification %f"), NotificationId);
+	UE_LOG(LogBlueprintUserMessages, Log, TEXT("Canceling notification %d"), NotificationId);
 	
 	platformService->CancelLocalNotification(NotificationId);
 }
@@ -179,28 +181,87 @@ void UBlueprintPlatformLibrary::GetLaunchNotification(bool& NotificationLaunched
 
 EScreenOrientation::Type UBlueprintPlatformLibrary::GetDeviceOrientation()
 {
-	switch (FPlatformMisc::GetDeviceOrientation())
+	return ConvertToScreenOrientation(FPlatformMisc::GetDeviceOrientation());
+}
+
+
+EScreenOrientation::Type UBlueprintPlatformLibrary::GetAllowedDeviceOrientation()
+{
+	return ConvertToScreenOrientation(FPlatformMisc::GetAllowedDeviceOrientation());
+}
+
+void UBlueprintPlatformLibrary::SetAllowedDeviceOrientation(EScreenOrientation::Type NewAllowedDeviceOrientation)
+{
+	FPlatformMisc::SetAllowedDeviceOrientation(ConvertToDeviceScreenOrientation(NewAllowedDeviceOrientation));
+}
+
+EScreenOrientation::Type UBlueprintPlatformLibrary::ConvertToScreenOrientation(EDeviceScreenOrientation DeviceScreenOrientation)
+{
+	switch (DeviceScreenOrientation)
 	{
-		case EDeviceScreenOrientation::Portrait:
-			return EScreenOrientation::Portrait;
-			
-		case EDeviceScreenOrientation::PortraitUpsideDown:
-			return EScreenOrientation::PortraitUpsideDown;
-			
-		case EDeviceScreenOrientation::LandscapeLeft:
-			return EScreenOrientation::LandscapeLeft;
+	case EDeviceScreenOrientation::Portrait:
+		return EScreenOrientation::Portrait;
 
-		case EDeviceScreenOrientation::LandscapeRight:
-			return EScreenOrientation::LandscapeRight;
+	case EDeviceScreenOrientation::PortraitUpsideDown:
+		return EScreenOrientation::PortraitUpsideDown;
 
-		case EDeviceScreenOrientation::FaceUp:
-			return EScreenOrientation::FaceUp;
-			
-		case EDeviceScreenOrientation::FaceDown:
-			return EScreenOrientation::FaceDown;
+	case EDeviceScreenOrientation::LandscapeLeft:
+		return EScreenOrientation::LandscapeLeft;
+
+	case EDeviceScreenOrientation::LandscapeRight:
+		return EScreenOrientation::LandscapeRight;
+
+	case EDeviceScreenOrientation::FaceUp:
+		return EScreenOrientation::FaceUp;
+
+	case EDeviceScreenOrientation::FaceDown:
+		return EScreenOrientation::FaceDown;
+
+	case EDeviceScreenOrientation::PortraitSensor:
+		return EScreenOrientation::PortraitSensor;
+
+	case EDeviceScreenOrientation::LandscapeSensor:
+		return EScreenOrientation::LandscapeSensor;
+
+	case EDeviceScreenOrientation::FullSensor:
+		return EScreenOrientation::FullSensor;
 	}
 	return EScreenOrientation::Unknown;
 }
 
+EDeviceScreenOrientation UBlueprintPlatformLibrary::ConvertToDeviceScreenOrientation(EScreenOrientation::Type ScreenOrientation)
+{
+	switch (ScreenOrientation)
+	{
+	case EScreenOrientation::Portrait:
+		return EDeviceScreenOrientation::Portrait;
+
+	case EScreenOrientation::PortraitUpsideDown:
+		return EDeviceScreenOrientation::PortraitUpsideDown;
+
+	case EScreenOrientation::LandscapeLeft:
+		return EDeviceScreenOrientation::LandscapeLeft;
+
+	case EScreenOrientation::LandscapeRight:
+		return EDeviceScreenOrientation::LandscapeRight;
+
+	case EScreenOrientation::FaceUp:
+		return EDeviceScreenOrientation::FaceUp;
+
+	case EScreenOrientation::FaceDown:
+		return EDeviceScreenOrientation::FaceDown;
+
+	case EScreenOrientation::PortraitSensor:
+		return EDeviceScreenOrientation::PortraitSensor;
+
+	case EScreenOrientation::LandscapeSensor:
+		return EDeviceScreenOrientation::LandscapeSensor;
+
+	case EScreenOrientation::FullSensor:
+		return EDeviceScreenOrientation::FullSensor;
+	}
+	return EDeviceScreenOrientation::Unknown;
+}
 
 ILocalNotificationService* UBlueprintPlatformLibrary::platformService = nullptr;
+

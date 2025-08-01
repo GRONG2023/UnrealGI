@@ -5,6 +5,10 @@
 #include "SSourceControlLogin.h"
 #include "SourceControlOperations.h"
 #include "SourceControlHelpers.h"
+#include "SourceControlAssetDataCache.h"
+#include "SourceControlFileStatusMonitor.h"
+#include "SourceControlCVars.h"
+#include "Misc/Paths.h"
 
 #if SOURCE_CONTROL_WITH_SLATE
 	#include "Widgets/DeclarativeSyntaxSupport.h"
@@ -19,8 +23,8 @@
 #endif
 
 #if WITH_EDITOR
-	#include "Runtime/Engine/Public/EngineAnalytics.h"
-	#include "Runtime/Analytics/Analytics/Public/Interfaces/IAnalyticsProvider.h"
+	#include "EngineAnalytics.h"
+	#include "Interfaces/IAnalyticsProvider.h"
 #endif
 
 DEFINE_LOG_CATEGORY(LogSourceControl);
@@ -59,12 +63,17 @@ void FSourceControlModule::StartupModule()
 #if WITH_UNREAL_DEVELOPER_TOOLS
 	// create a message log for source control to use
 	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
-	MessageLogModule.RegisterLogListing("SourceControl", LOCTEXT("SourceControlLogLabel", "Source Control"));
+	MessageLogModule.RegisterLogListing("SourceControl", LOCTEXT("SourceControlLogLabel", "Revision Control"));
 #endif
+
+	AssetDataCache.Startup();
+
+	SourceControlFileStatusMonitor = MakeShared<FSourceControlFileStatusMonitor>();
 }
 
 void FSourceControlModule::ShutdownModule()
 {
+	AssetDataCache.Shutdown();
 	// close the current provider
 	GetProvider().Close();
 
@@ -83,6 +92,8 @@ void FSourceControlModule::ShutdownModule()
 	// we don't care about modular features any more
 	IModularFeatures::Get().OnModularFeatureRegistered().RemoveAll(this);
 	IModularFeatures::Get().OnModularFeatureUnregistered().RemoveAll(this);
+
+	SourceControlFileStatusMonitor.Reset();
 }
 
 void FSourceControlModule::SaveSettings()
@@ -93,11 +104,21 @@ void FSourceControlModule::SaveSettings()
 void FSourceControlModule::ShowLoginDialog(const FSourceControlLoginClosed& InOnSourceControlLoginClosed, ELoginWindowMode::Type InLoginWindowMode, EOnLoginWindowStartup::Type InOnLoginWindowStartup)
 {
 #if SOURCE_CONTROL_WITH_SLATE
+	// Avoid continue running tasks while the dialog is displayed. Any change in textboxes could affect the connection status.
+	AssetDataCache.OnSourceControlDialogShown();
+
 	// Get Active Provider Name
 	ActiveProviderName = GetProvider().GetName().ToString();
 
+	// if we are forcing a modal dialog, change the preference now
+	ELoginWindowMode::Type LoginWindowMode = InLoginWindowMode;
+	if(SourceControlCVars::CVarSourceControlEnableLoginDialogModal.GetValueOnAnyThread())
+	{
+		LoginWindowMode = ELoginWindowMode::Modal;
+	}
+
 	// if we are showing a modal version of the dialog & a modeless version already exists, we must destroy the modeless dialog first
-	if(InLoginWindowMode == ELoginWindowMode::Modal && SourceControlLoginPtr.IsValid())
+	if(LoginWindowMode == ELoginWindowMode::Modal && SourceControlLoginPtr.IsValid())
 	{
 		// unhook the delegate so it doesn't fire in this case
 		SourceControlLoginWindowPtr->SetOnWindowClosed(FOnWindowClosed());
@@ -125,8 +146,8 @@ void FSourceControlModule::ShowLoginDialog(const FSourceControlLoginClosed& InOn
 
 		// Create the window
 		SourceControlLoginWindowPtr = SNew(SWindow)
-			.Title( LOCTEXT("SourceControlLoginTitle", "Source Control Login") )
-			.HasCloseButton(false)
+			.Title( LOCTEXT("SourceControlLoginTitle", "Revision Control Login") )
+			.HasCloseButton(true)
 			.SupportsMaximize(false) 
 			.SupportsMinimize(false)
 			.SizingRule( ESizingRule::Autosized );
@@ -136,19 +157,15 @@ void FSourceControlModule::ShowLoginDialog(const FSourceControlLoginClosed& InOn
 
 		// Setup the content for the created login window.
 		SourceControlLoginWindowPtr->SetContent(
-			SNew(SBox)
-			.WidthOverride(700.0f)
-			[
 				SAssignNew(SourceControlLoginPtr, SSourceControlLogin)
 				.ParentWindow(SourceControlLoginWindowPtr)
 				.OnSourceControlLoginClosed(InOnSourceControlLoginClosed)
-			]
 			);
 
 		TSharedPtr<SWindow> RootWindow = FGlobalTabmanager::Get()->GetRootWindow();
 		if(RootWindow.IsValid())
 		{
-			if(InLoginWindowMode == ELoginWindowMode::Modal)
+			if(LoginWindowMode == ELoginWindowMode::Modal)
 			{
 				FSlateApplication::Get().AddModalWindow(SourceControlLoginWindowPtr.ToSharedRef(), RootWindow);
 			}
@@ -159,7 +176,7 @@ void FSourceControlModule::ShowLoginDialog(const FSourceControlLoginClosed& InOn
 		}
 		else
 		{
-			if(InLoginWindowMode == ELoginWindowMode::Modal)
+			if(LoginWindowMode == ELoginWindowMode::Modal)
 			{
 				FSlateApplication::Get().AddModalWindow(SourceControlLoginWindowPtr.ToSharedRef(), RootWindow);
 			}
@@ -188,6 +205,8 @@ void FSourceControlModule::OnSourceControlDialogClosed(const TSharedRef<SWindow>
 		ActiveProviderName = NewProvider;
 	}
 #endif
+
+	AssetDataCache.OnSourceControlDialogClosed();
 }
 
 void FSourceControlModule::InitializeSourceControlProviders()
@@ -232,32 +251,35 @@ void FSourceControlModule::GetProviderNames(TArray<FName>& OutProviderNames)
 }
 
 void FSourceControlModule::Tick()
-{	
-	if( CurrentSourceControlProvider != nullptr )
+{
+	if (CurrentSourceControlProvider != nullptr)
 	{
 		ISourceControlProvider& Provider = GetProvider();
 
 		// tick the provider, so any operation results can be read back
 		Provider.Tick();
 
+		AssetDataCache.Tick();
+
 		// don't allow background status updates when temporarily disabled for login
-		if(!bTemporarilyDisabled)
+		if (!bTemporarilyDisabled)
 		{
 			// check for any pending dispatches
-			if(PendingStatusUpdateFiles.Num() > 0)
+			if (PendingStatusUpdateFiles.Num() > 0)
 			{
 				// grab a batch of files
 				TArray<FString> FilesToDispatch;
-				for(auto Iter(PendingStatusUpdateFiles.CreateConstIterator()); Iter; Iter++)
+				FilesToDispatch.Reserve(SourceControlConstants::MaxStatusDispatchesPerTick);
+				for (const FString& Filename : PendingStatusUpdateFiles)
 				{
 					if(FilesToDispatch.Num() >= SourceControlConstants::MaxStatusDispatchesPerTick)
 					{
 						break;
 					}
-					FilesToDispatch.Add(*Iter);
+					FilesToDispatch.Add(Filename);
 				}
 
-				if(FilesToDispatch.Num() > 0)
+				if (FilesToDispatch.Num() > 0)
 				{
 					// remove the files we are dispatching so we don't try again
 					PendingStatusUpdateFiles.RemoveAt(0, FilesToDispatch.Num());
@@ -272,29 +294,29 @@ void FSourceControlModule::Tick()
 
 void FSourceControlModule::QueueStatusUpdate(const TArray<UPackage*>& InPackages)
 {
-	if(IsEnabled())
+	if (IsEnabled())
 	{
-		for(auto It(InPackages.CreateConstIterator()); It; It++)
+		for (UPackage* Package: InPackages)
 		{
-			QueueStatusUpdate(*It);
+			QueueStatusUpdate(Package);
 		}
 	}
 }
 
 void FSourceControlModule::QueueStatusUpdate(const TArray<FString>& InFilenames)
 {
-	if(IsEnabled())
+	if (IsEnabled())
 	{
-		for(auto It(InFilenames.CreateConstIterator()); It; It++)
+		for (const FString& Filename : InFilenames)
 		{
-			QueueStatusUpdate(*It);
+			QueueStatusUpdate(Filename);
 		}
 	}
 }
 
 void FSourceControlModule::QueueStatusUpdate(UPackage* InPackage)
 {
-	if(IsEnabled())
+	if (IsEnabled())
 	{
 		QueueStatusUpdate(SourceControlHelpers::PackageFilename(InPackage));
 	}
@@ -302,13 +324,13 @@ void FSourceControlModule::QueueStatusUpdate(UPackage* InPackage)
 
 void FSourceControlModule::QueueStatusUpdate(const FString& InFilename)
 {
-	if(IsEnabled())
+	if (IsEnabled())
 	{
 		TSharedPtr<ISourceControlState, ESPMode::ThreadSafe> SourceControlState = GetProvider().GetState(InFilename, EStateCacheUsage::Use);
-		if(SourceControlState.IsValid())
+		if (SourceControlState.IsValid())
 		{
 			FTimespan TimeSinceLastUpdate = FDateTime::Now() - SourceControlState->GetTimeStamp();
-			if(TimeSinceLastUpdate > SourceControlConstants::StateRefreshInterval)
+			if (TimeSinceLastUpdate > SourceControlConstants::StateRefreshInterval)
 			{
 				PendingStatusUpdateFiles.AddUnique(InFilename);
 			}
@@ -326,6 +348,26 @@ ISourceControlProvider& FSourceControlModule::GetProvider() const
 	return *CurrentSourceControlProvider;
 }
 
+TUniquePtr<ISourceControlProvider> FSourceControlModule::CreateProvider(const FName& ProviderName, const FStringView& OwnerName, const FSourceControlInitSettings& InitialSettings) const
+{
+	TArray<ISourceControlProvider*> Providers = IModularFeatures::Get().GetModularFeatureImplementations<ISourceControlProvider>(SourceControlFeatureName);
+	for (const ISourceControlProvider* DefaultProvider : Providers)
+	{
+		if (DefaultProvider->GetName() == ProviderName)
+		{
+			return DefaultProvider->Create(OwnerName, InitialSettings);
+		}
+	}
+
+	// Provider was not found
+	return TUniquePtr<ISourceControlProvider>();
+}
+
+FSourceControlAssetDataCache& FSourceControlModule::GetAssetDataCache()
+{
+	return AssetDataCache;
+}
+
 void FSourceControlModule::SetProvider( const FName& InName )
 {
 	TArray<ISourceControlProvider*> Providers = IModularFeatures::Get().GetModularFeatureImplementations<ISourceControlProvider>(SourceControlFeatureName);
@@ -339,7 +381,7 @@ void FSourceControlModule::SetProvider( const FName& InName )
 		}
 	}
 
-	UE_LOG(LogSourceControl, Fatal, TEXT("Tried to set unknown source control provider: %s"), *InName.ToString());
+	UE_LOG(LogSourceControl, Fatal, TEXT("Tried to set unknown revision control provider: %s"), *InName.ToString());
 }
 
 void FSourceControlModule::ClearCurrentSourceControlProvider()
@@ -439,6 +481,11 @@ void FSourceControlModule::SetUseGlobalSettings(bool bIsUseGlobalSettings)
 	ShowLoginDialog(FSourceControlLoginClosed(), ELoginWindowMode::Modeless, EOnLoginWindowStartup::PreserveProvider);
 }	
 
+FSourceControlProviderChanging& FSourceControlModule::GetSourceControlProviderChanging()
+{
+	return OnSourceControlProviderChanging;
+}
+
 FDelegateHandle FSourceControlModule::RegisterProviderChanged(const FSourceControlProviderChanged::FDelegate& SourceControlProviderChanged)
 {
 	return OnSourceControlProviderChanged.Add(SourceControlProviderChanged);
@@ -447,6 +494,92 @@ FDelegateHandle FSourceControlModule::RegisterProviderChanged(const FSourceContr
 void FSourceControlModule::UnregisterProviderChanged(FDelegateHandle Handle)
 {
 	OnSourceControlProviderChanged.Remove(Handle);
+}
+
+void FSourceControlModule::RegisterPreSubmitDataValidation(const FSourceControlPreSubmitDataValidationDelegate& PreSubmitDataValidationDelegate)
+{
+	OnSourceControlPreSubmitDataValidation = PreSubmitDataValidationDelegate;
+}
+
+void FSourceControlModule::UnregisterPreSubmitDataValidation()
+{
+	OnSourceControlPreSubmitDataValidation = FSourceControlPreSubmitDataValidationDelegate();
+}
+
+FSourceControlPreSubmitDataValidationDelegate FSourceControlModule::GetRegisteredPreSubmitDataValidation()
+{
+	return OnSourceControlPreSubmitDataValidation;
+}
+
+FDelegateHandle FSourceControlModule::RegisterPreSubmitFinalize(const FSourceControlPreSubmitFinalizeDelegate::FDelegate& Delegate)
+{
+	return OnPresubmitFinalize.Add(Delegate);
+}
+
+void FSourceControlModule::UnregisterPreSubmitFinalize(FDelegateHandle Handle)
+{
+	OnPresubmitFinalize.Remove(Handle);
+}
+
+const FSourceControlPreSubmitFinalizeDelegate& FSourceControlModule::GetOnPreSubmitFinalize() const
+{
+	return OnPresubmitFinalize;
+}
+
+FDelegateHandle FSourceControlModule::RegisterFilesDeleted(const FSourceControlFilesDeletedDelegate::FDelegate& InDelegate)
+{
+	return OnFilesDeleted.Add(InDelegate);
+}
+
+void FSourceControlModule::UnregisterFilesDeleted(FDelegateHandle InHandle)
+{
+	OnFilesDeleted.Remove(InHandle);
+}
+
+const FSourceControlFilesDeletedDelegate& FSourceControlModule::GetOnFilesDeleted() const
+{
+	return OnFilesDeleted;
+}
+
+void FSourceControlModule::RegisterSourceControlProjectDirDelegate(const FSourceControlProjectDirDelegate& InSourceControlProjectDirDelegate)
+{
+	SourceControlProjectDirDelegate = InSourceControlProjectDirDelegate;
+}
+
+void FSourceControlModule::UnregisterSourceControlProjectDirDelegate()
+{
+	SourceControlProjectDirDelegate = FSourceControlProjectDirDelegate();
+}
+
+FString FSourceControlModule::GetSourceControlProjectDir() const
+{
+	if (SourceControlProjectDirDelegate.IsBound())
+	{
+		FString ProjectDir = SourceControlProjectDirDelegate.Execute();
+		if (!ProjectDir.IsEmpty())
+		{
+			return ProjectDir;
+		}
+	}
+	return FPaths::ProjectDir();
+}
+
+bool FSourceControlModule::UsesCustomProjectDir() const
+{
+	if (SourceControlProjectDirDelegate.IsBound())
+	{
+		FString ProjectDir = SourceControlProjectDirDelegate.Execute();
+		if (!ProjectDir.IsEmpty())
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+FSourceControlFileStatusMonitor& FSourceControlModule::GetSourceControlFileStatusMonitor()
+{
+	return *SourceControlFileStatusMonitor;
 }
 
 IMPLEMENT_MODULE( FSourceControlModule, SourceControl );

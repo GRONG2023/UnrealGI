@@ -13,15 +13,15 @@ class Error;
 /**
  * Just a wrapper for the struct with real data in it.
  */
-UCLASS(hidecategories=Object)
-class SLATECORE_API USlateWidgetStyleAsset : public UObject
+UCLASS(MinimalApi, hidecategories=Object)
+class USlateWidgetStyleAsset : public UObject
 {
 	GENERATED_BODY()
 		  
 public:  
 	/**  */
 	UPROPERTY(Category=Appearance, EditAnywhere, Instanced)
-	USlateWidgetStyleContainerBase* CustomStyle;
+	TObjectPtr<USlateWidgetStyleContainerBase> CustomStyle;
 
 	template< class WidgetStyleType >            
 	const WidgetStyleType* GetStyle() const 

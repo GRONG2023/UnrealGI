@@ -7,10 +7,6 @@ public class LinuxTargetPlatform : ModuleRules
     public LinuxTargetPlatform(ReadOnlyTargetRules Target) : base(Target)
 	{
         BinariesSubFolder = "Linux";
-		if (Target.Platform == UnrealTargetPlatform.LinuxAArch64)
-		{
-			BinariesSubFolder += "AArch64";
-		}
 
 		PrivateDependencyModuleNames.AddRange(
             new string[] {
@@ -24,17 +20,13 @@ public class LinuxTargetPlatform : ModuleRules
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
-				"Settings",
+				"Settings"
 			}
 		);
 
-        PrivateIncludePaths.AddRange(
-            new string[] {
-			}
-        );
-
 		if (Target.bCompileAgainstEngine)
 		{
+			PublicIncludePathModuleNames.Add("Engine");
 			PrivateDependencyModuleNames.Add("Engine");
 			PrivateIncludePathModuleNames.Add("TextureCompressor");
 		}

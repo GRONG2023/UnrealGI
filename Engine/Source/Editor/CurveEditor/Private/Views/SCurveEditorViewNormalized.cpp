@@ -1,18 +1,47 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Views/SCurveEditorViewNormalized.h"
+
+#include "Containers/SortedMap.h"
 #include "CurveEditor.h"
-#include "CurveEditorHelpers.h"
+#include "CurveEditorScreenSpace.h"
+#include "CurveEditorSettings.h"
 #include "CurveModel.h"
+#include "Delegates/Delegate.h"
+#include "Fonts/SlateFontInfo.h"
+#include "HAL/PlatformCrt.h"
+#include "IBufferedCurveModel.h"
+#include "Layout/Children.h"
+#include "Layout/Geometry.h"
+#include "Layout/Margin.h"
+#include "Math/Color.h"
+#include "Math/TransformCalculus2D.h"
+#include "Math/Vector2D.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Rendering/DrawElements.h"
+#include "SCurveEditorView.h"
+#include "Styling/CoreStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Templates/Tuple.h"
+#include "Templates/UniquePtr.h"
+#include "Types/SlateEnums.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
+#include "Widgets/SCompoundWidget.h"
 #include "Widgets/Text/STextBlock.h"
+
+class FPaintArgs;
+class FSlateRect;
+class FText;
+class FWidgetStyle;
 
 constexpr float NormalizedPadding = 10.f;
 
 void SCurveEditorViewNormalized::Construct(const FArguments& InArgs, TWeakPtr<FCurveEditor> InCurveEditor)
 {
+	//when created we set the output bounds to be fixed since otherwise it may get fitted
 	bFixedOutputBounds = true;
-	OutputMin = 0.0;
-	OutputMax = 1.0;
+	FrameVertical(-0.1, 1.1);
 
 	SInteractiveCurveEditorView::Construct(InArgs, InCurveEditor);
 
@@ -28,24 +57,12 @@ void SCurveEditorViewNormalized::Construct(const FArguments& InArgs, TWeakPtr<FC
 	];
 }
 
-void SCurveEditorViewNormalized::GetGridLinesY(TSharedRef<const FCurveEditor> CurveEditor, TArray<float>& MajorGridLines, TArray<float>& MinorGridLines, TArray<FText>* MajorGridLabels) const
-{
-	FCurveEditorScreenSpace ViewSpace = GetViewSpace();
-
-	MajorGridLines.Add(ViewSpace.ValueToScreen(0.0));
-	MajorGridLines.Add(ViewSpace.ValueToScreen(0.5));
-	MajorGridLines.Add(ViewSpace.ValueToScreen(1.0));
-
-	MinorGridLines.Add(ViewSpace.ValueToScreen(0.25));
-	MinorGridLines.Add(ViewSpace.ValueToScreen(0.75));
-}
-
-FTransform2D CalculateViewToCurveTransform(const double InCurveOutputMin, const double InCurveOutputMax)
+FTransform2D CalculateViewToCurveTransform(const double OutputMin, const double OutputMax, const double InCurveOutputMin, const double InCurveOutputMax)
 {
 	const double Scale = (InCurveOutputMax - InCurveOutputMin);
 	if (InCurveOutputMax > InCurveOutputMin)
 	{
-		return FTransform2D(FScale2D(1.f, Scale), FVector2D(0.f, InCurveOutputMin));
+		return FTransform2D(FScale2D(1.0, Scale), FVector2D(0.0, InCurveOutputMin));
 	}
 	else
 	{
@@ -57,6 +74,11 @@ void SCurveEditorViewNormalized::DrawBufferedCurves(const FGeometry& AllottedGeo
 {
 	TSharedPtr<FCurveEditor> CurveEditor = WeakCurveEditor.Pin();
 	if (!CurveEditor)
+	{
+		return;
+	}
+
+	if (!CurveEditor->GetSettings()->GetShowBufferedCurves())
 	{
 		return;
 	}
@@ -73,10 +95,15 @@ void SCurveEditorViewNormalized::DrawBufferedCurves(const FGeometry& AllottedGeo
 	const TArray<TUniquePtr<IBufferedCurveModel>>& BufferedCurves = CurveEditor->GetBufferedCurves();
 	for (const TUniquePtr<IBufferedCurveModel>& BufferedCurve : BufferedCurves)
 	{
+		if (!CurveEditor->IsActiveBufferedCurve(BufferedCurve))
+		{
+			continue;
+		}
+
 		FTransform2D ViewToBufferedCurveTransform;
 		double CurveOutputMin = BufferedCurve->GetValueMin(), CurveOutputMax = BufferedCurve->GetValueMax();
 
-		ViewToBufferedCurveTransform = CalculateViewToCurveTransform(CurveOutputMin, CurveOutputMax);
+		ViewToBufferedCurveTransform = CalculateViewToCurveTransform(OutputMin, OutputMax,CurveOutputMin, CurveOutputMax);
 
 		TArray<TTuple<double, double>> CurveSpaceInterpolatingPoints;
 		FCurveEditorScreenSpace CurveSpace = GetViewSpace().ToCurveSpace(ViewToBufferedCurveTransform);
@@ -119,6 +146,36 @@ void SCurveEditorViewNormalized::PaintView(const FPaintArgs& Args, const FGeomet
 	}
 }
 
+void SCurveEditorViewNormalized::FrameVertical(double InOutputMin, double InOutputMax)
+{
+	OutputMin = -0.1;
+	OutputMax = 1.1;;
+}
+
+void SCurveEditorViewNormalized::UpdateViewToTransformCurves(double InputMin, double InputMax) 
+{
+	TSharedPtr<FCurveEditor> CurveEditor = WeakCurveEditor.Pin();
+	if (!CurveEditor)
+	{
+		return;
+	}
+
+	for (auto It = CurveInfoByID.CreateIterator(); It; ++It)
+	{
+		FCurveModel* Curve = CurveEditor->FindCurve(It.Key());
+		if (!ensureAlways(Curve))
+		{
+			continue;
+		}
+
+		double CurveOutputMin = 0, CurveOutputMax = 1;
+		Curve->GetValueRange(InputMin, InputMax, CurveOutputMin, CurveOutputMax);
+
+		It->Value.ViewToCurveTransform = CalculateViewToCurveTransform(OutputMin, OutputMax, CurveOutputMin, CurveOutputMax);
+	}
+}
+
+
 void SCurveEditorViewNormalized::Tick(const FGeometry& AllottedGeometry, const double InCurrentTime, const float InDeltaTime)
 {
 	TSharedPtr<FCurveEditor> CurveEditor = WeakCurveEditor.Pin();
@@ -129,25 +186,10 @@ void SCurveEditorViewNormalized::Tick(const FGeometry& AllottedGeometry, const d
 
 	if (!CurveEditor->AreBoundTransformUpdatesSuppressed())
 	{
-		const double ValuePerPixel = 1.0 / AllottedGeometry.GetLocalSize().Y;
-		const double ValueSpacePadding = NormalizedPadding * ValuePerPixel;
-
-		OutputMin = 0.0 - ValueSpacePadding;
-		OutputMax = 1.0 + ValueSpacePadding;
-
-		for (auto It = CurveInfoByID.CreateIterator(); It; ++It)
-		{
-			FCurveModel* Curve = CurveEditor->FindCurve(It.Key());
-			if (!ensureAlways(Curve))
-			{
-				continue;
-			}
-
-			double CurveOutputMin = 0, CurveOutputMax = 1;
-			Curve->GetValueRange(CurveOutputMin, CurveOutputMax);
-
-			It->Value.ViewToCurveTransform = CalculateViewToCurveTransform(CurveOutputMin, CurveOutputMax);
-		}
+		bFixedOutputBounds = false;
+		double InputMin = 0, InputMax = 1;
+		GetInputBounds(InputMin, InputMax);
+		UpdateViewToTransformCurves(InputMin, InputMax);
 	}
 
 	SInteractiveCurveEditorView::Tick(AllottedGeometry, InCurrentTime, InDeltaTime);

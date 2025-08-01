@@ -2,13 +2,28 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
 #include "MovieSceneTrackEditor.h"
+#include "Templates/SharedPointer.h"
+#include "Templates/SubclassOf.h"
 
+class FMenuBuilder;
+class ISequencer;
+class ISequencerSection;
+class ISequencerTrackEditor;
+class SWidget;
+class UMaterialParameterCollection;
+class UMovieSceneMaterialParameterCollectionTrack;
+class UMovieSceneSection;
+class UMovieSceneSequence;
+class UMovieSceneTrack;
+class UObject;
+struct FAssetData;
+struct FBuildEditWidgetParams;
 struct FCollectionScalarParameter;
 struct FCollectionVectorParameter;
-struct FAssetData;
-class UMovieSceneMaterialParameterCollectionTrack;
+struct FGuid;
+struct FSlateBrush;
 
 /**
  * Track editor for material parameter collections.
@@ -39,10 +54,12 @@ public:
 private:
 
 	/** Provides the contents of the add parameter menu. */
-	TSharedRef<SWidget> OnGetAddParameterMenuContent(UMovieSceneMaterialParameterCollectionTrack* MaterialTrack);
+	TSharedRef<SWidget> OnGetAddParameterMenuContent(UMovieSceneMaterialParameterCollectionTrack* MaterialTrack, int32 RowIndex, int32 TrackInsertRowIndex);
 
-	void AddScalarParameter(UMovieSceneMaterialParameterCollectionTrack* Track, FCollectionScalarParameter Parameter);
-	void AddVectorParameter(UMovieSceneMaterialParameterCollectionTrack* Track, FCollectionVectorParameter Parameter);
+	void OnSelectMPC(UMaterialParameterCollection* MPC);
+
+	void AddScalarParameter(UMovieSceneMaterialParameterCollectionTrack* Track, int32 RowIndex, FCollectionScalarParameter Parameter);
+	void AddVectorParameter(UMovieSceneMaterialParameterCollectionTrack* Track, int32 RowIndex, FCollectionVectorParameter Parameter);
 
 	void AddTrackToSequence(const FAssetData& InAssetData);
 	void AddTrackToSequenceEnterPressed(const TArray<FAssetData>& InAssetData);

@@ -11,43 +11,53 @@ class UCurveFloat;
 UENUM()
 enum class EAlphaBlendOption : uint8
 {
-	// Linear interpolation
-	Linear = 0,
-	// Cubic-in interpolation
-	Cubic,
-	// Hermite-Cubic
-	HermiteCubic,
-	// Sinusoidal interpolation
-	Sinusoidal,
-	// Quadratic in-out interpolation
-	QuadraticInOut,
-	// Cubic in-out interpolation
-	CubicInOut,
-	// Quartic in-out interpolation
-	QuarticInOut,
-	// Quintic in-out interpolation
-	QuinticInOut,
-	// Circular-in interpolation
-	CircularIn,
-	// Circular-out interpolation
-	CircularOut,
-	// Circular in-out interpolation
-	CircularInOut,
-	// Exponential-in interpolation
-	ExpIn,
-	// Exponential-Out interpolation
-	ExpOut,
-	// Exponential in-out interpolation
-	ExpInOut,
-	// Custom interpolation, will use custom curve inside an FAlphaBlend or linear if none has been set
-	Custom,
+	Linear = 0 UMETA(Grouping = Linear, DisplayName = "Linear", ToolTip = "Linear interpolation"),
+	Cubic UMETA(Grouping = Cubic, DisplayName = "Cubic In", ToolTip = "Cubic-in interpolation"),
+	HermiteCubic UMETA(Grouping = Cubic, DisplayName = "Hermite-Cubic InOut", ToolTip = "Hermite-Cubic"),
+	Sinusoidal UMETA(Grouping = Sinusoidal, DisplayName = "Sinusoidal", ToolTip = "Sinusoidal interpolation"),
+	QuadraticInOut UMETA(Grouping = Quadratic, DisplayName = "Quadratic InOut", ToolTip = "Quadratic in-out interpolation"),
+	CubicInOut UMETA(Grouping = Cubic, DisplayName = "Cubic InOut", ToolTip = "Cubic in-out interpolation"),
+	QuarticInOut UMETA(Grouping = Quartic, DisplayName = "Quartic InOut", ToolTip = "Quartic in-out interpolation"),
+	QuinticInOut UMETA(Grouping = Quintic, DisplayName = "Quintic InOut", ToolTip = "Quintic in-out interpolation"),
+	CircularIn UMETA(Grouping = Circular, DisplayName = "Circular In", ToolTip = "Circular-in interpolation"),
+	CircularOut UMETA(Grouping = Circular, DisplayName = "Circular Out", ToolTip = "Circular-out interpolation"),
+	CircularInOut UMETA(Grouping = Circular, DisplayName = "Circular InOut", ToolTip = "Circular in-out interpolation"),
+	ExpIn UMETA(Grouping = Exponential, DisplayName = "Exponential In", ToolTip = "Exponential-in interpolation"),
+	ExpOut UMETA(Grouping = Exponential, DisplayName = "Exponential Out", ToolTip = "Exponential-Out interpolation"),
+	ExpInOut UMETA(Grouping = Exponential, DisplayName = "Exponential InOut", ToolTip = "Exponential in-out interpolation"),
+	Custom UMETA(Grouping = Custom, DisplayName = "Custom", ToolTip = "Custom interpolation, will use custom curve inside an FAlphaBlend or linear if none has been set"),
+};
+
+/**
+ * Alpha Blend construction arguments. Used for creation of an AlphaBlend.
+ */
+USTRUCT(BlueprintType)
+struct FAlphaBlendArgs
+{
+	GENERATED_BODY()
+
+	ENGINE_API FAlphaBlendArgs();
+	ENGINE_API FAlphaBlendArgs(float InBlendTime);
+	ENGINE_API FAlphaBlendArgs(const struct FAlphaBlend& InAlphaBlend);
+
+	/** If you're using Custom BlendOption, you can specify curve */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blend", meta=(DisplayAfter="BlendOption"))
+	TObjectPtr<UCurveFloat> CustomCurve;
+
+	/** Blend Time */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blend")
+	float BlendTime;
+
+	/** Type of blending used (Linear, Cubic, etc.) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Blend")
+	EAlphaBlendOption BlendOption;
 };
 
 /**
  * Alpha Blend class that supports different blend options as well as custom curves
  */
 USTRUCT(BlueprintType)
-struct ENGINE_API FAlphaBlend
+struct FAlphaBlend
 {
 	GENERATED_BODY()
 private:
@@ -58,20 +68,23 @@ private:
 
 	/** If you're using Custom BlendOption, you can specify curve */
 	UPROPERTY(EditAnywhere, Category = "Blend", meta=(DisplayAfter="BlendOption"))
-	UCurveFloat* CustomCurve;
+	TObjectPtr<UCurveFloat> CustomCurve;
 
 public:
 	/* Constructor */
-	FAlphaBlend(float NewBlendTime = 0.2f);
+	ENGINE_API FAlphaBlend(float NewBlendTime = 0.2f);
 
 	/* Constructor */
-	FAlphaBlend(const FAlphaBlend& Other, float NewBlendTime);
+	ENGINE_API FAlphaBlend(const FAlphaBlend& Other, float NewBlendTime);
+
+	/* Constructor */
+	ENGINE_API explicit FAlphaBlend(const FAlphaBlendArgs& InArgs);
 
 	/** Setters - need to refresh cached value */
-	void SetBlendOption(EAlphaBlendOption InBlendOption);
-	void SetCustomCurve(UCurveFloat* InCustomCurve);
+	ENGINE_API void SetBlendOption(EAlphaBlendOption InBlendOption);
+	ENGINE_API void SetCustomCurve(UCurveFloat* InCustomCurve);
 	/** Update transition blend time. This new value will be applied in the next Update. */
-	void SetBlendTime(float InBlendTime);
+	ENGINE_API void SetBlendTime(float InBlendTime);
 
 	/** Sets the range of values to map to the interpolation
 	 *
@@ -80,23 +93,23 @@ public:
 	 *
 	 * This can be (0, 1) if you'd like to increase, or it can be (1, 0) if you'd like to get to 0
 	 */
-	void SetValueRange(float Begin, float Desired);
+	ENGINE_API void SetValueRange(float Begin, float Desired);
 
 	/** Sets the final desired value for the blended value */
-	void SetDesiredValue(float InDesired);
+	ENGINE_API void SetDesiredValue(float InDesired);
 
 	/** Sets the Lerp alpha value directly. PLEASE NOTE that this modifies the Blended Value right away.  */
-	void SetAlpha(float InAlpha);
+	ENGINE_API void SetAlpha(float InAlpha);
 
 	/** Update interpolation, has to be called once every frame.
 	 *
 	 * @return How much time remains after the blend completed if applicable
 	 * e.g. if we have 0.01s left on the blend and update at 30Hz (~0.033s) we would return ~0.023s
 	 */
-	float Update(float InDeltaTime);
+	ENGINE_API float Update(float InDeltaTime);
 
 	/** Gets whether or not the blend is complete */
-	bool IsComplete() const;
+	ENGINE_API bool IsComplete() const;
 
 	/** Gets the current 0..1 alpha value. Changed to AlphaLerp to match with SetAlpha function */
 	float GetAlpha() const { return AlphaLerp; }
@@ -121,7 +134,7 @@ public:
 	 *  @param InBlendOption The type of blend to use
 	 *  @param InCustomCurve The curve to use when blend option is set to custom
 	 */
-	static float AlphaToBlendOption(float InAlpha, EAlphaBlendOption InBlendOption, UCurveFloat* InCustomCurve = nullptr);
+	static ENGINE_API float AlphaToBlendOption(float InAlpha, EAlphaBlendOption InBlendOption, UCurveFloat* InCustomCurve = nullptr);
 
 private:
 	/** Blend Time */
@@ -171,17 +184,17 @@ private:
 
 public:
 	/** Reset to zero / restart the blend. This resets whole thing.  */
-	void Reset();
+	ENGINE_API void Reset();
+
+	/** Reset alpha, this keeps current BlendedValue but modify Alpha to keep the blending state.  */
+	ENGINE_API void ResetAlpha();
 
 private:
-	/** Reset alpha, this keeps current BlendedValue but modify Alpha to keep the blending state.  */
-	void ResetAlpha();
-
 	/* Reset Blend Time, this modifies BlendTimeRemaining and possibly Weight when BlendTimeRemaining <= 0.f */
-	void ResetBlendTime();
+	ENGINE_API void ResetBlendTime();
 
 	/** Converts internal lerped alpha into the output alpha type */
-	float AlphaToBlendOption();
+	ENGINE_API float AlphaToBlendOption();
 
 	/** 
 	* Please note that changing this variable would get applied in the NEXT UPDATE. 

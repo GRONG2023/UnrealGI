@@ -7,13 +7,11 @@ MONOLITHIC_HEADER_BOILERPLATE()
 
 
 #include "Core.h"
-#include "UObject/ErrorException.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/ScriptInterface.h"
 #include "UObject/Script.h"
 #include "UObject/ScriptMacros.h"
 #include "UObject/ObjectMacros.h"
-#include "UObject/UObjectAllocator.h"
 #include "UObject/UObjectGlobals.h"
 #include "UObject/UObjectMarks.h"
 #include "UObject/UObjectBase.h"
@@ -79,7 +77,6 @@ MONOLITHIC_HEADER_BOILERPLATE()
 #include "UObject/ObjectResource.h"
 #include "UObject/Linker.h"
 #include "UObject/LinkerLoad.h"
-#include "UObject/LinkerSave.h"
 #include "UObject/GCObject.h"
 #include "Misc/NotifyHook.h"
 #include "Misc/RedirectCollector.h"

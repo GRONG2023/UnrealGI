@@ -11,6 +11,8 @@
 #include "MovieSceneTrack.h"
 #include "SequencerKeyParams.h"
 #include "Sections/MovieScene3DTransformSection.h"
+#include "MVVM/Extensions/IOutlinerExtension.h"
+#include "MVVM/ViewModelPtr.h"
 
 class FExtender;
 class ISequencer;
@@ -22,15 +24,41 @@ class UMovieScene;
 class UMovieSceneTrack;
 class UMovieSceneSequence;
 
-/** Data structure containing information required to build an edit widget */
-struct FBuildEditWidgetParams
+namespace UE::Sequencer
 {
-	FBuildEditWidgetParams()
-		: TrackInsertRowIndex(0)
+	class ITrackExtension;
+	class FObjectBindingModel;
+}
+
+
+
+struct FBuildColumnWidgetParams : UE::Sequencer::FCreateOutlinerViewParams
+{
+	FBuildColumnWidgetParams(UE::Sequencer::TViewModelPtr<UE::Sequencer::ITrackExtension> InTrack, const UE::Sequencer::FCreateOutlinerViewParams& InBaseParams)
+		: UE::Sequencer::FCreateOutlinerViewParams(InBaseParams)
+		, ViewModel(InTrack.AsModel())
+		, TrackModel(InTrack)
+	{}
+
+	/**  */
+	UE::Sequencer::FViewModelPtr ViewModel;
+	UE::Sequencer::TViewModelPtr<UE::Sequencer::ITrackExtension> TrackModel;
+};
+
+/** Data structure containing information required to build an edit widget */
+struct FBuildEditWidgetParams : FBuildColumnWidgetParams
+{
+	FBuildEditWidgetParams(const FBuildColumnWidgetParams& Other)
+		: FBuildColumnWidgetParams(Other)
+		, RowIndex(0)
+		, TrackInsertRowIndex(0)
 	{}
 
 	/** Attribute that specifies when the node relating to this edit widget is hovered */
 	TAttribute<bool> NodeIsHovered;
+
+	/** Index of current track row */
+	int32 RowIndex;
 
 	/** Track row index for any newly created sections */
 	int32 TrackInsertRowIndex;
@@ -52,7 +80,7 @@ struct FSequencerDragDropParams
 	{}
 
 	/** The track that is receiving this drop event */
-	UMovieSceneTrack* Track;
+	TWeakObjectPtr<UMovieSceneTrack> Track;
 	 
 	/** The row index to drop onto */
 	int32 RowIndex;
@@ -103,13 +131,18 @@ public:
 	virtual void BuildAddTrackMenu(FMenuBuilder& MenuBuilder) = 0;
 
 	/**
-	 * Builds up the object binding edit buttons for the outliner.
-	 *
-	 * @param EditBox The edit box to add buttons to.
-	 * @param ObjectBinding The object binding this is for.
-	 * @param ObjectClass The class of the object this is for.
+	 * Deprecated in principle, not practice (due to difficulty deprecating public virtual functions).
+	 * Still called from the newer BuildObjectBindingColumnWidgets which should now be preferred
 	 */
-	virtual void BuildObjectBindingEditButtons(TSharedPtr<SHorizontalBox> EditBox, const FGuid& ObjectBinding, const UClass* ObjectClass) = 0;
+	virtual void BuildObjectBindingEditButtons(TSharedPtr<SHorizontalBox> EditBox, const FGuid& ObjectBinding, const UClass* ObjectClass){}
+
+	/**
+	 * Build a column widget for the specified object binding on the outliner
+	 *
+	 * @param GetEditBox A function to retrieve the edit box to populate
+	 * @param ObjectBinding The object binding this is for.
+	 */
+	virtual void BuildObjectBindingColumnWidgets(TFunctionRef<TSharedRef<SHorizontalBox>()> GetEditBox, const UE::Sequencer::TViewModelPtr<UE::Sequencer::FObjectBindingModel>& ObjectBinding, const UE::Sequencer::FCreateOutlinerViewParams& InParams, const FName& InColumnName) = 0;
 
 	/**
 	 * Builds up the object binding track menu for the outliner.
@@ -149,6 +182,16 @@ public:
 	 */
 	virtual TSharedPtr<SWidget> BuildOutlinerEditWidget(const FGuid& ObjectBinding, UMovieSceneTrack* Track, const FBuildEditWidgetParams& Params) = 0;
 
+
+	/**
+	 * Builds an outliner column widget for the outliner nodes which represent tracks which are edited by this editor.
+	 * 
+	 * @param Params Parameter struct containing data relevant to the edit widget
+	 * @param ColumnName The name of the column. See FCommonOutlinerNames
+	 * @returns The the widget to display in the outliner, or an empty shared ptr if not widget is to be displayed.
+	 */
+	virtual TSharedPtr<SWidget> BuildOutlinerColumnWidget(const FBuildColumnWidgetParams& Params, const FName& ColumnName) = 0;
+
 	/**
 	 * Builds the context menu for the track.
 	 * @param MenuBuilder The menu builder to use to build the track menu. 
@@ -174,9 +217,6 @@ public:
 	 */
 	virtual bool OnAllowDrop(const FDragDropEvent& DragDropEvent, FSequencerDragDropParams& DragDropParams) = 0;
 
-	UE_DEPRECATED(4.27, "Use OnAllowDrop with DragDropParams.")
-	virtual bool OnAllowDrop(const FDragDropEvent& DragDropEvent, UMovieSceneTrack* Track, int32 RowIndex, const FGuid& TargetObjectGuid) { FSequencerDragDropParams DragDropParams; return OnAllowDrop(DragDropEvent, DragDropParams); }
-
 	/**
 	 * Called when an asset is dropped directly onto a track.
 	 *
@@ -185,9 +225,6 @@ public:
 	 * @return Whether the drop event was handled.
 	 */	
 	virtual FReply OnDrop(const FDragDropEvent& DragDropEvent, const FSequencerDragDropParams& DragDropParams) = 0;
-
-	UE_DEPRECATED(4.27, "Use OnDrop with DragDropParams.")
-	virtual FReply OnDrop(const FDragDropEvent& DragDropEvent, UMovieSceneTrack* Track, int32 RowIndex, const FGuid& TargetObjectGuid) { return OnDrop(DragDropEvent, FSequencerDragDropParams()); }
 
 	/**
 	 * Called to generate a section layout for a particular section.
@@ -206,9 +243,6 @@ public:
 
 	/** Called when the instance of this track editor is released */
 	virtual void OnRelease() = 0;
-
-	/** Allows the track editor to paint on a track area. */
-	virtual int32 PaintTrackArea(const FPaintArgs& Args, const FGeometry& AllottedGeometry, const FSlateRect& MyCullingRect, FSlateWindowElementList& OutDrawElements, int32 LayerId, const FWidgetStyle& InWidgetStyle) = 0;
 
 	/**
 	 * Returns whether a track class is supported by this tool.
@@ -284,6 +318,21 @@ public:
 	* Handle this object being implicitly added
 	*/
 	virtual void ObjectImplicitlyAdded(UObject* InObject)  {}
+
+	/**
+	* Handle this object being implicitly removed
+	*/
+	virtual void ObjectImplicitlyRemoved(UObject* InObject) {}
+
+	/**
+	 * Called before the sequencer restores pre-animated state on all objects before saving the level.
+	 */
+	virtual void OnPreSaveWorld(UWorld* World) {}
+
+	/**
+	 * Called after the sequencer has re-evaluated all objects after saving the level.
+	 */
+	virtual void OnPostSaveWorld(UWorld* World) {}
 
 public:
 

@@ -10,17 +10,13 @@ namespace UnrealBuildTool.Rules
 				new string[]
 				{
 					"CoreUObject",
+					"AutomationTest"
 				});
 
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
-					"Core",
-				});
-
-			PrivateIncludePaths.AddRange(
-				new string[]
-				{
+					"Core"
 				});
 		}
 	}

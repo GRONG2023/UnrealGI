@@ -8,6 +8,8 @@
 
 #include "CoreMinimal.h"
 
+class AActor;
+
 /**
  * Encapsulates a map from objects to their direct inners, used by UExporter::ExportObjectInner when exporting objects.
  * Should be recreated before new objects are created within objects that are to be exported!
@@ -18,22 +20,25 @@
  *     foreach( Object in a set of objects)
  *         Exporter->ExportObjectInner( Context, Object ); 
  */
-class ENGINE_API FExportObjectInnerContext
+class FExportObjectInnerContext
 {
 public:
 	/**
 	 * Creates the map from objects to their direct inners.
 	 */
-	FExportObjectInnerContext();
+	ENGINE_API FExportObjectInnerContext();
 
 	/**
 	 * Creates the map from objects to their direct inners.
 	 * @param	ObjsToIgnore	An array of objects that should NOT be put in the list
 	 */
-	FExportObjectInnerContext(const TArray<UObject*>& ObjsToIgnore);
+	ENGINE_API FExportObjectInnerContext(const TArray<UObject*>& ObjsToIgnore);
 
 	/**Empty Constructor for derived export contexts */
 	FExportObjectInnerContext(const bool bIgnoredValue) {};
+
+	virtual ~FExportObjectInnerContext() = default;
+	virtual int32 GetObjectNumber() const { return 0; }
 
 protected:
 	friend class UExporter;
@@ -54,13 +59,27 @@ public:
 	{
 		return ObjectToInnerMap.Find(InObj);
 	}
+
+	/**
+	 * Should the given object be considered selected by the current export?
+	 */
+	ENGINE_API virtual bool IsObjectSelected(const UObject* InObj) const;
 };
 
 #if WITH_EDITOR
-class ENGINE_API FSelectedActorExportObjectInnerContext : public FExportObjectInnerContext
+class FSelectedActorExportObjectInnerContext : public FExportObjectInnerContext
 {
 public:
-	FSelectedActorExportObjectInnerContext();
+	ENGINE_API FSelectedActorExportObjectInnerContext();
+	ENGINE_API explicit FSelectedActorExportObjectInnerContext(const TArray<AActor*> InSelectedActors);
+
+	ENGINE_API virtual bool IsObjectSelected(const UObject* InObj) const override;
+	virtual int32 GetObjectNumber() const override { return SelectedActors.Num(); }
+
+private:
+	ENGINE_API void AddSelectedActor(const AActor* InActor);
+
+	TSet<const AActor*> SelectedActors;
 };
 #endif
 

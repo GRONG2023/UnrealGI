@@ -1,12 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -40,9 +38,9 @@ namespace UnrealBuildTool
 		/// </summary>
 		public static void QueueEngineDirectory()
 		{
-			lock(QueuedDirectories)
+			lock (QueuedDirectories)
 			{
-				if(QueuedDirectories.Add(UnrealBuildTool.EngineDirectory))
+				if (QueuedDirectories.Add(Unreal.EngineDirectory))
 				{
 					Enqueue(() => ScanEngineDirectory());
 				}
@@ -55,9 +53,9 @@ namespace UnrealBuildTool
 		/// <param name="ProjectDirectory">The project directory to prefetch</param>
 		public static void QueueProjectDirectory(DirectoryReference ProjectDirectory)
 		{
-			lock(QueuedDirectories)
+			lock (QueuedDirectories)
 			{
-				if(QueuedDirectories.Add(ProjectDirectory))
+				if (QueuedDirectories.Add(ProjectDirectory))
 				{
 					Enqueue(() => ScanProjectDirectory(DirectoryItem.GetItemByDirectoryReference(ProjectDirectory)));
 				}
@@ -70,9 +68,9 @@ namespace UnrealBuildTool
 		/// <param name="Directory">Directory to start searching from</param>
 		public static void QueueDirectoryTree(DirectoryReference Directory)
 		{
-			lock(QueuedDirectories)
+			lock (QueuedDirectories)
 			{
-				if(QueuedDirectories.Add(Directory))
+				if (QueuedDirectories.Add(Directory))
 				{
 					Enqueue(() => ScanDirectoryTree(DirectoryItem.GetItemByDirectoryReference(Directory)));
 				}
@@ -102,7 +100,7 @@ namespace UnrealBuildTool
 		/// <param name="Action">Action to enqueue</param>
 		static void Enqueue(System.Action Action)
 		{
-			Queue.Enqueue(() => { if(!CancelToken.IsCancellationRequested){ Action(); } });
+			Queue.Enqueue(() => { if (!CancelToken.IsCancellationRequested) { Action(); } });
 		}
 
 		/// <summary>
@@ -110,7 +108,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		static void ScanEngineDirectory()
 		{
-			foreach (DirectoryReference ExtensionDir in UnrealBuildTool.GetExtensionDirs(UnrealBuildTool.EngineDirectory))
+			foreach (DirectoryReference ExtensionDir in Unreal.GetExtensionDirs(Unreal.EngineDirectory))
 			{
 				DirectoryItem BaseDirectory = DirectoryItem.GetItemByDirectoryReference(ExtensionDir);
 				BaseDirectory.CacheDirectories();
@@ -138,15 +136,15 @@ namespace UnrealBuildTool
 		/// <param name="ProjectDirectory">The project directory to search</param>
 		static void ScanProjectDirectory(DirectoryItem ProjectDirectory)
 		{
-			foreach (DirectoryReference ExtensionDir in UnrealBuildTool.GetExtensionDirs(UnrealBuildTool.EngineDirectory))
+			foreach (DirectoryReference ExtensionDir in Unreal.GetExtensionDirs(ProjectDirectory.Location))
 			{
 				DirectoryItem BaseDirectory = DirectoryItem.GetItemByDirectoryReference(ExtensionDir);
 				BaseDirectory.CacheDirectories();
 
-				DirectoryItem BasePluginsDirectory = DirectoryItem.Combine(ProjectDirectory, "Plugins");
+				DirectoryItem BasePluginsDirectory = DirectoryItem.Combine(BaseDirectory, "Plugins");
 				Enqueue(() => ScanPluginFolder(BasePluginsDirectory));
 
-				DirectoryItem BaseSourceDirectory = DirectoryItem.Combine(ProjectDirectory, "Source");
+				DirectoryItem BaseSourceDirectory = DirectoryItem.Combine(BaseDirectory, "Source");
 				Enqueue(() => ScanDirectoryTree(BaseSourceDirectory));
 			}
 		}
@@ -157,13 +155,18 @@ namespace UnrealBuildTool
 		/// <param name="Directory">The directory which may contain plugin directories</param>
 		static void ScanPluginFolder(DirectoryItem Directory)
 		{
-			foreach(DirectoryItem SubDirectory in Directory.EnumerateDirectories())
+			if (CancelToken.IsCancellationRequested || Directory.TryGetFile(".ubtignore", out FileItem? _))
 			{
-				if(SubDirectory.EnumerateFiles().Any(x => x.HasExtension(".uplugin")))
+				return;
+			}
+
+			foreach (DirectoryItem SubDirectory in Directory.EnumerateDirectories())
+			{
+				if (SubDirectory.EnumerateFiles().Any((fi) => fi.HasExtension(".uplugin")))
 				{
 					Enqueue(() => ScanDirectoryTree(DirectoryItem.Combine(SubDirectory, "Source")));
 				}
-				else
+				else if (!SubDirectory.TryGetFile(".ubtignore", out FileItem? OutFile))
 				{
 					Enqueue(() => ScanPluginFolder(SubDirectory));
 				}
@@ -176,11 +179,15 @@ namespace UnrealBuildTool
 		/// <param name="Directory">Root of the directory tree</param>
 		static void ScanDirectoryTree(DirectoryItem Directory)
 		{
-			foreach(DirectoryItem SubDirectory in Directory.EnumerateDirectories())
+			if (CancelToken.IsCancellationRequested || Directory.TryGetFile(".ubtignore", out FileItem? _))
+			{
+				return;
+			}
+
+			foreach (DirectoryItem SubDirectory in Directory.EnumerateDirectories())
 			{
 				Enqueue(() => ScanDirectoryTree(SubDirectory));
 			}
-			Directory.CacheFiles();
 		}
 	}
 }

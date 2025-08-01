@@ -6,22 +6,41 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using OpenTracing.Util;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
+	/// <summary>
+	/// The header unit type markup is used for multiple things:
+	/// 1. To figure out if a header can be compiled by itself or not. Many includes are included in the middle of other includes and those can never be compiled by themselves
+	///    This markup is used by both msvc header unit feature and IWYU toolchain
+	/// 2. Tell if the header even supports being part of a header unit. If it does not support it will also prevent all includes including it from producing a header unit
+	/// This is how to markup in headers to provide above info:
+	///    // HEADER_UNIT_SKIP - Here you can write why this file can't be compiled standalone
+	///    // HEADER_UNIT_UNSUPPORTED - Here you can write why this file can't be part of header units.
+	/// </summary>
+	enum HeaderUnitType
+	{
+		Valid = 0,
+		Unsupported = 1,
+		Skip = 2,
+		Ignore = 3
+	}
+
 	/// <summary>
 	/// Caches information about C++ source files; whether they contain reflection markup, what the first included header is, and so on.
 	/// </summary>
 	class SourceFileMetadataCache
 	{
 		/// <summary>
-		/// Information about the first file included from a source file
+		/// Source(cpp/c) file info
 		/// </summary>
-		class IncludeInfo
+		class SourceFileInfo
 		{
 			/// <summary>
 			/// Last write time of the file when the data was cached
@@ -31,13 +50,18 @@ namespace UnrealBuildTool
 			/// <summary>
 			/// Contents of the include directive
 			/// </summary>
-			public string IncludeText;
+			public string? IncludeText;
+
+			/// <summary>
+			/// List of files this particular file is inlining
+			/// </summary>
+			public List<string> InlinedFileNames = new List<string>();
 		}
 
 		/// <summary>
-		/// Information about whether a file contains reflection markup
+		/// Header file info
 		/// </summary>
-		class ReflectionInfo
+		class HeaderFileInfo
 		{
 			/// <summary>
 			/// Last write time of the file when the data was cached
@@ -48,12 +72,24 @@ namespace UnrealBuildTool
 			/// Whether or not the file contains reflection markup
 			/// </summary>
 			public bool bContainsMarkup;
+
+			/// <summary>
+			/// Whether or not the file has types that use DLL export/import defines
+			/// </summary>
+			public bool bUsesAPIDefine;
+
+			/// <summary>
+			/// List of includes that header contains
+			/// </summary>
+			public List<string>? Includes;
+
+			public HeaderUnitType UnitType;
 		}
 
 		/// <summary>
 		/// The current file version
 		/// </summary>
-		public const int CurrentVersion = 3;
+		public const int CurrentVersion = 8;
 
 		/// <summary>
 		/// Location of this dependency cache
@@ -68,17 +104,22 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// The parent cache.
 		/// </summary>
-		SourceFileMetadataCache Parent;
+		SourceFileMetadataCache? Parent;
 
 		/// <summary>
 		/// Map from file item to source file info
 		/// </summary>
-		ConcurrentDictionary<FileItem, IncludeInfo> FileToIncludeInfo = new ConcurrentDictionary<FileItem, IncludeInfo>();
+		ConcurrentDictionary<FileItem, SourceFileInfo> FileToSourceFileInfo = new ConcurrentDictionary<FileItem, SourceFileInfo>();
 
 		/// <summary>
 		/// Map from file item to header file info
 		/// </summary>
-		ConcurrentDictionary<FileItem, ReflectionInfo> FileToReflectionInfo = new ConcurrentDictionary<FileItem, ReflectionInfo>();
+		ConcurrentDictionary<FileItem, HeaderFileInfo> FileToHeaderFileInfo = new ConcurrentDictionary<FileItem, HeaderFileInfo>();
+
+		/// <summary>
+		/// Map from file item to source file
+		/// </summary>
+		ConcurrentDictionary<FileItem, SourceFile> FileToSourceFile = new ConcurrentDictionary<FileItem, SourceFile>();
 
 		/// <summary>
 		/// Whether the cache has been modified and needs to be saved
@@ -86,9 +127,19 @@ namespace UnrealBuildTool
 		bool bModified;
 
 		/// <summary>
+		/// Logger for output
+		/// </summary>
+		ILogger Logger;
+
+		/// <summary>
 		/// Regex that matches C++ code with UObject declarations which we will need to generated code for.
 		/// </summary>
-		static readonly Regex ReflectionMarkupRegex = new Regex("^\\s*U(CLASS|STRUCT|ENUM|INTERFACE|DELEGATE)\\b", RegexOptions.Compiled | RegexOptions.Multiline);
+		static readonly Regex ReflectionMarkupRegex = new Regex("^\\s*U(CLASS|STRUCT|ENUM|INTERFACE|DELEGATE)\\b", RegexOptions.Compiled);
+
+		/// <summary>
+		/// Regex that matches #include UE_INLINE_GENERATED_CPP_BY_NAME(****) statements.
+		/// </summary>
+		static readonly Regex InlineReflectionMarkupRegex = new Regex("^\\s*#\\s*include\\s*UE_INLINE_GENERATED_CPP_BY_NAME\\((.+)\\)", RegexOptions.Compiled | RegexOptions.Multiline);
 
 		/// <summary>
 		/// Regex that matches #include statements.
@@ -103,7 +154,7 @@ namespace UnrealBuildTool
 		/// <summary>
 		/// Static cache of all constructed dependency caches
 		/// </summary>
-		static Dictionary<FileReference, SourceFileMetadataCache> Caches = new Dictionary<FileReference, SourceFileMetadataCache>();
+		static ConcurrentDictionary<FileReference, SourceFileMetadataCache> Caches = new ConcurrentDictionary<FileReference, SourceFileMetadataCache>();
 
 		/// <summary>
 		/// Constructs a dependency cache. This method is private; call CppDependencyCache.Create() to create a cache hierarchy for a given project.
@@ -111,15 +162,17 @@ namespace UnrealBuildTool
 		/// <param name="Location">File to store the cache</param>
 		/// <param name="BaseDir">Base directory for files that this cache should store data for</param>
 		/// <param name="Parent">The parent cache to use</param>
-		private SourceFileMetadataCache(FileReference Location, DirectoryReference BaseDir, SourceFileMetadataCache Parent)
+		/// <param name="Logger">Logger for output</param>
+		private SourceFileMetadataCache(FileReference Location, DirectoryReference BaseDir, SourceFileMetadataCache? Parent, ILogger Logger)
 		{
 			this.Location = Location;
-			this.BaseDirectory = BaseDir;
+			BaseDirectory = BaseDir;
 			this.Parent = Parent;
+			this.Logger = Logger;
 
-			if(FileReference.Exists(Location))
+			if (FileReference.Exists(Location))
 			{
-				using(Timeline.ScopeEvent("Reading source file metadata cache"))
+				using (GlobalTracer.Instance.BuildSpan("Reading source file metadata cache").StartActive())
 				{
 					Read();
 				}
@@ -127,54 +180,52 @@ namespace UnrealBuildTool
 		}
 
 		/// <summary>
-		/// Gets the first included file from a source file
+		/// Returns a SourceFileInfo struct for a file (and parse the file if not already cached)
 		/// </summary>
-		/// <param name="SourceFile">The source file to parse</param>
-		/// <returns>Text from the first include directive. Null if the file did not contain any include directives.</returns>
-		public string GetFirstInclude(FileItem SourceFile)
+		/// <param name="SourceFile">The file to parse</param>
+		/// <returns>SourceFileInfo for file</returns>
+		SourceFileInfo GetSourceFileInfo(FileItem SourceFile)
 		{
-			if(Parent != null && !SourceFile.Location.IsUnderDirectory(BaseDirectory))
+			if (Parent != null && !SourceFile.Location.IsUnderDirectory(BaseDirectory))
 			{
-				return Parent.GetFirstInclude(SourceFile);
+				return Parent.GetSourceFileInfo(SourceFile);
 			}
 			else
 			{
-				IncludeInfo IncludeInfo;
-				if(!FileToIncludeInfo.TryGetValue(SourceFile, out IncludeInfo) || SourceFile.LastWriteTimeUtc.Ticks > IncludeInfo.LastWriteTimeUtc)
+				Func<FileItem, SourceFileInfo> UpdateSourceFileInfo = (FileItem SourceFile) =>
 				{
-					IncludeInfo = new IncludeInfo();
-					IncludeInfo.LastWriteTimeUtc = SourceFile.LastWriteTimeUtc.Ticks;
-					IncludeInfo.IncludeText = ParseFirstInclude(SourceFile.Location);
-					FileToIncludeInfo[SourceFile] = IncludeInfo;
-					bModified = true;
-				}
-				return IncludeInfo.IncludeText;
-			}
-		}
+					SourceFileInfo SourceFileInfo = new SourceFileInfo();
+					string FileText = FileReference.ReadAllText(SourceFile.Location);
+					string[] FileTextLines = FileText.Split('\n');
 
-		/// <summary>
-		/// Determines whether the given file contains reflection markup
-		/// </summary>
-		/// <param name="SourceFile">The source file to parse</param>
-		/// <returns>True if the file contains reflection markup</returns>
-		public bool ContainsReflectionMarkup(FileItem SourceFile)
-		{
-			if(Parent != null && !SourceFile.Location.IsUnderDirectory(BaseDirectory))
-			{
-				return Parent.ContainsReflectionMarkup(SourceFile);
-			}
-			else
-			{
-				ReflectionInfo ReflectionInfo;
-				if(!FileToReflectionInfo.TryGetValue(SourceFile, out ReflectionInfo) || SourceFile.LastWriteTimeUtc.Ticks > ReflectionInfo.LastWriteTimeUtc)
-				{
-					ReflectionInfo = new ReflectionInfo();
-					ReflectionInfo.LastWriteTimeUtc = SourceFile.LastWriteTimeUtc.Ticks;
-					ReflectionInfo.bContainsMarkup = ReflectionMarkupRegex.IsMatch(FileReference.ReadAllText(SourceFile.Location));
-					FileToReflectionInfo[SourceFile] = ReflectionInfo;
+					SourceFileInfo.LastWriteTimeUtc = SourceFile.LastWriteTimeUtc.Ticks;
+
+					// Inline reflection data
+					MatchCollection FileMatches = InlineReflectionMarkupRegex.Matches(FileText);
+					foreach (Match Match in FileMatches)
+					{
+						SourceFileInfo.InlinedFileNames.Add(Match.Groups[1].Value);
+					}
+
+					SourceFileInfo.IncludeText = ParseFirstInclude(SourceFile, FileTextLines);
+
 					bModified = true;
+					return SourceFileInfo;
+				};
+
+				return FileToSourceFileInfo.AddOrUpdate(SourceFile, _ =>
+				{
+					return UpdateSourceFileInfo(SourceFile);
+				},
+				(k, v) =>
+				{
+					if (SourceFile.LastWriteTimeUtc.Ticks > v.LastWriteTimeUtc)
+					{
+						return UpdateSourceFileInfo(SourceFile);
+					}
+					return v;
 				}
-				return ReflectionInfo.bContainsMarkup;
+				);
 			}
 		}
 
@@ -182,60 +233,299 @@ namespace UnrealBuildTool
 		/// Parse the first include directive from a source file
 		/// </summary>
 		/// <param name="SourceFile">The source file to parse</param>
+		/// <param name="FileToSourceFileFileText">The source file contents</param>
 		/// <returns>The first include directive</returns>
-		static string ParseFirstInclude(FileReference SourceFile)
+		static string? ParseFirstInclude(FileItem SourceFile, string[] FileToSourceFileFileText)
 		{
 			bool bMatchImport = SourceFile.HasExtension(".m") || SourceFile.HasExtension(".mm");
-			using(StreamReader Reader = new StreamReader(SourceFile.FullName, true))
+			foreach (string Line in FileToSourceFileFileText)
 			{
-				for(;;)
+				if (Line == null)
 				{
-					string Line = Reader.ReadLine();
-					if(Line == null)
+					return null;
+				}
+
+				Match IncludeMatch = IncludeRegex.Match(Line);
+				if (IncludeMatch.Success)
+				{
+					return IncludeMatch.Groups[1].Value;
+				}
+
+				if (bMatchImport)
+				{
+					Match ImportMatch = ImportRegex.Match(Line);
+					if (ImportMatch.Success)
 					{
-						return null;
+						return ImportMatch.Groups[1].Value;
+					}
+				}
+			}
+			return null;
+		}
+
+		HeaderFileInfo GetHeaderFileInfo(FileItem HeaderFile)
+		{
+			if (Parent != null && !HeaderFile.Location.IsUnderDirectory(BaseDirectory))
+			{
+				return Parent.GetHeaderFileInfo(HeaderFile);
+			}
+			else
+			{
+				Func<FileItem, HeaderFileInfo> UpdateHeaderFileInfo = (FileItem HeaderFile) =>
+				{
+					HeaderFileInfo HeaderFileInfo = new HeaderFileInfo();
+					string FileText = FileReference.ReadAllText(HeaderFile.Location);
+					string[] FileTextLines = FileText.Split('\n');
+
+					HeaderFileInfo.LastWriteTimeUtc = HeaderFile.LastWriteTimeUtc.Ticks;
+
+					ParseHeader(HeaderFileInfo, FileTextLines);
+
+					bModified = true;
+					return HeaderFileInfo;
+				};
+
+				return FileToHeaderFileInfo.AddOrUpdate(HeaderFile, _ =>
+				{
+					return UpdateHeaderFileInfo(HeaderFile);
+				},
+				(k, v) =>
+				{
+					if (HeaderFile.LastWriteTimeUtc.Ticks > v.LastWriteTimeUtc)
+					{
+						return UpdateHeaderFileInfo(HeaderFile);
+					}
+					return v;
+				}
+				);
+			}
+		}
+
+		/// <summary>
+		/// Read entire header file to find markup and includes
+		/// </summary>
+		/// <returns>A HeaderInfo struct containing information about header</returns>
+		private void ParseHeader(HeaderFileInfo HeaderFileInfo, string[] FileText)
+		{
+			bool bContainsMarkup = false;
+			bool bUsesAPIDefine = false;
+			int InsideDeprecationScope = 0;
+
+			SortedSet<string> Includes = new();
+			foreach (string Line in FileText)
+			{
+				if (!bUsesAPIDefine)
+				{
+					bUsesAPIDefine = Line.Contains("_API", StringComparison.Ordinal);
+				}
+
+				if (!bContainsMarkup)
+				{
+					bContainsMarkup = ReflectionMarkupRegex.IsMatch(Line);
+				}
+
+				ReadOnlySpan<char> LineSpan = Line.AsSpan().TrimStart();
+				if (LineSpan.StartsWith("#include") && InsideDeprecationScope == 0)
+				{
+					ReadOnlySpan<char> IncludeSpan = LineSpan.Slice("#include".Length).TrimStart();
+					if (IncludeSpan.IsEmpty)
+					{
+						continue;
+					}
+					char EndChar;
+					bool TrimQuotation = true;
+					if (IncludeSpan[0] == '"')
+					{
+						EndChar = '"';
+					}
+					else if (IncludeSpan[0] == '<')
+					{
+						EndChar = '>';
+					}
+					else
+					{
+						EndChar = ')';
+						TrimQuotation = false;
 					}
 
-					Match IncludeMatch = IncludeRegex.Match(Line);
-					if(IncludeMatch.Success)
+					if (TrimQuotation)
 					{
-						return IncludeMatch.Groups[1].Value;
+						IncludeSpan = IncludeSpan.Slice(1);
 					}
 
-					if(bMatchImport)
+					if (IncludeSpan.Contains("HEADER_UNIT_IGNORE", StringComparison.OrdinalIgnoreCase))
 					{
-						Match ImportMatch = ImportRegex.Match(Line);
-						if(ImportMatch.Success)
+						continue;
+					}
+
+					int EndIndex = IncludeSpan.IndexOf(EndChar);
+
+					if (EndIndex == -1)
+					{
+						continue;
+					}
+
+					// This will include the ')' at the end
+					if (!TrimQuotation)
+					{
+						EndIndex++;
+					}
+
+					IncludeSpan = IncludeSpan.Slice(0, EndIndex);
+					Includes.Add(IncludeSpan.ToString());
+				}
+				else if (InsideDeprecationScope != 0)
+				{
+					if (LineSpan.StartsWith("#endif"))
+					{
+						--InsideDeprecationScope;
+					}
+					else if (LineSpan.StartsWith("#if"))
+					{
+						++InsideDeprecationScope;
+					}
+				}
+				else if (LineSpan.StartsWith("#if"))
+				{
+					if (Line.IndexOf("UE_ENABLE_INCLUDE_ORDER_DEPRECATED_") != -1)
+					{
+						++InsideDeprecationScope;
+					}
+				}
+				else
+				{
+					int HeaderUnitIndex = Line.IndexOf("HEADER_UNIT_");
+					if (HeaderUnitIndex != -1)
+					{
+						ReadOnlySpan<char> Span = Line.AsSpan(HeaderUnitIndex + "HEADER_UNIT_".Length);
+						if (Span.StartsWith("UNSUPPORTED"))
 						{
-							return IncludeMatch.Groups[1].Value;
+							HeaderFileInfo.UnitType = HeaderUnitType.Unsupported;
+						}
+						else if (Span.StartsWith("SKIP"))
+						{
+							HeaderFileInfo.UnitType = HeaderUnitType.Skip;
 						}
 					}
 				}
 			}
+
+			HeaderFileInfo.bContainsMarkup = bContainsMarkup;
+			HeaderFileInfo.bUsesAPIDefine = bUsesAPIDefine;
+			HeaderFileInfo.Includes = Includes.ToList();
+		}
+
+		/// <summary>
+		/// Gets the first included file from a source file
+		/// </summary>
+		/// <param name="SourceFile">The source file to parse</param>
+		/// <returns>Text from the first include directive. Null if the file did not contain any include directives.</returns>
+		public string? GetFirstInclude(FileItem SourceFile)
+		{
+			return GetSourceFileInfo(SourceFile).IncludeText;
+		}
+
+		/// <summary>
+		/// Finds or adds a SourceFile class for the given file
+		/// </summary>
+		/// <param name="File">File to fetch the source file data for</param>
+		/// <returns>SourceFile instance corresponding to the given source file</returns>
+		public SourceFile GetSourceFile(FileItem File)
+		{
+			if (Parent != null && !File.Location.IsUnderDirectory(BaseDirectory))
+			{
+				return Parent.GetSourceFile(File);
+			}
+			else
+			{
+				return FileToSourceFile.AddOrUpdate(File, _ =>
+				{
+					return new SourceFile(File);
+				},
+				(k, v) =>
+				{
+					if (File.LastWriteTimeUtc.Ticks > v.LastWriteTimeUtc)
+					{
+						return new SourceFile(File);
+					}
+					return v;
+				});
+			}
+		}
+
+		/// <summary>
+		/// Returns a list of inlined generated cpps that this source file contains.
+		/// </summary>
+		/// <param name="SourceFile">The source file to parse</param>
+		/// <returns>List of marked files this source file contains</returns>
+		public IList<string> GetListOfInlinedGeneratedCppFiles(FileItem SourceFile)
+		{
+			return GetSourceFileInfo(SourceFile).InlinedFileNames;
+		}
+
+		/// <summary>
+		/// Determines whether the given file contains reflection markup
+		/// </summary>
+		/// <param name="HeaderFile">The source file to parse</param>
+		/// <returns>True if the file contains reflection markup</returns>
+		public bool ContainsReflectionMarkup(FileItem HeaderFile)
+		{
+			return GetHeaderFileInfo(HeaderFile).bContainsMarkup;
+		}
+
+		/// <summary>
+		/// Determines whether the given file uses the *_API define
+		/// </summary>
+		/// <param name="HeaderFile">The source file to parse</param>
+		/// <returns>True if the file uses the *_API define</returns>
+		public bool UsesAPIDefine(FileItem HeaderFile)
+		{
+			return GetHeaderFileInfo(HeaderFile).bUsesAPIDefine;
+		}
+
+		/// <summary>
+		/// Returns header unit type for a header file (and parse the file if not already cached)
+		/// </summary>
+		/// <param name="HeaderFile">The header file to parse</param>
+		/// <returns>Header unit type</returns>
+		public HeaderUnitType GetHeaderUnitType(FileItem HeaderFile)
+		{
+			return GetHeaderFileInfo(HeaderFile).UnitType;
+		}
+
+		/// <summary>
+		/// Returns all #includes existing inside a header file (and parse the file if not already cached)
+		/// </summary>
+		/// <param name="HeaderFile">The header file to parse</param>
+		/// <returns>List of includes</returns>
+		public List<string> GetHeaderIncludes(FileItem HeaderFile)
+		{
+			return GetHeaderFileInfo(HeaderFile).Includes!;
 		}
 
 		/// <summary>
 		/// Creates a cache hierarchy for a particular target
 		/// </summary>
 		/// <param name="ProjectFile">Project file for the target being built</param>
+		/// <param name="Logger">Logger for output</param>
 		/// <returns>Dependency cache hierarchy for the given project</returns>
-		public static SourceFileMetadataCache CreateHierarchy(FileReference ProjectFile)
+		public static SourceFileMetadataCache CreateHierarchy(FileReference? ProjectFile, ILogger Logger)
 		{
-			SourceFileMetadataCache Cache = null;
+			SourceFileMetadataCache? Cache = null;
 
-			if(ProjectFile == null || !UnrealBuildTool.IsEngineInstalled())
+			if (ProjectFile == null || !Unreal.IsEngineInstalled())
 			{
-				FileReference EngineCacheLocation = FileReference.Combine(UnrealBuildTool.EngineDirectory, "Intermediate", "Build", "SourceFileCache.bin");
-				Cache = FindOrAddCache(EngineCacheLocation, UnrealBuildTool.EngineDirectory, Cache);
+				FileReference EngineCacheLocation = FileReference.Combine(Unreal.EngineDirectory, "Intermediate", "Build", "SourceFileCache.bin");
+				Cache = FindOrAddCache(EngineCacheLocation, Unreal.EngineDirectory, Cache, Logger);
 			}
 
-			if(ProjectFile != null)
+			if (ProjectFile != null)
 			{
 				FileReference ProjectCacheLocation = FileReference.Combine(ProjectFile.Directory, "Intermediate", "Build", "SourceFileCache.bin");
-				Cache = FindOrAddCache(ProjectCacheLocation, ProjectFile.Directory, Cache);
+				Cache = FindOrAddCache(ProjectCacheLocation, ProjectFile.Directory, Cache, Logger);
 			}
 
-			return Cache;
+			return Cache!;
 		}
 
 		/// <summary>
@@ -243,13 +533,13 @@ namespace UnrealBuildTool
 		/// </summary>
 		/// <param name="ProjectFile">Project file for the target being built</param>
 		/// <returns>Dependency cache hierarchy for the given project</returns>
-		public static IEnumerable<FileReference> GetFilesToClean(FileReference ProjectFile)
+		public static IEnumerable<FileReference> GetFilesToClean(FileReference? ProjectFile)
 		{
-			if(ProjectFile == null || !UnrealBuildTool.IsEngineInstalled())
+			if (ProjectFile == null || !Unreal.IsEngineInstalled())
 			{
-				yield return FileReference.Combine(UnrealBuildTool.EngineDirectory, "Intermediate", "Build", "SourceFileCache.bin");
+				yield return FileReference.Combine(Unreal.EngineDirectory, "Intermediate", "Build", "SourceFileCache.bin");
 			}
-			if(ProjectFile != null)
+			if (ProjectFile != null)
 			{
 				yield return FileReference.Combine(ProjectFile.Directory, "Intermediate", "Build", "SourceFileCache.bin");
 			}
@@ -261,24 +551,19 @@ namespace UnrealBuildTool
 		/// <param name="Location">File to store the cache</param>
 		/// <param name="BaseDirectory">Base directory for files that this cache should store data for</param>
 		/// <param name="Parent">The parent cache to use</param>
+		/// <param name="Logger"></param>
 		/// <returns>Reference to a dependency cache with the given settings</returns>
-		static SourceFileMetadataCache FindOrAddCache(FileReference Location, DirectoryReference BaseDirectory, SourceFileMetadataCache Parent)
+		static SourceFileMetadataCache FindOrAddCache(FileReference Location, DirectoryReference BaseDirectory, SourceFileMetadataCache? Parent, ILogger Logger)
 		{
-			lock(Caches)
+			SourceFileMetadataCache Cache = Caches.GetOrAdd(Location, _ =>
 			{
-				SourceFileMetadataCache Cache;
-				if(Caches.TryGetValue(Location, out Cache))
-				{
-					Debug.Assert(Cache.BaseDirectory == BaseDirectory);
-					Debug.Assert(Cache.Parent == Parent);
-				}
-				else
-				{
-					Cache = new SourceFileMetadataCache(Location, BaseDirectory, Parent);
-					Caches.Add(Location, Cache);
-				}
-				return Cache;
-			}
+				return new SourceFileMetadataCache(Location, BaseDirectory, Parent, Logger); ;
+			});
+
+			Debug.Assert(Cache.BaseDirectory == BaseDirectory);
+			Debug.Assert(Cache.Parent == Parent);
+
+			return Cache;
 		}
 
 		/// <summary>
@@ -286,7 +571,7 @@ namespace UnrealBuildTool
 		/// </summary>
 		public static void SaveAll()
 		{
-			Parallel.ForEach(Caches.Values, Cache => { if(Cache.bModified){ Cache.Write(); } });
+			Parallel.ForEach(Caches.Values, Cache => { if (Cache.bModified) { Cache.Write(); } });
 		}
 
 		/// <summary>
@@ -296,44 +581,48 @@ namespace UnrealBuildTool
 		{
 			try
 			{
-				using(BinaryArchiveReader Reader = new BinaryArchiveReader(Location))
+				using (BinaryArchiveReader Reader = new BinaryArchiveReader(Location))
 				{
 					int Version = Reader.ReadInt();
-					if(Version != CurrentVersion)
+					if (Version != CurrentVersion)
 					{
-						Log.TraceLog("Unable to read dependency cache from {0}; version {1} vs current {2}", Location, Version, CurrentVersion);
+						Logger.LogDebug("Unable to read dependency cache from {File}; version {Version} vs current {CurrentVersion}", Location, Version, CurrentVersion);
 						return;
 					}
 
-					int FileToFirstIncludeCount = Reader.ReadInt();
-					for(int Idx = 0; Idx < FileToFirstIncludeCount; Idx++)
+					int FileToMarkupFlagCount = Reader.ReadInt();
+					for (int Idx = 0; Idx < FileToMarkupFlagCount; Idx++)
 					{
 						FileItem File = Reader.ReadCompactFileItem();
-						
-						IncludeInfo IncludeInfo = new IncludeInfo();
-						IncludeInfo.LastWriteTimeUtc = Reader.ReadLong();
-						IncludeInfo.IncludeText = Reader.ReadString();
 
-						FileToIncludeInfo[File] = IncludeInfo;
+						HeaderFileInfo HeaderFileInfo = new HeaderFileInfo();
+						HeaderFileInfo.LastWriteTimeUtc = Reader.ReadLong();
+						HeaderFileInfo.bContainsMarkup = Reader.ReadBool();
+						HeaderFileInfo.bUsesAPIDefine = Reader.ReadBool();
+						HeaderFileInfo.UnitType = (HeaderUnitType)Reader.ReadByte();
+						HeaderFileInfo.Includes = Reader.ReadList(() => Reader.ReadString())!;
+
+						FileToHeaderFileInfo[File] = HeaderFileInfo;
 					}
 
-					int FileToMarkupFlagCount = Reader.ReadInt();
-					for(int Idx = 0; Idx < FileToMarkupFlagCount; Idx++)
+					int FileToInlineMarkupFlagCount = Reader.ReadInt();
+					for (int Idx = 0; Idx < FileToInlineMarkupFlagCount; Idx++)
 					{
 						FileItem File = Reader.ReadCompactFileItem();
 
-						ReflectionInfo ReflectionInfo = new ReflectionInfo();
-						ReflectionInfo.LastWriteTimeUtc = Reader.ReadLong();
-						ReflectionInfo.bContainsMarkup = Reader.ReadBool();
+						SourceFileInfo SourceFileInfo = new SourceFileInfo();
+						SourceFileInfo.LastWriteTimeUtc = Reader.ReadLong();
+						SourceFileInfo.IncludeText = Reader.ReadString();
+						SourceFileInfo.InlinedFileNames = Reader.ReadList(() => Reader.ReadString())!;
 
-						FileToReflectionInfo[File] = ReflectionInfo;
+						FileToSourceFileInfo[File] = SourceFileInfo;
 					}
 				}
 			}
-			catch(Exception Ex)
+			catch (Exception Ex)
 			{
-				Log.TraceWarning("Unable to read {0}. See log for additional information.", Location);
-				Log.TraceLog("{0}", ExceptionUtils.FormatExceptionDetails(Ex));
+				Logger.LogWarning("Unable to read {Location}. See log for additional information.", Location);
+				Logger.LogDebug(Ex, "{Ex}", ExceptionUtils.FormatExceptionDetails(Ex));
 			}
 		}
 
@@ -343,26 +632,30 @@ namespace UnrealBuildTool
 		private void Write()
 		{
 			DirectoryReference.CreateDirectory(Location.Directory);
-			using(FileStream Stream = File.Open(Location.FullName, FileMode.Create, FileAccess.Write, FileShare.Read))
+			using (FileStream Stream = File.Open(Location.FullName, FileMode.Create, FileAccess.Write, FileShare.Read))
 			{
-				using(BinaryArchiveWriter Writer = new BinaryArchiveWriter(Stream))
+				using (BinaryArchiveWriter Writer = new BinaryArchiveWriter(Stream))
 				{
 					Writer.WriteInt(CurrentVersion);
 
-					Writer.WriteInt(FileToIncludeInfo.Count);
-					foreach(KeyValuePair<FileItem, IncludeInfo> Pair in FileToIncludeInfo)
-					{
-						Writer.WriteCompactFileItem(Pair.Key);
-						Writer.WriteLong(Pair.Value.LastWriteTimeUtc);
-						Writer.WriteString(Pair.Value.IncludeText);
-					}
-
-					Writer.WriteInt(FileToReflectionInfo.Count);
-					foreach(KeyValuePair<FileItem, ReflectionInfo> Pair in FileToReflectionInfo)
+					Writer.WriteInt(FileToHeaderFileInfo.Count);
+					foreach (KeyValuePair<FileItem, HeaderFileInfo> Pair in FileToHeaderFileInfo)
 					{
 						Writer.WriteCompactFileItem(Pair.Key);
 						Writer.WriteLong(Pair.Value.LastWriteTimeUtc);
 						Writer.WriteBool(Pair.Value.bContainsMarkup);
+						Writer.WriteBool(Pair.Value.bUsesAPIDefine);
+						Writer.WriteByte((byte)Pair.Value.UnitType);
+						Writer.WriteList(Pair.Value.Includes, Item => Writer.WriteString(Item));
+					}
+
+					Writer.WriteInt(FileToSourceFileInfo.Count);
+					foreach (KeyValuePair<FileItem, SourceFileInfo> Pair in FileToSourceFileInfo)
+					{
+						Writer.WriteCompactFileItem(Pair.Key);
+						Writer.WriteLong(Pair.Value.LastWriteTimeUtc);
+						Writer.WriteString(Pair.Value.IncludeText);
+						Writer.WriteList(Pair.Value.InlinedFileNames, Item => Writer.WriteString(Item));
 					}
 				}
 			}

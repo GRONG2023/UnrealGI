@@ -2,18 +2,17 @@
 #pragma once
 
 #include "Chaos/Array.h"
-#include "Chaos/ConstraintHandle.h"
+#include "Chaos/Evolution/IndexedConstraintContainer.h"
 #include "Chaos/ParticleHandle.h"
-#include "Chaos/PBDConstraintContainer.h"
 
 namespace Chaos
 {
 	class FPBDRigidSpringConstraints;
 
-	class CHAOS_API FPBDRigidSpringConstraintHandle : public TContainerConstraintHandle<FPBDRigidSpringConstraints>
+	class FPBDRigidSpringConstraintHandle final : public TIndexedContainerConstraintHandle<FPBDRigidSpringConstraints>
 	{
 	public:
-		using Base = TContainerConstraintHandle<FPBDRigidSpringConstraints>;
+		using Base = TIndexedContainerConstraintHandle<FPBDRigidSpringConstraints>;
 		using FConstraintContainer = FPBDRigidSpringConstraints;
 		using FGeometryParticleHandle = TGeometryParticleHandle<FReal, 3>;
 
@@ -22,30 +21,33 @@ namespace Chaos
 		}
 		
 		FPBDRigidSpringConstraintHandle(FConstraintContainer* InConstraintContainer, int32 InConstraintIndex) 
-		: TContainerConstraintHandle<FPBDRigidSpringConstraints>(StaticType(), InConstraintContainer, InConstraintIndex) 
+		: TIndexedContainerConstraintHandle<FPBDRigidSpringConstraints>(InConstraintContainer, InConstraintIndex)
 		{
 		}
 
-		static FConstraintHandle::EType StaticType() { return FConstraintHandle::EType::RigidSpring; }
-
-		const TVector<FVec3, 2>& GetConstraintPositions() const;
-		void SetConstraintPositions(const TVector<FVec3, 2>& ConstraintPositions);
+		CHAOS_API const TVector<FVec3, 2>& GetConstraintPositions() const;
+		CHAOS_API void SetConstraintPositions(const TVector<FVec3, 2>& ConstraintPositions);
 		
-		TVector<FGeometryParticleHandle*, 2> GetConstrainedParticles() const;
+		CHAOS_API virtual FParticlePair GetConstrainedParticles() const override final;
 
 		// Get the rest length of the spring
-		FReal GetRestLength() const;
-		void SetRestLength(const FReal SpringLength);
+		CHAOS_API FReal GetRestLength() const;
+		CHAOS_API void SetRestLength(const FReal SpringLength);
 
+		static const FConstraintHandleTypeID& StaticType()
+		{
+			static FConstraintHandleTypeID STypeID(TEXT("FRigidSpringConstraintHandle"), &FIndexedConstraintHandle::StaticType());
+			return STypeID;
+		}
 	};
 
 
-	class FPBDRigidSpringConstraints : public FPBDConstraintContainer
+	class FPBDRigidSpringConstraints : public TPBDIndexedConstraintContainer<FPBDRigidSpringConstraints>
 	{
 	public:
 		// @todo(ccaulfield): an alternative AddConstraint which takes the constrain settings rather than assuming everything is in world-space rest pose
 
-		using Base = FPBDConstraintContainer;
+		using Base = TPBDIndexedConstraintContainer<FPBDRigidSpringConstraints>;
 		using FConstraintContainerHandle = FPBDRigidSpringConstraintHandle;
 		using FConstraintHandleAllocator = TConstraintHandleAllocator<FPBDRigidSpringConstraints>;
 		using FConstrainedParticlePair = TVector<TGeometryParticleHandle<FReal, 3>*, 2>;
@@ -152,41 +154,43 @@ namespace Chaos
 
 
 		//
-		// Island Rule API
+		// FConstraintContainer Implementation
 		//
+		virtual int32 GetNumConstraints() const override final { return NumConstraints(); }
+		virtual void ResetConstraints() override final {}
+		virtual void AddConstraintsToGraph(Private::FPBDIslandManager& IslandManager) override final;
+		virtual void PrepareTick() override final {}
+		virtual void UnprepareTick() override final {}
 
-		void PrepareTick() {}
+		//
+		// TSimpleConstraintContainerSolver API - used by RBAN solvers
+		//
+		void AddBodies(FSolverBodyContainer& SolverBodyContainer);
+		void GatherInput(const FReal Dt) {}
+		void ScatterOutput(const FReal Dt);
+		void ApplyPositionConstraints(const FReal Dt, const int32 It, const int32 NumIts);
+		void ApplyVelocityConstraints(const FReal Dt, const int32 It, const int32 NumIts) {}
+		void ApplyProjectionConstraints(const FReal Dt, const int32 It, const int32 NumIts) {}
 
-		void UnprepareTick() {}
-
-		void PrepareIteration(FReal Dt) {}
-
-		void UnprepareIteration(FReal Dt) {}
-
-		void UpdatePositionBasedState(const FReal Dt) {}
-
-		bool Apply(const FReal Dt, const int32 It, const int32 NumIts);
-
-		bool ApplyPushOut(const FReal Dt, const int32 It, const int32 NumIts)
-		{
-			return false;
-		}
-
-		bool Apply(const FReal Dt, const TArray<FConstraintContainerHandle*>& InConstraintHandles, const int32 It, const int32 NumIts);
-
-		bool ApplyPushOut(const FReal Dt, const TArray<FConstraintContainerHandle*>& InConstraintHandles, const int32 It, const int32 NumIts)
-		{
-			return false;
-		}
+		//
+		// TIndexedConstraintContainerSolver API - used by World solvers
+		//
+		void AddBodies(const TArrayView<int32>& ConstraintIndices, FSolverBodyContainer& SolverBodyContainer);
+		void GatherInput(const TArrayView<int32>& ConstraintIndices, const FReal Dt) {}
+		void ScatterOutput(const TArrayView<int32>& ConstraintIndices, const FReal Dt);
+		void ApplyPositionConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts);
+		void ApplyVelocityConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts) {}
+		void ApplyProjectionConstraints(const TArrayView<int32>& ConstraintIndices, const FReal Dt, const int32 It, const int32 NumIts) {}
 
 	protected:
 		using Base::GetConstraintIndex;
 		using Base::SetConstraintIndex;
 
 	private:
-		void ApplySingle(const FReal Dt, int32 ConstraintIndex) const;
+		void AddBodies(const int32 ConstraintIndex, FSolverBodyContainer& SolverBodyContainer);
+		void ApplyPhase1Single(const FReal Dt, int32 ConstraintIndex) const;
 
-		void UpdateDistance(int32 ConstraintIndex, const FVec3& Location0, const FVec3& Location1);
+		void InitDistance(int32 ConstraintIndex, const FVec3& Location0, const FVec3& Location1);
 
 		FVec3 GetDelta(int32 ConstraintIndex, const FVec3& WorldSpaceX1, const FVec3& WorldSpaceX2) const;
 
@@ -200,6 +204,8 @@ namespace Chaos
 		TArray<FConstrainedParticlePair> Constraints;
 		TArray<TVector<FVec3, 2>> Distances;
 		TArray<FSpringSettings> SpringSettings;
+
+		TArray<FSolverBodyPtrPair> ConstraintSolverBodies;
 
 		TArray<FConstraintContainerHandle*> Handles;
 		FConstraintHandleAllocator HandleAllocator;

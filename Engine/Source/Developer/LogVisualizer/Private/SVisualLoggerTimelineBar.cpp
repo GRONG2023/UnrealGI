@@ -5,7 +5,7 @@
 #include "Rendering/DrawElements.h"
 #include "VisualLoggerDatabase.h"
 #include "LogVisualizerStyle.h"
-#include "LogVisualizerPrivate.h"
+#include "LogVisualizerPublic.h"
 #include "VisualLoggerTimeSliderController.h"
 #include "Misc/OutputDeviceHelper.h"
 
@@ -20,7 +20,7 @@ FReply SVisualLoggerTimelineBar::OnMouseButtonDown(const FGeometry& MyGeometry, 
 	{
 		FName RowName = TimelineOwner.Pin()->GetName();
 		FVisualLoggerDBRow& DBRow = FVisualLoggerDatabase::Get().GetRowByName(RowName);
-		const float ScrubPosition = TimeSliderController->GetTimeSliderArgs().ScrubPosition.Get();
+		const double ScrubPosition = TimeSliderController->GetTimeSliderArgs().ScrubPosition.Get();
 		const int32 ClosestItem = DBRow.GetClosestItem(ScrubPosition);
 		const auto& Items = DBRow.GetItems();
 		if (Items.IsValidIndex(ClosestItem))
@@ -43,7 +43,7 @@ FReply SVisualLoggerTimelineBar::OnMouseButtonUp(const FGeometry& MyGeometry, co
 	{
 		FName RowName = TimelineOwner.Pin()->GetName();
 		FVisualLoggerDBRow& DBRow = FVisualLoggerDatabase::Get().GetRowByName(RowName);
-		const float ScrubPosition = TimeSliderController->GetTimeSliderArgs().ScrubPosition.Get();
+		const double ScrubPosition = TimeSliderController->GetTimeSliderArgs().ScrubPosition.Get();
 		const int32 ClosestItem = DBRow.GetClosestItem(ScrubPosition);
 		const auto& Items = DBRow.GetItems();
 		if (Items.IsValidIndex(ClosestItem))
@@ -59,7 +59,7 @@ FReply SVisualLoggerTimelineBar::OnMouseMove(const FGeometry& MyGeometry, const 
 	FName RowName = TimelineOwner.Pin()->GetName();
 	FVisualLoggerDBRow& DBRow = FVisualLoggerDatabase::Get().GetRowByName(RowName);
 
-	const float ClosestMouseTime = TimeSliderController->GetTimeAtCursorPosition(MyGeometry, MouseEvent);
+	const double ClosestMouseTime = TimeSliderController->GetTimeAtCursorPosition(MyGeometry, MouseEvent);
 
 	const int32 NewItemIndex = DBRow.GetClosestItem(ClosestMouseTime);
 	const auto& Items = DBRow.GetItems();
@@ -72,12 +72,15 @@ FReply SVisualLoggerTimelineBar::OnMouseMove(const FGeometry& MyGeometry, const 
 		if (Items.IsValidIndex(MouseMoveClosestItemIndex))
 		{
 			const FVisualLogEntry& CurrentEntry = Items[MouseMoveClosestItemIndex].Entry;
-				
-			TooltipBuilder = FString::Printf(TEXT("Time: %.2f"), CurrentEntry.TimeStamp);
+			
+			TooltipBuilder = FString::Printf(TEXT("Time: %.2lf WorldTime: %.2lf"), CurrentEntry.TimeStamp, CurrentEntry.WorldTimeStamp);
 
 			for (const FVisualLogShapeElement& Shape : CurrentEntry.ElementsToDraw)
 			{
-				TooltipBuilder += FString::Printf(TEXT("\n(shape) %s: %s"), ::ToString(Shape.Verbosity), *Shape.Description);
+				if (!Shape.Description.IsEmpty())
+				{
+					TooltipBuilder += FString::Printf(TEXT("\n(shape) %s: %s"), ::ToString(Shape.Verbosity), *Shape.Description);
+				}
 			}
 
 			for (const FVisualLogLine& Line : CurrentEntry.LogLines)
@@ -125,7 +128,7 @@ void SVisualLoggerTimelineBar::Construct(const FArguments& InArgs, TSharedPtr<FV
 	TimeSliderController = InTimeSliderController;
 	TimelineOwner = InTimelineOwner;
 
-	TRange<float> LocalViewRange = TimeSliderController->GetTimeSliderArgs().ViewRange.Get();
+	TRange<double> LocalViewRange = TimeSliderController->GetTimeSliderArgs().ViewRange.Get();
 
 	MouseMoveClosestItemIndex = INDEX_NONE;
 }
@@ -143,13 +146,11 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 	FArrangedChildren ArrangedChildren(EVisibility::Visible);
 	ArrangeChildren(AllottedGeometry, ArrangedChildren);
 
-	TRange<float> LocalViewRange = TimeSliderController->GetTimeSliderArgs().ViewRange.Get();
-	float LocalScrubPosition = TimeSliderController->GetTimeSliderArgs().ScrubPosition.Get();
+	TRange<double> LocalViewRange = TimeSliderController->GetTimeSliderArgs().ViewRange.Get();
+	double LocalScrubPosition = TimeSliderController->GetTimeSliderArgs().ScrubPosition.Get();
 
-	float ViewRange = LocalViewRange.Size<float>();
-	float PixelsPerInput = ViewRange > 0 ? AllottedGeometry.GetLocalSize().X / ViewRange : 0;
-	float CurrentScrubLinePos = (LocalScrubPosition - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
-	float BoxWidth = FMath::Max(0.08f * PixelsPerInput, 4.0f);
+	double ViewRange = LocalViewRange.Size<double>();
+	double PixelsPerInput = ViewRange > 0. ? AllottedGeometry.GetLocalSize().X / ViewRange : 0.;
 
 	// Draw a region around the entire section area
 	FSlateDrawElement::MakeBox(
@@ -170,8 +171,8 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 
 	const ESlateDrawEffect DrawEffects = ESlateDrawEffect::None;// bEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
 
-	TArray<float> ErrorTimes;
-	TArray<float> WarningTimes;
+	TArray<double> ErrorTimes;
+	TArray<double> WarningTimes;
 	int32 EntryIndex = 0;
 
 	FVisualLoggerDBRow& DBRow = FVisualLoggerDatabase::Get().GetRowByName(TimelineOwner.Pin()->GetName());
@@ -192,10 +193,9 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 		}
 
 		// find bar width, connect all contiguous bars to draw them as one geometry (rendering optimization)
-		const float StartPos = (Entry.TimeStamp - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput - 2;
-		float EndPos = (Entry.TimeStamp - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput + 2;
+		const double StartPos = (Entry.TimeStamp - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput - 2;
+		double EndPos = (Entry.TimeStamp - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput + 2;
 		int32 StartIndex = EntryIndex;
-		float LastEndX = MAX_FLT;
 		for (; StartIndex < Entries.Num(); ++StartIndex)
 		{
 			const FVisualLogEntry& CurrentEntry = Entries[StartIndex].Entry;
@@ -230,7 +230,7 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 				}
 			}
 
-			const float CurrentStartPos = (CurrentEntry.TimeStamp - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput - 2;
+			const double CurrentStartPos = (CurrentEntry.TimeStamp - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput - 2;
 			if (CurrentStartPos > EndPos)
 			{
 				break;
@@ -245,8 +245,8 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 				OutDrawElements,
 				RetLayerId,
 				AllottedGeometry.ToPaintGeometry(
-				FVector2D(StartPos, 0.0f),
-				FVector2D(BarWidth, AllottedGeometry.Size.Y)),
+				FVector2f(BarWidth, AllottedGeometry.GetLocalSize().Y),
+				FSlateLayoutTransform(FVector2f(StartPos, 0.0f))),
 				FillImage,
 				DrawEffects,
 				CurrentTimeColor
@@ -258,14 +258,14 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 	if (WarningTimes.Num()) RetLayerId++;
 	for (auto CurrentTime : WarningTimes)
 	{
-		float LinePos = (CurrentTime - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
+		double LinePos = (CurrentTime - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
 
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			RetLayerId,
 			AllottedGeometry.ToPaintGeometry(
-			FVector2D(LinePos - 3, 0.0f),
-			FVector2D(6, AllottedGeometry.GetLocalSize().Y)),
+			FVector2f(6.f, AllottedGeometry.GetLocalSize().Y),
+			FSlateLayoutTransform(FVector2f(LinePos - 3.f, 0.0f))),
 			FillImage,
 			DrawEffects,
 			WarningTimeColor
@@ -275,14 +275,14 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 	if (ErrorTimes.Num()) RetLayerId++;
 	for (auto CurrentTime : ErrorTimes)
 	{
-		float LinePos = (CurrentTime - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
+		double LinePos = (CurrentTime - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
 
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			RetLayerId,
 			AllottedGeometry.ToPaintGeometry(
-			FVector2D(LinePos - 3, 0.0f),
-			FVector2D(6, AllottedGeometry.GetLocalSize().Y)),
+			FVector2f(6, AllottedGeometry.GetLocalSize().Y),
+			FSlateLayoutTransform(FVector2f(LinePos - 3, 0.0f))),
 			FillImage,
 			DrawEffects,
 			ErrorTimeColor
@@ -294,15 +294,15 @@ int32 SVisualLoggerTimelineBar::OnPaint(const FPaintArgs& Args, const FGeometry&
 	if (TimelineOwner.Pin()->IsSelected() && DBRow.GetCurrentItemIndex() != INDEX_NONE)
 	{
 		const auto &HighlightedItemEntry = DBRow.GetCurrentItem();
-		float CurrentTime = HighlightedItemEntry.Entry.TimeStamp;
-		float LinePos = (CurrentTime - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
+		double CurrentTime = HighlightedItemEntry.Entry.TimeStamp;
+		double LinePos = (CurrentTime - LocalViewRange.GetLowerBoundValue()) * PixelsPerInput;
 
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			++RetLayerId,
 			AllottedGeometry.ToPaintGeometry(
-			FVector2D(LinePos - 2, 0.0f),
-			FVector2D(4, AllottedGeometry.GetLocalSize().Y)),
+			FVector2f(4, AllottedGeometry.GetLocalSize().Y),
+			FSlateLayoutTransform(FVector2f(LinePos - 2, 0.0f))),
 			SelectedFillImage,
 			ESlateDrawEffect::None,
 			SelectedBarColor

@@ -2,50 +2,62 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/Map.h"
 #include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "HAL/ThreadSingleton.h"
+#include "Internationalization/Text.h"
+#include "UObject/NameTypes.h"
 #include "UObject/UObjectGlobals.h"
 
-class UDynamicClass;
-struct FCompilerNativizationOptions;
+class FObjectInitializer;
+class UClass;
+class UObject;
+class UPackage;
+class UScriptStruct;
+class UStruct;
+struct FUObjectSerializeContext;
 class ITargetPlatform;
 
 /**
  * List of asset registry tags used by blueprints. These are here so they can be used by both the asset registry and blueprint code
  * These need to be kept in sync with UBlueprint::GetAssetRegistryTags, and any changes there will require resaving content
  */
-struct COREUOBJECT_API FBlueprintTags
+struct FBlueprintTags
 {
 	/** Full path in export form ClassType'/PackagePath/PackageName.ClassName' of generated blueprint class */
-	static const FName GeneratedClassPath;
+	static COREUOBJECT_API const FName GeneratedClassPath;
 	/** Full path in export form ClassType'/PackagePath/PackageName.ClassName' of the immediate parent, may be a blueprint or native class */
-	static const FName ParentClassPath;
+	static COREUOBJECT_API const FName ParentClassPath;
 	/** Full path in export form Class'/Script/ModuleName.ClassName' of the first found parent native class */
-	static const FName NativeParentClassPath;
+	static COREUOBJECT_API const FName NativeParentClassPath;
 	/** Integer representing bitfield EClassFlags */
-	static const FName ClassFlags;
+	static COREUOBJECT_API const FName ClassFlags;
 	/** String representing enum EBlueprintType */
-	static const FName BlueprintType;
+	static COREUOBJECT_API const FName BlueprintType;
 	/** String with user-entered description of blueprint */
-	static const FName BlueprintDescription;
+	static COREUOBJECT_API const FName BlueprintDescription;
 	/** String with user-entered display name for the blueprint class (used in editor along with the description to identify the Blueprint type) */
-	static const FName BlueprintDisplayName;
+	static COREUOBJECT_API const FName BlueprintDisplayName;
+	/** String with user-entered category for the blueprint */
+	static COREUOBJECT_API const FName BlueprintCategory;
 	/** String set to True/False, set if this is a data only blueprint */
-	static const FName IsDataOnly;
+	static COREUOBJECT_API const FName IsDataOnly;
 	/** List of implemented interfaces, must be converted to FBPInterfaceDescription */
-	static const FName ImplementedInterfaces;
+	static COREUOBJECT_API const FName ImplementedInterfaces;
 	/** Very large string used to store find in blueprint data for the editor */
-	static const FName FindInBlueprintsData;
+	static COREUOBJECT_API const FName FindInBlueprintsData;
 	/** (Deprecated) Legacy tag that was initially used to store find in blueprint data for the editor */
-	static const FName UnversionedFindInBlueprintsData;
+	static COREUOBJECT_API const FName UnversionedFindInBlueprintsData;
 	/** Number of replicated properties */
-	static const FName NumReplicatedProperties;
+	static COREUOBJECT_API const FName NumReplicatedProperties;
 	/** Number of native components */
-	static const FName NumNativeComponents;
+	static COREUOBJECT_API const FName NumNativeComponents;
 	/** Number of blueprint components */
-	static const FName NumBlueprintComponents;
+	static COREUOBJECT_API const FName NumBlueprintComponents;
 	/** The subpath of a blueprint contained within the asset. Used to determine whether, and where a blueprint exists in a package. */
-	static const FName BlueprintPathWithinPackage;
+	static COREUOBJECT_API const FName BlueprintPathWithinPackage;
 };
 
 struct FBlueprintWarningDeclaration
@@ -95,10 +107,13 @@ struct FBlueprintSupport
 	COREUOBJECT_API static void SetClassReparentingFPtr(FClassReparentingFPtr Ptr);
 
 	/** Tells if the specified object is one of the many flavors of FLinkerPlaceholderBase that we have. */
-	COREUOBJECT_API static bool IsDeferredDependencyPlaceholder(UObject* LoadedObj);
+	COREUOBJECT_API static bool IsDeferredDependencyPlaceholder(const UObject* LoadedObj);
 
 	/** Registers any object properties in this struct with the deferred dependency system */
 	COREUOBJECT_API static void RegisterDeferredDependenciesInStruct(const UStruct* Struct, void* StructData);
+
+	/** Repair function to scan for any deferred dependency placeholders and attempt to resolve them in-place with real assets */
+	COREUOBJECT_API static void RepairDeferredDependenciesInObject(UObject* Object);
 
 	/** Not a particularly fast function. Mostly intended for validation in debug builds. */
 	static bool IsInBlueprintPackage(UObject* LoadedObj);
@@ -109,7 +124,7 @@ struct FBlueprintSupport
 	COREUOBJECT_API static bool ShouldTreatWarningAsError(FName WarningIdentifier);
 	COREUOBJECT_API static bool ShouldSuppressWarning(FName WarningIdentifier);
 
-	COREUOBJECT_API static bool IsClassPlaceholder(UClass* Class);
+	COREUOBJECT_API static bool IsClassPlaceholder(const UClass* Class);
 
 #if WITH_EDITOR
 	/** Function that walks the object graph, ensuring that there are no references to TRASH or REINST classes: */
@@ -125,11 +140,11 @@ struct FBlueprintSupport
  * this registers raw addresses for tracking. This is somewhat less safe, make
  * sure to not register addresses that may change
  */
-struct COREUOBJECT_API FScopedPlaceholderRawContainerTracker
+struct FScopedPlaceholderRawContainerTracker
 {
 public:
-	FScopedPlaceholderRawContainerTracker(void* InData);
-	~FScopedPlaceholderRawContainerTracker();
+	COREUOBJECT_API FScopedPlaceholderRawContainerTracker(void* InData);
+	COREUOBJECT_API ~FScopedPlaceholderRawContainerTracker();
 
 private:
 	void* Data;
@@ -139,16 +154,16 @@ private:
 /**
  * This is a helper struct that allows us to gather all previously unloaded class dependencies of a UClass
  * The first time we create a new UClass object in FLinkerLoad::CreateExport(), we register it as a dependency
- * master.  Any subsequent UClasses that are created for the first time during the preload of that class are
+ * authority. Any subsequent UClasses that are created for the first time during the preload of that class are
  * added to the list as potential cyclic referencers.  We then step over the list at the end of the load, and
  * recompile any classes that may depend on each other a second time to ensure that that functions and properties
  * are properly resolved
  */
-struct COREUOBJECT_API FScopedClassDependencyGather
+struct FScopedClassDependencyGather
 {
 public:
-	FScopedClassDependencyGather(UClass* ClassToGather, FUObjectSerializeContext* InLoadContext);
-	~FScopedClassDependencyGather();
+	COREUOBJECT_API FScopedClassDependencyGather(UClass* ClassToGather, FUObjectSerializeContext* InLoadContext);
+	COREUOBJECT_API ~FScopedClassDependencyGather();
 
 	/**
 	 * Post load, some systems would like an easy list of dependencies. This will
@@ -157,14 +172,14 @@ public:
 	 * 
 	 * @return The most recent array of tracked dependencies.
 	 */
-	static TArray<UClass*> const& GetCachedDependencies();
+	static COREUOBJECT_API TArray<UClass*> const& GetCachedDependencies();
 
 private:
-	/** Whether or not this dependency gather is the dependency master, and thus should process all dependencies in the destructor */
-	bool bMasterClass;	
+	/** Whether or not this dependency gather is the dependency authoritative class, and thus should process all dependencies in the destructor */
+	bool bAuthoritativeClass;
 
 	/** The current class that is gathering potential dependencies in this scope */
-	static UClass* BatchMasterClass;
+	static UClass* BatchAuthorityClass;
 
 	/** List of dependencies (i.e. UClasses that have been newly instantiated) in the scope of this dependency gather */
 	static TArray<UClass*> BatchClassDependencies;
@@ -173,78 +188,6 @@ private:
 	FUObjectSerializeContext* LoadContext;
 
 	FScopedClassDependencyGather();
-};
-
-enum class EReplacementResult
-{
-	/** Don't replace the provided package at all */
-	DontReplace,
-
-	/** Generate a stub file, but don't replace the package */
-	GenerateStub,
-
-	/** Completely replace the file with generated code */
-	ReplaceCompletely
-};
-
-/**
- * Interface needed by CoreUObject to the BlueprintNativeCodeGen logic. Used by cooker to convert assets 
- * to native code.
- */
-struct IBlueprintNativeCodeGenCore
-{
-	/** Returns the current IBlueprintNativeCodeGenCore, may return nullptr */
-	COREUOBJECT_API static const IBlueprintNativeCodeGenCore* Get();
-
-	/**
-	 * Registers the IBlueprintNativeCodeGenCore, just used to point us at an implementation.
-	 * By default, there is no IBlueprintNativeCodeGenCore, and thus no blueprints are
-	 * replaced at cook.
-	 */
-	COREUOBJECT_API static void Register(const IBlueprintNativeCodeGenCore* Coordinator);
-
-	/**
-	 * Determines whether the provided package needs to be replaced (in part or completely)
-	 * 
-	 * @param Package	The package in question
-	 * @return Whether the package should be converted
-	 */
-	virtual EReplacementResult IsTargetedForReplacement(const UPackage* Package, const FCompilerNativizationOptions& NativizationOptions) const = 0;
-	
-	/**
-	 * Determines whether the provided object needs to be replaced (in part or completely).
-	 * Some objects in a package may require conversion and some may not. If any object 
-	 * in a package wants to be converted then it is implied that all other objects will 
-	 * be converted with it (no support for partial package conversion, beyond stubs)
-	 *
-	 * @param Object	The package in question
-	 * @return Whether the object should be converted
-	 */
-	virtual EReplacementResult IsTargetedForReplacement(const UObject* Object, const FCompilerNativizationOptions& NativizationOptions) const = 0;
-
-	/** 
-	 * Function used to change the type of a class from, say, UBlueprintGeneratedClass to 
-	 * UDynamicClass. Cooking (and conversion in general) must be order independent so
-	 * The scope of this kind of type swap is limited.
-	 * 
-	 * @param Object whose class will be replaced
-	 * @return A replacement class ptr, null if none
-	 */
-	virtual UClass* FindReplacedClassForObject(const UObject* Object, const FCompilerNativizationOptions& NativizationOptions) const = 0;
-	
-	/** 
-	 * Function used to change the path of subobject from a nativized class.
-	 * 
-	 * @param Object Imported Object.
-	 * @param OutName Referenced to name, that will be saved in import table.
-	 * @return An Outer object that should be saved in import table.
-	 */
-	virtual UObject* FindReplacedNameAndOuter(UObject* Object, FName& OutName, const FCompilerNativizationOptions& NativizationOptions) const = 0;
-
-	/*
-	 * Return nativization options for given platform.
-	 */
-	virtual const FCompilerNativizationOptions& GetNativizationOptionsForPlatform(const ITargetPlatform* Platform) const = 0;
 };
 
 #endif // WITH_EDITOR
@@ -266,13 +209,13 @@ public:
 	 * Makes a copy of the specified initializer and stores it (mapped under its 
 	 * dependency), so that it can instead be executed later via ResolveArchetypeInstances().
 	 * 
-	 * @param  InitDependecy			The object (usually the initializer's archetype) that this initializer is dependent on. The key 
+	 * @param  InitDependency			The object (usually the initializer's archetype) that this initializer is dependent on. The key 
 	 *									you'll pass to ResolveArchetypeInstances() later to run this initializer.
 	 * @param  DeferringInitializer		The initializer you want to defer.
 	 *
-	 * @raturn A copy of the specified initializer. This should always succeed (only returns null if InitDependecy is null).
+	 * @raturn A copy of the specified initializer. This should always succeed (only returns null if InitDependency is null).
 	 */
-	FObjectInitializer* Add(const UObject* InitDependecy, const FObjectInitializer& DeferringInitializer);
+	FObjectInitializer* Add(const UObject* InitDependency, const FObjectInitializer& DeferringInitializer);
 
 	/** 
 	 * Runs all deferred initializers that were dependent on the specified archetype 
@@ -421,115 +364,4 @@ struct FDeferredObjInitializationHelper
 	 * Should be called once the object has been fully serialized in.
 	 */
 	static void ResolveDeferredInitsFromArchetype(UObject* Archetype);
-};
-
-struct FBlueprintDependencyType
-{
-	uint8 bSerializationBeforeSerializationDependency : 1;
-	uint8 bCreateBeforeSerializationDependency : 1;
-	uint8 bSerializationBeforeCreateDependency : 1;
-	uint8 bCreateBeforeCreateDependency : 1;
-
-	FBlueprintDependencyType()
-		: bSerializationBeforeSerializationDependency(0)
-		, bCreateBeforeSerializationDependency(0)
-		, bSerializationBeforeCreateDependency(0)
-		, bCreateBeforeCreateDependency(0) {}
-
-	FBlueprintDependencyType(bool bInSerializationBeforeSerializationDependency
-		, bool bInCreateBeforeSerializationDependency
-		, bool bInSerializationBeforeCreateDependency
-		, bool bInCreateBeforeCreateDependency)
-		: bSerializationBeforeSerializationDependency(bInSerializationBeforeSerializationDependency)
-		, bCreateBeforeSerializationDependency(bInCreateBeforeSerializationDependency)
-		, bSerializationBeforeCreateDependency(bInSerializationBeforeCreateDependency)
-		, bCreateBeforeCreateDependency(bInCreateBeforeCreateDependency)
-	{}
-};
-
-struct COREUOBJECT_API FCompactBlueprintDependencyData
-{
-	int16 ObjectRefIndex;
-	FBlueprintDependencyType StructDependency;
-	FBlueprintDependencyType CDODependency;
-
-	FCompactBlueprintDependencyData()
-		: ObjectRefIndex(-1)
-	{}
-
-	FCompactBlueprintDependencyData(int16 InObjectRefIndex
-		, FBlueprintDependencyType InStructDependency
-		, FBlueprintDependencyType InCDODependency = FBlueprintDependencyType())
-		: ObjectRefIndex(InObjectRefIndex)
-		, StructDependency(InStructDependency)
-		, CDODependency(InCDODependency)
-	{}
-};
-
-struct COREUOBJECT_API FBlueprintDependencyObjectRef
-{
-	FName PackageName;
-	FName ObjectName;
-	FName ClassPackageName;
-	FName ClassName;
-	FName OuterName;
-
-	FBlueprintDependencyObjectRef() {}
-
-	FORCENOINLINE FBlueprintDependencyObjectRef(const TCHAR* InPackageFolder
-		, const TCHAR* InShortPackageName
-		, const TCHAR* InObjectName
-		, const TCHAR* InClassPackageName
-		, const TCHAR* InClassName
-		, const TCHAR* InOuterName );
-};
-
-struct COREUOBJECT_API FBlueprintDependencyData
-{
-	FBlueprintDependencyObjectRef ObjectRef;
-	// 0 - dependency type for dynamic class or UDS
-	// 1 - dependency type for CD0
-	FBlueprintDependencyType DependencyTypes[2];
-
-	int16 ObjectRefIndex; // NativizationWithoutEDLBT
-
-	FBlueprintDependencyData(const FBlueprintDependencyObjectRef& InObjectRef
-		, const FCompactBlueprintDependencyData& InCompactDependencyData)
-		: ObjectRef(InObjectRef)
-		, ObjectRefIndex(InCompactDependencyData.ObjectRefIndex)
-	{
-		DependencyTypes[0] = InCompactDependencyData.StructDependency;
-		DependencyTypes[1] = InCompactDependencyData.CDODependency;
-	}
-
-	bool operator==(const FBlueprintDependencyData& Other) const
-	{
-		return Other.ObjectRefIndex == ObjectRefIndex;
-	}
-
-	static bool ContainsDependencyData(TArray<FBlueprintDependencyData>& Assets, int16 ObjectRefIndex);
-	static void AppendUniquely(TArray<FBlueprintDependencyData>& Destination, const TArray<FBlueprintDependencyData>& AdditionalData);
-};
-
-/**
- *	Stores info about dependencies of native classes converted from BPs
- */
-struct COREUOBJECT_API FConvertedBlueprintsDependencies
-{
-	typedef void(*GetDependenciesNamesFunc)(TArray<FBlueprintDependencyData>&);
-
-private:
-
-	TMap<FName, GetDependenciesNamesFunc> PackageNameToGetter;
-
-public:
-	static FConvertedBlueprintsDependencies& Get();
-
-	void RegisterConvertedClass(FName PackageName, GetDependenciesNamesFunc GetAssets);
-
-	/** Get all assets paths necessary for the class with the given class name and all converted classes that dependencies. */
-	void GetAssets(FName PackageName, TArray<FBlueprintDependencyData>& OutDependencies) const;
-
-	static void FillUsedAssetsInDynamicClass(UDynamicClass* DynamicClass, GetDependenciesNamesFunc GetUsedAssets);
-	static UObject* LoadObjectForStructConstructor(UScriptStruct* ScriptStruct, const TCHAR* ObjectPath);
 };

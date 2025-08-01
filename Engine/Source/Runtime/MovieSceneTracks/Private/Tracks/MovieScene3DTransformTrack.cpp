@@ -6,7 +6,12 @@
 #include "Compilation/MovieSceneSegmentCompiler.h"
 #include "Evaluation/MovieSceneEvaluationTrack.h"
 #include "Channels/MovieSceneChannelProxy.h"
+#include "Systems/MovieSceneQuaternionBlenderSystem.h"
+#include "Systems/MovieScenePiecewiseDoubleBlenderSystem.h"
+#include "MovieSceneCommonHelpers.h"
 #include "Algo/BinarySearch.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MovieScene3DTransformTrack)
 
 UMovieScene3DTransformTrack::UMovieScene3DTransformTrack( const FObjectInitializer& ObjectInitializer )
 	: Super( ObjectInitializer )
@@ -33,6 +38,30 @@ UMovieSceneSection* UMovieScene3DTransformTrack::CreateNewSection()
 	return NewObject<UMovieScene3DTransformSection>(this, NAME_None, RF_Transactional);
 }
 
+TSubclassOf<UMovieSceneBlenderSystem> UMovieScene3DTransformTrack::GetBlenderSystem() const
+{
+	if (BlenderSystemClass == nullptr)
+	{
+		return UMovieScenePiecewiseDoubleBlenderSystem::StaticClass();
+	}
+	return BlenderSystemClass;
+}
+
+void UMovieScene3DTransformTrack::SetBlenderSystem(TSubclassOf<UMovieSceneBlenderSystem> InBlenderSystemClass)
+{
+	if (InBlenderSystemClass == UMovieScenePiecewiseDoubleBlenderSystem::StaticClass())
+	{
+		InBlenderSystemClass = nullptr;
+	}
+
+	BlenderSystemClass = InBlenderSystemClass;
+}
+
+void UMovieScene3DTransformTrack::GetSupportedBlenderSystems(TArray<TSubclassOf<UMovieSceneBlenderSystem>>& OutSystemClasses) const
+{
+	OutSystemClasses.Add(UMovieSceneQuaternionBlenderSystem::StaticClass());
+	OutSystemClasses.Add(UMovieScenePiecewiseDoubleBlenderSystem::StaticClass());
+}
 
 #if WITH_EDITOR
 
@@ -57,7 +86,7 @@ TArray<FTrajectoryKey> UMovieScene3DTransformTrack::GetTrajectoryData(FFrameNumb
 {
 	struct FCurveKeyIterator
 	{
-		FCurveKeyIterator(UMovieScene3DTransformSection* InSection, FMovieSceneFloatChannel* InChannel, FName InChannelName, FFrameNumber StartTime, TRange<FFrameNumber> ViewRange)
+		FCurveKeyIterator(UMovieScene3DTransformSection* InSection, FMovieSceneDoubleChannel* InChannel, FName InChannelName, FFrameNumber StartTime, TRange<FFrameNumber> ViewRange)
 			: Section(InSection), Channel(InChannel->GetData()), ChannelName(InChannelName), SectionRange(TRange<FFrameNumber>::Intersection(ViewRange, InSection->GetRange())), CurrentIndex(INDEX_NONE)
 		{
 			TArrayView<const FFrameNumber> Times = Channel.GetTimes();
@@ -162,7 +191,7 @@ TArray<FTrajectoryKey> UMovieScene3DTransformTrack::GetTrajectoryData(FFrameNumb
 
 	private:
 		UMovieScene3DTransformSection* Section;
-		TMovieSceneChannelData<FMovieSceneFloatValue> Channel;
+		TMovieSceneChannelData<FMovieSceneDoubleValue> Channel;
 		FName ChannelName;
 		TRange<FFrameNumber> SectionRange;
 		int32 CurrentIndex;
@@ -175,41 +204,50 @@ TArray<FTrajectoryKey> UMovieScene3DTransformTrack::GetTrajectoryData(FFrameNumb
 	for (UMovieSceneSection* Section : Sections)
 	{
 		UMovieScene3DTransformSection* TransformSection = Cast<UMovieScene3DTransformSection>(Section);
-		if (TransformSection)
+		if (TransformSection && MovieSceneHelpers::IsSectionKeyable(TransformSection))
 		{
-			TArrayView<FMovieSceneFloatChannel*>         FloatChannels = TransformSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
-			TArrayView<const FMovieSceneChannelMetaData> MetaData      = TransformSection->GetChannelProxy().GetMetaData<FMovieSceneFloatChannel>();
+			FMovieSceneChannelProxy& SectionChannelProxy = TransformSection->GetChannelProxy();
+			TMovieSceneChannelHandle<FMovieSceneDoubleChannel> ChannelHandles[] = {
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.X"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Y"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Z"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.X"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.Y"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Rotation.Z"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.X"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.Y"),
+				SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Scale.Z")
+			};
 
-			EMovieSceneTransformChannel Mask = TransformSection->GetMask().GetChannels();
-			if (EnumHasAnyFlags(Mask, EMovieSceneTransformChannel::TranslationX))
+			if (ChannelHandles[0].Get())
 			{
-				ForwardIters.Emplace(TransformSection, FloatChannels[0], MetaData[0].Name, Time, ViewRange);
-				BackwardIters.Emplace(TransformSection, FloatChannels[0], MetaData[0].Name, Time, ViewRange);
+				ForwardIters.Emplace(TransformSection, ChannelHandles[0].Get(), TEXT("Location.X"), Time, ViewRange);
+				BackwardIters.Emplace(TransformSection, ChannelHandles[0].Get(), TEXT("Location.X"), Time, ViewRange);
 			}
-			if (EnumHasAnyFlags(Mask, EMovieSceneTransformChannel::TranslationY))
+			if (ChannelHandles[1].Get())
 			{
-				ForwardIters.Emplace(TransformSection, FloatChannels[1], MetaData[1].Name, Time, ViewRange);
-				BackwardIters.Emplace(TransformSection, FloatChannels[1], MetaData[1].Name, Time, ViewRange);
+				ForwardIters.Emplace(TransformSection, ChannelHandles[1].Get(), TEXT("Location.Y"), Time, ViewRange);
+				BackwardIters.Emplace(TransformSection, ChannelHandles[1].Get(), TEXT("Location.Y"), Time, ViewRange);
 			}
-			if (EnumHasAnyFlags(Mask, EMovieSceneTransformChannel::TranslationZ))
+			if (ChannelHandles[2].Get())
 			{
-				ForwardIters.Emplace(TransformSection, FloatChannels[2], MetaData[2].Name, Time, ViewRange);
-				BackwardIters.Emplace(TransformSection, FloatChannels[2], MetaData[2].Name, Time, ViewRange);
+				ForwardIters.Emplace(TransformSection, ChannelHandles[2].Get(), TEXT("Location.Z"), Time, ViewRange);
+				BackwardIters.Emplace(TransformSection, ChannelHandles[2].Get(), TEXT("Location.Z"), Time, ViewRange);
 			}
-			if (EnumHasAnyFlags(Mask, EMovieSceneTransformChannel::RotationX))
+			if (ChannelHandles[3].Get())
 			{
-				ForwardIters.Emplace(TransformSection, FloatChannels[3], MetaData[3].Name, Time, ViewRange);
-				BackwardIters.Emplace(TransformSection, FloatChannels[3], MetaData[3].Name, Time, ViewRange);
+				ForwardIters.Emplace(TransformSection, ChannelHandles[3].Get(), TEXT("Rotation.X"), Time, ViewRange);
+				BackwardIters.Emplace(TransformSection, ChannelHandles[3].Get(), TEXT("Rotation.X"), Time, ViewRange);
 			}
-			if (EnumHasAnyFlags(Mask, EMovieSceneTransformChannel::RotationY))
+			if (ChannelHandles[4].Get())
 			{
-				ForwardIters.Emplace(TransformSection, FloatChannels[4], MetaData[4].Name, Time, ViewRange);
-				BackwardIters.Emplace(TransformSection, FloatChannels[4], MetaData[4].Name, Time, ViewRange);
+				ForwardIters.Emplace(TransformSection, ChannelHandles[4].Get(), TEXT("Rotation.Y"), Time, ViewRange);
+				BackwardIters.Emplace(TransformSection, ChannelHandles[4].Get(), TEXT("Rotation.Y"), Time, ViewRange);
 			}
-			if (EnumHasAnyFlags(Mask, EMovieSceneTransformChannel::RotationZ))
+			if (ChannelHandles[5].Get())
 			{
-				ForwardIters.Emplace(TransformSection, FloatChannels[5], MetaData[5].Name, Time, ViewRange);
-				BackwardIters.Emplace(TransformSection, FloatChannels[5], MetaData[5].Name, Time, ViewRange);
+				ForwardIters.Emplace(TransformSection, ChannelHandles[5].Get(), TEXT("Rotation.Z"), Time, ViewRange);
+				BackwardIters.Emplace(TransformSection, ChannelHandles[5].Get(), TEXT("Rotation.Z"), Time, ViewRange);
 			}
 		}
 	}
@@ -289,4 +327,10 @@ TArray<FTrajectoryKey> UMovieScene3DTransformTrack::GetTrajectoryData(FFrameNumb
 	return Result;
 }
 
+FSlateColor UMovieScene3DTransformTrack::GetLabelColor(const FMovieSceneLabelParams& LabelParams) const
+{
+	return LabelParams.bIsDimmed ? FSlateColor::UseSubduedForeground() : FSlateColor::UseForeground();
+}
+
 #endif	// WITH_EDITOR
+

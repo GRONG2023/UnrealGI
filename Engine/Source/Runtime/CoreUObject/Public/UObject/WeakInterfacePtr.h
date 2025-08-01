@@ -8,19 +8,22 @@
 #include "Templates/Casts.h"
 #include "ScriptInterface.h"
 
+#include <type_traits>
+
 /**
  * An alternative to TWeakObjectPtr that makes it easier to work through an interface.
  */
 template<class T>
 struct TWeakInterfacePtr
 {
-	/**
-	 * Construct a new default weak pointer, pointing to null object.
-	 */
-	TWeakInterfacePtr() 
-		: InterfaceInstance(nullptr) 
-	{
-	}
+	using ElementType = T;
+	
+	FORCEINLINE TWeakInterfacePtr() = default;
+	FORCEINLINE TWeakInterfacePtr(const TWeakInterfacePtr& Other) = default;
+	FORCEINLINE TWeakInterfacePtr(TWeakInterfacePtr&& Other) = default;
+	FORCEINLINE ~TWeakInterfacePtr() = default;
+	FORCEINLINE TWeakInterfacePtr& operator=(const TWeakInterfacePtr& Other) = default;
+	FORCEINLINE TWeakInterfacePtr& operator=(TWeakInterfacePtr&& Other) = default;
 
 	/**
 	 * Construct from an object pointer
@@ -28,11 +31,11 @@ struct TWeakInterfacePtr
 	 */
 	template<
 		typename U,
-		decltype(ImplicitConv<typename TCopyQualifiersFromTo<U, UObject>::Type*>((U*)nullptr))* = nullptr
+		decltype(ImplicitConv<typename TCopyQualifiersFromTo<U, UObject>::Type*>(std::declval<U>()))* = nullptr
 	>
-	TWeakInterfacePtr(U* Object)
+	TWeakInterfacePtr(U&& Object)
 	{
-		InterfaceInstance = Cast<T>(Object);
+		InterfaceInstance = Cast<T>(ImplicitConv<typename TCopyQualifiersFromTo<U, UObject>::Type*>(Object));
 		if (InterfaceInstance != nullptr)
 		{
 			ObjectInstance = Object;
@@ -44,23 +47,11 @@ struct TWeakInterfacePtr
 	 * @param Interface The interface pointer to create a weak pointer to. There must be a UObject behind the interface.
 	 */
 	TWeakInterfacePtr(T* Interface)
-		: InterfaceInstance(nullptr)
 	{
 		ObjectInstance = Cast<UObject>(Interface);
 		if (ObjectInstance != nullptr)
 		{
 			InterfaceInstance = Interface;
-		}
-	}
-
-	UE_DEPRECATED(4.27, "Please use the constructor that takes a pointer")
-	TWeakInterfacePtr(T& Interface)
-		: InterfaceInstance(nullptr)
-	{
-		ObjectInstance = Cast<UObject>(&Interface);
-		if (ObjectInstance != nullptr)
-		{
-			InterfaceInstance = &Interface;
 		}
 	}
 
@@ -141,16 +132,6 @@ struct TWeakInterfacePtr
 	}
 
 	/**
-	 * Assign from another weak pointer.
-	 */
-	FORCEINLINE TWeakInterfacePtr<T>& operator=(const TWeakInterfacePtr<T>& Other)
-	{
-		ObjectInstance = Other.ObjectInstance;
-		InterfaceInstance = Other.InterfaceInstance;
-		return *this;
-	}
-
-	/**
 	 * Assign from a script interface.
 	 */
 	FORCEINLINE TWeakInterfacePtr<T>& operator=(const TScriptInterface<T>& Other)
@@ -170,12 +151,6 @@ struct TWeakInterfacePtr
 		return InterfaceInstance != Other.InterfaceInstance;
 	}
 
-	UE_DEPRECATED(4.27, "Implicit equality with a UObject pointer has been deprecated - use GetObject() and test equality on its return value")
-	FORCEINLINE bool operator==(const UObject* Other) const
-	{
-		return Other == ObjectInstance.Get();
-	}
-
 	FORCEINLINE TScriptInterface<T> ToScriptInterface() const
 	{
 		UObject* Object = ObjectInstance.Get();
@@ -187,7 +162,12 @@ struct TWeakInterfacePtr
 		return TScriptInterface<T>();
 	}
 
+	FORCEINLINE TWeakObjectPtr<UObject> GetWeakObjectPtr() const
+	{
+		return ObjectInstance;
+	}
+
 private:
 	TWeakObjectPtr<UObject> ObjectInstance;
-	T* InterfaceInstance;
+	T* InterfaceInstance = nullptr;
 };

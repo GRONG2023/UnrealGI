@@ -10,6 +10,8 @@
 #include "Engine/NetworkSettings.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 
+#include "Settings/LevelEditorPlaySettings.h"
+
 namespace NetworkEmulationSettingsHelper
 {
 	const FString& GetCustomProfileName()
@@ -71,7 +73,8 @@ void FLevelEditorPlayNetworkEmulationSettingsDetail::CustomizeHeader(TSharedRef<
 	.ValueContent()
 	[
 		IsNetworkEmulationEnabledHandle->CreatePropertyValueWidget()
-	];
+	]
+	.IsEnabled(TAttribute<bool>(this, &FLevelEditorPlayNetworkEmulationSettingsDetail::IsNetworkEmulationAvailable));
 }
 
 
@@ -167,6 +170,7 @@ TSharedRef<SWidget> FLevelEditorPlayNetworkEmulationSettingsDetail::OnGetProfile
 
 void FLevelEditorPlayNetworkEmulationSettingsDetail::OnEmulationProfileChanged(int32 Index) const
 {
+#if DO_ENABLE_NET_TEST
 	FString Selection;
 	if (const UNetworkSettings* NetworkSettings = GetDefault<UNetworkSettings>())
 	{
@@ -199,6 +203,7 @@ void FLevelEditorPlayNetworkEmulationSettingsDetail::OnEmulationProfileChanged(i
 	}
 
 	CurrentProfileHandle->SetValue(Selection);
+#endif
 }
 
 FText FLevelEditorPlayNetworkEmulationSettingsDetail::GetSelectedNetworkEmulationProfile() const
@@ -207,6 +212,19 @@ FText FLevelEditorPlayNetworkEmulationSettingsDetail::GetSelectedNetworkEmulatio
 	CurrentProfileHandle->GetValue(SelectedProfile);
 
 	return FText::FromString(SelectedProfile);
+}
+
+bool FLevelEditorPlayNetworkEmulationSettingsDetail::IsNetworkEmulationAvailable() const
+{
+	const ULevelEditorPlaySettings* PlayerLevelEditorSettings = GetDefault<ULevelEditorPlaySettings>();
+
+	int32 NumberOfClients;
+	PlayerLevelEditorSettings->GetPlayNumberOfClients(NumberOfClients);
+
+	EPlayNetMode NetMode;
+	PlayerLevelEditorSettings->GetPlayNetMode(NetMode);
+
+	return (NumberOfClients > 1) || NetMode != PIE_Standalone || PlayerLevelEditorSettings->bLaunchSeparateServer;
 }
 
 //-------------------------------------------------------------------------------------------------

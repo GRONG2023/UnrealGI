@@ -2,70 +2,7 @@
 
 #pragma once
 
-
-#ifndef DEPRECATED
-	/**
-	 * Macro for marking up deprecated code, functions and types.
-	 *
-	 * Features that are marked as deprecated are scheduled to be removed from the code base
-	 * in a future release. If you are using a deprecated feature in your code, you should
-	 * replace it before upgrading to the next release. See the Upgrade Notes in the release
-	 * notes for the release in which the feature was marked deprecated.
-	 *
-	 * Sample usage (note the slightly different syntax for classes and structures):
-	 *
-	 *		DEPRECATED(4.xx, "Message")
-	 *		void Function();
-	 *
-	 *		struct DEPRECATED(4.xx, "Message") MODULE_API MyStruct
-	 *		{
-	 *			// StructImplementation
-	 *		};
-	 *		class DEPRECATED(4.xx, "Message") MODULE_API MyClass
-	 *		{
-	 *			// ClassImplementation
-	 *		};
-	 *
-	 *		Unfortunately, VC++ will complain about using member functions and fields from deprecated
-	 *		class/structs even for class/struct implementation e.g.:
-	 *		class DEPRECATED(4.xx, "") DeprecatedClass
-	 *		{
-	 *		public:
-	 *			DeprecatedClass() {}
-	 *
-	 *			float GetMyFloat()
-	 *			{
-	 *				return MyFloat; // This line will cause warning that deprecated field is used.
-	 *			}
-	 *		private:
-	 *			float MyFloat;
-	 *		};
-	 *
-	 *		To get rid of this warning, place all code not called in class implementation in non-deprecated
-	 *		base class and deprecate only derived one. This may force you to change some access specifiers
-	 *		from private to protected, e.g.:
-	 *
-	 *		class DeprecatedClass_Base_DEPRECATED
-	 *		{
-	 *		protected: // MyFloat is protected now, so DeprecatedClass has access to it.
-	 *			float MyFloat;
-	 *		};
-	 *
-	 *		class DEPRECATED(4.xx, "") DeprecatedClass : DeprecatedClass_Base_DEPRECATED
-	 *		{
-	 *		public:
-	 *			DeprecatedClass() {}
-	 *
-	 *			float GetMyFloat()
-	 *			{
-	 *				return MyFloat;
-	 *			}
-	 *		};
-	 * @param VERSION The release number in which the feature was marked deprecated.
-	 * @param MESSAGE A message text containing additional upgrade notes.
-	 */
-	#define DEPRECATED(VERSION, MESSAGE) DEPRECATED_MACRO(4.22, "The DEPRECATED macro has been deprecated in favor of UE_DEPRECATED().")
-#endif // DEPRECATED
+// HEADER_UNIT_SKIP - Cause cirular dependencies for header units
 
 #ifndef PRAGMA_DISABLE_DEPRECATION_WARNINGS
 	#define PRAGMA_DISABLE_DEPRECATION_WARNINGS
@@ -79,13 +16,30 @@
 	#define EMIT_CUSTOM_WARNING_AT_LINE(Line, Warning)
 #endif // EMIT_CUSTOM_WARNING_AT_LINE
 
+#ifndef EMIT_CUSTOM_ERROR_AT_LINE
+	#define EMIT_CUSTOM_ERROR_AT_LINE(Line, Error)
+#endif // EMIT_CUSTOM_ERROR_AT_LINE
+
 #ifndef EMIT_CUSTOM_WARNING
 	#define EMIT_CUSTOM_WARNING(Warning) \
 		EMIT_CUSTOM_WARNING_AT_LINE(__LINE__, Warning)
 #endif // EMIT_CUSTOM_WARNING
 
+#ifndef EMIT_CUSTOM_ERROR
+	#define EMIT_CUSTOM_ERROR(Error) \
+		EMIT_CUSTOM_ERROR_AT_LINE(__LINE__, Error)
+#endif // EMIT_CUSTOM_ERROR
+
+#ifndef UE_DEPRECATED_MACRO
+	#if UE_WARNINGS_AS_ERRORS
+		#define UE_DEPRECATED_MACRO(Version, Message) EMIT_CUSTOM_ERROR(Message " Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.")
+	#else
+		#define UE_DEPRECATED_MACRO(Version, Message) EMIT_CUSTOM_WARNING(Message " Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.")
+	#endif
+#endif
+
 #ifndef DEPRECATED_MACRO
-	#define DEPRECATED_MACRO(Version, Message) EMIT_CUSTOM_WARNING(Message " Please update your code to the new API before upgrading to the next release, otherwise your project will no longer compile.")
+	#define DEPRECATED_MACRO(Version, Message) UE_DEPRECATED_MACRO(5.1, "The DEPRECATED_MACRO macro has been deprecated in favor of UE_DEPRECATED_MACRO.") UE_DEPRECATED_MACRO(Version, Message)
 #endif
 
 #ifndef PRAGMA_DEFAULT_VISIBILITY_START
@@ -94,4 +48,21 @@
 
 #ifndef PRAGMA_DEFAULT_VISIBILITY_END
 	#define PRAGMA_DEFAULT_VISIBILITY_END
+#endif
+
+#ifndef PRAGMA_DISABLE_BUFFER_OVERRUN_WARNING
+	#define PRAGMA_DISABLE_BUFFER_OVERRUN_WARNING
+#endif
+
+#ifndef PRAGMA_ENABLE_BUFFER_OVERRUN_WARNING
+	#define PRAGMA_ENABLE_BUFFER_OVERRUN_WARNING
+#endif
+
+// Disable CA warnings around SDK includes - default to those disabled at the compiler level
+#ifndef THIRD_PARTY_INCLUDES_START
+	#define THIRD_PARTY_INCLUDES_START UE_COMPILER_THIRD_PARTY_INCLUDES_START
+#endif
+
+#ifndef THIRD_PARTY_INCLUDES_END
+	#define THIRD_PARTY_INCLUDES_END UE_COMPILER_THIRD_PARTY_INCLUDES_END
 #endif

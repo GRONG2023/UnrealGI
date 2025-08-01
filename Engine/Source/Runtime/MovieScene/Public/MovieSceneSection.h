@@ -2,38 +2,66 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "Containers/ContainersFwd.h"
-#include "Misc/FrameTime.h"
-#include "UObject/ObjectMacros.h"
-#include "MovieSceneFwd.h"
-#include "KeyParams.h"
-#include "MovieScene.h"
-#include "MovieSceneSignedObject.h"
+#include "Containers/Map.h"
+#include "CoreMinimal.h"
+#include "CoreTypes.h"
 #include "Evaluation/Blending/MovieSceneBlendType.h"
 #include "Evaluation/MovieSceneCompletionMode.h"
-#include "Generators/MovieSceneEasingFunction.h"
-#include "MovieSceneFrameMigration.h"
-#include "Misc/QualifiedFrameTime.h"
 #include "Evaluation/MovieSceneEvaluationCustomVersion.h"
-#include "EntitySystem/MovieSceneEntityBuilder.h"
+#include "EventHandlers/ISectionEventHandler.h"
+#include "EventHandlers/MovieSceneDataEventContainer.h"
+#include "HAL/PlatformCrt.h"
+#include "Math/Range.h"
+#include "Math/RangeBound.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/FrameNumber.h"
+#include "Misc/QualifiedFrameTime.h"
+#include "Misc/FrameRate.h"
+#include "Misc/FrameTime.h"
+#include "Misc/Optional.h"
+#include "Misc/Timecode.h"
+#include "MovieSceneFrameMigration.h"
+#include "MovieSceneSequenceID.h"
+#include "MovieSceneSignedObject.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ScriptInterface.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieSceneSection.generated.h"
 
-
+class FArchive;
 class FStructOnScope;
-
-struct FKeyHandle;
+class IMovieSceneEasingFunction;
+class IMovieScenePlayer;
+class UMovieSceneEntitySystemLinker;
+class UObject;
+namespace UE { namespace MovieScene { class ISectionEventHandler; } }
 struct FEasingComponentData;
+struct FFrame;
+struct FFrameRate;
+struct FGuid;
+struct FKeyHandle;
+struct FMovieSceneBlendTypeField;
 struct FMovieSceneChannelProxy;
 struct FMovieSceneEvalTemplatePtr;
+struct FMovieSceneSequenceHierarchy;
+struct FMovieSceneSequenceID;
+struct FPropertyChangedEvent;
+struct FQualifiedFrameTime;
 
-class UMovieSceneEntitySystemLinker;
+enum class ECookOptimizationFlags;
 
 namespace UE
 {
 namespace MovieScene
 {
 	struct FEntityImportParams;
+	struct FFixedObjectBindingID;
 	struct FImportedEntity;
 }
 }
@@ -144,6 +172,63 @@ public:
 #endif
 };
 
+USTRUCT(BlueprintType)
+struct FMovieSceneTimecodeSource
+{
+	GENERATED_BODY()
+
+	FMovieSceneTimecodeSource(FTimecode InTimecode)
+		: Timecode(InTimecode)
+	{}
+
+	FMovieSceneTimecodeSource()
+		: Timecode(FTimecode())
+	{}
+
+	FORCEINLINE bool operator==(const FMovieSceneTimecodeSource& Other) const
+	{
+		return Timecode == Other.Timecode;
+	}
+	FORCEINLINE bool operator!=(const FMovieSceneTimecodeSource& Other) const
+	{
+		return Timecode != Other.Timecode;
+	}
+
+public:
+
+	/** The global timecode at which this target is based (ie. the timecode at the beginning of the movie scene section when it was recorded) */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timecode")
+	FTimecode Timecode;
+};
+/**
+* Defines for common transform 'type' sections. Moved here to avoid extra module dependencies
+*/
+enum class EMovieSceneTransformChannel : uint32
+{
+	None = 0x000,
+
+	TranslationX = 0x001,
+	TranslationY = 0x002,
+	TranslationZ = 0x004,
+	Translation = TranslationX | TranslationY | TranslationZ,
+
+	RotationX = 0x008,
+	RotationY = 0x010,
+	RotationZ = 0x020,
+	Rotation = RotationX | RotationY | RotationZ,
+
+	ScaleX = 0x040,
+	ScaleY = 0x080,
+	ScaleZ = 0x100,
+	Scale = ScaleX | ScaleY | ScaleZ,
+
+	AllTransform = Translation | Rotation | Scale,
+
+	Weight = 0x200,
+
+	All = Translation | Rotation | Scale | Weight,
+};
+
 /**
  * Base class for movie scene sections
  */
@@ -153,10 +238,14 @@ class UMovieSceneSection
 {
 	GENERATED_UCLASS_BODY()
 
+	~UMovieSceneSection() {};
+
 public:
 
 	UPROPERTY(EditAnywhere, Category="Section", meta=(ShowOnlyInnerProperties))
 	FMovieSceneSectionEvalOptions EvalOptions;
+
+	UE::MovieScene::TDataEventContainer<UE::MovieScene::ISectionEventHandler> EventHandlers;
 
 public:
 
@@ -217,7 +306,7 @@ public:
 	 * 
 	 * @param NewRange	The new range of times
 	 */
-	MOVIESCENE_API virtual void SetRange(const TRange<FFrameNumber>& NewRange)
+	virtual void SetRange(const TRange<FFrameNumber>& NewRange)
 	{
 		
 		// Skip TryModify for objects that still need initialization (i.e. we're in the object's constructor), because modifying objects in their constructor can lead to non-deterministic cook issues.
@@ -338,7 +427,7 @@ public:
 	 * Sets this section's blend type
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Sequencer|Section")
-	MOVIESCENE_API virtual void SetBlendType(EMovieSceneBlendType InBlendType)
+	virtual void SetBlendType(EMovieSceneBlendType InBlendType)
 	{
 		if (GetSupportedBlendTypes().Contains(InBlendType))
 		{
@@ -356,7 +445,7 @@ public:
 	 *
 	 * @param DeltaTime	The distance in time to move the curve
 	 */
-	MOVIESCENE_API void MoveSection(FFrameNumber DeltaTime);
+	MOVIESCENE_API virtual void MoveSection(FFrameNumber DeltaTime);
 
 	/**
 	 * Return the range within which this section is effective. Used for automatic calculation of sequence bounds.
@@ -374,9 +463,6 @@ public:
 	 */
 	MOVIESCENE_API virtual UMovieSceneSection* SplitSection(FQualifiedFrameTime SplitTime, bool bDeleteKeys);
 
-	UE_DEPRECATED(4.23, "Please use SplitSection(SplitTime, bDeleteKeys) instead.")
-	virtual UMovieSceneSection* SplitSection(FQualifiedFrameTime SplitTime) { return SplitSection(SplitTime, false); }
-
 	/**
 	 * Trim a section at the trim time
 	 *
@@ -385,9 +471,6 @@ public:
 	 * @param bDeleteKeys Delete keys outside the split ranges
 	 */
 	MOVIESCENE_API virtual void TrimSection(FQualifiedFrameTime TrimTime, bool bTrimLeft, bool bDeleteKeys);
-
-	UE_DEPRECATED(4.23, "Please use TrimSection(SplitTime, bTrimLeft, bDeleteKeys) instead.")
-	virtual void TrimSection(FQualifiedFrameTime SplitTime, bool bTrimLeft) { TrimSection(SplitTime, bTrimLeft, false); }
 
 	/**
 	 * Get the data structure representing the specified keys.
@@ -421,7 +504,7 @@ public:
 
 	/** Sets this section's new row index */
 	UFUNCTION(BlueprintCallable, Category = "Sequencer|Section")
-	void SetRowIndex(int32 NewRowIndex) {RowIndex = NewRowIndex;}
+	MOVIESCENE_API void SetRowIndex(int32 NewRowIndex);
 
 	/** Gets the row index for this section */
 	UFUNCTION(BlueprintPure, Category = "Sequencer|Section")
@@ -496,22 +579,38 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Sequencer|Section")
 	int32 GetPostRollFrames() const { return PostRollFrames.Value; }
 
+	/** Set this section's color tint. */
+	UFUNCTION(BlueprintCallable, Category = "Sequencer|Section")
+	MOVIESCENE_API void SetColorTint(const FColor& InColorTint);
+	/** Get this section's color tint. */
+	UFUNCTION(BlueprintPure, Category = "Sequencer|Section")
+	MOVIESCENE_API FColor GetColorTint() const;
+
 	/** The optional offset time of this section */
 	virtual TOptional<FFrameTime> GetOffsetTime() const { return TOptional<FFrameTime>(); }
+
+	/* Migrate the frame times of the movie scene section from the source frame rate to the destination frame rate */
+	virtual void MigrateFrameTimes(FFrameRate SourceRate, FFrameRate DestinationRate) {}
 
 	/**
 	 * When guid bindings are updated to allow this section to fix-up any internal bindings
 	 *
 	 */
-	virtual void OnBindingsUpdated(const TMap<FGuid, FGuid>& OldGuidToNewGuidMap) { }
+	virtual void OnBindingIDsUpdated(const TMap<UE::MovieScene::FFixedObjectBindingID, UE::MovieScene::FFixedObjectBindingID>& OldFixedToNewFixedMap, FMovieSceneSequenceID LocalSequenceID, const FMovieSceneSequenceHierarchy* Hierarchy, IMovieScenePlayer& Player) {}
 
 	/** Get the referenced bindings for this section */
-	MOVIESCENE_API virtual void GetReferencedBindings(TArray<FGuid>& OutBindings) {}
+	virtual void GetReferencedBindings(TArray<FGuid>& OutBindings) {}
 
 	/**
 	 * Gets a list of all overlapping sections
 	 */
 	MOVIESCENE_API void GetOverlappingSections(TArray<UMovieSceneSection*>& OutSections, bool bSameRow, bool bIncludeThis);
+
+	/* Returns whether this section can have an open lower bound. This will generally be false if sections of this type cannot be blended and there is another section on the same row before this one.*/
+	MOVIESCENE_API bool CanHaveOpenLowerBound() const;
+
+	/* Returns whether this section can have an open upper bound. This will generally be false if sections of this type cannot be blended and there is another section on the same row after this one.*/
+	MOVIESCENE_API bool CanHaveOpenUpperBound() const;
 
 	/**
 	 * Evaluate this sections's easing functions based on the specified time
@@ -536,27 +635,57 @@ public:
 	MOVIESCENE_API FMovieSceneChannelProxy& GetChannelProxy() const;
 
 	/** Does this movie section support infinite ranges for evaluation */
-	MOVIESCENE_API bool GetSupportsInfiniteRange() const { return bSupportsInfiniteRange; }
+	bool GetSupportsInfiniteRange() const { return bSupportsInfiniteRange; }
 
 	/**
 	*  Whether or not we draw a curve for a particular channel owned by this section.
 	*  Defaults to true.
 	*/
-	MOVIESCENE_API virtual bool ShowCurveForChannel(const void *Channel) const  { return true; }
+	virtual bool ShowCurveForChannel(const void *Channel) const  { return true; }
 
 	/** 
 	*  Get The Total Weight Value for this Section
 	*  For Most Sections it's just the Ease Value, but for some Sections also have an extra Weight Curve
 	*/
-	MOVIESCENE_API virtual float GetTotalWeightValue(FFrameTime InTime) const { return EvaluateEasing(InTime); }
+	virtual float GetTotalWeightValue(FFrameTime InTime) const { return EvaluateEasing(InTime); }
+
+
+	/**
+	*  Get the implicit owner of this section, usually this will be the section's outer possessable or spawnable,
+	*  but some sections, like Control Rig, this will be the Control Rig object instead.
+	*
+	**/
+	MOVIESCENE_API virtual UObject* GetImplicitObjectOwner();
+
 
 #if WITH_EDITOR
 	MOVIESCENE_API virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+	MOVIESCENE_API virtual void PostPaste();
+#endif
+
+#if WITH_EDITOR
+
+	/**
+	 * Called when this section's movie scene is being cooked to determine if/how this section should be cooked.
+	 * @return ECookOptimizationFlags detailing how to optimize this section
+	 */
+	MOVIESCENE_API virtual ECookOptimizationFlags GetCookOptimizationFlags() const;
+
+	/**
+	 * Called when this section should be removed for cooking
+	 */
+	MOVIESCENE_API virtual void RemoveForCook();
+
 #endif
 
 public:
 
 	MOVIESCENE_API void BuildDefaultComponents(UMovieSceneEntitySystemLinker* EntityLinker, const UE::MovieScene::FEntityImportParams& Params, UE::MovieScene::FImportedEntity* OutLedgerEntry);
+
+#if WITH_EDITORONLY_DATA
+	MOVIESCENE_API static void DeclareConstructClasses(TArray<FTopLevelAssetPath>& OutConstructClasses, const UClass* SpecificSubclass);
+#endif
 
 protected:
 
@@ -580,6 +709,7 @@ private:
 	 */
 	MOVIESCENE_API virtual EMovieSceneChannelProxyType CacheChannelProxy();
 
+	void MoveSectionImpl(FFrameNumber DeltaTime);
 
 public:
 
@@ -622,6 +752,12 @@ private:
 	UPROPERTY(EditAnywhere, Category="Section")
 	uint32 bIsLocked : 1;
 
+#if WITH_EDITORONLY_DATA
+	/** The color tint for this section */
+	UPROPERTY(EditAnywhere, Category = "Section")
+	FColor ColorTint;
+#endif
+
 protected:
 
 	/** The start time of the section */
@@ -662,3 +798,19 @@ protected:
 	/** Defines whether the channel proxy can change over the lifetime of the section */
 	mutable EMovieSceneChannelProxyType ChannelProxyType;
 };
+
+template<typename SectionParams>
+inline FFrameNumber GetFirstLoopStartOffsetAtTrimTime(FQualifiedFrameTime TrimTime, const SectionParams& Params, FFrameNumber StartFrame, FFrameRate FrameRate)
+{
+	const float AnimPlayRate = FMath::IsNearlyZero(Params.PlayRate) ? 1.0f : Params.PlayRate;
+	const float AnimPosition = static_cast<float>((TrimTime.Time - StartFrame) / TrimTime.Rate * AnimPlayRate);
+	const float SeqLength = static_cast<float>(Params.GetSequenceLength() - FrameRate.AsSeconds(Params.StartFrameOffset + Params.EndFrameOffset) / AnimPlayRate);
+
+	FFrameNumber NewOffset = FrameRate.AsFrameNumber(FMath::Fmod(AnimPosition, SeqLength));
+	NewOffset += Params.FirstLoopStartFrameOffset;
+
+	const FFrameNumber SeqLengthInFrames = FrameRate.AsFrameNumber(SeqLength);
+	NewOffset = NewOffset % SeqLengthInFrames;
+
+	return NewOffset;
+}

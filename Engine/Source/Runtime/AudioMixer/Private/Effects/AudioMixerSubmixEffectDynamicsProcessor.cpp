@@ -2,10 +2,14 @@
 
 #include "SubmixEffects/AudioMixerSubmixEffectDynamicsProcessor.h"
 
+#include "AudioBusSubsystem.h"
 #include "AudioDeviceManager.h"
 #include "AudioMixerDevice.h"
 #include "AudioMixerSubmix.h"
 #include "ProfilingDebugging/CsvProfiler.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AudioMixerSubmixEffectDynamicsProcessor)
 
 // Link to "Audio" profiling category
 CSV_DECLARE_CATEGORY_MODULE_EXTERN(AUDIOMIXERCORE_API, Audio);
@@ -43,12 +47,6 @@ void FSubmixEffectDynamicsProcessor::Init(const FSoundEffectSubmixInitData& Init
 	static const int32 ProcessorScratchNumChannels = 8;
 
 	DynamicsProcessor.Init(InitData.SampleRate, ProcessorScratchNumChannels);
-
-	AudioKeyFrame.Reset();
-	AudioKeyFrame.AddZeroed(ProcessorScratchNumChannels);
-
-	AudioInputFrame.Reset();
-	AudioInputFrame.AddZeroed(ProcessorScratchNumChannels);
 
 	DeviceId = InitData.DeviceID;
 
@@ -111,6 +109,10 @@ void FSubmixEffectDynamicsProcessor::OnPresetChanged()
 
 	case ESubmixEffectDynamicsProcessorType::Gate:
 		DynamicsProcessor.SetProcessingMode(Audio::EDynamicsProcessingMode::Gate);
+		break;
+
+	case ESubmixEffectDynamicsProcessorType::UpwardsCompressor:
+		DynamicsProcessor.SetProcessingMode(Audio::EDynamicsProcessingMode::UpwardsCompressor);
 		break;
 	}
 
@@ -189,11 +191,17 @@ bool FSubmixEffectDynamicsProcessor::UpdateKeySourcePatch()
 			// should never be hit during Teardown.
 			if (Audio::FMixerDevice* MixerDevice = GetMixerDevice())
 			{
-				KeySource.Patch = MixerDevice->AddPatchForAudioBus(KeySource.GetObjectId(), 1.0f /* PatchGain */);
-				if (KeySource.Patch.IsValid())
+				const uint32 ObjectId = KeySource.GetObjectId();
+				if (ObjectId != INDEX_NONE)
 				{
-					DynamicsProcessor.SetKeyNumChannels(KeySource.GetNumChannels());
-					return true;
+					UAudioBusSubsystem* AudioBusSubsystem = MixerDevice->GetSubsystem<UAudioBusSubsystem>();
+					if (AudioBusSubsystem)
+					{
+						const int32 NumChannels = KeySource.GetNumChannels();
+						AudioBusSubsystem->StartAudioBus(Audio::FAudioBusKey(ObjectId), NumChannels, /*bInIsAutomatic=*/false);
+						KeySource.Patch = AudioBusSubsystem->AddPatchOutputForAudioBus(Audio::FAudioBusKey(ObjectId), MixerDevice->GetNumOutputFrames(), NumChannels);
+						DynamicsProcessor.SetKeyNumChannels(NumChannels);
+					}
 				}
 			}
 		}
@@ -207,18 +215,22 @@ bool FSubmixEffectDynamicsProcessor::UpdateKeySourcePatch()
 			// should never be hit during Teardown.
 			if (Audio::FMixerDevice* MixerDevice = GetMixerDevice())
 			{
-				KeySource.Patch = MixerDevice->AddPatchForSubmix(KeySource.GetObjectId(), 1.0f /* PatchGain */);
-				if (KeySource.Patch.IsValid())
+				const uint32 ObjectId = KeySource.GetObjectId();
+				if (ObjectId != INDEX_NONE)
 				{
-					Audio::FMixerSubmixPtr SubmixPtr = MixerDevice->FindSubmixInstanceByObjectId(KeySource.GetObjectId());
-					if (SubmixPtr.IsValid())
+					KeySource.Patch = MixerDevice->AddPatchForSubmix(ObjectId, 1.0f /* PatchGain */);
+					if (KeySource.Patch.IsValid())
 					{
-						const int32 SubmixNumChannels = SubmixPtr->GetNumOutputChannels();
-						KeySource.SetNumChannels(SubmixNumChannels);
-						DynamicsProcessor.SetKeyNumChannels(SubmixNumChannels);
-						return true;
+						Audio::FMixerSubmixPtr SubmixPtr = MixerDevice->FindSubmixInstanceByObjectId(KeySource.GetObjectId());
+						if (SubmixPtr.IsValid())
+						{
+							const int32 SubmixNumChannels = SubmixPtr->GetNumOutputChannels();
+							KeySource.SetNumChannels(SubmixNumChannels);
+							DynamicsProcessor.SetKeyNumChannels(SubmixNumChannels);
+							return true;
+						}
 					}
-				}
+				}	
 			}
 		}
 		break;
@@ -237,14 +249,14 @@ void FSubmixEffectDynamicsProcessor::OnProcessAudio(const FSoundEffectSubmixInpu
 {
 	CSV_SCOPED_TIMING_STAT(Audio, SubmixDynamics);
 	SCOPE_CYCLE_COUNTER(STAT_AudioMixerSubmixDynamics);
+	TRACE_CPUPROFILER_EVENT_SCOPE(FSubmixEffectDynamicsProcessor::OnProcessAudio);
 
 	ensure(InData.NumChannels == OutData.NumChannels);
 
-	const Audio::AlignedFloatBuffer& InBuffer = *InData.AudioBuffer;
-	Audio::AlignedFloatBuffer& OutBuffer = *OutData.AudioBuffer;
+	const Audio::FAlignedFloatBuffer& InBuffer = *InData.AudioBuffer;
+	Audio::FAlignedFloatBuffer& OutBuffer = *OutData.AudioBuffer;
 
-	const bool bBypassDueToInvalidChannelCount = !ensure(InData.NumChannels <= AudioInputFrame.Num());
-	if (bBypassDueToInvalidChannelCount || bBypassSubmixDynamicsProcessor || bBypass)
+	if (bBypassSubmixDynamicsProcessor || bBypass)
 	{
 		FMemory::Memcpy(OutBuffer.GetData(), InBuffer.GetData(), sizeof(float) * InBuffer.Num());
 		return;
@@ -285,27 +297,12 @@ void FSubmixEffectDynamicsProcessor::OnProcessAudio(const FSoundEffectSubmixInpu
 	// No key assigned (Uses input buffer as key)
 	if (KeySource.GetType() == ESubmixEffectDynamicsKeySource::Default)
 	{
-		for (int32 Frame = 0; Frame < InData.NumFrames; ++Frame)
-		{
-			const int32 SampleIndex = Frame * InData.NumChannels;
-			DynamicsProcessor.ProcessAudio(&InBuffer[SampleIndex], InData.NumChannels, &OutBuffer[SampleIndex]);
-		}
+		DynamicsProcessor.ProcessAudio(InBuffer.GetData(), InData.NumChannels * InData.NumFrames, OutBuffer.GetData());
 	}
 	// Key assigned
 	else
 	{
-		for (int32 Frame = 0; Frame < InData.NumFrames; ++Frame)
-		{
-			// Copy the data to the input frame
-			const int32 SampleIndexOfInputFrame = Frame * InData.NumChannels;
-			FMemory::Memcpy(AudioInputFrame.GetData(), &InBuffer[SampleIndexOfInputFrame], sizeof(float) * InData.NumChannels);
-
-			// Copy the data to the key frame
-			const int32 SampleIndexOfKeyFrame = Frame * NumKeyChannels;
-			FMemory::Memcpy(AudioKeyFrame.GetData(), &AudioExternal[SampleIndexOfKeyFrame], sizeof(float) * NumKeyChannels);
-
-			DynamicsProcessor.ProcessAudio(AudioInputFrame.GetData(), InData.NumChannels, &OutBuffer[SampleIndexOfInputFrame], AudioKeyFrame.GetData());
-		}
+		DynamicsProcessor.ProcessAudio(InBuffer.GetData(), InData.NumChannels * InData.NumFrames, OutBuffer.GetData(), AudioExternal.GetData());
 	}
 }
 
@@ -491,3 +488,4 @@ void USubmixEffectDynamicsProcessorPreset::SetSettings(const FSubmixEffectDynami
 		Instance.UpdateKeyFromSettings(InSettings);
 	});
 }
+

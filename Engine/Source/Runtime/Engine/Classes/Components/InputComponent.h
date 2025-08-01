@@ -48,7 +48,7 @@ struct TInputUnifiedDelegate
 
 	/** Binds a native delegate and unbinds any bound dynamic delegate */
 	template< class UserClass >
-	inline void BindDelegate(UserClass* Object, typename DelegateType::template TUObjectMethodDelegate< UserClass >::FMethodPtr Func)
+	inline void BindDelegate(UserClass* Object, typename DelegateType::template TMethodPtr< UserClass > Func)
 	{
 		FuncDynDelegate.Reset();;
 		FuncDelegate = MakeShared<DelegateType>(DelegateType::CreateUObject(Object, Func));
@@ -207,7 +207,7 @@ struct FInputActionUnifiedDelegate
 
 	/** Binds a native delegate and unbinds any bound dynamic delegate */
 	template< class UserClass >
-	inline void BindDelegate(UserClass* Object, typename FInputActionHandlerSignature::template TUObjectMethodDelegate< UserClass >::FMethodPtr Func)
+	inline void BindDelegate(UserClass* Object, typename FInputActionHandlerSignature::template TMethodPtr< UserClass > Func)
 	{
 		Unbind();
 		BoundDelegateType = EBoundDelegate::Delegate;
@@ -215,7 +215,7 @@ struct FInputActionUnifiedDelegate
 	}
 
 	template< class UserClass >
-	inline void BindDelegate(UserClass* Object, typename FInputActionHandlerWithKeySignature::template TUObjectMethodDelegate< UserClass >::FMethodPtr Func)
+	inline void BindDelegate(UserClass* Object, typename FInputActionHandlerWithKeySignature::template TMethodPtr< UserClass > Func)
 	{
 		Unbind();
 		BoundDelegateType = EBoundDelegate::DelegateWithKey;
@@ -223,7 +223,7 @@ struct FInputActionUnifiedDelegate
 	}
 
 	template< class DelegateType, class UserClass, typename... VarTypes >
-	inline void BindDelegate(UserClass* Object, typename DelegateType::template TUObjectMethodDelegate< UserClass >::FMethodPtr Func, VarTypes... Vars)
+	inline void BindDelegate(UserClass* Object, typename DelegateType::template TMethodPtr< UserClass > Func, VarTypes... Vars)
 	{
 		Unbind();
 		BoundDelegateType = EBoundDelegate::Delegate;
@@ -678,7 +678,7 @@ struct FInputGestureBinding : public FInputBinding
 UENUM()
 namespace EControllerAnalogStick
 {
-	enum Type
+	enum Type : int
 	{
 		CAS_LeftStick,
 		CAS_RightStick,
@@ -696,7 +696,7 @@ struct FCachedKeyToActionInfo
 
 	/** Which PlayerInput object this has been built for */
 	UPROPERTY()
-	UPlayerInput* PlayerInput;
+	TWeakObjectPtr<UPlayerInput> PlayerInput;
 
 	/** What index of the player input's key mappings was the map built for. */
 	uint32 KeyMapBuiltForIndex;
@@ -723,8 +723,8 @@ struct FCachedKeyToActionInfo
  *
  * @see https://docs.unrealengine.com/latest/INT/Gameplay/Input/index.html
  */
-UCLASS(transient, config=Input, hidecategories=(Activation, "Components|Activation"))
-class ENGINE_API UInputComponent
+UCLASS(NotBlueprintable, transient, config=Input, hidecategories=(Activation, "Components|Activation"), MinimalAPI)
+class UInputComponent
 	: public UActorComponent
 {
 	GENERATED_UCLASS_BODY()
@@ -754,6 +754,9 @@ private:
 	UPROPERTY(Transient, DuplicateTransient)
 	TArray<FCachedKeyToActionInfo> CachedKeyToActionInfo;
 
+	UFUNCTION()
+	ENGINE_API void OnInputOwnerEndPlayed(AActor* InOwner, EEndPlayReason::Type EndPlayReason);
+
 public:
 	/** The priority of this input component when pushed in to the stack. */
 	int32 Priority;
@@ -761,7 +764,10 @@ public:
 	/** Whether any components lower on the input stack should be allowed to receive input. */
 	uint8 bBlockInput:1;
 
-	void ConditionalBuildKeyMap(UPlayerInput* PlayerInput);
+	/** Clears any inut callback delegates from the given UObject */
+	ENGINE_API virtual void ClearBindingsForObject(UObject* InOwner);
+	
+	ENGINE_API void ConditionalBuildKeyMap(UPlayerInput* PlayerInput);
 
 	/**
 	 * Gets the current value of the axis with the specified name.
@@ -770,7 +776,7 @@ public:
 	 * @return Axis value.
 	 * @see GetAxisKeyValue, GetVectorAxisValue
 	 */
-	float GetAxisValue( const FName AxisName ) const;
+	ENGINE_API float GetAxisValue( const FName AxisName ) const;
 
 	/**
 	 * Gets the current value of the axis with the specified key.
@@ -779,7 +785,7 @@ public:
 	 * @return Axis value.
 	 * @see GetAxisKeyValue, GetVectorAxisValue
 	 */
-	float GetAxisKeyValue( const FKey AxisKey ) const;
+	ENGINE_API float GetAxisKeyValue( const FKey AxisKey ) const;
 
 	/**
 	 * Gets the current vector value of the axis with the specified key.
@@ -788,14 +794,14 @@ public:
 	 * @return Axis value.
 	 * @see GetAxisValue, GetAxisKeyValue
 	 */
-	FVector GetVectorAxisValue( const FKey AxisKey ) const;
+	ENGINE_API FVector GetVectorAxisValue( const FKey AxisKey ) const;
 
 	/**
 	 * Checks whether this component has any input bindings.
 	 *
 	 * @return true if any bindings are set, false otherwise.
 	 */
-	bool HasBindings() const;
+	ENGINE_API bool HasBindings() const;
 
 
 	/**
@@ -805,14 +811,14 @@ public:
 	 * @return The last binding in the list.
 	 * @see ClearActionBindings, GetActionBinding, GetNumActionBindings, RemoveActionBinding
 	 */
-	FInputActionBinding& AddActionBinding( FInputActionBinding Binding );
+	ENGINE_API FInputActionBinding& AddActionBinding( FInputActionBinding Binding );
 
 	/**
 	 * Removes all action bindings.
 	 *
 	 * @see AddActionBinding, GetActionBinding, GetNumActionBindings, RemoveActionBinding
 	 */
-	void ClearActionBindings();
+	ENGINE_API virtual void ClearActionBindings();
 
 	/**
 	 * Gets the action binding with the specified index.
@@ -836,8 +842,8 @@ public:
 	 * @param BindingIndex The index of the binding to remove.
 	 * @see AddActionBinding, ClearActionBindings, GetActionBinding, GetNumActionBindings
 	 */
-	void RemoveActionBinding( const int32 BindingIndex );
-	void RemoveActionBinding(FName ActionName, EInputEvent KeyEvent);
+	ENGINE_API void RemoveActionBinding( const int32 BindingIndex );
+	ENGINE_API void RemoveActionBinding(FName ActionName, EInputEvent KeyEvent);
 
 	/**
 	 * Removes the action binding at the specified handle.
@@ -845,7 +851,7 @@ public:
 	 * @param Handle The handle of the binding to remove.
 	 * @see AddActionBinding, ClearActionBindings, GetActionBinding, GetNumActionBindings
 	 */
-	void RemoveActionBindingForHandle(const int32 Handle);
+	ENGINE_API void RemoveActionBindingForHandle(const int32 Handle);
 
 	/**
 	 * Removes the action binding (index need for multi-name fixups).
@@ -854,17 +860,17 @@ public:
 	 * @param BindingIndex The binding's index for actions with the same name to fixup their data.
 	 * @see AddActionBinding, ClearActionBindings, GetActionBinding, GetNumActionBindings
 	 */
-	void RemoveActionBinding(const FInputActionBinding &BindingToRemove, const int32 BindingIndex);
+	ENGINE_API void RemoveActionBinding(const FInputActionBinding &BindingToRemove, const int32 BindingIndex);
 
 	/** Clears all cached binding values. */
-	void ClearBindingValues();
+	ENGINE_API void ClearBindingValues();
 
 	/**
 	 * Binds a delegate function to an Action defined in the project settings.
 	 * Returned reference is only guaranteed to be valid until another action is bound.
 	 */
 	template<class UserClass>
-	FInputActionBinding& BindAction( const FName ActionName, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputActionBinding& BindAction( const FName ActionName, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputActionBinding AB( ActionName, KeyEvent );
 		AB.ActionDelegate.BindDelegate(Object, Func);
@@ -876,7 +882,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another action is bound.
 	 */
 	template<class UserClass>
-	FInputActionBinding& BindAction( const FName ActionName, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerWithKeySignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputActionBinding& BindAction( const FName ActionName, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerWithKeySignature::TMethodPtr< UserClass > Func )
 	{
 		FInputActionBinding AB( ActionName, KeyEvent );
 		AB.ActionDelegate.BindDelegate(Object, Func);
@@ -888,7 +894,7 @@ public:
 	* Returned reference is only guaranteed to be valid until another action is bound.
 	*/
 	template< class DelegateType, class UserClass, typename... VarTypes >
-	FInputActionBinding& BindAction( const FName ActionName, const EInputEvent KeyEvent, UserClass* Object, typename DelegateType::template TUObjectMethodDelegate< UserClass >::FMethodPtr Func, VarTypes... Vars )
+	FInputActionBinding& BindAction( const FName ActionName, const EInputEvent KeyEvent, UserClass* Object, typename DelegateType::template TMethodPtr< UserClass > Func, VarTypes... Vars )
 	{
 		FInputActionBinding AB( ActionName, KeyEvent );
 		AB.ActionDelegate.BindDelegate<DelegateType>(Object, Func, Vars...);
@@ -900,13 +906,25 @@ public:
 	 * Returned reference is only guaranteed to be valid until another axis is bound.
 	 */
 	template<class UserClass>
-	FInputAxisBinding& BindAxis( const FName AxisName, UserClass* Object, typename FInputAxisHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputAxisBinding& BindAxis( const FName AxisName, UserClass* Object, typename FInputAxisHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputAxisBinding AB( AxisName );
 		AB.AxisDelegate.BindDelegate(Object, Func);
 		AxisBindings.Emplace(MoveTemp(AB));
 		return AxisBindings.Last();
 	}
+
+	/**
+	* Removes the axis binding with the specified name.
+	*
+	* @param AxisName the name of the axis to remove.
+	*/
+	ENGINE_API void RemoveAxisBinding(const FName AxisName);
+
+	/**
+	* Removes all axis bindings.
+	*/
+	ENGINE_API void ClearAxisBindings();
 
 	/**
 	 * Indicates that the InputComponent is interested in knowing the Axis value
@@ -925,7 +943,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another axis key is bound.
 	 */
 	template<class UserClass>
-	FInputAxisKeyBinding& BindAxisKey( const FKey AxisKey, UserClass* Object, typename FInputAxisHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputAxisKeyBinding& BindAxisKey( const FKey AxisKey, UserClass* Object, typename FInputAxisHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputAxisKeyBinding AB(AxisKey);
 		AB.AxisDelegate.BindDelegate(Object, Func);
@@ -950,7 +968,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another vector axis key is bound.
 	 */
 	template<class UserClass>
-	FInputVectorAxisBinding& BindVectorAxis( const FKey AxisKey, UserClass* Object, typename FInputVectorAxisHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputVectorAxisBinding& BindVectorAxis( const FKey AxisKey, UserClass* Object, typename FInputVectorAxisHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputVectorAxisBinding AB(AxisKey);
 		AB.AxisDelegate.BindDelegate(Object, Func);
@@ -975,7 +993,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another input key is bound.
 	 */
 	template<class UserClass>
-	FInputKeyBinding& BindKey( const FInputChord Chord, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputKeyBinding& BindKey( const FInputChord Chord, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputKeyBinding KB(Chord, KeyEvent);
 		KB.KeyDelegate.BindDelegate(Object, Func);
@@ -988,7 +1006,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another input key is bound.
 	 */
 	template<class UserClass>
-	FInputKeyBinding& BindKey( const FKey Key, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputKeyBinding& BindKey( const FKey Key, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		return BindKey(FInputChord(Key, false, false, false, false), KeyEvent, Object, Func);
 	}
@@ -998,7 +1016,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another input key is bound.
 	 */
 	template <class UserClass>
-	FInputKeyBinding& BindKey(const FKey Key, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerWithKeySignature::TUObjectMethodDelegate<UserClass>::FMethodPtr Func)
+	FInputKeyBinding& BindKey(const FKey Key, const EInputEvent KeyEvent, UserClass* Object, typename FInputActionHandlerWithKeySignature::TMethodPtr<UserClass> Func)
 	{
 		FInputKeyBinding KB(FInputChord(Key, false, false, false, false), KeyEvent);
 		KB.KeyDelegate.BindDelegate(Object, Func);
@@ -1011,7 +1029,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another touch event is bound.
 	 */
 	template<class UserClass>
-	FInputTouchBinding& BindTouch( const EInputEvent KeyEvent, UserClass* Object, typename FInputTouchHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputTouchBinding& BindTouch( const EInputEvent KeyEvent, UserClass* Object, typename FInputTouchHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputTouchBinding TB(KeyEvent);
 		TB.TouchDelegate.BindDelegate(Object, Func);
@@ -1024,7 +1042,7 @@ public:
 	 * Returned reference is only guaranteed to be valid until another gesture event is bound.
 	 */
 	template<class UserClass>
-	FInputGestureBinding& BindGesture( const FKey GestureKey, UserClass* Object, typename FInputGestureHandlerSignature::TUObjectMethodDelegate< UserClass >::FMethodPtr Func )
+	FInputGestureBinding& BindGesture( const FKey GestureKey, UserClass* Object, typename FInputGestureHandlerSignature::TMethodPtr< UserClass > Func )
 	{
 		FInputGestureBinding GB(GestureKey);
 		GB.GestureDelegate.BindDelegate(Object, Func);
@@ -1035,45 +1053,45 @@ public:
 private:
 
 	/** Retrieves the actions bound to the input component which are triggered by a given key. Requires that the internal key map has already been built. */
-	void GetActionsBoundToKey(UPlayerInput* PlayerInput, FKey Key, TArray<TSharedPtr<FInputActionBinding>>& Actions) const;
+	ENGINE_API void GetActionsBoundToKey(UPlayerInput* PlayerInput, FKey Key, TArray<TSharedPtr<FInputActionBinding>>& Actions) const;
 
 	friend struct FGetActionsBoundToKey;
 
 	/** Returns true if the given key/button is pressed on the input of the controller (if present) */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.IsInputKeyDown instead."))
-	bool IsControllerKeyDown(FKey Key) const;
+	ENGINE_API bool IsControllerKeyDown(FKey Key) const;
 
 	/** Returns true if the given key/button was up last frame and down this frame. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.WasInputKeyJustPressed instead."))
-	bool WasControllerKeyJustPressed(FKey Key) const;
+	ENGINE_API bool WasControllerKeyJustPressed(FKey Key) const;
 
 	/** Returns true if the given key/button was down last frame and up this frame. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.WasInputKeyJustReleased instead."))
-	bool WasControllerKeyJustReleased(FKey Key) const;
+	ENGINE_API bool WasControllerKeyJustReleased(FKey Key) const;
 
 	/** Returns the analog value for the given key/button.  If analog isn't supported, returns 1 for down and 0 for up. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.GetInputAnalogKeyState instead."))
-	float GetControllerAnalogKeyState(FKey Key) const;
+	ENGINE_API float GetControllerAnalogKeyState(FKey Key) const;
 
 	/** Returns the vector value for the given key/button. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.GetInputVectorKeyState instead."))
-	FVector GetControllerVectorKeyState(FKey Key) const;
+	ENGINE_API FVector GetControllerVectorKeyState(FKey Key) const;
 
 	/** Returns the location of a touch, and if it's held down */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.GetInputTouchState instead."))
-	void GetTouchState(int32 FingerIndex, float& LocationX, float& LocationY, bool& bIsCurrentlyPressed) const;
+	ENGINE_API void GetTouchState(int32 FingerIndex, float& LocationX, float& LocationY, bool& bIsCurrentlyPressed) const;
 
 	/** Returns how long the given key/button has been down.  Returns 0 if it's up or it just went down this frame. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.GetInputKeyTimeDown instead."))
-	float GetControllerKeyTimeDown(FKey Key) const;
+	ENGINE_API float GetControllerKeyTimeDown(FKey Key) const;
 
 	/** Retrieves how far the mouse moved this frame. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.GetInputMouseDelta instead."))
-	void GetControllerMouseDelta(float& DeltaX, float& DeltaY) const;
+	ENGINE_API void GetControllerMouseDelta(float& DeltaX, float& DeltaY) const;
 
 	/** Retrieves the X and Y displacement of the given analog stick.  For WhickStick, 0 = left, 1 = right. */
 	UFUNCTION(BlueprintCallable, meta=(DeprecatedFunction, DeprecationMessage="Use PlayerController.GetInputAnalogStickState instead."))
-	void GetControllerAnalogStickState(EControllerAnalogStick::Type WhichStick, float& StickX, float& StickY) const;
+	ENGINE_API void GetControllerAnalogStickState(EControllerAnalogStick::Type WhichStick, float& StickX, float& StickY) const;
 
 	friend class UEnhancedInputComponent;	// TEMP: Support for ongoing input rework
 };

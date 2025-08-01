@@ -3,16 +3,17 @@
 #pragma once
 
 #include "Containers/Array.h"
+#include "Containers/ArrayView.h"
 #include "EntitySystem/MovieSceneEntitySystemTypes.h"
+#include "HAL/Platform.h"
 
 namespace UE
 {
 namespace MovieScene
 {
 
-struct FEntityAllocation;
-
 class FEntityManager;
+struct FEntityAllocation;
 
 /** Signifies whether any caches held for the current cached result are still up to date, or whether they should be updated */
 enum class ECachedEntityManagerState
@@ -63,13 +64,13 @@ private:
 /**
  * Simple cached filter results that stores whether its filter passes or not
  */
-struct MOVIESCENE_API FCachedEntityFilterResult_Match
+struct FCachedEntityFilterResult_Match
 {
 	FEntityComponentFilter Filter;
 
-	bool Matches(const FEntityManager& InEntityManager);
+	MOVIESCENE_API bool Matches(const FEntityManager& InEntityManager);
 
-	void Invalidate();
+	MOVIESCENE_API void Invalidate();
 
 private:
 
@@ -83,20 +84,20 @@ private:
 /**
  * Cached filter result that caches pointers to allocations matching the specified filter
  */
-struct MOVIESCENE_API FCachedEntityFilterResult_Allocations
+struct FCachedEntityFilterResult_Allocations
 {
 	FEntityComponentFilter Filter;
 
-	TArrayView<const FEntityAllocation* const> GetMatchingAllocations(const FEntityManager& InEntityManager);
+	MOVIESCENE_API TArrayView<FEntityAllocation* const> GetMatchingAllocations(const FEntityManager& InEntityManager);
 
-	void Invalidate();
+	MOVIESCENE_API void Invalidate();
 
 private:
 
 	FCachedEntityManagerState Cache;
 
 	/** Set bits indicate matching allocations */
-	TArray<const FEntityAllocation*> MatchedEntityAllocations;
+	TArray<FEntityAllocation*> MatchedEntityAllocations;
 };
 
 

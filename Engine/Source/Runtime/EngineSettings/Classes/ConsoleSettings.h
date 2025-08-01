@@ -22,11 +22,7 @@ struct FAutoCompleteCommand
 	UPROPERTY(config, EditAnywhere, Category=Command)
 	FString Desc;
 
-	FColor Color;
-
-	FAutoCompleteCommand()
-		: Color(180, 180, 180)
-	{}
+	FColor Color = FColor(180, 180, 180);
 
 	bool operator<(const FAutoCompleteCommand& rhs) const
 	{
@@ -60,13 +56,13 @@ struct FAutoCompleteCommand
 /**
  * Implements the settings for the UConsole class.
  */
-UCLASS(config=Input, defaultconfig)
-class ENGINESETTINGS_API UConsoleSettings
+UCLASS(config=Input, defaultconfig, MinimalAPI)
+class UConsoleSettings
 	: public UObject
 {
 	GENERATED_UCLASS_BODY()
 
-	/**  Visible Console stuff */
+	/** The maximum number of lines the console keeps in its output history. */
 	UPROPERTY(globalconfig, EditAnywhere, Category=General)
 	int32 MaxScrollbackSize;
 
@@ -109,4 +105,7 @@ class ENGINESETTINGS_API UConsoleSettings
 	/** The autocomplete color used for command descriptions and read-only CVars. */
 	UPROPERTY(config, EditAnywhere, Category=Colors)
 	FColor AutoCompleteFadedColor;
+
+	/** Returns an array with the auto-complete command names that match all the words in the substring. */
+	ENGINESETTINGS_API TArray<FString> GetFilteredManualAutoCompleteCommands(FStringView Substring) const;
 };

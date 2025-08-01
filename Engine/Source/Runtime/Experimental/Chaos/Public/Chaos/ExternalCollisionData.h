@@ -1,16 +1,55 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
-#include "Box.h"
-#include "Chaos/Framework/PhysicsProxyBase.h"
-#include "Chaos/PBDConstraintContainer.h"
+#include "Chaos/Box.h"
 #include "Chaos/ParticleHandleFwd.h"
+#include "Chaos/PhysicalMaterials.h"
 #include "Chaos/Vector.h"
+//
+// NOTE: This file is widely included in Engine code. 
+// Avoid including Chaos headers when possible.
+//
 
 
 class UPhysicalMaterial;
+class IPhysicsProxyBase;
 
 namespace Chaos
 {
+	// Event Emitter flag
+	enum EventEmitterFlag
+	{
+		EmptyDispatcher = 0,
+		OwnDispatcher = 1,
+		GlobalDispatcher = 2,
+		BothDispatcher = 3,
+	};
+
+	struct FBaseEventFlag
+	{
+		FBaseEventFlag() : EmitterFlag(OwnDispatcher) {}
+
+		void SetEmitterFlag(bool LocalEmitter, bool GlobalEmitter)
+		{
+			EmitterFlag = ComputeEmitterFlag(LocalEmitter, GlobalEmitter);
+		}
+
+		static EventEmitterFlag ComputeEmitterFlag(bool LocalEmitter, bool GlobalEmitter)
+		{
+			EventEmitterFlag EmitterFlagOut = EventEmitterFlag::EmptyDispatcher;
+			if (LocalEmitter)
+			{
+				EmitterFlagOut = EventEmitterFlag::OwnDispatcher;
+			}
+			if (GlobalEmitter)
+			{
+				EmitterFlagOut = EventEmitterFlag(EmitterFlagOut | EventEmitterFlag::GlobalDispatcher);
+			}
+			return EmitterFlagOut;
+		}
+
+		EventEmitterFlag EmitterFlag;
+	};
+
 	/**
 	 * Collision event data stored for use by other systems (e.g. Niagara, gameplay events)
 	 */
@@ -22,23 +61,27 @@ namespace Chaos
 			, Normal(FVec3((FReal)0.0))
 			, Velocity1(FVec3((FReal)0.0))
 			, Velocity2(FVec3((FReal)0.0))
-		    , DeltaVelocity1(FVec3((FReal)0.0))
-		    , DeltaVelocity2(FVec3((FReal)0.0))
+			, DeltaVelocity1(FVec3((FReal)0.0))
+			, DeltaVelocity2(FVec3((FReal)0.0))
 			, AngularVelocity1(FVec3((FReal)0.0))
 			, AngularVelocity2(FVec3((FReal)0.0))
 			, Mass1((FReal)0.0)
 			, Mass2((FReal)0.0)
 			, PenetrationDepth((FReal)0.0)
-			, Particle(nullptr)
-			, Levelset(nullptr)
-			, ParticleProxy(nullptr)
-		    , LevelsetProxy(nullptr)
+			, Mat1(FMaterialHandle())
+			, Mat2(FMaterialHandle())
+			, bProbe(false)
+			, Proxy1(nullptr)
+			, Proxy2(nullptr)
+			, ShapeIndex1(INDEX_NONE)
+			, ShapeIndex2(INDEX_NONE)
+			, SolverTime((FReal)0.0)
 		{}
 
 		FCollidingData(FVec3 InLocation, FVec3 InAccumulatedImpulse, FVec3 InNormal, FVec3 InVelocity1, FVec3 InVelocity2, FVec3 InDeltaVelocity1, FVec3 InDeltaVelocity2
-		, FVec3 InAngularVelocity1, FVec3 InAngularVelocity2, FReal InMass1, FReal InMass2, FReal InPenetrationDepth, FGeometryParticle* InParticle
-		, FGeometryParticle* InLevelset, IPhysicsProxyBase* InParticleProxy, IPhysicsProxyBase* InLevelsetProxy)
-		    : Location(InLocation)
+			, FVec3 InAngularVelocity1, FVec3 InAngularVelocity2, FReal InMass1,FReal InMass2,  FReal InPenetrationDepth, IPhysicsProxyBase* InProxy1, IPhysicsProxyBase* InProxy2
+			, int32 InShapeIndex1, int32 InShapeIndex2, FReal InSolverTime)
+			: Location(InLocation)
 			, AccumulatedImpulse(InAccumulatedImpulse)
 			, Normal(InNormal)
 			, Velocity1(InVelocity1)
@@ -50,26 +93,45 @@ namespace Chaos
 			, Mass1(InMass1)
 			, Mass2(InMass2)
 			, PenetrationDepth(InPenetrationDepth)
-			, Particle(InParticle)
-			, Levelset(InLevelset)
-			, ParticleProxy(InParticleProxy)
-		    , LevelsetProxy(InLevelsetProxy)
+			, Mat1(FMaterialHandle())
+			, Mat2(FMaterialHandle())
+			, bProbe(false)
+			, Proxy1(InProxy1)
+			, Proxy2(InProxy2)
+			, ShapeIndex1(InShapeIndex1)
+			, ShapeIndex2(InShapeIndex2)
+			, SolverTime(InSolverTime)
 		{}
-
-		bool IsValid() { return (ParticleProxy && LevelsetProxy); }
 
 		FVec3 Location;
 		FVec3 AccumulatedImpulse;
 		FVec3 Normal;
-		FVec3 Velocity1, Velocity2;
-		FVec3 DeltaVelocity1, DeltaVelocity2;
-		FVec3 AngularVelocity1, AngularVelocity2;
-		FReal Mass1, Mass2;
+		FVec3 Velocity1;
+		FVec3 Velocity2;
+		FVec3 DeltaVelocity1;
+		FVec3 DeltaVelocity2;
+		FVec3 AngularVelocity1;
+		FVec3 AngularVelocity2;
+		FReal Mass1;
+		FReal Mass2;
 		FReal PenetrationDepth;
-		FGeometryParticle* Particle;
-		FGeometryParticle* Levelset;
-		IPhysicsProxyBase* ParticleProxy;
-		IPhysicsProxyBase* LevelsetProxy;
+		FMaterialHandle Mat1;
+		FMaterialHandle Mat2;
+		bool bProbe;
+
+		// The pointers to the proxies should be used with caution on the Game Thread.
+		// Ideally we only ever use these as table keys when acquiring related structures.
+		// If we genuinely need to dereference the pointers for any reason, test if they are deleted (nullptr) or
+		// pending deletion: if a call to FPhysScene_Chaos::GetOwningComponent<UPrimitiveComponent>() returns
+		// nullptr, the proxies should not be used.
+		// If either Proxy is nullptr, the structure is invalid.
+		IPhysicsProxyBase* Proxy1;
+		IPhysicsProxyBase* Proxy2;
+
+		int32 ShapeIndex1;
+		int32 ShapeIndex2;
+
+		FReal SolverTime;
 	};
 
 	/*
@@ -87,21 +149,17 @@ namespace Chaos
 			, AngularVelocity2(FVec3((FReal)0.0))
 			, Mass1((FReal)0.0)
 			, Mass2((FReal)0.0)
-			, Particle(nullptr)
-			, Levelset(nullptr)
-		    , ParticleProxy(nullptr)
-		    , LevelsetProxy(nullptr)
 			, BoundingboxVolume((FReal)-1.0)
 			, BoundingboxExtentMin((FReal)-1.0)
 			, BoundingboxExtentMax((FReal)-1.0)
-			, SurfaceType(-1)
+			, SurfaceType1(-1)
+			, SurfaceType2(-1)
 		{}
 
 		FCollidingDataExt(
 		    FVec3 InLocation, FVec3 InAccumulatedImpulse, FVec3 InNormal, FVec3 InVelocity1, FVec3 InVelocity2
-			, FVec3 InAngularVelocity1, FVec3 InAngularVelocity2, FReal InMass1, FReal InMass2, FGeometryParticle* InParticle
-			, FGeometryParticle* InLevelset, IPhysicsProxyBase* InParticleProxy, IPhysicsProxyBase* InLevelsetProxy
-			, FReal InBoundingboxVolume, FReal InBoundingboxExtentMin, FReal InBoundingboxExtentMax, int32 InSurfaceType)
+			, FVec3 InAngularVelocity1, FVec3 InAngularVelocity2, FReal InMass1, FReal InMass2 //, FGeometryParticleHandle* InParticle, FGeometryParticleHandle* InLevelset
+			, FReal InBoundingboxVolume, FReal InBoundingboxExtentMin, FReal InBoundingboxExtentMax, int32 InSurfaceType1, int32 InSurfaceType2)
 			: Location(InLocation)
 			, AccumulatedImpulse(InAccumulatedImpulse)
 			, Normal(InNormal)
@@ -111,14 +169,11 @@ namespace Chaos
 			, AngularVelocity2(InAngularVelocity2)
 			, Mass1(InMass1)
 			, Mass2(InMass2)
-			, Particle(InParticle)
-			, Levelset(InLevelset)
-		    , ParticleProxy(InParticleProxy)
-		    , LevelsetProxy(InLevelsetProxy)
 			, BoundingboxVolume(InBoundingboxVolume)
 			, BoundingboxExtentMin(InBoundingboxExtentMin)
 			, BoundingboxExtentMax(InBoundingboxExtentMax)
-			, SurfaceType(InSurfaceType)
+			, SurfaceType1(InSurfaceType1)
+			, SurfaceType2(InSurfaceType2)
 		{}
 
 		FCollidingDataExt(const FCollidingData& InCollisionData)
@@ -131,14 +186,11 @@ namespace Chaos
 			, AngularVelocity2(InCollisionData.AngularVelocity2)
 			, Mass1(InCollisionData.Mass1)
 			, Mass2(InCollisionData.Mass2)
-			, Particle(InCollisionData.Particle)
-			, Levelset(InCollisionData.Levelset)
-		    , ParticleProxy(InCollisionData.ParticleProxy)
-		    , LevelsetProxy(InCollisionData.LevelsetProxy)
 			, BoundingboxVolume((FReal)-1.0)
 			, BoundingboxExtentMin((FReal)-1.0)
 			, BoundingboxExtentMax((FReal)-1.0)
-			, SurfaceType(-1)
+			, SurfaceType1(-1)
+			, SurfaceType2(-1)
 		{
 		}
 
@@ -148,39 +200,78 @@ namespace Chaos
 		FVec3 Velocity1, Velocity2;
 		FVec3 AngularVelocity1, AngularVelocity2;
 		FReal Mass1, Mass2;
-		FGeometryParticle* Particle;
-		FGeometryParticle* Levelset;
-		IPhysicsProxyBase* ParticleProxy;
-		IPhysicsProxyBase* LevelsetProxy;
 		FReal BoundingboxVolume;
 		FReal BoundingboxExtentMin, BoundingboxExtentMax;
-		int32 SurfaceType;
+		int32 SurfaceType1, SurfaceType2;
+		FName PhysicalMaterialName1, PhysicalMaterialName2;
 	};
 
 	/*
 	BreakingData passed from the physics solver to subsystems
 	*/
-	struct FBreakingData
+	struct FBreakingData : public FBaseEventFlag
 	{
 		FBreakingData()
-			: Particle(nullptr)
-		    , ParticleProxy(nullptr)
+			: FBaseEventFlag()
+			, Proxy(nullptr)
 			, Location(FVec3((FReal)0.0))
 			, Velocity(FVec3((FReal)0.0))
 			, AngularVelocity(FVec3((FReal)0.0))
 			, Mass((FReal)0.0)
 			, BoundingBox(FAABB3(FVec3((FReal)0.0), FVec3((FReal)0.0)))
+			, TransformGroupIndex(INDEX_NONE)
+			, bFromCrumble(false)
 		{}
 
-		FGeometryParticleHandle* Particle;
-		IPhysicsProxyBase* ParticleProxy;
+		// The pointer to the proxy should be used with caution on the Game Thread.
+		// Ideally we only ever use this as a table key when acquiring related structures.
+		// If we genuinely need to dereference the pointer for any reason, test if it is deleted (nullptr) or
+		// pending deletion: if a call to FPhysScene_Chaos::GetOwningComponent<UPrimitiveComponent>() returns
+		// nullptr, the proxy should not be used.
+		IPhysicsProxyBase* Proxy;
+		
 		FVec3 Location;
 		FVec3 Velocity;
 		FVec3 AngularVelocity;
 		FReal Mass;
 		Chaos::FAABB3 BoundingBox;
+		int32 TransformGroupIndex;
+		bool bFromCrumble;
 	};
 
+	/*
+	CrumblingData passed from the physics solver to subsystems
+	*/
+	struct FCrumblingData : public FBaseEventFlag
+	{
+		FCrumblingData()
+			: FBaseEventFlag()
+			, Proxy(nullptr)
+			, Location(FVec3::ZeroVector)
+			, Orientation(FRotation3::Identity)
+			, LinearVelocity(FVec3::ZeroVector)
+			, AngularVelocity(FVec3::ZeroVector)
+			, Mass((FReal)0.0)
+			, LocalBounds(FAABB3(FVec3((FReal)0.0), FVec3((FReal)0.0)))
+		{}
+
+		// The pointer to the proxy should be used with caution on the Game Thread.
+		// Ideally we only ever use this as a table key when acquiring related structures.
+		// If we genuinely need to dereference the pointer for any reason, test if it is deleted (nullptr) or
+		// pending deletion: if a call to FPhysScene_Chaos::GetOwningComponent<UPrimitiveComponent>() returns
+		// nullptr, the proxy should not be used.
+		IPhysicsProxyBase* Proxy;
+		
+		FVec3 Location;
+		FRotation3 Orientation;
+		FVec3 LinearVelocity;
+		FVec3 AngularVelocity;
+		FReal Mass;
+		FAABB3 LocalBounds;
+		// optional ( see proxy options )
+		TArray<int32> Children;
+	};
+	
 	/*
 	BreakingData used in the subsystems
 	*/
@@ -191,8 +282,6 @@ namespace Chaos
 			, Velocity(FVec3((FReal)0.0))
 			, AngularVelocity(FVec3((FReal)0.0))
 			, Mass((FReal)0.0)
-		    , Particle(nullptr)
-		    , ParticleProxy(nullptr)
 			, BoundingboxVolume((FReal)-1.0)
 			, BoundingboxExtentMin((FReal)-1.0)
 			, BoundingboxExtentMax((FReal)-1.0)
@@ -204,7 +293,6 @@ namespace Chaos
 			, FVec3 InAngularVelocity
 			, FReal InMass
 			, FGeometryParticleHandle* InParticle
-			, IPhysicsProxyBase* InParticleProxy
 			, FReal InBoundingboxVolume
 			, FReal InBoundingboxExtentMin
 			, FReal InBoundingboxExtentMax
@@ -213,8 +301,6 @@ namespace Chaos
 			, Velocity(InVelocity)
 			, AngularVelocity(InAngularVelocity)
 			, Mass(InMass)
-		    , Particle(InParticle)
-		    , ParticleProxy(InParticleProxy)
 			, BoundingboxVolume(InBoundingboxVolume)
 			, BoundingboxExtentMin(InBoundingboxExtentMin)
 			, BoundingboxExtentMax(InBoundingboxExtentMax)
@@ -226,8 +312,6 @@ namespace Chaos
 			, Velocity(InBreakingData.Velocity)
 			, AngularVelocity(InBreakingData.AngularVelocity)
 			, Mass(InBreakingData.Mass)
-		    , Particle(InBreakingData.Particle)
-		    , ParticleProxy(InBreakingData.ParticleProxy)
 			, BoundingboxVolume((FReal)-1.0)
 			, BoundingboxExtentMin((FReal)-1.0)
 			, BoundingboxExtentMax((FReal)-1.0)
@@ -239,8 +323,6 @@ namespace Chaos
 		FVec3 Velocity;
 		FVec3 AngularVelocity;
 		FReal Mass;
-		FGeometryParticleHandle* Particle;
-		IPhysicsProxyBase* ParticleProxy;
 		FReal BoundingboxVolume;
 		FReal BoundingboxExtentMin, BoundingboxExtentMax;
 		int32 SurfaceType;
@@ -267,39 +349,35 @@ namespace Chaos
 			, Velocity(FVec3((FReal)0.0))
 			, AngularVelocity(FVec3((FReal)0.0))
 			, Mass((FReal)0.0)
-			, Particle(nullptr)
-		    , ParticleProxy(nullptr)
+			, Proxy(nullptr)
 			, BoundingBox(FAABB3(FVec3((FReal)0.0), FVec3((FReal)0.0)))
 		{}
 
 		FTrailingData(FVec3 InLocation, FVec3 InVelocity, FVec3 InAngularVelocity, FReal InMass
-			, FGeometryParticleHandle* InParticle, IPhysicsProxyBase* InParticleProxy, Chaos::FAABB3& InBoundingBox)
+			, IPhysicsProxyBase* InProxy, Chaos::TAABB<FReal, 3>& InBoundingBox)
 			: Location(InLocation)
 			, Velocity(InVelocity)
 			, AngularVelocity(InAngularVelocity)
 			, Mass(InMass)
-			, Particle(InParticle)
-		    , ParticleProxy(InParticleProxy)
+			, Proxy(InProxy)
 			, BoundingBox(InBoundingBox)
+			, TransformGroupIndex(INDEX_NONE)
 		{}
 
 		FVec3 Location;
 		FVec3 Velocity;
 		FVec3 AngularVelocity;
 		FReal Mass;
-		FGeometryParticleHandle* Particle;
-		IPhysicsProxyBase* ParticleProxy;
+		
+		// The pointer to the proxy should be used with caution on the Game Thread.
+		// Ideally we only ever use this as a table key when acquiring related structures.
+		// If we genuinely need to dereference the pointer for any reason, test if it is deleted (nullptr) or
+		// pending deletion: if a call to FPhysScene_Chaos::GetOwningComponent<UPrimitiveComponent>() returns
+		// nullptr, the proxy should not be used.
+		IPhysicsProxyBase* Proxy;
+
 		Chaos::FAABB3 BoundingBox;
-
-		friend inline uint32 GetTypeHash(const FTrailingData& Other)
-		{
-			return ::GetTypeHash(Other.Particle);
-		}
-
-		friend bool operator==(const FTrailingData& A, const FTrailingData& B)
-		{
-			return A.Particle == B.Particle;
-		}
+		int32 TransformGroupIndex;
 	};
 
 	/*
@@ -312,7 +390,6 @@ namespace Chaos
 			, Velocity(FVec3((FReal)0.0))
 			, AngularVelocity(FVec3((FReal)0.0))
 			, Mass((FReal)0.0)
-			, Particle(nullptr)
 			, BoundingboxVolume((FReal)-1.0)
 			, BoundingboxExtentMin((FReal)-1.0)
 			, BoundingboxExtentMax((FReal)-1.0)
@@ -324,7 +401,6 @@ namespace Chaos
 			, FVec3 InAngularVelocity
 			, FReal InMass
 			, FGeometryParticleHandle* InParticle
-			, IPhysicsProxyBase* InParticleProxy
 			, FReal InBoundingboxVolume
 			, FReal InBoundingboxExtentMin
 			, FReal InBoundingboxExtentMax
@@ -333,8 +409,6 @@ namespace Chaos
 			, Velocity(InVelocity)
 			, AngularVelocity(InAngularVelocity)
 			, Mass(InMass)
-			, Particle(InParticle)
-		    , ParticleProxy(InParticleProxy)
 			, BoundingboxVolume(InBoundingboxVolume)
 			, BoundingboxExtentMin(InBoundingboxExtentMin)
 			, BoundingboxExtentMax(InBoundingboxExtentMax)
@@ -346,8 +420,6 @@ namespace Chaos
 			, Velocity(InTrailingData.Velocity)
 			, AngularVelocity(InTrailingData.AngularVelocity)
 			, Mass(InTrailingData.Mass)
-			, Particle(InTrailingData.Particle)
-		    , ParticleProxy(InTrailingData.ParticleProxy)
 			, BoundingboxVolume((FReal)-1.0)
 			, BoundingboxExtentMin((FReal)-1.0)
 			, BoundingboxExtentMax((FReal)-1.0)
@@ -358,40 +430,108 @@ namespace Chaos
 		FVec3 Velocity;
 		FVec3 AngularVelocity;
 		FReal Mass;
-		FGeometryParticleHandle* Particle;
-		IPhysicsProxyBase* ParticleProxy;
-		//	int32 ParticleIndexMesh; // If ParticleIndex points to a cluster then this index will point to an actual mesh in the cluster
-								 // It is important to be able to get extra data from the component
 		FReal BoundingboxVolume;
 		FReal BoundingboxExtentMin, BoundingboxExtentMax;
 		int32 SurfaceType;
-
-		friend inline uint32 GetTypeHash(const FTrailingDataExt& Other)
-		{
-			return ::GetTypeHash(Other.Particle);
-		}
-
-		friend bool operator==(const FTrailingDataExt& A, const FTrailingDataExt& B)
-		{
-			return A.Particle == B.Particle;
-		}
 	};
 
 	struct FSleepingData
 	{
 		FSleepingData()
-			: Particle(nullptr)
+			: Proxy(nullptr)
 			, Sleeping(true)
 		{}
 
-		FSleepingData(
-		    FGeometryParticle* InParticle, bool InSleeping)
-			: Particle(InParticle)
+		FSleepingData(IPhysicsProxyBase* InProxy, bool InSleeping)
+			: Proxy(InProxy)
 			, Sleeping(InSleeping)
 		{}
 
-		FGeometryParticle* Particle;
+		// The pointer to the proxy should be used with caution on the Game Thread.
+		// Ideally we only ever use this as a table key when acquiring related structures.
+		// If we genuinely need to dereference the pointer for any reason, test if it is deleted (nullptr) or
+		// pending deletion: if a call to FPhysScene_Chaos::GetOwningComponent<UPrimitiveComponent>() returns
+		// nullptr, the proxy should not be used.
+		IPhysicsProxyBase* Proxy;
+
 		bool Sleeping;	// if !Sleeping == Awake
+	};
+
+	/*
+	RemovalData passed from the physics solver to subsystems
+	*/
+	struct FRemovalData
+	{
+		FRemovalData()
+			: Location(FVec3((FReal)0.0))
+			, Mass((FReal)0.0)
+			, Proxy(nullptr)
+			, BoundingBox(FAABB3(FVec3((FReal)0.0), FVec3((FReal)0.0)))
+		{}
+
+		FRemovalData(FVec3 InLocation, FReal InMass, IPhysicsProxyBase* InProxy, Chaos::TAABB<FReal, 3>& InBoundingBox)
+			: Location(InLocation)
+			, Mass(InMass)
+			, Proxy(InProxy)
+			, BoundingBox(InBoundingBox)
+		{}
+
+		FVec3 Location;
+		FReal Mass;
+
+		// The pointer to the proxy should be used with caution on the Game Thread.
+		// Ideally we only ever use this as a table key when acquiring related structures.
+		// If we genuinely need to dereference the pointer for any reason, test if it is deleted (nullptr) or
+		// pending deletion: if a call to FPhysScene_Chaos::GetOwningComponent<UPrimitiveComponent>() returns
+		// nullptr, the proxy should not be used.
+		IPhysicsProxyBase* Proxy;
+
+		Chaos::FAABB3 BoundingBox;
+	};
+
+	/*
+	RemovalData used in subsystems
+	*/
+	struct FRemovalDataExt
+	{
+		FRemovalDataExt()
+			: Location(FVec3((FReal)0.0))
+			, Mass((FReal)0.0)
+			, BoundingboxVolume((FReal)-1.0)
+			, BoundingboxExtentMin((FReal)-1.0)
+			, BoundingboxExtentMax((FReal)-1.0)
+			, SurfaceType(-1)
+		{}
+
+		FRemovalDataExt(FVec3 InLocation
+			, FReal InMass
+			, FGeometryParticleHandle* InParticle
+			, FReal InBoundingboxVolume
+			, FReal InBoundingboxExtentMin
+			, FReal InBoundingboxExtentMax
+			, int32 InSurfaceType)
+			: Location(InLocation)
+			, Mass(InMass)
+			, BoundingboxVolume(InBoundingboxVolume)
+			, BoundingboxExtentMin(InBoundingboxExtentMin)
+			, BoundingboxExtentMax(InBoundingboxExtentMax)
+			, SurfaceType(InSurfaceType)
+		{}
+
+		FRemovalDataExt(const FRemovalData& InRemovalData)
+			: Location(InRemovalData.Location)
+			, Mass(InRemovalData.Mass)
+			, BoundingboxVolume((FReal)-1.0)
+			, BoundingboxExtentMin((FReal)-1.0)
+			, BoundingboxExtentMax((FReal)-1.0)
+			, SurfaceType(-1)
+		{}
+
+		FVec3 Location;
+		FReal Mass;
+		FReal BoundingboxVolume;
+		FReal BoundingboxExtentMin, BoundingboxExtentMax;
+		int32 SurfaceType;
 	};
 
 	template<class T, int d>

@@ -1,9 +1,11 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MeshVertexPainter/MeshVertexPainter.h"
-#include "Components.h"
+#include "StaticMeshComponentLODInfo.h"
 #include "StaticMeshResources.h"
 #include "Engine/StaticMesh.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MeshVertexPainter)
 
 
 void FMeshVertexPainter::PaintVerticesSingleColor(UStaticMeshComponent* StaticMeshComponent, const FLinearColor& FillColor, bool bConvertToSRGB)
@@ -74,7 +76,7 @@ void FMeshVertexPainter::PaintVerticesLerpAlongAxis(UStaticMeshComponent* Static
 
 		for (uint32 VertexIndex = 0; VertexIndex < NumVertices; ++VertexIndex)
 		{
-			const FVector& VertexPosition = PositionVertexBuffer.VertexPosition(VertexIndex);
+			const FVector3f& VertexPosition = PositionVertexBuffer.VertexPosition(VertexIndex);
 			const FLinearColor Color = FMath::Lerp(StartColor, EndColor, (VertexPosition.Component(static_cast<int32>(Axis)) - AxisMin) / (AxisMax - AxisMin));
 			VertexColors[VertexIndex] = Color.ToFColor(bConvertToSRGB);
 		}
@@ -112,3 +114,4 @@ void FMeshVertexPainter::RemovePaintedVertices(UStaticMeshComponent* StaticMeshC
 	StaticMeshComponent->MarkRenderStateDirty();
 	StaticMeshComponent->bDisallowMeshPaintPerInstance = false;
 }
+

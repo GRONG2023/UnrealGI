@@ -1,8 +1,21 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "CEF/CEFBrowserApp.h"
+#include "HAL/IConsoleManager.h"
 
 #if WITH_CEF3
+#include "WebBrowserLog.h"
+
+//#define DEBUG_CEFMESSAGELOOP_FRAMERATE 1 // uncomment this to have debug spew about the FPS we call the CefDoMessageLoopWork function
+
+DEFINE_LOG_CATEGORY(LogCEFBrowser);
+
+static bool bCEFGPUAcceleration = true;
+static FAutoConsoleVariableRef CVarCEFGPUAcceleration(
+	TEXT("r.CEFGPUAcceleration"),
+	bCEFGPUAcceleration,
+	TEXT("Enables GPU acceleration in CEF\n"),
+	ECVF_Default);
 
 FCEFBrowserApp::FCEFBrowserApp()
 	: MessagePumpCountdown(0)
@@ -15,17 +28,39 @@ void FCEFBrowserApp::OnBeforeChildProcessLaunch(CefRefPtr<CefCommandLine> Comman
 
 void FCEFBrowserApp::OnBeforeCommandLineProcessing(const CefString& ProcessType, CefRefPtr< CefCommandLine > CommandLine)
 {
-	CommandLine->AppendSwitch("enable-gpu");
-	CommandLine->AppendSwitch("enable-gpu-compositing");
+	if (bCEFGPUAcceleration)
+	{
+		UE_LOG(LogCEFBrowser, Log, TEXT("CEF GPU acceleration enabled"));
+		CommandLine->AppendSwitch("enable-gpu");
+		CommandLine->AppendSwitch("enable-gpu-compositing");
+	}
+	else
+	{
+		UE_LOG(LogCEFBrowser, Log, TEXT("CEF GPU acceleration disabled"));
+		CommandLine->AppendSwitch("disable-gpu");
+		CommandLine->AppendSwitch("disable-gpu-compositing");
+	}
+
+#if PLATFORM_LINUX
+	CommandLine->AppendSwitchWithValue("ozone-platform", "headless");
+	CommandLine->AppendSwitchWithValue("use-gl", "angle");
+	CommandLine->AppendSwitchWithValue("use-angle", "vulkan");
+	CommandLine->AppendSwitch("use-vulkan");
+#endif
+
 	CommandLine->AppendSwitch("enable-begin-frame-scheduling");
+	CommandLine->AppendSwitch("disable-pinch"); // the web pages we have don't expect zoom to work right now so disable touchpad pinch zoom
+	CommandLine->AppendSwitch("disable-gpu-shader-disk-cache"); // Don't create a "GPUCache" directory when cache-path is unspecified.
+#if PLATFORM_MAC
+	CommandLine->AppendSwitch("use-mock-keychain"); // Disable the toolchain prompt on macOS.
+#endif
+
+	// Uncomment these to lines to create a FULL network log from chrome, which can then be inspected using https://netlog-viewer.appspot.com/
+	//CommandLine->AppendSwitchWithValue("log-net-log", "c:\\temp\\cef_net_log.json");
+	//CommandLine->AppendSwitchWithValue("net-log-capture-mode", "IncludeCookiesAndCredentials");
 }
 
-void FCEFBrowserApp::OnRenderProcessThreadCreated(CefRefPtr<CefListValue> ExtraInfo)
-{
-	RenderProcessThreadCreatedDelegate.ExecuteIfBound(ExtraInfo);
-}
 
-#if !PLATFORM_LINUX
 void FCEFBrowserApp::OnScheduleMessagePumpWork(int64 delay_ms)
 {
 	FScopeLock Lock(&MessagePumpCountdownCS);
@@ -38,15 +73,9 @@ void FCEFBrowserApp::OnScheduleMessagePumpWork(int64 delay_ms)
 	}
 	MessagePumpCountdown = delay_ms;
 }
-#endif
 
-void FCEFBrowserApp::TickMessagePump(float DeltaTime, bool bForce)
+bool FCEFBrowserApp::TickMessagePump(float DeltaTime, bool bForce)
 {
-#if PLATFORM_LINUX
-	CefDoMessageLoopWork();
-	return;
-#endif
-
 	bool bPump = false;
 	{
 		FScopeLock Lock(&MessagePumpCountdownCS);
@@ -54,7 +83,7 @@ void FCEFBrowserApp::TickMessagePump(float DeltaTime, bool bForce)
 		// count down in order to call message pump
 		if (MessagePumpCountdown >= 0)
 		{
-			MessagePumpCountdown -= DeltaTime * 1000;
+			MessagePumpCountdown -= (DeltaTime * 1000);
 			if (MessagePumpCountdown <= 0)
 			{
 				bPump = true;
@@ -68,10 +97,27 @@ void FCEFBrowserApp::TickMessagePump(float DeltaTime, bool bForce)
 		}
 	}
 	
+#ifdef  DEBUG_CEFMESSAGELOOP_FRAMERATE
+	static float SecondsFrameRate = 0;
+	static int NumFrames = 0;
+	SecondsFrameRate += DeltaTime;
+#endif
 	if (bPump || bForce)
 	{
+#ifdef DEBUG_CEFMESSAGELOOP_FRAMERATE
+		++NumFrames;
+		if (NumFrames % 100 == 0 || SecondsFrameRate > 5.0f)
+		{
+			UE_LOG(LogWebBrowser, Error, TEXT("CefDoMessageLoopWork call Frame Rate %0.2f"), NumFrames / SecondsFrameRate);
+			SecondsFrameRate = 0;
+			NumFrames = 0;
+		}
+#endif
+
 		CefDoMessageLoopWork();
+		return true;
 	}
+	return false;
 }
 
 #endif

@@ -699,7 +699,7 @@ namespace iPhonePackager
 
 
 			/// <summary>
-			/// Finds the root path in a given IPA (e.g., "Payload/UDKGame.app/")
+			/// Finds the root path in a given IPA (e.g., "Payload/UnrealGame.app/")
 			/// </summary>
 			public static string FindRootPathInIPA(ZipFile Zip)
 			{

@@ -2,14 +2,17 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "Input/Reply.h"
-#include "Widgets/SWidget.h"
-#include "ActorTreeItem.h"
-#include "Widgets/Views/SHeaderRow.h"
 #include "ISceneOutlinerColumn.h"
-#include "Editor/Layers/Private/LayerViewModel.h"
+#include "Input/Reply.h"
+#include "SceneOutlinerFwd.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
+#include "UObject/WeakObjectPtrTemplates.h"
+#include "Widgets/Views/SHeaderRow.h"
 
+class AActor;
+class FLayerViewModel;
+class SWidget;
 template<typename ItemType> class STableRow;
 
 /**
@@ -37,33 +40,14 @@ public:
 
 	virtual SHeaderRow::FColumn::FArguments ConstructHeaderRowColumn() override;
 
-	virtual const TSharedRef< SWidget > ConstructRowWidget( SceneOutliner::FTreeItemRef TreeItem, const STableRow<SceneOutliner::FTreeItemPtr>& Row ) override
-	{
-		FColumnGenerator Generator(*this);
-		TreeItem->Visit(Generator);
-		return Generator.Widget.ToSharedRef();
-	}
+	virtual const TSharedRef< SWidget > ConstructRowWidget(FSceneOutlinerTreeItemRef TreeItem, const STableRow<FSceneOutlinerTreeItemPtr>& Row) override;
 
 	// End ISceneOutlinerColumn Implementation
 	//////////////////////////////////////////////////////////////////////////
 
 private:
-
 	FReply OnRemoveFromLayerClicked( const TWeakObjectPtr< AActor > Actor );
-
-	TSharedRef<SWidget> ConstructRowWidget(const TWeakObjectPtr< AActor >& Actor );
 	
-	struct FColumnGenerator : SceneOutliner::FColumnGenerator
-	{
-		FSceneOutlinerLayerContentsColumn& Column;
-		FColumnGenerator(FSceneOutlinerLayerContentsColumn& InColumn) : Column(InColumn) {}
-
-		virtual TSharedRef<SWidget> GenerateWidget(SceneOutliner::FActorTreeItem& ActorItem) const override
-		{
-			return Column.ConstructRowWidget(ActorItem.Actor);
-		}
-	};
-	friend FColumnGenerator;
 private:
 
 	/**	 */

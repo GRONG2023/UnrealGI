@@ -3,6 +3,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Styling/StyleColors.h"
+#include "Styling/AppStyle.h"
 
 /** Differences found within a graph or object */
 namespace EDiffType
@@ -36,6 +38,7 @@ namespace EDiffType
 		PIN_TYPE_IS_ARRAY,
 		PIN_TYPE_IS_REF,
 		PIN_LINKEDTO_NODE,
+		PIN_LINKEDTO_PIN, // only used when a pin was relinked to a different pin on the same node
 		NODE_MOVED,
 		TIMELINE_LENGTH,
 		TIMELINE_AUTOPLAY,
@@ -49,6 +52,19 @@ namespace EDiffType
 
 		// Informational message, does't count as a real diff
 		INFO_MESSAGE
+	};
+	
+	enum Category
+	{
+		ADDITION,
+		SUBTRACTION,
+		MODIFICATION,
+		
+		// used for small changes like moving nodes that don't effect the compilation
+		MINOR,
+
+		// used for items that are purely informational and don't show up in the diff results
+		CONTROL,
 	};
 }
 
@@ -64,11 +80,12 @@ struct FDiffSingleResult
 		Pin2 = nullptr;
 		Object1 = nullptr;
 		Object2 = nullptr;
-		DisplayColor = FLinearColor::White;
 	}
 
 	/** The type of diff */
 	EDiffType::Type Diff;
+
+	EDiffType::Category Category;
 
 	/** The first node involved in diff */
 	class UEdGraphNode* Node1;
@@ -94,8 +111,19 @@ struct FDiffSingleResult
 	/** Optional tooltip containing more information */
 	FText ToolTip; 
 
-	/** User can override color to use for display string */
-	FLinearColor DisplayColor;
+	/** Get the color that is associated with this diff category */
+	FLinearColor GetDisplayColor() const
+	{
+		switch(Category)
+		{
+		case EDiffType::ADDITION: return FAppStyle::Get().GetSlateColor("SourceControl.Diff.AdditionColor").GetSpecifiedColor();
+		case EDiffType::SUBTRACTION: return FAppStyle::Get().GetSlateColor("SourceControl.Diff.SubtractionColor").GetSpecifiedColor();
+		case EDiffType::MODIFICATION: return FAppStyle::Get().GetSlateColor("SourceControl.Diff.MajorModificationColor").GetSpecifiedColor();
+		case EDiffType::MINOR:  return FAppStyle::Get().GetSlateColor("SourceControl.Diff.MinorModificationColor").GetSpecifiedColor();
+		
+		default: return FStyleColors::Foreground.GetSpecifiedColor();
+		}
+	}
 
 	/** Path string of graph, relative to blueprint/asset root */
 	FString OwningObjectPath;
@@ -126,7 +154,7 @@ FORCEINLINE bool operator==( const FDiffSingleResult& LHS, const FDiffSingleResu
 			LHS.Object2 == RHS.Object2 &&
 			LHS.DisplayString.ToString() == RHS.DisplayString.ToString() &&
 			LHS.ToolTip.ToString() == RHS.ToolTip.ToString() &&
-			LHS.DisplayColor == RHS.DisplayColor;
+			LHS.Category == RHS.Category;
 }
 
 /** Collects the Diffs found for a node/object */

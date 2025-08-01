@@ -3,6 +3,7 @@
 #include "SuspensionUtility.h"
 
 DEFINE_LOG_CATEGORY(LogVehicleUtility);
+
 bool FSuspensionUtility::ComputeSprungMasses(const TArray<FVector>& MassSpringPositions, const float TotalMass, TArray<float>& OutSprungMasses)
 {
 	/*
@@ -189,8 +190,9 @@ bool FSuspensionUtility::ComputeSprungMasses(const TArray<FVector>& MassSpringPo
 		- (XDotY * Count);
 
 	// Make sure the matrix is invertible!
-	if (!ensureMsgf(DetLL > SMALL_NUMBER || DetLL < -SMALL_NUMBER, TEXT("Spring configuration is invalid! Please make sure no two springs are at the same location.")))
+	if (!(DetLL > SMALL_NUMBER || DetLL < -SMALL_NUMBER))
 	{
+		UE_LOG(LogVehicleUtility, Warning, TEXT("Spring configuration is invalid! Please make sure no two springs are at the same location."));
 		return false;
 	}
 

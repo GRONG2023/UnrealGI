@@ -15,7 +15,7 @@ namespace Chaos
 
 	// Metadata for a convex shape used by the manifold generation system and anything
 	// else that can benefit from knowing which vertices are associated with the faces.
-	class CHAOS_API FConvexStructureData
+	class FConvexStructureData
 	{
 	public:
 		using FConvexStructureDataLarge = FConvexHalfEdgeStructureDataS32;
@@ -53,7 +53,7 @@ namespace Chaos
 		//			[]() { return 0; });
 		//
 		template<typename T_OP, typename T_EMPTYOP>
-		auto ConstDataOp(const T_OP& Op, const T_EMPTYOP& EmptyOp) const
+		inline auto ConstDataOp(const T_OP& Op, const T_EMPTYOP& EmptyOp) const
 		{
 			switch (IndexType)
 			{
@@ -67,9 +67,21 @@ namespace Chaos
 			return EmptyOp();
 		}
 
+		#define CHAOS_CONVEXSTRUCTUREDATA_DATAOP(Op, DefaultValue)	\
+			switch (IndexType)										\
+			{														\
+			case EIndexType::Small:									\
+				return Op(DataS());									\
+			case EIndexType::Medium:								\
+				return Op(DataM());									\
+			case EIndexType::Large:									\
+				return Op(DataL());									\
+			}														\
+			return DefaultValue;
+
 		// A write-enabled version of ConstDataOp
 		template<typename T_OP, typename T_EMPTYOP>
-		auto NonConstDataOp(const T_OP& Op, const T_EMPTYOP& EmptyOp)
+		inline auto NonConstDataOp(const T_OP& Op, const T_EMPTYOP& EmptyOp)
 		{
 			switch (IndexType)
 			{
@@ -115,27 +127,66 @@ namespace Chaos
 
 			return *this;
 		}
+		
+		void CopyFrom(const FConvexStructureData& Other)
+		{
+			DestroyDataContainer();
 
+			check(Data.Ptr == nullptr);
+			check(IndexType == EIndexType::None);
 
-		bool IsValid() const
+			if (Other.IndexType == EIndexType::Large)
+			{
+				check(Other.Data.DataL);
+				Data.DataL = new FConvexStructureDataLarge(*Other.Data.DataL);
+			}
+			else if (Other.IndexType == EIndexType::Medium)
+			{
+				check(Other.Data.DataM);
+				Data.DataM = new FConvexStructureDataMedium(*Other.Data.DataM);
+			}
+			else if (Other.IndexType == EIndexType::Small)
+			{
+				check(Other.Data.DataS);
+				Data.DataS = new FConvexStructureDataSmall(*Other.Data.DataS);
+			}
+
+			IndexType = Other.IndexType;
+		}
+		
+		inline bool IsValid() const
 		{
 			return (Data.Ptr != nullptr);
 		}
 
-		EIndexType GetIndexType() const
+		inline EIndexType GetIndexType() const
 		{
 			return IndexType;
 		}
 
-		int32 FindVertexPlanes(int32 VertexIndex, int32* VertexPlanes, int32 MaxVertexPlanes) const
+		inline int32 FindVertexPlanes(int32 VertexIndex, int32* VertexPlanes, int32 MaxVertexPlanes) const
 		{
 			return ConstDataOp(
 				[VertexIndex, VertexPlanes, MaxVertexPlanes](const auto& ConcreteData) { return ConcreteData.FindVertexPlanes(VertexIndex, VertexPlanes, MaxVertexPlanes); },
 				[]() { return 0; });
 		}
 
+		inline int32 GetVertexPlanes3(int32 VertexIndex, int32& PlaneIndex0, int32& PlaneIndex1, int32& PlaneIndex2) const
+		{
+			switch (IndexType)
+			{
+			case EIndexType::Small:
+				return DataS().GetVertexPlanes3(VertexIndex, PlaneIndex0, PlaneIndex1, PlaneIndex2);
+			case EIndexType::Medium:
+				return DataM().GetVertexPlanes3(VertexIndex, PlaneIndex0, PlaneIndex1, PlaneIndex2);
+			case EIndexType::Large:
+				return DataL().GetVertexPlanes3(VertexIndex, PlaneIndex0, PlaneIndex1, PlaneIndex2);
+			}
+			return 0;
+		}
+
 		// The number of vertices that make up the corners of the specified face
-		int32 NumPlaneVertices(int32 PlaneIndex) const
+		inline int32 NumPlaneVertices(int32 PlaneIndex) const
 		{
 			return ConstDataOp(
 				[PlaneIndex](const auto& ConcreteData) { return ConcreteData.NumPlaneVertices(PlaneIndex); },
@@ -143,23 +194,30 @@ namespace Chaos
 		}
 
 		// Get the vertex index (in the outer convex container) of one of the vertices making up the corners of the specified face
-		int32 GetPlaneVertex(int32 PlaneIndex, int32 PlaneVertexIndex) const
+		inline int32 GetPlaneVertex(int32 PlaneIndex, int32 PlaneVertexIndex) const
 		{
 			checkSlow(IsValid());
-
 			return ConstDataOp(
 				[PlaneIndex, PlaneVertexIndex](const auto& ConcreteData) { return ConcreteData.GetPlaneVertex(PlaneIndex, PlaneVertexIndex); },
 				[]() { return (int32)INDEX_NONE; });
 		}
 
-		int32 NumEdges() const
+
+		inline int32 NumHalfEdges() const
+		{
+			return ConstDataOp(
+				[](const auto& ConcreteData) { return ConcreteData.NumHalfEdges(); },
+				[]() { return 0; });
+		}
+
+		inline int32 NumEdges() const
 		{
 			return ConstDataOp(
 				[](const auto& ConcreteData) { return ConcreteData.NumEdges(); },
 				[]() { return 0; });
 		}
 
-		int32 GetEdgeVertex(int32 EdgeIndex, int32 EdgeVertexIndex) const
+		inline int32 GetEdgeVertex(int32 EdgeIndex, int32 EdgeVertexIndex) const
 		{
 			return ConstDataOp(
 				[EdgeIndex, EdgeVertexIndex](const auto& ConcreteData)
@@ -169,7 +227,7 @@ namespace Chaos
 				[]() { return (int32)INDEX_NONE; });
 		}
 
-		int32 GetEdgePlane(int32 EdgeIndex, int32 EdgePlaneIndex) const
+		inline int32 GetEdgePlane(int32 EdgeIndex, int32 EdgePlaneIndex) const
 		{
 			return ConstDataOp(
 				[EdgeIndex, EdgePlaneIndex](const auto& ConcreteData)
@@ -180,14 +238,16 @@ namespace Chaos
 		}
 
 		// Initialize the structure data from the set of vertices for each face of the convex
-		void SetPlaneVertices(const TArray<TArray<int32>>& InPlaneVertices, int32 NumVerts)
+		bool SetPlaneVertices(const TArray<TArray<int32>>& InPlaneVertices, int32 NumVerts, const bool bRegularDatas = false)
 		{
 			const EIndexType NewIndexType = GetRequiredIndexType(InPlaneVertices, NumVerts);
 			CreateDataContainer(NewIndexType);
 
-			NonConstDataOp(
-				[InPlaneVertices, NumVerts](auto& ConcreteData) { ConcreteData.SetPlaneVertices(InPlaneVertices, NumVerts); },
-				[]() {});
+			return NonConstDataOp(
+				[InPlaneVertices, NumVerts, bRegularDatas](auto& ConcreteData) {
+				return bRegularDatas ? ConcreteData.BuildRegularDatas(InPlaneVertices, NumVerts) : ConcreteData.SetPlaneVertices(InPlaneVertices, NumVerts); 
+					},
+				[]() { return true; });
 		}
 
 		void Serialize(FArchive& Ar)
@@ -227,6 +287,20 @@ namespace Chaos
 			Value.Serialize(Ar);
 			return Ar;
 		}
+
+#if INTEL_ISPC
+		// See PerParticlePBDCollisionConstraint.cpp
+		// ISPC code has matching structs for interpreting FImplicitObjects.
+		// This is used to verify that the structs stay the same.
+		struct FISPCDataVerifier
+		{
+			static constexpr int32 OffsetOfData() { return offsetof(FConvexStructureData, Data); }
+			static constexpr int32 SizeOfData() { return sizeof(FConvexStructureData::Data); }
+			static constexpr int32 OffsetOfIndexType() { return offsetof(FConvexStructureData, IndexType); }
+			static constexpr int32 SizeOfIndexType() { return sizeof(FConvexStructureData::IndexType); }
+		};
+		friend FISPCDataVerifier;
+#endif // #if INTEL_ISPC
 
 	private:
 

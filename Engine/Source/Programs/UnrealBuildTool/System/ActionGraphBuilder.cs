@@ -2,11 +2,10 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using Microsoft.Extensions.Logging;
+using UnrealBuildBase;
 
 namespace UnrealBuildTool
 {
@@ -16,19 +15,28 @@ namespace UnrealBuildTool
 	interface IActionGraphBuilder
 	{
 		/// <summary>
-		/// Creates a new action to be built as part of this target
+		/// Adds an action to this graph
 		/// </summary>
-		/// <param name="Type">Type of action to create</param>
-		/// <returns>New action</returns>
-		Action CreateAction(ActionType Type);
+		/// <param name="Action">Action to add</param>
+		void AddAction(IExternalAction Action);
 
 		/// <summary>
 		/// Creates a response file for use in the action graph
 		/// </summary>
 		/// <param name="Location">Location of the response file</param>
 		/// <param name="Contents">Contents of the file</param>
+		/// <param name="AllowAsync">Allows the backend to write the file in a separate task.</param>
 		/// <returns>New file item</returns>
-		FileItem CreateIntermediateTextFile(FileReference Location, string Contents);
+		void CreateIntermediateTextFile(FileItem Location, string Contents, bool AllowAsync = true);
+
+		/// <summary>
+		/// Creates a response file for use in the action graph, with a newline between each string in ContentLines
+		/// </summary>
+		/// <param name="Location">Location of the response file</param>
+		/// <param name="ContentLines">Contents of the file</param>
+		/// <param name="AllowAsync">Allows the backend to write the file in a separate task.</param>
+		/// <returns>New file item</returns>
+		void CreateIntermediateTextFile(FileItem Location, IEnumerable<string> ContentLines, bool AllowAsync = true);
 
 		/// <summary>
 		/// Adds a file which is in the non-unity working set
@@ -56,6 +64,12 @@ namespace UnrealBuildTool
 		void AddSourceFiles(DirectoryItem SourceDir, FileItem[] SourceFiles);
 
 		/// <summary>
+		/// Adds a list of known header files
+		/// </summary>
+		/// <param name="HeaderFiles">List of header files to track</param>
+		void AddHeaderFiles(FileItem[] HeaderFiles);
+
+		/// <summary>
 		/// Sets the output items which belong to a particular module
 		/// </summary>
 		/// <param name="ModuleName">Name of the module</param>
@@ -72,48 +86,68 @@ namespace UnrealBuildTool
 	/// <summary>
 	/// Implementation of IActionGraphBuilder which discards all unnecessary operations
 	/// </summary>
-	class NullActionGraphBuilder : IActionGraphBuilder
+	sealed class NullActionGraphBuilder : IActionGraphBuilder
 	{
-		/// <inheritdoc/>
-		public Action CreateAction(ActionType Type)
+		private readonly ILogger Logger;
+
+		/// <summary>
+		/// Constructor
+		/// </summary>
+		/// <param name="InLogger"></param>
+		public NullActionGraphBuilder(ILogger InLogger)
 		{
-			return new Action(Type);
+			Logger = InLogger;
 		}
 
 		/// <inheritdoc/>
-		public virtual FileItem CreateIntermediateTextFile(FileReference Location, string Contents)
-		{
-			Utils.WriteFileIfChanged(Location, Contents, StringComparison.OrdinalIgnoreCase);
-			return FileItem.GetItemByFileReference(Location);
-		}
-
-		/// <inheritdoc/>
-		public virtual void AddSourceDir(DirectoryItem SourceDir)
+		public void AddAction(IExternalAction Action)
 		{
 		}
 
 		/// <inheritdoc/>
-		public virtual void AddSourceFiles(DirectoryItem SourceDir, FileItem[] SourceFiles)
+		public void CreateIntermediateTextFile(FileItem FileItem, string Contents, bool AllowAsync = true)
+		{
+			Utils.WriteFileIfChanged(FileItem, Contents, Logger);
+		}
+
+		/// <inheritdoc/>
+		public void CreateIntermediateTextFile(FileItem FileItem, IEnumerable<string> ContentLines, bool AllowAsync = true)
+		{
+			Utils.WriteFileIfChanged(FileItem, ContentLines, Logger);
+		}
+
+		/// <inheritdoc/>
+		public void AddSourceDir(DirectoryItem SourceDir)
 		{
 		}
 
 		/// <inheritdoc/>
-		public virtual void AddFileToWorkingSet(FileItem File)
+		public void AddSourceFiles(DirectoryItem SourceDir, FileItem[] SourceFiles)
 		{
 		}
 
 		/// <inheritdoc/>
-		public virtual void AddCandidateForWorkingSet(FileItem File)
+		public void AddHeaderFiles(FileItem[] HeaderFiles)
 		{
 		}
 
 		/// <inheritdoc/>
-		public virtual void AddDiagnostic(string Message)
+		public void AddFileToWorkingSet(FileItem File)
 		{
 		}
 
 		/// <inheritdoc/>
-		public virtual void SetOutputItemsForModule(string ModuleName, FileItem[] OutputItems)
+		public void AddCandidateForWorkingSet(FileItem File)
+		{
+		}
+
+		/// <inheritdoc/>
+		public void AddDiagnostic(string Message)
+		{
+		}
+
+		/// <inheritdoc/>
+		public void SetOutputItemsForModule(string ModuleName, FileItem[] OutputItems)
 		{
 		}
 	}
@@ -138,15 +172,21 @@ namespace UnrealBuildTool
 		}
 
 		/// <inheritdoc/>
-		public virtual Action CreateAction(ActionType Type)
+		public virtual void AddAction(IExternalAction Action)
 		{
-			return Inner.CreateAction(Type);
+			Inner.AddAction(Action);
 		}
 
 		/// <inheritdoc/>
-		public virtual FileItem CreateIntermediateTextFile(FileReference Location, string Contents)
+		public virtual void CreateIntermediateTextFile(FileItem FileItem, string Contents, bool AllowAsync = true)
 		{
-			return Inner.CreateIntermediateTextFile(Location, Contents);
+			Inner.CreateIntermediateTextFile(FileItem, Contents, AllowAsync);
+		}
+
+		/// <inheritdoc/>
+		public virtual void CreateIntermediateTextFile(FileItem FileItem, IEnumerable<string> ContentLines, bool AllowAsync = true)
+		{
+			Inner.CreateIntermediateTextFile(FileItem, ContentLines, AllowAsync);
 		}
 
 		/// <inheritdoc/>
@@ -159,6 +199,12 @@ namespace UnrealBuildTool
 		public virtual void AddSourceFiles(DirectoryItem SourceDir, FileItem[] SourceFiles)
 		{
 			Inner.AddSourceFiles(SourceDir, SourceFiles);
+		}
+
+		/// <inheritdoc/>
+		public virtual void AddHeaderFiles(FileItem[] HeaderFiles)
+		{
+			Inner.AddHeaderFiles(HeaderFiles);
 		}
 
 		/// <inheritdoc/>
@@ -192,6 +238,19 @@ namespace UnrealBuildTool
 	static class ActionGraphBuilderExtensions
 	{
 		/// <summary>
+		/// Creates a new action to be built as part of this target
+		/// </summary>
+		/// <param name="Graph">Graph to add the action to</param>
+		/// <param name="Type">Type of action to create</param>
+		/// <returns>New action</returns>
+		public static Action CreateAction(this IActionGraphBuilder Graph, ActionType Type)
+		{
+			Action Action = new Action(Type);
+			Graph.AddAction(Action);
+			return Action;
+		}
+
+		/// <summary>
 		/// Creates an action which copies a file from one location to another
 		/// </summary>
 		/// <param name="Graph">The action graph</param>
@@ -209,9 +268,9 @@ namespace UnrealBuildTool
 			}
 			else
 			{
-				CopyAction.CommandArguments = String.Format("-c 'cp -f \"{0}\" \"{1}\"'", SourceFile.AbsolutePath, TargetFile.AbsolutePath);
+				CopyAction.CommandArguments = String.Format("-c \"cp -f \\\"{0}\\\" \\\"{1}\\\"\"", SourceFile.AbsolutePath, TargetFile.AbsolutePath);
 			}
-			CopyAction.WorkingDirectory = UnrealBuildTool.EngineSourceDirectory;
+			CopyAction.WorkingDirectory = Unreal.EngineSourceDirectory;
 			CopyAction.PrerequisiteItems.Add(SourceFile);
 			CopyAction.ProducedItems.Add(TargetFile);
 			CopyAction.DeleteItems.Add(TargetFile);
@@ -246,15 +305,20 @@ namespace UnrealBuildTool
 		/// <returns>New action instance</returns>
 		public static Action CreateRecursiveAction<T>(this IActionGraphBuilder Graph, ActionType Type, string Arguments) where T : ToolMode
 		{
-			ToolModeAttribute Attribute = typeof(T).GetCustomAttribute<ToolModeAttribute>();
+			ToolModeAttribute? Attribute = typeof(T).GetCustomAttribute<ToolModeAttribute>();
 			if (Attribute == null)
 			{
 				throw new BuildException("Missing ToolModeAttribute on {0}", typeof(T).Name);
 			}
 
 			Action NewAction = Graph.CreateAction(Type);
-			NewAction.CommandPath = UnrealBuildTool.GetUBTPath();
-			NewAction.CommandArguments = String.Format("-Mode={0} {1}", Attribute.Name, Arguments);
+			NewAction.CommandPath = Unreal.DotnetPath;
+			NewAction.WorkingDirectory = Unreal.EngineSourceDirectory;
+			NewAction.CommandArguments = $"\"{Unreal.UnrealBuildToolDllPath}\" -Mode={Attribute.Name} {Arguments}";
+			NewAction.CommandDescription = Attribute.Name;
+			NewAction.bCanExecuteRemotely = false;
+			NewAction.bCanExecuteRemotelyWithSNDBS = false;
+			NewAction.bCanExecuteInUBA = false;
 			return NewAction;
 		}
 
@@ -265,10 +329,29 @@ namespace UnrealBuildTool
 		/// <param name="Graph">The action graph</param>
 		/// <param name="AbsolutePath">Path to the intermediate file to create</param>
 		/// <param name="Contents">Contents of the new file</param>
+		/// <param name="AllowAsync">Allows the backend to write the file in a separate task.</param>
 		/// <returns>File item for the newly created file</returns>
-		public static FileItem CreateIntermediateTextFile(this IActionGraphBuilder Graph, FileReference AbsolutePath, IEnumerable<string> Contents)
+		public static FileItem CreateIntermediateTextFile(this IActionGraphBuilder Graph, FileReference AbsolutePath, string Contents, bool AllowAsync = true)
 		{
-			return Graph.CreateIntermediateTextFile(AbsolutePath, string.Join(Environment.NewLine, Contents));
+			FileItem FileItem = FileItem.GetItemByFileReference(AbsolutePath);
+			Graph.CreateIntermediateTextFile(FileItem, Contents, AllowAsync);
+			return FileItem;
+		}
+
+		/// <summary>
+		/// Creates a text file with the given contents.  If the contents of the text file aren't changed, it won't write the new contents to
+		/// the file to avoid causing an action to be considered outdated.
+		/// </summary>
+		/// <param name="Graph">The action graph</param>
+		/// <param name="AbsolutePath">Path to the intermediate file to create</param>
+		/// <param name="ContentLines">Contents of the new file</param>
+		/// <param name="AllowAsync">Allows the backend to write the file in a separate task.</param>
+		/// <returns>File item for the newly created file</returns>
+		public static FileItem CreateIntermediateTextFile(this IActionGraphBuilder Graph, FileReference AbsolutePath, IEnumerable<string> ContentLines, bool AllowAsync = true)
+		{
+			FileItem FileItem = UnrealBuildBase.FileItem.GetItemByFileReference(AbsolutePath);
+			Graph.CreateIntermediateTextFile(FileItem, ContentLines, AllowAsync);
+			return FileItem;
 		}
 	}
 }

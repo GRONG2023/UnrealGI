@@ -7,11 +7,12 @@
 #define LOCTEXT_NAMESPACE "TimingEvent"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-// ITimingEvent, FTimingEvent
+// ITimingEvent, FTimingEvent, ITimingEventRelation
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 INSIGHTS_IMPLEMENT_RTTI(ITimingEvent)
 INSIGHTS_IMPLEMENT_RTTI(FTimingEvent)
+INSIGHTS_IMPLEMENT_RTTI(ITimingEventRelation)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -25,7 +26,8 @@ uint32 FTimingEvent::ComputeEventColor(uint32 Id)
 uint32 FTimingEvent::ComputeEventColor(const TCHAR* Str)
 {
 	uint32 Color = 0;
-	if (Str != nullptr)
+	// Let the special event names (ex. "<unknown>", "<noname>", "<invalid>", etc.) to be colored in black.
+	if (Str != nullptr && *Str != TEXT('<'))
 	{
 		for (const TCHAR* c = Str; *c; ++c)
 		{

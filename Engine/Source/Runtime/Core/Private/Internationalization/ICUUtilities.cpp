@@ -37,7 +37,7 @@ namespace ICUUtilities
 		if (SourceLen > 0)
 		{
 			// Get the internal buffer of the string, we're going to write to it directly
-			TArray<TCHAR>& InternalStringBuffer = Destination.GetCharArray();
+			TArray<TCHAR, FString::AllocatorType>& InternalStringBuffer = Destination.GetCharArray();
 			InternalStringBuffer.SetNumUninitialized(SourceLen + 1);
 
 			// Copy into the string buffer and terminate
@@ -105,7 +105,7 @@ namespace ICUUtilities
 			ucnv_reset(ICUConverter);
 
 			// Get the internal buffer of the string, we're going to use it as scratch space
-			TArray<TCHAR>& InternalStringBuffer = Destination.GetCharArray();
+			TArray<TCHAR, FString::AllocatorType>& InternalStringBuffer = Destination.GetCharArray();
 
 			// Work out the maximum size required and resize the buffer so it can hold enough data
 			const int32_t DestinationCapacityBytes = UCNV_GET_MAX_BYTES_FOR_STRING(SourceLen, ucnv_getMaxCharSize(ICUConverter));
@@ -116,7 +116,7 @@ namespace ICUUtilities
 			const int32_t DestinationSizeBytes = ucnv_fromUChars(ICUConverter, reinterpret_cast<char*>(InternalStringBuffer.GetData()), DestinationCapacityBytes, Source.getBuffer() + SourceStartIndex, SourceLen, &ICUStatus);
 			const int32 DestinationSizeTCHARs = DestinationSizeBytes / sizeof(TCHAR);
 			InternalStringBuffer[DestinationSizeTCHARs] = 0;
-			InternalStringBuffer.SetNum(DestinationSizeTCHARs + 1, /*bAllowShrinking*/false); // the array size includes null
+			InternalStringBuffer.SetNum(DestinationSizeTCHARs + 1, EAllowShrinking::No); // the array size includes null
 
 			check(U_SUCCESS(ICUStatus));
 		}
@@ -326,85 +326,6 @@ namespace ICUUtilities
 	int32 GetUnicodeStringLength(const TCHAR* Source, const int32 InSourceStartIndex, const int32 InSourceLength)
 	{
 		return GetUnicodeStringLengthImpl<FPlatformString::IsUnicodeEncoded, sizeof(TCHAR)>(Source, InSourceStartIndex, InSourceLength);
-	}
-
-	FString SanitizeCultureCode(const FString& InCultureCode)
-	{
-		if (InCultureCode.IsEmpty())
-		{
-			return InCultureCode;
-		}
-
-		// ICU culture codes (IETF language tags) may only contain A-Z, a-z, 0-9, -, ,_, @, ;, =, or .
-		FString SanitizedCultureCode = InCultureCode;
-		{
-			SanitizedCultureCode.GetCharArray().RemoveAll([](const TCHAR InChar)
-			{
-				if (InChar != 0)
-				{
-					const bool bIsValid = (InChar >= TEXT('A') && InChar <= TEXT('Z')) || (InChar >= TEXT('a') && InChar <= TEXT('z')) || (InChar >= TEXT('0') && InChar <= TEXT('9')) || (InChar == TEXT('-')) || (InChar == TEXT('_')) || (InChar == TEXT('@')) || (InChar == TEXT(';')) || (InChar == TEXT('=')) || (InChar == TEXT('.'));
-					return !bIsValid;
-				}
-				return false;
-			});
-		}
-		return SanitizedCultureCode;
-	}
-
-	FString SanitizeTimezoneCode(const FString& InTimezoneCode)
-	{
-		if (InTimezoneCode.IsEmpty())
-		{
-			return InTimezoneCode;
-		}
-
-		// ICU timezone codes (Olson or custom offset codes) may only contain A-Z, a-z, 0-9, :, /, +, -, or _, and each / delimited name can be 14-characters max
-		FString SanitizedTimezoneCode = InTimezoneCode;
-		{
-			int32 NumValidChars = 0;
-			SanitizedTimezoneCode.GetCharArray().RemoveAll([&NumValidChars](const TCHAR InChar)
-			{
-				if (InChar != 0)
-				{
-					if (InChar == TEXT('/'))
-					{
-						NumValidChars = 0;
-						return false;
-					}
-					else
-					{
-						const bool bIsValid = (InChar >= TEXT('A') && InChar <= TEXT('Z')) || (InChar >= TEXT('a') && InChar <= TEXT('z')) || (InChar >= TEXT('0') && InChar <= TEXT('9')) || (InChar == TEXT(':')) || (InChar == TEXT('+')) || (InChar == TEXT('-')) || (InChar == TEXT('_'));
-						return !bIsValid || ++NumValidChars > 14;
-					}
-				}
-				return false;
-			});
-		}
-		return SanitizedTimezoneCode;
-	}
-
-	FString SanitizeCurrencyCode(const FString& InCurrencyCode)
-	{
-		if (InCurrencyCode.IsEmpty())
-		{
-			return InCurrencyCode;
-		}
-
-		// ICU currency codes (ISO 4217) may only contain A-Z or a-z, and should be 3-characters
-		FString SanitizedCurrencyCode = InCurrencyCode;
-		{
-			int32 NumValidChars = 0;
-			SanitizedCurrencyCode.GetCharArray().RemoveAll([&NumValidChars](const TCHAR InChar)
-			{
-				if (InChar != 0)
-				{
-					const bool bIsValid = (InChar >= TEXT('A') && InChar <= TEXT('Z')) || (InChar >= TEXT('a') && InChar <= TEXT('z'));
-					return !bIsValid || ++NumValidChars > 3;
-				}
-				return false;
-			});
-		}
-		return SanitizedCurrencyCode;
 	}
 }
 #endif

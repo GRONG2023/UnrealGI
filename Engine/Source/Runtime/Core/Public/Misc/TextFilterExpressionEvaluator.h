@@ -1,15 +1,18 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #pragma once
 
-#include "CoreTypes.h"
-#include "Containers/UnrealString.h"
+#include "Containers/Array.h"
 #include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
 #include "Delegates/Delegate.h"
-#include "Misc/Optional.h"
 #include "Internationalization/Text.h"
-#include "Misc/ExpressionParserTypes.h"
 #include "Misc/ExpressionParser.h"
+#include "Misc/ExpressionParserTypes.h"
+#include "Misc/Optional.h"
 #include "Misc/TextFilterUtils.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
 
 class FTextToken;
 
@@ -163,7 +166,7 @@ namespace TextFilterExpressionParser
 	{																	\
 		struct TYPE														\
 		{																\
-			static const int32 MonikerCount = MONIKER_COUNT;			\
+			static constexpr int32 MonikerCount = MONIKER_COUNT;			\
 			static const TCHAR* Monikers[MonikerCount];					\
 		};																\
 	}																	\
@@ -179,9 +182,9 @@ DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FLessOrEqual,				2,	0x8C0A46B0, 0x8DAA4E2B,
 DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FGreater,					1,	0x6A6247F4, 0xFD78467F, 0xA6AC1244, 0x0A31E0A5)
 DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FGreaterOrEqual,			2,	0x09D75C5E, 0xA29A4194, 0x8E8E5278, 0xC84365FD)
 
-DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FOr,						3,	0xF4778B51, 0xF535414D, 0x9C0EB5F2, 0x2F2B0FD4)
-DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FAnd,						3,	0x7511397A, 0x02D24DC2, 0x86729800, 0xF454C320)
-DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FNot,						2,	0x03D78990, 0x41D04E26, 0x8E98AD2F, 0x74667868)
+DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FOr,						4,	0xF4778B51, 0xF535414D, 0x9C0EB5F2, 0x2F2B0FD4)
+DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FAnd,						4,	0x7511397A, 0x02D24DC2, 0x86729800, 0xF454C320)
+DEFINE_TEXT_EXPRESSION_OPERATOR_NODE(FNot,						3,	0x03D78990, 0x41D04E26, 0x8E98AD2F, 0x74667868)
 
 DEFINE_EXPRESSION_NODE_TYPE(TextFilterExpressionParser::FTextToken,	0x09E49538, 0x633545E3, 0x84B5644F, 0x1F11628F);
 DEFINE_EXPRESSION_NODE_TYPE(TextFilterExpressionParser::FFunction,	0x084E6214, 0x032FFA48, 0x9245ABF1, 0x9E248F1A);
@@ -191,45 +194,45 @@ DEFINE_EXPRESSION_NODE_TYPE(TextFilterExpressionParser::FFunction,	0x084E6214, 0
 DECLARE_DELEGATE_RetVal_OneParam(bool, FTokenFunctionHandler, const FTextFilterString&);
 
 /** Defines an expression evaluator that can be used to perform complex text filter queries */
-class CORE_API FTextFilterExpressionEvaluator
+class FTextFilterExpressionEvaluator
 {
 public:
 	/** Construction and assignment */
-	FTextFilterExpressionEvaluator(const ETextFilterExpressionEvaluatorMode InMode);
-	FTextFilterExpressionEvaluator(const FTextFilterExpressionEvaluator& Other);
-	FTextFilterExpressionEvaluator& operator=(const FTextFilterExpressionEvaluator& Other);
+	CORE_API FTextFilterExpressionEvaluator(const ETextFilterExpressionEvaluatorMode InMode);
+	CORE_API FTextFilterExpressionEvaluator(const FTextFilterExpressionEvaluator& Other);
+	CORE_API FTextFilterExpressionEvaluator& operator=(const FTextFilterExpressionEvaluator& Other);
 	virtual ~FTextFilterExpressionEvaluator() {}
 
 	/** Get the complexity of the current filter terms */
-	ETextFilterExpressionType GetFilterType() const;
+	CORE_API ETextFilterExpressionType GetFilterType() const;
 
 	/** Get the filter terms that we're currently using */
-	FText GetFilterText() const;
+	CORE_API FText GetFilterText() const;
 
 	/** Set the filter terms to be compiled for evaluation later. Returns true if the filter was actually changed */
-	bool SetFilterText(const FText& InFilterText);
+	CORE_API bool SetFilterText(const FText& InFilterText);
 
 	/** Get the last error returned from lexing or compiling the current filter text */
-	FText GetFilterErrorText() const;
+	CORE_API FText GetFilterErrorText() const;
 
 	/** Get the filter expression tokens created from the current filter text */
-	const TArray<FExpressionToken>& GetFilterExpressionTokens() const;
+	CORE_API const TArray<FExpressionToken>& GetFilterExpressionTokens() const;
 
 	/** Test our compiled filter using the given context */
-	bool TestTextFilter(const ITextFilterExpressionContext& InContext) const;
+	CORE_API bool TestTextFilter(const ITextFilterExpressionContext& InContext) const;
 
 	/** Helper function to add callbacks for function tokens */
-	void AddFunctionTokenCallback(FString InFunctionName, FTokenFunctionHandler InCallback);
+	CORE_API void AddFunctionTokenCallback(FString InFunctionName, FTokenFunctionHandler InCallback);
 
 protected:
 	/** Sets up grammar used for evaluation */
-	void SetupGrammar();
+	CORE_API void SetupGrammar();
 
 	/** Common function to construct the expression parser */
-	virtual void ConstructExpressionParser();
+	CORE_API virtual void ConstructExpressionParser();
 
 	/** Evaluate the given compiled result, and optionally populate OutErrorText with any error information */
-	virtual bool EvaluateCompiledExpression(const ExpressionParser::CompileResultType& InCompiledResult, const ITextFilterExpressionContext& InContext, FText* OutErrorText) const;
+	CORE_API virtual bool EvaluateCompiledExpression(const ExpressionParser::CompileResultType& InCompiledResult, const ITextFilterExpressionContext& InContext, FText* OutErrorText) const;
 
 	/** Defines whether or not the expression parser can evaluate complex expressions */
 	ETextFilterExpressionEvaluatorMode ExpressionEvaluatorMode;

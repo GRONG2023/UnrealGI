@@ -5,13 +5,15 @@
 #include "Containers/Queue.h"
 #include "Containers/LockFreeList.h"
 #include "Templates/TypeHash.h"
+#include "Misc/CoreDelegates.h"
 #include "Misc/ScopeLock.h"
 #include "Async/AsyncFileHandle.h"
 #include "Async/TaskGraphInterfaces.h"
 #include "ProfilingDebugging/LoadTimeTracker.h"
 #include "HAL/PlatformFile.h"
-#include "HAL/PlatformFilemanager.h"
+#include "HAL/PlatformFileManager.h"
 #include "HAL/IConsoleManager.h"
+#include "ProfilingDebugging/CsvProfiler.h"
 
 DECLARE_STATS_GROUP(TEXT("Streaming File Cache"), STATGROUP_SFC, STATCAT_Advanced);
 
@@ -22,28 +24,35 @@ DECLARE_CYCLE_STAT(TEXT("EvictAll"), STAT_SFC_EvictAll, STATGROUP_SFC);
 // These below are pretty high throughput and probably should be removed once the system gets more mature
 DECLARE_CYCLE_STAT(TEXT("Find Eviction Candidate"), STAT_SFC_FindEvictionCandidate, STATGROUP_SFC);
 
+CSV_DEFINE_CATEGORY(FileCache, true);
+
 DEFINE_LOG_CATEGORY_STATIC(LogStreamingFileCache, Log, All);
 
-static const int CacheLineSize = 64 * 1024;
+static int32 GFileCacheBlockSizeKB = 64;
+static FAutoConsoleVariableRef CVarFileCacheBlockSize(
+	TEXT("fc.BlockSize"),
+	GFileCacheBlockSizeKB,
+	TEXT("Size of each block in KB in the global file cache object\n"
+	     "Should match packaging compression block size for optimal reading from packege"),
+	ECVF_ReadOnly
+);
 
-static int32 GNumFileCacheBlocks = 256;
+static int32 GNumFileCacheBlocks = 64;
 static FAutoConsoleVariableRef CVarNumFileCacheBlocks(
-	TEXT("fc.NumFileCacheBlocks"),
+	TEXT("fc.NumBlocks"),
 	GNumFileCacheBlocks,
-	TEXT("Number of blocks in the global file cache object\n"),
-	ECVF_RenderThreadSafe
+	TEXT("Number of blocks in the global file cache object"),
+	ECVF_ReadOnly
 );
 
 // 
 // Strongly typed ids to avoid confusion in the code
 // 
-template <int SetBlockSize, typename Parameter> class StrongBlockIdentifier
+template <typename Parameter> class StrongBlockIdentifier
 {
 	static const int InvalidHandle = 0xFFFFFFFF;
 
 public:
-	static const int32 BlockSize = SetBlockSize;
-
 	StrongBlockIdentifier() : Id(InvalidHandle) {}
 	explicit StrongBlockIdentifier(int32 SetId) : Id(SetId) {}
 
@@ -56,24 +65,24 @@ public:
 	inline StrongBlockIdentifier operator--(int) { StrongBlockIdentifier Temp(*this); operator--(); return Temp; }
 
 	// Get the offset in the file to read this block
-	inline int64 GetOffset() const { checkSlow(IsValid()); return (int64)Id * (int64)BlockSize; }
-	inline int64 GetSize() const { checkSlow(IsValid()); return BlockSize; }
+	inline static int64 GetSize() { return ((int64)GFileCacheBlockSizeKB * 1024); }
+	inline int64 GetOffset() const { checkSlow(IsValid()); return (int64)Id * GetSize(); }
 
 	// Get the number of bytes that need to be read for this block
 	// takes into account incomplete blocks at the end of the file
-	inline int64 GetSize(int64 FileSize) const { checkSlow(IsValid()); return FMath::Min((int64)BlockSize, FileSize - GetOffset()); }
+	inline int64 GetSize(int64 FileSize) const { checkSlow(IsValid()); return FMath::Min(GetSize(), FileSize - GetOffset()); }
 
-	friend inline uint32 GetTypeHash(const StrongBlockIdentifier<SetBlockSize, Parameter>& Info) { return GetTypeHash(Info.Id); }
+	friend inline uint32 GetTypeHash(const StrongBlockIdentifier<Parameter>& Info) { return GetTypeHash(Info.Id); }
 
-	inline bool operator==(const StrongBlockIdentifier<SetBlockSize, Parameter>&Other) const { return Id == Other.Id; }
-	inline bool operator!=(const StrongBlockIdentifier<SetBlockSize, Parameter>&Other) const { return Id != Other.Id; }
+	inline bool operator==(const StrongBlockIdentifier<Parameter>&Other) const { return Id == Other.Id; }
+	inline bool operator!=(const StrongBlockIdentifier<Parameter>&Other) const { return Id != Other.Id; }
 
 private:
 	int32 Id;
 };
 
-using CacheLineID = StrongBlockIdentifier<CacheLineSize, struct CacheLineStrongType>; // Unique per file handle
-using CacheSlotID = StrongBlockIdentifier<CacheLineSize, struct CacheSlotStrongType>; // Unique per cache
+using CacheLineID = StrongBlockIdentifier<struct CacheLineStrongType>; // Unique per file handle
+using CacheSlotID = StrongBlockIdentifier<struct CacheSlotStrongType>; // Unique per cache
 
 class FFileCacheHandle;
 
@@ -97,7 +106,7 @@ public:
 	{
 		check(SlotID.Get() < SlotInfo.Num() - 1);
 		check(IsSlotLocked(SlotID)); // slot must be locked in order to access memory
-		return Memory + SlotID.Get() * CacheSlotID::BlockSize;
+		return Memory + SlotID.Get() * CacheSlotID::GetSize();
 	}
 
 	CacheSlotID AcquireAndLockSlot(FFileCacheHandle* InHandle, CacheLineID InLineID);
@@ -190,8 +199,9 @@ public:
 	// allocated with an extra dummy entry at index0 for linked list head
 	TArray<FSlotInfo> SlotInfo;
 	uint8* Memory;
-	int32 SizeInBytes;
+	int64 SizeInBytes;
 	int32 NumFreeSlots;
+	int32 MinNumFreeSlots;
 };
 
 static FFileCache &GetCache()
@@ -206,25 +216,25 @@ class FFileCacheHandle : public IFileCacheHandle
 {
 public:
 
-	FFileCacheHandle(IAsyncReadFileHandle* InHandle);
+	explicit FFileCacheHandle(IAsyncReadFileHandle* InHandle, int64 InBaseOffset);
 	virtual ~FFileCacheHandle() override;
 
 	//
 	// Block helper functions. These are just convenience around basic math.
 	// 
 
- // templated uses of this may end up converting int64 to int32, but it's up to the user of the template to know
+	// templated uses of this may end up converting int64 to int32, but it's up to the user of the template to know
 	PRAGMA_DISABLE_UNSAFE_TYPECAST_WARNINGS
-		/*
-		 * Get the block id that contains the specified offset
-		 */
-		template<typename BlockIDType> inline BlockIDType GetBlock(int64 Offset)
+	/*
+		* Get the block id that contains the specified offset
+		*/
+	template<typename BlockIDType> inline BlockIDType GetBlock(int64 Offset)
 	{
-		return BlockIDType(FMath::DivideAndRoundDown(Offset, (int64)BlockIDType::BlockSize));
+		return BlockIDType(FMath::DivideAndRoundDown(Offset, BlockIDType::GetSize()));
 	}
-	PRAGMA_ENABLE_UNSAFE_TYPECAST_WARNINGS
+	PRAGMA_RESTORE_UNSAFE_TYPECAST_WARNINGS
 
-		template<typename BlockIDType> inline int32 GetNumBlocks(int64 Offset, int64 Size)
+	template<typename BlockIDType> inline int32 GetNumBlocks(int64 Offset, int64 Size)
 	{
 		BlockIDType FirstBlock = GetBlock<BlockIDType>(Offset);
 		BlockIDType LastBlock = GetBlock<BlockIDType>(Offset + Size - 1);// Block containing the last byte
@@ -234,7 +244,7 @@ public:
 	// Returns the offset within the first block covering the byte range to read from
 	template<typename BlockIDType> inline int64 GetBlockOffset(int64 Offset)
 	{
-		return Offset - FMath::DivideAndRoundDown(Offset, (int64)BlockIDType::BlockSize) *  BlockIDType::BlockSize;
+		return Offset - FMath::DivideAndRoundDown(Offset, BlockIDType::GetSize()) *  BlockIDType::GetSize();
 	}
 
 	// Returns the size within the first cache line covering the byte range to read
@@ -254,20 +264,23 @@ public:
 	void Evict(CacheLineID Line);
 
 private:
-	struct FPendingRequest
-	{
-		FGraphEventRef Event;
-	};
-
 	void CheckForSizeRequestComplete();
 
 	CacheSlotID AcquireSlotAndReadLine(FFileCache& Cache, CacheLineID LineID, EAsyncIOPriorityAndFlags Priority);
 	void ReadLine(FFileCache& Cache, CacheSlotID SlotID, CacheLineID LineID, EAsyncIOPriorityAndFlags Priority, const FGraphEventRef& CompletionEvent);
 
-	TArray<CacheSlotID> LineToSlot;
-	TArray<FPendingRequest> LineToRequest;
+	struct FPendingRequest
+	{
+		FGraphEventRef Event;
+	};
+	struct FLineInfo
+	{
+		CacheSlotID SlotID;
+		FPendingRequest PendingRequest;
+	};
+	TMap<int32, FLineInfo> LineInfos;
 
-	int64 NumSlots;
+	int64 BaseOffset;
 	int64 FileSize;
 	IAsyncReadFileHandle* InnerHandle;
 	FGraphEventRef SizeRequestEvent;
@@ -275,13 +288,81 @@ private:
 
 ///////////////
 
+#if !UE_BUILD_SHIPPING
+
+static std::atomic_bool bFileCacheInitialized = false;
+static std::atomic_uint GIoStoreCompressionBlockSize = 0; // 0 means no iostore has reported any.
+static std::atomic_bool bIoStoreCompressionBlockSizeMultiple = false; // if we get different ones, we by definition can't match.
+
+//
+// This exists to log warnings when projects are misconfigured to have FileCache block sizes
+// different than iostore compression block sizes. The difficulty is that iostore containers
+// are mounted _very early_ - before the cvars are resolved - so we don't know what the final
+// FileCache block size will be. However, once in the FileCache constructor, there's no code api
+// to get us access to the underlying iostore containers - file iostore containers are above core.
+// So we have to have that code call over to us when it's loaded, and we just keep track of what
+// compression blocks we've seen.
+//
+// Once we initialize, we check and log as necessary.
+//
+// And of course, iostore containers can be mounted _after_ the file cache is initialized,
+// so we have to check for that and log immediately in that case.
+//
+void FileCache_PostIoStoreCompressionBlockSize(uint32 InCompressionBlockSize, FString const& InContainerFilePath)
+{
+	if (bFileCacheInitialized.load())
+	{
+		// We can direct check since CacheSlotID is correct (cvars resolved).
+		if (InCompressionBlockSize != CacheSlotID::GetSize())
+		{
+			UE_LOG(LogStreamingFileCache, Warning, TEXT("IoStore container %s has a different block sizes than FileCache (%d vs %d)!"), *InContainerFilePath, InCompressionBlockSize, CacheSlotID::GetSize());
+			UE_LOG(LogStreamingFileCache, Warning, TEXT("	Check your IoStore compression block size (Project Settings -> 'Package Compression Commandline Options'"));
+			UE_LOG(LogStreamingFileCache, Warning, TEXT("	and your File Cache block size (fc.BlockSize cvar). They should match!"));
+		}
+		return;
+	}
+
+	// otherwise, save off the value.
+	uint32 LastBlockSize = GIoStoreCompressionBlockSize.exchange(InCompressionBlockSize);
+	if (LastBlockSize && // we had a value
+		LastBlockSize != InCompressionBlockSize) // and it was different
+	{
+		// Mark that we are dealing with more than one compression blocks size.
+		bIoStoreCompressionBlockSizeMultiple.store(true);
+	}
+}
+
+#endif //!UE_BUILD_SHIPPING
+
 FFileCache::FFileCache(int32 NumSlots)
 	: EvictFileCacheCommand(TEXT("r.VT.EvictFileCache"), TEXT("Evict all the file caches in the VT system."),
 		FConsoleCommandDelegate::CreateRaw(this, &FFileCache::EvictFileCacheFromConsole))
-	, SizeInBytes(NumSlots * CacheSlotID::BlockSize)
+	, SizeInBytes(NumSlots * CacheSlotID::GetSize())
 	, NumFreeSlots(NumSlots)
+	, MinNumFreeSlots(NumSlots)
 {
 	LLM_SCOPE(ELLMTag::FileSystem);
+
+#if !UE_BUILD_SHIPPING
+	//
+	// If we aren't shipping, check and see if we have a mismatch vs the compression
+	// block size for any mounted iostore containers.
+	//
+	uint32 IoStoreCompressionBlockSize = GIoStoreCompressionBlockSize.load();
+	if (bIoStoreCompressionBlockSizeMultiple.load())
+	{
+		UE_LOG(LogStreamingFileCache, Warning, TEXT("IoStore containers have multiple compression block sizes! This means the FileCache block size must be misaligned with at least one!"));
+		UE_LOG(LogStreamingFileCache, Warning, TEXT("	Check your IoStore compression block size (Project Settings -> 'Package Compression Commandline Options'"));
+		UE_LOG(LogStreamingFileCache, Warning, TEXT("	and your File Cache block size (fc.BlockSize cvar). They should match!"));
+	}
+	else if (IoStoreCompressionBlockSize && // If we load without any iostore containers (i.e. editor) we don't need to warn.
+		IoStoreCompressionBlockSize != CacheSlotID::GetSize())
+	{
+		UE_LOG(LogStreamingFileCache, Warning, TEXT("IoStore containers have a different block sizes than FileCache (%d vs %d)!"), IoStoreCompressionBlockSize, CacheSlotID::GetSize());
+		UE_LOG(LogStreamingFileCache, Warning, TEXT("	Check your IoStore compression block size (Project Settings -> 'Package Compression Commandline Options'"));
+		UE_LOG(LogStreamingFileCache, Warning, TEXT("	and your File Cache block size (fc.BlockSize cvar). They should match!"));
+	}
+#endif // !UE_BUILD_SHIPPING
 
 	Memory = (uint8*)FMemory::Malloc(SizeInBytes);
 
@@ -299,12 +380,22 @@ FFileCache::FFileCache(int32 NumSlots)
 	// list is circular
 	SlotInfo[0].PrevSlotIndex = NumSlots;
 	SlotInfo[NumSlots].NextSlotIndex = 0;
+
+#if !UE_BUILD_SHIPPING
+	bFileCacheInitialized.store(true);
+#endif
+
+	FCoreDelegates::OnBeginFrameRT.AddLambda([this]() { 
+		CSV_CUSTOM_STAT(FileCache, NumFreeSlots, NumFreeSlots, ECsvCustomStatOp::Set); 
+		CSV_CUSTOM_STAT(FileCache, MinNumFreeSlots, MinNumFreeSlots, ECsvCustomStatOp::Set);
+		});
 }
 
 CacheSlotID FFileCache::AcquireAndLockSlot(FFileCacheHandle* InHandle, CacheLineID InLineID)
 {
 	check(NumFreeSlots > 0);
 	--NumFreeSlots;
+	MinNumFreeSlots = FMath::Min(MinNumFreeSlots, NumFreeSlots);
 
 	const int32 SlotIndex = SlotInfo[0].NextSlotIndex;
 	check(SlotIndex != 0);
@@ -340,6 +431,7 @@ void FFileCache::LockSlot(CacheSlotID InSlotID)
 	{
 		check(NumFreeSlots > 0);
 		--NumFreeSlots;
+		MinNumFreeSlots = FMath::Min(MinNumFreeSlots, NumFreeSlots);
 		UnlinkSlot(SlotIndex);
 	}
 	Info.LockCount = PrevLockCount + 1;
@@ -423,8 +515,8 @@ FFileCacheHandle::~FFileCacheHandle()
 	}
 }
 
-FFileCacheHandle::FFileCacheHandle(IAsyncReadFileHandle* InHandle)
-	: NumSlots(0)
+FFileCacheHandle::FFileCacheHandle(IAsyncReadFileHandle* InHandle, int64 InBaseOffset)
+	: BaseOffset(InBaseOffset)
 	, FileSize(-1)
 	, InnerHandle(InHandle)
 {
@@ -434,8 +526,7 @@ FFileCacheHandle::FFileCacheHandle(IAsyncReadFileHandle* InHandle)
 		this->FileSize = Request->GetSizeResults();
 		check(this->FileSize > 0);
 
-		TArray<FBaseGraphTask*> NewTasks;
-		CompletionEvent->DispatchSubsequents(NewTasks);
+		CompletionEvent->DispatchSubsequents();
 		GetCache().PushCompletedRequest(Request);
 	};
 
@@ -475,6 +566,15 @@ public:
 		return ResultData + InOffset;
 	}
 
+	virtual void EnsureReadNonBlocking() override
+	{
+		if (Request)
+		{
+			check(!Memory);
+			Request->EnsureCompletion();
+		}
+	}
+
 	virtual int64 GetSize() override
 	{
 		return Size;
@@ -501,8 +601,7 @@ IMemoryReadStreamRef FFileCacheHandle::ReadDataUncached(FGraphEventArray& OutCom
 
 	FAsyncFileCallBack ReadCallbackFunction = [CompletionEvent](bool bWasCancelled, IAsyncReadRequest* Request)
 	{
-		TArray<FBaseGraphTask*> NewTasks;
-		CompletionEvent->DispatchSubsequents(NewTasks);
+		CompletionEvent->DispatchSubsequents();
 	};
 
 	OutCompletionEvents.Add(CompletionEvent);
@@ -510,7 +609,7 @@ IMemoryReadStreamRef FFileCacheHandle::ReadDataUncached(FGraphEventArray& OutCom
 	return new FMemoryReadStreamAsyncRequest(AsyncRequest, BytesToRead);
 }
 
-class FMemoryReadStreamCache : public IMemoryReadStream
+class FMemoryReadStreamCache : public IMemoryReadStream //-V1062
 {
 public:
 	virtual const void* Read(int64& OutSize, int64 InOffset, int64 InSize) override
@@ -518,12 +617,13 @@ public:
 		FFileCache& Cache = GetCache();
 
 		const int64 Offset = InitialSlotOffset + InOffset;
-		const int32 SlotIndex = (int32)FMath::DivideAndRoundDown(Offset, (int64)CacheSlotID::BlockSize);
-		const int32 OffsetInSlot = (int32)(Offset - SlotIndex * CacheSlotID::BlockSize);
-		checkSlow(SlotIndex >= 0 && SlotIndex < NumCacheSlots);
+		const int64 BlockSize = CacheSlotID::GetSize();
+		const int32 SlotIndex = (int32)FMath::DivideAndRoundDown(Offset, BlockSize);
+		const int32 OffsetInSlot = (int32)(Offset - SlotIndex * BlockSize);
+		check(SlotIndex >= 0 && SlotIndex < NumCacheSlots);
 		const void* SlotMemory = Cache.GetSlotMemory(CacheSlots[SlotIndex]);
 
-		OutSize = FMath::Min(InSize, (int64)CacheSlotID::BlockSize - OffsetInSlot);
+		OutSize = FMath::Min(InSize, BlockSize - OffsetInSlot);
 		return (uint8*)SlotMemory + OffsetInSlot;
 	}
 
@@ -563,14 +663,9 @@ void FFileCacheHandle::CheckForSizeRequestComplete()
 
 		check(FileSize > 0);
 
-		// Make sure we haven't lazily allocated more slots than are in the file, then allocate the final number of slots
-		const int64 TotalNumSlots = FMath::DivideAndRoundUp(FileSize, (int64)CacheLineSize);
-		check(NumSlots <= TotalNumSlots);
-		NumSlots = TotalNumSlots;
-		// TArray is max signed int
+		// LineInfos key is int32
+		const int64 TotalNumSlots = FMath::DivideAndRoundUp(FileSize, (int64)GFileCacheBlockSizeKB * 1024);
 		check(TotalNumSlots < MAX_int32);
-		LineToSlot.SetNum((int32)TotalNumSlots, false);
-		LineToRequest.SetNum((int32)TotalNumSlots, false);
 	}
 }
 
@@ -584,8 +679,7 @@ void FFileCacheHandle::ReadLine(FFileCache& Cache, CacheSlotID SlotID, CacheLine
 	// callback triggered when async read operation is complete, used to signal task graph event
 	FAsyncFileCallBack ReadCallbackFunction = [CompletionEvent](bool bWasCancelled, IAsyncReadRequest* Request)
 	{
-		TArray<FBaseGraphTask*> NewTasks;
-		CompletionEvent->DispatchSubsequents(NewTasks);
+		CompletionEvent->DispatchSubsequents();
 		GetCache().PushCompletedRequest(Request);
 	};
 
@@ -599,15 +693,15 @@ CacheSlotID FFileCacheHandle::AcquireSlotAndReadLine(FFileCache& Cache, CacheLin
 	// no valid slot for this line, grab a new slot from cache and start a read request
 	CacheSlotID SlotID = Cache.AcquireAndLockSlot(this, LineID);
 
-	FPendingRequest& PendingRequest = LineToRequest[LineID.Get()];
-	if (PendingRequest.Event)
+	FLineInfo& LineInfo = LineInfos.FindOrAdd(LineID.Get());
+	if (LineInfo.PendingRequest.Event)
 	{
 		// previous async request/event (if any) should be completed, if this is back in the free list
-		check(PendingRequest.Event->IsComplete());
+		check(LineInfo.PendingRequest.Event->IsComplete());
 	}
 
 	FGraphEventRef CompletionEvent = FGraphEvent::CreateGraphEvent();
-	PendingRequest.Event = CompletionEvent;
+	LineInfo.PendingRequest.Event = CompletionEvent;
 	if (FileSize >= 0)
 	{
 		// If FileSize >= 0, that means the async file size request has completed, we can perform the read immediately
@@ -627,13 +721,15 @@ CacheSlotID FFileCacheHandle::AcquireSlotAndReadLine(FFileCache& Cache, CacheLin
 	return SlotID;
 }
 
-IMemoryReadStreamRef FFileCacheHandle::ReadData(FGraphEventArray& OutCompletionEvents, int64 Offset, int64 BytesToRead, EAsyncIOPriorityAndFlags Priority)
+IMemoryReadStreamRef FFileCacheHandle::ReadData(FGraphEventArray& OutCompletionEvents, int64 InOffset, int64 BytesToRead, EAsyncIOPriorityAndFlags Priority)
 {
 	SCOPE_CYCLE_COUNTER(STAT_SFC_ReadData);
 	SCOPED_LOADTIMER(FFileCacheHandle_ReadData);
 
+	const int64 Offset = BaseOffset + InOffset;
 	const CacheLineID StartLine = GetBlock<CacheLineID>(Offset);
 	const CacheLineID EndLine = GetBlock<CacheLineID>(Offset + BytesToRead - 1);
+	check(EndLine.Get() + 1 < MAX_int32);
 
 	const int32 NumSlotsNeeded = EndLine.Get() + 1 - StartLine.Get();
 
@@ -652,18 +748,6 @@ IMemoryReadStreamRef FFileCacheHandle::ReadData(FGraphEventArray& OutCompletionE
 		return ReadDataUncached(OutCompletionEvents, Offset, BytesToRead, Priority);
 	}
 
-	if (EndLine.Get() >= NumSlots)
-	{
-		// If we're still waiting on SizeRequest, may need to lazily allocate some slots to service this request
-		// If this happens after SizeRequest has completed, that means something must have gone wrong
-		check(SizeRequestEvent);
-		NumSlots = EndLine.Get() + 1;
-		// TArray is max signed int
-		check(NumSlots < MAX_int32);
-		LineToSlot.SetNum((int32)NumSlots, false);
-		LineToRequest.SetNum((int32)NumSlots, false);
-	}
-
 	const int32 NumCacheSlots = EndLine.Get() + 1 - StartLine.Get();
 	check(NumCacheSlots > 0);
 	const uint32 AllocSize = sizeof(FMemoryReadStreamCache) + sizeof(CacheSlotID) * (NumCacheSlots - 1);
@@ -676,31 +760,30 @@ IMemoryReadStreamRef FFileCacheHandle::ReadData(FGraphEventArray& OutCompletionE
 	bool bHasPendingSlot = false;
 	for (CacheLineID LineID = StartLine; LineID.Get() <= EndLine.Get(); ++LineID)
 	{
-		CacheSlotID& SlotID = LineToSlot[LineID.Get()];
-		if (!SlotID.IsValid())
+		FLineInfo& LineInfo = LineInfos.FindOrAdd(LineID.Get());
+		if (!LineInfo.SlotID.IsValid())
 		{
 			// no valid slot for this line, grab a new slot from cache and start a read request
-			SlotID = AcquireSlotAndReadLine(Cache, LineID, Priority);
+			LineInfo.SlotID = AcquireSlotAndReadLine(Cache, LineID, Priority);
 		}
 		else
 		{
-			Cache.LockSlot(SlotID);
+			Cache.LockSlot(LineInfo.SlotID);
 		}
 
-		check(SlotID.IsValid());
-		Result->CacheSlots[LineID.Get() - StartLine.Get()] = SlotID;
+		check(LineInfo.SlotID.IsValid());
+		Result->CacheSlots[LineID.Get() - StartLine.Get()] = LineInfo.SlotID;
 
-		FPendingRequest& PendingRequest = LineToRequest[LineID.Get()];
-		if (PendingRequest.Event && !PendingRequest.Event->IsComplete())
+		if (LineInfo.PendingRequest.Event && !LineInfo.PendingRequest.Event->IsComplete())
 		{
 			// this line has a pending async request to read data
 			// will need to wait for this request to complete before data is valid
-			OutCompletionEvents.Add(PendingRequest.Event);
+			OutCompletionEvents.Add(LineInfo.PendingRequest.Event);
 			bHasPendingSlot = true;
 		}
 		else
 		{
-			PendingRequest.Event.SafeRelease();
+			LineInfo.PendingRequest.Event.SafeRelease();
 		}
 	}
 
@@ -741,22 +824,6 @@ FGraphEventRef FFileCacheHandle::PreloadData(const FFileCachePreloadEntry* Prelo
 
 	CheckForSizeRequestComplete();
 
-	{
-		const FFileCachePreloadEntry& LastEntry = PreloadEntries[NumEntries - 1];
-		const CacheLineID EndLine = GetBlock<CacheLineID>(LastEntry.Offset + LastEntry.Size - 1);
-		if (EndLine.Get() >= NumSlots)
-		{
-			// If we're still waiting on SizeRequest, may need to lazily allocate some slots to service this request
-			// If this happens after SizeRequest has completed, that means something must have gone wrong
-			check(SizeRequestEvent);
-			NumSlots = EndLine.Get() + 1;
-			// TArray is max signed int
-			check(NumSlots < MAX_int32);
-			LineToSlot.SetNum((int32)NumSlots, false);
-			LineToRequest.SetNum((int32)NumSlots, false);
-		}
-	}
-
 	FGraphEventArray CompletionEvents;
 	TArray<CacheSlotID> LockedSlots;
 	LockedSlots.Empty(NumEntries);
@@ -766,9 +833,11 @@ FGraphEventRef FFileCacheHandle::PreloadData(const FFileCachePreloadEntry* Prelo
 	for (int32 EntryIndex = 0; EntryIndex < NumEntries && Cache.NumFreeSlots > 0; ++EntryIndex)
 	{
 		const FFileCachePreloadEntry& Entry = PreloadEntries[EntryIndex];
-		const CacheLineID StartLine = GetBlock<CacheLineID>(Entry.Offset);
-		const CacheLineID EndLine = GetBlock<CacheLineID>(Entry.Offset + Entry.Size - 1);
+		const int64 EntryOffset = BaseOffset + Entry.Offset;
+		const CacheLineID StartLine = GetBlock<CacheLineID>(EntryOffset);
+		const CacheLineID EndLine = GetBlock<CacheLineID>(EntryOffset + Entry.Size - 1);
 
+		check(EndLine.Get() + 1 < MAX_int32);
 		checkf(Entry.Offset > PrevOffset, TEXT("Preload entries must be sorted by Offset [%lld, %lld), %lld"),
 			Entry.Offset, Entry.Offset + Entry.Size, PrevOffset);
 		PrevOffset = Entry.Offset;
@@ -776,24 +845,24 @@ FGraphEventRef FFileCacheHandle::PreloadData(const FFileCachePreloadEntry* Prelo
 		CurrentLine = CacheLineID(FMath::Max(CurrentLine.Get(), StartLine.Get()));
 		while (CurrentLine.Get() <= EndLine.Get() && Cache.NumFreeSlots > 0)
 		{
-			CacheSlotID& SlotID = LineToSlot[CurrentLine.Get()];
-			if (!SlotID.IsValid())
+			FLineInfo& LineInfo = LineInfos.FindOrAdd(CurrentLine.Get());
+			
+			if (!LineInfo.SlotID.IsValid())
 			{
 				// no valid slot for this line, grab a new slot from cache and start a read request
-				SlotID = AcquireSlotAndReadLine(Cache, CurrentLine, Priority);
-				LockedSlots.Add(SlotID);
+				LineInfo.SlotID = AcquireSlotAndReadLine(Cache, CurrentLine, Priority);
+				LockedSlots.Add(LineInfo.SlotID);
 			}
 
-			FPendingRequest& PendingRequest = LineToRequest[CurrentLine.Get()];
-			if (PendingRequest.Event && !PendingRequest.Event->IsComplete())
+			if (LineInfo.PendingRequest.Event && !LineInfo.PendingRequest.Event->IsComplete())
 			{
 				// this line has a pending async request to read data
 				// will need to wait for this request to complete before data is valid
-				CompletionEvents.Add(PendingRequest.Event);
+				CompletionEvents.Add(LineInfo.PendingRequest.Event);
 			}
 			else
 			{
-				PendingRequest.Event.SafeRelease();
+				LineInfo.PendingRequest.Event.SafeRelease();
 			}
 
 			++CurrentLine;
@@ -819,25 +888,28 @@ FGraphEventRef FFileCacheHandle::PreloadData(const FFileCachePreloadEntry* Prelo
 
 void FFileCacheHandle::Evict(CacheLineID LineID)
 {
-	LineToSlot[LineID.Get()] = CacheSlotID();
+	FLineInfo* LineInfo = LineInfos.Find(LineID.Get());
+	if (LineInfo != nullptr)
+	{ 
+		if (LineInfo->PendingRequest.Event)
+		{
+			check(LineInfo->PendingRequest.Event->IsComplete());
+			LineInfo->PendingRequest.Event.SafeRelease();
+		}
 
-	FPendingRequest& PendingRequest = LineToRequest[LineID.Get()];
-	if (PendingRequest.Event)
-	{
-		check(PendingRequest.Event->IsComplete());
-		PendingRequest.Event.SafeRelease();
+		LineInfos.Remove(LineID.Get());
 	}
 }
 
 void FFileCacheHandle::WaitAll()
 {
-	for (int i = 0; i < LineToRequest.Num(); ++i)
+	for (TPair<int32, FLineInfo>& Pair : LineInfos)
 	{
-		FPendingRequest& PendingRequest = LineToRequest[i];
-		if (PendingRequest.Event)
+		FLineInfo& LineInfo = Pair.Value;
+		if (LineInfo.PendingRequest.Event)
 		{
-			check(PendingRequest.Event->IsComplete());
-			PendingRequest.Event.SafeRelease();
+			check(LineInfo.PendingRequest.Event->IsComplete());
+			LineInfo.PendingRequest.Event.SafeRelease();
 		}
 	}
 }
@@ -847,7 +919,7 @@ void IFileCacheHandle::EvictAll()
 	GetCache().EvictAll();
 }
 
-IFileCacheHandle* IFileCacheHandle::CreateFileCacheHandle(const TCHAR* InFileName)
+IFileCacheHandle* IFileCacheHandle::CreateFileCacheHandle(const TCHAR* InFileName, int64 InBaseOffset)
 {
 	SCOPE_CYCLE_COUNTER(STAT_SFC_CreateHandle);
 
@@ -857,16 +929,16 @@ IFileCacheHandle* IFileCacheHandle::CreateFileCacheHandle(const TCHAR* InFileNam
 		return nullptr;
 	}
 
-	return new FFileCacheHandle(FileHandle);
+	return new FFileCacheHandle(FileHandle, InBaseOffset);
 }
 
-IFileCacheHandle* IFileCacheHandle::CreateFileCacheHandle(IAsyncReadFileHandle* FileHandle)
+IFileCacheHandle* IFileCacheHandle::CreateFileCacheHandle(IAsyncReadFileHandle* FileHandle, int64 InBaseOffset)
 {
 	SCOPE_CYCLE_COUNTER(STAT_SFC_CreateHandle);
 
 	if (FileHandle != nullptr)
 	{
-		return new FFileCacheHandle(FileHandle);
+		return new FFileCacheHandle(FileHandle, InBaseOffset);
 	}
 	else
 	{
@@ -874,7 +946,7 @@ IFileCacheHandle* IFileCacheHandle::CreateFileCacheHandle(IAsyncReadFileHandle* 
 	}
 }
 
-uint32 IFileCacheHandle::GetFileCacheSize()
+int64 IFileCacheHandle::GetFileCacheSize()
 {
 	return GetCache().SizeInBytes;
 }

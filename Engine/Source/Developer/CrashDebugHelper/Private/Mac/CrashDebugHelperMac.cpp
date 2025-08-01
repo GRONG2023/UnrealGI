@@ -69,13 +69,12 @@ static int32 ParseVersion(TCHAR const* CrashLog, int32& OutMajor, int32& OutMino
 		Found = swscanf(TCHAR_TO_WCHAR(VersionLine), WTEXT("%*s %d.%d.%d (%*d.%*d.%*d-%d+%256ls)"), &OutMajor, &OutMinor, &OutBuild, &OutChangeList, RawBranch);
 		if(Found == 5)
 		{
-			TCHAR* Branch = WCHAR_TO_TCHAR(RawBranch);
-			TCHAR* BranchEnd = FCStringWide::Strchr(Branch, TEXT(')'));
+			TCHAR* BranchEnd = FCStringWide::Strchr(WCHAR_TO_TCHAR(RawBranch), TEXT(')'));
 			if(BranchEnd)
 			{
 				*BranchEnd = TEXT('\0');
 			}
-			OutBranch = Branch;
+			OutBranch = FString(WCHAR_TO_TCHAR(RawBranch));
 		}
 	}
 	return Found;
@@ -165,6 +164,30 @@ static int32 ParseGraphics(TCHAR const* CrashLog, FString& OutGPUDetails)
 	return bFound;
 }
 
+static int32 ParseArchitecture(TCHAR const* CrashLog, FString& Architecture)
+{
+	bool bFound = false;
+	TCHAR const* Line = FCStringWide::Strstr(CrashLog, TEXT("Code Type:"));
+	int32 Output = 0;
+	while (Line)
+	{
+		Line += FCStringWide::Strlen(TEXT("Code Type:"));
+		TCHAR const* End = FCStringWide::Strchr(Line, TEXT('\r'));
+		if(!End)
+		{
+			End = FCStringWide::Strchr(Line, TEXT('\n'));
+		}
+		check(End);
+		
+		int32 Length = FMath::Min(PATH_MAX, (int32)((uintptr_t)(End - Line)));
+		Architecture.Append(Line, Length);
+		Architecture = Architecture.TrimStartAndEnd();
+		Line = nullptr;
+		bFound = true;
+	}
+	return bFound;
+}
+
 static int32 ParseError(TCHAR const* CrashLog, FString& OutErrorDetails)
 {
 	bool bFound = false;
@@ -221,52 +244,52 @@ static int32 ParseExceptionCode(TCHAR const* CrashLog, uint32& OutExceptionCode)
 		}
 		if(Found)
 		{
-			TCHAR* Buffer = WCHAR_TO_TCHAR(RawBuffer);
+			FString Buffer = FString(WCHAR_TO_TCHAR(RawBuffer));
 
-			TCHAR* End = FCStringWide::Strchr(Buffer, TEXT(')'));
-			if(End)
+			int End = Buffer.Find(TEXT(")"));
+			if(End != INDEX_NONE)
 			{
-				*End = TEXT('\0');
+				Buffer = Buffer.LeftChop(End);
 			}
-			if(FCStringWide::Strcmp(Buffer, TEXT("SIGQUIT")) == 0)
+			if(Buffer.Find(TEXT("SIGQUIT")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGQUIT;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGILL")) == 0)
+			else if(Buffer.Find(TEXT("SIGILL")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGILL;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGEMT")) == 0)
+			else if(Buffer.Find(TEXT("SIGEMT")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGEMT;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGFPE")) == 0)
+			else if(Buffer.Find(TEXT("SIGFPE")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGFPE;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGBUS")) == 0)
+			else if(Buffer.Find(TEXT("SIGBUS")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGBUS;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGSEGV")) == 0)
+			else if(Buffer.Find(TEXT("SIGSEGV")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGSEGV;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGSYS")) == 0)
+			else if(Buffer.Find(TEXT("SIGSYS")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGSYS;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGABRT")) == 0)
+			else if(Buffer.Find(TEXT("SIGABRT")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGABRT;
 			}
-			else if(FCStringWide::Strcmp(Buffer, TEXT("SIGTRAP")) == 0)
+			else if(Buffer.Find(TEXT("SIGTRAP")) != INDEX_NONE)
 			{
 				OutExceptionCode = SIGTRAP;
 			}
-			else if(FString(Buffer).IsNumeric())
+			else if(Buffer.IsNumeric())
 			{
-				Found = swscanf(TCHAR_TO_WCHAR(Buffer), WTEXT("%u"), &OutExceptionCode);
+				Found = swscanf(TCHAR_TO_WCHAR(*Buffer), WTEXT("%u"), &OutExceptionCode);
 			}
 			else
 			{
@@ -353,22 +376,22 @@ static int32 ParseThreadStackLine(TCHAR const* StackLine, FString& OutModuleName
 		case 3:
 		{
 			int32 Status = -1;
-			const TCHAR* FunctionName = WCHAR_TO_TCHAR(RawFunctionName);
-			ANSICHAR* DemangledName = abi::__cxa_demangle(TCHAR_TO_UTF8(FunctionName), nullptr, nullptr, &Status);
+			FString FunctionName = FString(WCHAR_TO_TCHAR(RawFunctionName));
+			ANSICHAR* DemangledName = abi::__cxa_demangle(TCHAR_TO_UTF8(*FunctionName), nullptr, nullptr, &Status);
 			if(DemangledName && Status == 0)
 			{
 				// C++ function
 				OutFunctionName = FString::Printf(TEXT("%ls "), UTF8_TO_TCHAR(DemangledName));
 			}
-			else if (FCStringWide::Strlen(FunctionName) > 0 && FCStringWide::Strchr(FunctionName, ']'))
+			else if (FCStringWide::Strlen(*FunctionName) > 0 && FCStringWide::Strchr(*FunctionName, ']'))
 			{
 				// ObjC function
-				OutFunctionName = FString::Printf(TEXT("%ls "), FunctionName);
+				OutFunctionName = FString::Printf(TEXT("%ls "), *FunctionName);
 			}
-			else if(FCStringWide::Strlen(FunctionName) > 0)
+			else if(FCStringWide::Strlen(*FunctionName) > 0)
 			{
 				// C function
-				OutFunctionName = FString::Printf(TEXT("%ls() "), FunctionName);
+				OutFunctionName = FString::Printf(TEXT("%ls() "), *FunctionName);
 			}
 		}
 		case 2:
@@ -385,7 +408,7 @@ static int32 ParseThreadStackLine(TCHAR const* StackLine, FString& OutModuleName
 	return Found;
 }
 
-static int32 SymboliseStackInfo(FPlatformSymbolDatabaseSet& SymbolCache, TArray<FCrashModuleInfo> const& ModuleInfo, FString ModuleName, uint64 const ProgramCounter, FString& OutFunctionName, FString& OutFileName, int32& OutLineNumber)
+static int32 SymboliseStackInfo(FPlatformSymbolDatabaseSet& SymbolCache, TArray<FCrashModuleInfo> const& ModuleInfo, FString ModuleName, FString Architecture, uint64 const ProgramCounter, FString& OutFunctionName, FString& OutFileName, int32& OutLineNumber)
 {
 	FProgramCounterSymbolInfo Info;
 	int32 ValuesSymbolised = 0;
@@ -404,7 +427,7 @@ static int32 SymboliseStackInfo(FPlatformSymbolDatabaseSet& SymbolCache, TArray<
 	if(!Db)
 	{
 		FApplePlatformSymbolDatabase Database;
-		if(FPlatformSymbolication::LoadSymbolDatabaseForBinary(TEXT(""), Module.Name, Module.Report, Database))
+		if(FPlatformSymbolication::LoadSymbolDatabaseForBinary(TEXT(""), Module.Name, Module.Report, Architecture, Database))
 		{
 			SymbolCache.Add(Database);
 			Db = SymbolCache.Find(Module.Report);
@@ -685,7 +708,11 @@ bool FCrashDebugHelperMac::CreateMinidumpDiagnosticReport( const FString& InCras
 			
 			Result = ParseExceptionCode(*CrashDump, CrashInfo.Exception.Code);
 			check(Result == 1);
-			
+
+			FString Architecture;
+			Result = ParseArchitecture(*CrashDump, Architecture);
+			check(Result == 1);
+
 			FCrashThreadInfo ThreadInfo;
 			ThreadInfo.ThreadId = CrashInfo.Exception.ThreadId;
 			ThreadInfo.SuspendCount = 0;
@@ -742,7 +769,7 @@ bool FCrashDebugHelperMac::CreateMinidumpDiagnosticReport( const FString& InCras
 				if(Result > 1 && Result < 4)
 				{
 					// Attempt to resymbolise using CoreSymbolication
-					Result += SymboliseStackInfo(SymbolCache, CrashInfo.Modules, ModuleName, ProgramCounter, FunctionName, FileName, LineNumber);
+					Result += SymboliseStackInfo(SymbolCache, CrashInfo.Modules, ModuleName, Architecture, ProgramCounter, FunctionName, FileName, LineNumber);
 				}
 				
 				// Output in our format based on the fields we actually have

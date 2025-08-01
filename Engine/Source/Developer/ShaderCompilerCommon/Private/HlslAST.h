@@ -7,8 +7,8 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Developer/ShaderCompilerCommon/Private/HlslUtils.h"
-#include "Developer/ShaderCompilerCommon/Private/HlslLexer.h"
+#include "HlslUtils.h"
+#include "HlslLexer.h"
 
 namespace CrossCompiler
 {
@@ -531,14 +531,14 @@ namespace CrossCompiler
 					// Interpolation modifiers
 					uint32 bLinear : 1;
 					uint32 bCentroid : 1;
-					uint32 bNoInterpolation : 1;
-					uint32 bNoPerspective : 1;
 					uint32 bSample : 1;
 				};
 				uint32 Raw;
 			};
 
 			const TCHAR* PrimitiveType = nullptr;
+			const TCHAR* NoInterpolatorType = nullptr;
+			const TCHAR* NoPerspectiveType = nullptr;
 
 			FTypeQualifier();
 
@@ -555,6 +555,7 @@ namespace CrossCompiler
 			const TCHAR* Name;
 			const TCHAR* ParentName;
 			TLinearArray<FNode*> Members;
+			bool bForwardDeclaration;
 		};
 
 		struct FCBufferDeclaration : public FNode
@@ -644,12 +645,15 @@ namespace CrossCompiler
 			virtual void Write(FASTWriter& Writer) const override;
 
 			FFullySpecifiedType* ReturnType;
+			const TCHAR* ScopeIdentifier;
 			const TCHAR* Identifier;
 			FSemanticSpecifier* ReturnSemantic;
 
 			TLinearArray<FNode*> Parameters;
 
-			bool bIsDefinition = false;
+			bool bIsDefinition;
+			bool bIsOperator;
+			bool bIsStatic;
 
 			//Signature
 		};

@@ -1,18 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "Sound/AudioSettings.h"
 
+#include "AudioBusSubsystem.h"
 #include "AudioDevice.h"
-#include "AudioDeviceManager.h"
-#include "AudioMixerDevice.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Misc/Paths.h"
-#include "Sound/SoundBase.h"
-#include "Sound/SoundClass.h"
-#include "Sound/SoundConcurrency.h"
 #include "Sound/SoundNodeQualityLevel.h"
 #include "Sound/SoundSubmix.h"
-#include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AudioSettings)
 
 #if WITH_EDITOR
 #include "Framework/Notifications/NotificationManager.h"
@@ -28,10 +23,12 @@ UAudioSettings::UAudioSettings(const FObjectInitializer& ObjectInitializer)
 	AddDefaultSettings();
 
 	bAllowPlayWhenSilent = true;
-	bIsAudioMixerEnabled = false;
+	bParameterInterfacesRegistered = false;
 
 	GlobalMinPitchScale = 0.4F;
 	GlobalMaxPitchScale = 2.0F;
+
+	DefaultAudioCompressionType = EDefaultAudioCompressionType::BinkAudio;
 }
 
 void UAudioSettings::AddDefaultSettings()
@@ -94,6 +91,20 @@ void UAudioSettings::PostEditChangeChainProperty(FPropertyChangedChainEvent& Pro
 		{
 			bPromptRestartRequired = true;
 		}
+		else if (PropertyName == GET_MEMBER_NAME_CHECKED(UAudioSettings, DefaultAudioCompressionType))
+		{
+			// loop through all USoundWaves and update the compression type w/ the new defualt
+			// (if they are set to "Project Default")
+			for (TObjectIterator<USoundWave> It; It; ++It)
+			{
+				USoundWave* SoundWave = *It;
+				if(SoundWave && SoundWave->GetSoundAssetCompressionTypeEnum() == ESoundAssetCompressionType::ProjectDefined)
+				{
+					// this will query the correct compression type and update the asset accordingly
+					SoundWave->SetSoundAssetCompressionType(SoundWave->GetSoundAssetCompressionType(), /*bMarkDirty*/false);
+				}
+			}
+		}
 		else if (PropertyName == GET_MEMBER_NAME_CHECKED(UAudioSettings, QualityLevels))
 		{
 			if (QualityLevels.Num() == 0)
@@ -141,7 +152,9 @@ void UAudioSettings::PostEditChangeChainProperty(FPropertyChangedChainEvent& Pro
 			{
 				DeviceManager->IterateOverAllDevices([this](Audio::FDeviceId, FAudioDevice* InDevice)
 				{
-					InDevice->InitDefaultAudioBuses();
+					UAudioBusSubsystem* AudioBusSubsystem = InDevice->GetSubsystem<UAudioBusSubsystem>();
+					check(AudioBusSubsystem);
+					AudioBusSubsystem->InitDefaultAudioBuses();
 				});
 			}
 		}
@@ -172,6 +185,11 @@ const FAudioQualitySettings& UAudioSettings::GetQualityLevelSettings(int32 Quali
 {
 	check(QualityLevels.Num() > 0);
 	return QualityLevels[FMath::Clamp(QualityLevel, 0, QualityLevels.Num() - 1)];
+}
+
+int32 UAudioSettings::GetDefaultCompressionQuality() const
+{
+	return FMath::Clamp(DefaultCompressionQuality,1,100);
 }
 
 int32 UAudioSettings::GetQualityLevelSettingsNum() const
@@ -259,6 +277,20 @@ void UAudioSettings::LoadDefaultObjects()
 	}
 }
 
+void UAudioSettings::RegisterParameterInterfaces()
+{
+	if (!bParameterInterfacesRegistered)
+	{
+		UE_LOG(LogAudio, Display, TEXT("Registering Engine Module Parameter Interfaces..."));
+		bParameterInterfacesRegistered = true;
+		Audio::IAudioParameterInterfaceRegistry& InterfaceRegistry = Audio::IAudioParameterInterfaceRegistry::Get();
+		InterfaceRegistry.RegisterInterface(Audio::AttenuationInterface::GetInterface());
+		InterfaceRegistry.RegisterInterface(Audio::SpatializationInterface::GetInterface());
+		InterfaceRegistry.RegisterInterface(Audio::SourceOrientationInterface::GetInterface());
+		InterfaceRegistry.RegisterInterface(Audio::ListenerOrientationInterface::GetInterface());
+	}
+}
+
 USoundClass* UAudioSettings::GetDefaultMediaSoundClass() const
 {
 	return DefaultMediaSoundClass;
@@ -274,16 +306,6 @@ USoundConcurrency* UAudioSettings::GetDefaultSoundConcurrency() const
 	return DefaultSoundConcurrency;
 }
 
-void UAudioSettings::SetAudioMixerEnabled(const bool bInAudioMixerEnabled)
-{
-	bIsAudioMixerEnabled = bInAudioMixerEnabled;
-}
-
-const bool UAudioSettings::IsAudioMixerEnabled() const
-{
-	return bIsAudioMixerEnabled;
-}
-
 int32 UAudioSettings::GetHighestMaxChannels() const
 {
 	check(QualityLevels.Num() > 0);
@@ -291,10 +313,7 @@ int32 UAudioSettings::GetHighestMaxChannels() const
 	int32 HighestMaxChannels = -1;
 	for (const FAudioQualitySettings& Settings : QualityLevels)
 	{
-		if (Settings.MaxChannels > HighestMaxChannels)
-		{
-			HighestMaxChannels = Settings.MaxChannels;
-		}
+		HighestMaxChannels = FMath::Max(Settings.MaxChannels, HighestMaxChannels);
 	}
 
 	return HighestMaxChannels;
@@ -308,3 +327,4 @@ FString UAudioSettings::FindQualityNameByIndex(int32 Index) const
 }
 
 #undef LOCTEXT_NAMESPACE
+

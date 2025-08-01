@@ -5,17 +5,17 @@
 #include "Misc/Guid.h"
 #include "UObject/Class.h"
 #include "GameFramework/Actor.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Widgets/SWidget.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
 #include "ActorFactories/ActorFactory.h"
 #include "ActorPlacementInfo.h"
-#include "IPlacementMode.h"
 #include "GameFramework/Volume.h"
 #include "Editor.h"
+#include "Textures/SlateIcon.h"
 
-class FBlacklistNames;
+class FNamePermissionList;
 
 /**
  * Struct that defines an identifier for a particular placeable item in this module.
@@ -44,13 +44,22 @@ private:
  */
 struct FPlacementCategoryInfo
 {
-	FPlacementCategoryInfo(FText InDisplayName, FName InHandle, FString InTag, int32 InSortOrder = 0, bool bInSortable = true)
-		: DisplayName(InDisplayName), UniqueHandle(InHandle), SortOrder(InSortOrder), TagMetaData(MoveTemp(InTag)), bSortable(bInSortable)
+	FPlacementCategoryInfo(FText InDisplayName, FSlateIcon InDisplayIcon, FName InHandle, FString InTag, int32 InSortOrder = 0, bool bInSortable = true)
+		: DisplayName(InDisplayName), DisplayIcon(InDisplayIcon), UniqueHandle(InHandle), SortOrder(InSortOrder), TagMetaData(MoveTemp(InTag)), bSortable(bInSortable)
 	{
 	}
 
+	FPlacementCategoryInfo(FText InDisplayName, FName InHandle, FString InTag, int32 InSortOrder = 0, bool bInSortable = true)
+		: DisplayName(InDisplayName), DisplayIcon(), UniqueHandle(InHandle), SortOrder(InSortOrder), TagMetaData(MoveTemp(InTag)), bSortable(bInSortable)
+	{
+	}
+
+
 	/** This category's display name */
 	FText DisplayName;
+
+	/** This category's representative icon */
+	FSlateIcon DisplayIcon;
 
 	/** A unique name for this category */
 	FName UniqueHandle;
@@ -79,8 +88,10 @@ struct FPlaceableItem
 	{}
 
 	/** Constructor that takes a specific factory and asset */
-	FPlaceableItem(UActorFactory* InFactory, const FAssetData& InAssetData, TOptional<int32> InSortOrder = TOptional<int32>())
-		: Factory(InFactory)
+	FPlaceableItem(TScriptInterface<IAssetFactoryInterface> InAssetFactory,
+		const FAssetData& InAssetData, TOptional<int32> InSortOrder = TOptional<int32>())
+		: Factory(Cast<UActorFactory>(InAssetFactory.GetObject()))
+		, AssetFactory(InAssetFactory)
 		, AssetData(InAssetData)
 		, bAlwaysUseGenericThumbnail(false)
 		, SortOrder(InSortOrder)
@@ -88,9 +99,28 @@ struct FPlaceableItem
 		AutoSetNativeAndDisplayName();
 	}
 
-	/** Constructor for any placeable class */
-	FPlaceableItem(UClass& InAssetClass, TOptional<int32> InSortOrder = TOptional<int32>())
-		: Factory(GEditor->FindActorFactoryByClass(&InAssetClass))
+	//~ Note: for the constructors that expect UActorFactory, we can't forward to the IAssetFactoryInterface
+	//~ constructors because those currently have a Cast<>() call that requires linking to the module that
+	//~ contains IAssetFactoryInterface, which users sometimes don't do. This problem might go away once we
+	//~ finished deprecating and removing the Factory member.
+
+	/** Constructor that takes a specific actor factory and asset */
+	FPlaceableItem(UActorFactory* InFactory, const FAssetData& InAssetData, 
+		TOptional<int32> InSortOrder = TOptional<int32>()) 
+		: Factory(InFactory)
+		, AssetFactory(InFactory)
+		, AssetData(InAssetData)
+		, bAlwaysUseGenericThumbnail(false)
+		, SortOrder(InSortOrder)
+	{
+		AutoSetNativeAndDisplayName();
+	}
+
+	//~ TODO: Might want a version of this that is works for non-actor factories.
+	/** Constructor for any actor factory class */
+	 FPlaceableItem(UClass& InActorFactoryClass, TOptional<int32> InSortOrder = TOptional<int32>())
+		: Factory(GEditor->FindActorFactoryByClass(&InActorFactoryClass))
+		, AssetFactory(Factory)
 		, AssetData(Factory ? Factory->GetDefaultActorClass(FAssetData()) : FAssetData())
 		, bAlwaysUseGenericThumbnail(false)
 		, SortOrder(InSortOrder)
@@ -98,18 +128,20 @@ struct FPlaceableItem
 		AutoSetNativeAndDisplayName();
 	}
 
-	/** Constructor for any placeable class with associated asset data, brush and display name overrides */
+	/** Constructor that takes a specific factory and asset with brush and display name overrides */
 	FPlaceableItem(
-		UClass& InAssetClass,
-		const FAssetData& InAssetData,
-		FName InClassThumbnailBrushOverride = NAME_None,
-		TOptional<FLinearColor> InAssetTypeColorOverride = TOptional<FLinearColor>(),
-		TOptional<int32> InSortOrder = TOptional<int32>(),
-		TOptional<FText> InDisplayName = TOptional<FText>()
-	)
-		: Factory(GEditor->FindActorFactoryByClass(&InAssetClass))
+		 TScriptInterface<IAssetFactoryInterface> InAssetFactory,
+		 const FAssetData& InAssetData,
+		 FName InClassThumbnailBrushOverride,
+		 FName InClassIconBrushOverride,
+		 TOptional<FLinearColor> InAssetTypeColorOverride = TOptional<FLinearColor>(),
+		 TOptional<int32> InSortOrder = TOptional<int32>(),
+		 TOptional<FText> InDisplayName = TOptional<FText>())
+		: Factory(Cast<UActorFactory>(InAssetFactory.GetObject()))
+		, AssetFactory(InAssetFactory)
 		, AssetData(InAssetData)
 		, ClassThumbnailBrushOverride(InClassThumbnailBrushOverride)
+		, ClassIconBrushOverride(InClassIconBrushOverride)
 		, bAlwaysUseGenericThumbnail(true)
 		, AssetTypeColorOverride(InAssetTypeColorOverride)
 		, SortOrder(InSortOrder)
@@ -121,32 +153,38 @@ struct FPlaceableItem
 		}
 	}
 
+	/** Constructor for any placeable actor class with associated asset data, brush and display name overrides */
+	 FPlaceableItem(
+		UClass& InActorFactoryClass,
+		const FAssetData& InAssetData,
+		FName InClassThumbnailBrushOverride = NAME_None,
+		FName InClassIconBrushOverride = NAME_None,
+		TOptional<FLinearColor> InAssetTypeColorOverride = TOptional<FLinearColor>(),
+		TOptional<int32> InSortOrder = TOptional<int32>(),
+		TOptional<FText> InDisplayName = TOptional<FText>()
+	 ) 
+		 : Factory(GEditor->FindActorFactoryByClass(&InActorFactoryClass))
+		 , AssetFactory(Factory)
+		 , AssetData(InAssetData)
+		 , ClassThumbnailBrushOverride(InClassThumbnailBrushOverride)
+		 , ClassIconBrushOverride(InClassIconBrushOverride)
+		 , bAlwaysUseGenericThumbnail(true)
+		 , AssetTypeColorOverride(InAssetTypeColorOverride)
+		 , SortOrder(InSortOrder)
+	{
+		 AutoSetNativeAndDisplayName();
+		 if (InDisplayName.IsSet())
+		 {
+			 DisplayName = InDisplayName.GetValue();
+		 }
+	}
+
 	/** Automatically set this item's native and display names from its class or asset */
 	void AutoSetNativeAndDisplayName()
 	{
 		UClass* Class = AssetData.GetClass() == UClass::StaticClass() ? Cast<UClass>(AssetData.GetAsset()) : nullptr;
-		const bool bIsVolume = Class && Class->IsChildOf<AVolume>();
-		const bool bIsShape = Class ? false : AssetData.GetClass()->IsChildOf(UStaticMesh::StaticClass());
 
-		// Use the factory unless its a volume or shape.  Those need custom names as the factory that spawns them does not properly represent what is being spawned.
-		if (Factory && !bIsVolume && !bIsShape) 
-		{
-			if (!Factory->NewActorClassName.IsEmpty())
-			{
-				NativeName = Factory->NewActorClassName;
-			}
-			else if (Factory->NewActorClass)
-			{
-				Factory->NewActorClass->GetName(NativeName);
-			}
-			else
-			{
-				NativeName = Factory->GetName();
-			}
-
-			DisplayName = Factory->GetDisplayName();
-		}
-		else if (Class)
+		if (Class)
 		{
 			Class->GetName(NativeName);
 			DisplayName = Class->GetDisplayNameText();
@@ -173,8 +211,11 @@ struct FPlaceableItem
 
 public:
 
+	//~TODO: UE_DEPRECATED(5.4, "Use AssetFactory instead.")
+	UActorFactory* Factory = nullptr;
+
 	/** The factory used to create an instance of this placeable item */
-	UActorFactory* Factory;
+	TScriptInterface<IAssetFactoryInterface> AssetFactory = nullptr;
 
 	/** Asset data pertaining to the class */
 	FAssetData AssetData;
@@ -187,6 +228,9 @@ public:
 
 	/** Optional override for the thumbnail brush (passed to FClassIconFinder::FindThumbnailForClass in the form ClassThumbnail.<override>) */
 	FName ClassThumbnailBrushOverride;
+
+	/** Optional override for the small icon brush */
+	FName ClassIconBrushOverride;
 
 	/** Whether to always use the generic thumbnail for this item or not */
 	bool bAlwaysUseGenericThumbnail;
@@ -209,6 +253,7 @@ struct FBuiltInPlacementCategories
 	static FName RecentlyPlaced()	{ static FName Name("RecentlyPlaced");	return Name; }
 	static FName Basic()			{ static FName Name("Basic");			return Name; }
 	static FName Lights()			{ static FName Name("Lights");			return Name; }
+	static FName Shapes()			{ static FName Name("Shapes");			return Name; }
 	static FName Visual()			{ static FName Name("Visual");			return Name; }
 	static FName Volumes()			{ static FName Name("Volumes");			return Name; }
 	static FName AllClasses()		{ static FName Name("AllClasses");		return Name; }
@@ -243,11 +288,23 @@ public:
 	 * Add the specified assets to the recently placed items list
 	 */
 	virtual void AddToRecentlyPlaced( const TArray< UObject* >& Assets, UActorFactory* FactoryUsed = NULL ) = 0;
+	virtual void AddToRecentlyPlaced(const TArray< UObject* >& Assets, TScriptInterface<IAssetFactoryInterface> FactoryUsed)
+	{
+		// This overload was added later, so we route to old overload, though there shouldn't be any implementers
+		// aside from the module itself.
+		AddToRecentlyPlaced(Assets, Cast<UActorFactory>(FactoryUsed.GetObject()));
+	}
 	
 	/**
 	 * Add the specified asset to the recently placed items list
 	 */
 	virtual void AddToRecentlyPlaced( UObject* Asset, UActorFactory* FactoryUsed = NULL ) = 0;
+	virtual void AddToRecentlyPlaced(UObject* Asset, TScriptInterface<IAssetFactoryInterface> FactoryUsed)
+	{
+		// This overload was added later, so we route to old overload, though there shouldn't be any implementers
+		// aside from the module itself.
+		AddToRecentlyPlaced(Asset, Cast<UActorFactory>(FactoryUsed.GetObject()));
+	}
 
 	/**
 	 * Get a copy of the recently placed items
@@ -257,51 +314,37 @@ public:
 	/**
 	 * @return the event that is broadcast whenever the user facing list of placement mode categories gets modified
 	 */
-	DECLARE_EVENT(IPlacementMode, FOnPlacementModeCategoryListChanged);
+	DECLARE_EVENT(IPlacementModeModule, FOnPlacementModeCategoryListChanged);
 	virtual FOnPlacementModeCategoryListChanged& OnPlacementModeCategoryListChanged() = 0;
 
 	/**
 	 * @return the event that is broadcast whenever a placement mode category is refreshed
 	 */
-	DECLARE_EVENT_OneParam( IPlacementMode, FOnPlacementModeCategoryRefreshed, FName /*CategoryName*/ );
+	DECLARE_EVENT_OneParam( IPlacementModeModule, FOnPlacementModeCategoryRefreshed, FName /*CategoryName*/ );
 	virtual FOnPlacementModeCategoryRefreshed& OnPlacementModeCategoryRefreshed() = 0;
 
 	/**
 	 * @return the event that is broadcast whenever the list of recently placed assets changes
 	 */
-	DECLARE_EVENT_OneParam( IPlacementMode, FOnRecentlyPlacedChanged, const TArray< FActorPlacementInfo >& /*NewRecentlyPlaced*/ );
+	DECLARE_EVENT_OneParam( IPlacementModeModule, FOnRecentlyPlacedChanged, const TArray< FActorPlacementInfo >& /*NewRecentlyPlaced*/ );
 	virtual FOnRecentlyPlacedChanged& OnRecentlyPlacedChanged() = 0;
 
 	/**
 	 * @return the event that is broadcast whenever the list of all placeable assets changes
 	 */
-	DECLARE_EVENT( IPlacementMode, FOnAllPlaceableAssetsChanged );
+	DECLARE_EVENT( IPlacementModeModule, FOnAllPlaceableAssetsChanged );
 	virtual FOnAllPlaceableAssetsChanged& OnAllPlaceableAssetsChanged() = 0;
 
 	/**
 	 * @return the event that is broadcast whenever the filtering of placeable items changes (system filtering, not user filtering)
 	 */
-	DECLARE_EVENT(IPlacementMode, FOnPlaceableItemFilteringChanged);
+	DECLARE_EVENT(IPlacementModeModule, FOnPlaceableItemFilteringChanged);
 	virtual FOnPlaceableItemFilteringChanged& OnPlaceableItemFilteringChanged() = 0;
-
-	/**
-	 * @return the event that is broadcast whenever a placement mode enters a placing session
-	 */
-	DECLARE_EVENT_OneParam( IPlacementMode, FOnStartedPlacingEvent, const TArray< UObject* >& /*Assets*/ );
-	virtual FOnStartedPlacingEvent& OnStartedPlacing() = 0;
-	virtual void BroadcastStartedPlacing( const TArray< UObject* >& Assets ) = 0;
-
-	/**
-	 * @return the event that is broadcast whenever a placement mode exits a placing session
-	 */
-	DECLARE_EVENT_OneParam( IPlacementMode, FOnStoppedPlacingEvent, bool /*bWasSuccessfullyPlaced*/ );
-	virtual FOnStoppedPlacingEvent& OnStoppedPlacing() = 0;
-	virtual void BroadcastStoppedPlacing( bool bWasSuccessfullyPlaced ) = 0;
 
 	/**
 	 * Creates the placement browser widget
 	 */
-	virtual TSharedRef<SWidget> CreatePlacementModeBrowser() = 0;
+	virtual TSharedRef<SWidget> CreatePlacementModeBrowser(TSharedRef<SDockTab> ParentTab) = 0;
 
 public:
 
@@ -328,11 +371,11 @@ public:
 	 */
 	virtual const FPlacementCategoryInfo* GetRegisteredPlacementCategory(FName UniqueHandle) const = 0;
 
-	/** Placement categories blacklist */
-	virtual TSharedRef<FBlacklistNames>& GetCategoryBlacklist() = 0;
+	/** Placement categories deny list */
+	virtual TSharedRef<FNamePermissionList>& GetCategoryPermissionList() = 0;
 
 	/**
-	 * Get all placement categories that aren't blacklisted, sorted by SortOrder
+	 * Get all placement categories that aren't denied, sorted by SortOrder
 	 *
 	 * @param OutCategories	The array to populate with registered category information
 	 */

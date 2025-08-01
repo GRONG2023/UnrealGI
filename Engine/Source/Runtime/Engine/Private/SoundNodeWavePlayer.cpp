@@ -1,11 +1,14 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Sound/SoundNodeWavePlayer.h"
-#include "Audio.h"
 #include "ActiveSound.h"
+#include "AudioDevice.h"
+#include "Sound/SoundCue.h"
 #include "Sound/SoundWave.h"
 #include "UObject/FrameworkObjectVersion.h"
 #include "Async/Async.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SoundNodeWavePlayer)
 
 #define LOCTEXT_NAMESPACE "SoundNodeWavePlayer"
 
@@ -23,15 +26,24 @@ void USoundNodeWavePlayer::Serialize(FArchive& Ar)
 		}
 		else if (Ar.IsSaving())
 		{
-			USoundWave* HardReference = (ShouldHardReferenceAsset(Ar.CookingTarget()) ? SoundWave : nullptr);
+			USoundWave* HardReference = (ShouldHardReferenceAsset(Ar.CookingTarget()) ? ToRawPtr(SoundWave) : nullptr);
 			Ar << HardReference;
 		}
 	}
 }
 
+bool USoundNodeWavePlayer::ContainsProceduralSoundReference() const
+{
+	if (SoundWave)
+	{
+		return SoundWave->IsA<USoundWaveProcedural>();
+	}
+	return false;
+}
+
 void USoundNodeWavePlayer::LoadAsset(bool bAddToRoot)
 {
-	if (IsAsyncLoading())
+	if (IsAsyncLoadingMultithreaded())
 	{
 		SoundWave = SoundWaveAssetPtr.Get();
 		if (SoundWave && SoundWave->HasAnyFlags(RF_NeedLoad))
@@ -58,6 +70,14 @@ void USoundNodeWavePlayer::LoadAsset(bool bAddToRoot)
 		if (SoundWave)
 		{
 			SoundWave->AddToCluster(this, true);
+			// Don't init resources when running cook, as this can trigger 
+			// registration of a MetaSound and its dependent graphs.
+			// Those will instead be registered when the MetaSound itself is cooked (FMetasoundAssetBase::CookMetaSound)
+			// in a way that does not deal with runtime data like this function does
+			if (!IsRunningCookCommandlet())
+			{
+				SoundWave->InitResources();
+			}
 		}
 	}
 	else
@@ -76,6 +96,14 @@ void USoundNodeWavePlayer::LoadAsset(bool bAddToRoot)
 				SoundWave->AddToRoot();
 			}
 			SoundWave->AddToCluster(this);
+			// Don't init resources when running cook, as this can trigger 
+			// registration of a MetaSound and its dependent graphs.
+			// Those will instead be registered when the MetaSound itself is cooked (FMetasoundAssetBase::CookMetaSound)
+			// in a way that does not deal with runtime data like this function does
+			if (!IsRunningCookCommandlet())
+			{
+				SoundWave->InitResources();
+			}
 		}
 	}
 }
@@ -132,57 +160,68 @@ void USoundNodeWavePlayer::ParseNodes( FAudioDevice* AudioDevice, const UPTRINT 
 
 	if (SoundWave)
 	{
+		RETRIEVE_SOUNDNODE_PAYLOAD(sizeof(int32));
+		DECLARE_SOUNDNODE_ELEMENT(int32, bPlayFailed);
+
+		if (*RequiresInitialization)
+		{
+			bPlayFailed = 0;
+
+			if (FSoundCueParameterTransmitter* SoundCueTransmitter = static_cast<FSoundCueParameterTransmitter*>(ActiveSound.GetTransmitter()))
+			{
+				Audio::FParameterTransmitterInitParams Params;
+				Params.DefaultParams = ActiveSound.GetTransmitter()->GetParameters();
+				Params.InstanceID = Audio::GetTransmitterID(ActiveSound.GetAudioComponentID(), NodeWaveInstanceHash, ActiveSound.GetPlayOrder()); 
+				Params.SampleRate = AudioDevice->GetSampleRate();
+				Params.AudioDeviceID = AudioDevice->DeviceID;
+
+				SoundWave->InitParameters(Params.DefaultParams);
+				
+				const TSharedPtr<Audio::IParameterTransmitter> SoundWaveTransmitter = SoundWave->CreateParameterTransmitter(MoveTemp(Params));
+				
+				if (SoundWaveTransmitter.IsValid())
+				{
+					SoundCueTransmitter->Transmitters.Add(NodeWaveInstanceHash, SoundWaveTransmitter);
+				}
+			}
+			
+			*RequiresInitialization = 0;
+		}
+
 		// The SoundWave's bLooping is only for if it is directly referenced, so clear it
 		// in the case that it is being played from a player
-		bool bWaveIsLooping = SoundWave->bLooping;
+		const bool bWaveIsLooping = SoundWave->bLooping;
 		SoundWave->bLooping = false;
 
-		if (bLooping)
+		if (bLooping || (SoundWave->bProcedural && !SoundWave->IsOneShot()))
 		{
 			FSoundParseParameters UpdatedParams = ParseParams;
 			UpdatedParams.bLooping = true;
 			SoundWave->Parse(AudioDevice, NodeWaveInstanceHash, ActiveSound, UpdatedParams, WaveInstances);
 		}
+		else if (ParseParams.bEnableRetrigger)
+		{
+			// Don't play non-looping sounds again if this sound has been revived to// avoid re-triggering one shots played adjacent with looping wave instances in cue
+			SoundWave->Parse(AudioDevice, NodeWaveInstanceHash, ActiveSound, ParseParams, WaveInstances);
+		}
 		else
 		{
-			// Don't play non-looping sounds again if this sound has been revived to
-			// avoid re-triggering one shots played adjacent with looping wave instances in cue
-			if (ParseParams.bEnableRetrigger)
+			// If sound has been virtualized, don't try to revive one-shots
+			if (!ActiveSound.bHasVirtualized)
 			{
-				SoundWave->Parse(AudioDevice, NodeWaveInstanceHash, ActiveSound, ParseParams, WaveInstances);
-			}
-			else
-			{
-				// If sound has been virtualized, don't try to revive one-shots
-				if (!ActiveSound.bHasVirtualized)
+				// Guard against continual parsing if wave instance was created but not added to transient
+				// wave instance list to avoid inaudible sounds popping back in.
+				if (bPlayFailed == 0)
 				{
-					RETRIEVE_SOUNDNODE_PAYLOAD(sizeof(int32));
-					DECLARE_SOUNDNODE_ELEMENT(int32, bPlayFailed);
-					if (*RequiresInitialization)
-					{
-						bPlayFailed = 0;
-					}
-
 					const int32 InitActiveSoundWaveInstanceNum = ActiveSound.GetWaveInstances().Num();
 					const int32 InitWaveInstancesNum = WaveInstances.Num();
-
-					// Guard against continual parsing if wave instance was created but not added to transient
-					// wave instance list to avoid inaudible sounds popping back in.
-					if (!bPlayFailed)
+					
+					SoundWave->Parse(AudioDevice, NodeWaveInstanceHash, ActiveSound, ParseParams, WaveInstances);
+					
+					const bool bFailed = ActiveSound.GetWaveInstances().Num() == InitActiveSoundWaveInstanceNum && WaveInstances.Num() == InitWaveInstancesNum;
+					if (bFailed)
 					{
-						SoundWave->Parse(AudioDevice, NodeWaveInstanceHash, ActiveSound, ParseParams, WaveInstances);
-					}
-
-					if (*RequiresInitialization != 0)
-					{
-						if (ActiveSound.GetWaveInstances().Num() == InitActiveSoundWaveInstanceNum)
-						{
-							if (WaveInstances.Num() == InitWaveInstancesNum)
-							{
-								bPlayFailed = 1;
-							}
-						}
-						*RequiresInitialization = 0;
+						bPlayFailed = 1;
 					}
 				}
 			}

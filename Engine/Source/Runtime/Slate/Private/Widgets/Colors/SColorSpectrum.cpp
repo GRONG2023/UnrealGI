@@ -5,6 +5,11 @@
 #include "Styling/CoreStyle.h"
 
 
+SColorSpectrum::SColorSpectrum()
+	: SelectedColor(*this, FLinearColor(ForceInit))
+{
+}
+
 /* SColorSpectrum methods
  *****************************************************************************/
 
@@ -12,7 +17,7 @@ void SColorSpectrum::Construct( const FArguments& InArgs )
 {
 	Image = FCoreStyle::Get().GetBrush("ColorSpectrum.Spectrum");
 	SelectorImage = FCoreStyle::Get().GetBrush("ColorSpectrum.Selector");
-	SelectedColor = InArgs._SelectedColor;
+	SelectedColor.Assign(*this, InArgs._SelectedColor);
 
 	OnMouseCaptureBegin = InArgs._OnMouseCaptureBegin;
 	OnMouseCaptureEnd = InArgs._OnMouseCaptureEnd;
@@ -25,7 +30,7 @@ void SColorSpectrum::Construct( const FArguments& InArgs )
 
 FVector2D SColorSpectrum::ComputeDesiredSize( float ) const
 {
-	return Image->ImageSize;
+	return FVector2D(Image->ImageSize);
 }
 
 
@@ -101,7 +106,7 @@ int32 SColorSpectrum::OnPaint( const FPaintArgs& Args, const FGeometry& Allotted
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		LayerId + 1,
-		AllottedGeometry.ToPaintGeometry(CalcRelativeSelectedPosition() * AllottedGeometry.Size - SelectorImage->ImageSize * 0.5f, SelectorImage->ImageSize),
+		AllottedGeometry.ToPaintGeometry(SelectorImage->ImageSize, FSlateLayoutTransform(CalcRelativeSelectedPosition() * AllottedGeometry.Size - SelectorImage->ImageSize * 0.5f)),
 		SelectorImage,
 		DrawEffects,
 		InWidgetStyle.GetColorAndOpacityTint() * SelectorImage->GetTint(InWidgetStyle));
@@ -131,6 +136,7 @@ void SColorSpectrum::ProcessMouseAction(const FGeometry& MyGeometry, const FPoin
 	FVector2D NormalizedMousePosition = MyGeometry.AbsoluteToLocal(MouseEvent.GetScreenSpacePosition()) / MyGeometry.GetLocalSize();
 	NormalizedMousePosition = NormalizedMousePosition.ClampAxes(0.0f, 1.0f);
 
+	SelectedColor.UpdateNow(*this);
 	FLinearColor NewColor = SelectedColor.Get();
 	NewColor.R = 360.0f * NormalizedMousePosition.X;
 

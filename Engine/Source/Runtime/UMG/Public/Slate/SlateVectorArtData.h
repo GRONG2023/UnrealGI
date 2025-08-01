@@ -20,26 +20,26 @@ struct FSlateMeshVertex
 
 	FSlateMeshVertex()
 		:
-		Position(FVector2D::ZeroVector)
+		Position(FVector2f::ZeroVector)
 		, Color(ForceInitToZero)
-		, UV0(FVector2D::ZeroVector)
-		, UV1(FVector2D::ZeroVector)
-		, UV2(FVector2D::ZeroVector)
-		, UV3(FVector2D::ZeroVector)
-		, UV4(FVector2D::ZeroVector)
-		, UV5(FVector2D::ZeroVector)
+		, UV0(FVector2f::ZeroVector)
+		, UV1(FVector2f::ZeroVector)
+		, UV2(FVector2f::ZeroVector)
+		, UV3(FVector2f::ZeroVector)
+		, UV4(FVector2f::ZeroVector)
+		, UV5(FVector2f::ZeroVector)
 	{
 	}
 
 	FSlateMeshVertex(
-		  FVector2D InPos
+		  FVector2f InPos
 		, FColor InColor
-		, FVector2D InUV0
-		, FVector2D InUV1
-		, FVector2D InUV2
-		, FVector2D InUV3
-		, FVector2D InUV4
-		, FVector2D InUV5
+		, FVector2f InUV0
+		, FVector2f InUV1
+		, FVector2f InUV2
+		, FVector2f InUV3
+		, FVector2f InUV4
+		, FVector2f InUV5
 		)
 		: Position(InPos)
 		, Color(InColor)
@@ -53,63 +53,67 @@ struct FSlateMeshVertex
 	}
 
 	UPROPERTY()
-	FVector2D Position;
+	FVector2f Position;
 
 	UPROPERTY()
 	FColor Color;
 
 	UPROPERTY()
-	FVector2D UV0;
+	FVector2f UV0;
 
 	UPROPERTY()
-	FVector2D UV1;
+	FVector2f UV1;
 
 	UPROPERTY()
-	FVector2D UV2;
+	FVector2f UV2;
 
 	UPROPERTY()
-	FVector2D UV3;
+	FVector2f UV3;
 
 	UPROPERTY()
-	FVector2D UV4;
+	FVector2f UV4;
 
 	UPROPERTY()
-	FVector2D UV5;
+	FVector2f UV5;
 };
 
 /**
  * Turn static mesh data into Slate's simple vector art format.
  */
-UCLASS()
-class UMG_API USlateVectorArtData : public UObject
+UCLASS(MinimalAPI)
+class USlateVectorArtData : public UObject
 {
 	GENERATED_UCLASS_BODY()
 
 public:
 	/** Access the slate vertexes. */
-	const TArray<FSlateMeshVertex>& GetVertexData() const;
+	UMG_API const TArray<FSlateMeshVertex>& GetVertexData() const;
 	
 	/** Access the indexes for the order in which to draw the vertexes. */
-	const TArray<uint32>& GetIndexData() const;
+	UMG_API const TArray<uint32>& GetIndexData() const;
 	
 	/** Material to be used with the specified vector art data. */
-	UMaterialInterface* GetMaterial() const;
+	UMG_API UMaterialInterface* GetMaterial() const;
 	
 	/** Convert the material into an MID and get a pointer to the MID so that parameters can be set on it. */
-	UMaterialInstanceDynamic* ConvertToMaterialInstanceDynamic();
+	UMG_API UMaterialInstanceDynamic* ConvertToMaterialInstanceDynamic();
 
 	/** Convert the static mesh data into slate vector art on demand. Does nothing in a cooked build. */
-	void EnsureValidData();
+	UMG_API void EnsureValidData();
 
-	FVector2D GetDesiredSize() const;
+	UMG_API FVector2D GetDesiredSize() const;
 
-	FVector2D GetExtentMin() const;
+	UMG_API FVector2D GetExtentMin() const;
 
-	FVector2D GetExtentMax() const;
+	UMG_API FVector2D GetExtentMax() const;
 
 private:
 	// ~ UObject Interface
-	virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	PRAGMA_DISABLE_DEPRECATION_WARNINGS // Suppress compiler warning on override of deprecated function
+	UE_DEPRECATED(5.0, "Use version that takes FObjectPreSaveContext instead.")
+	UMG_API virtual void PreSave(const class ITargetPlatform* TargetPlatform) override;
+	UMG_API PRAGMA_ENABLE_DEPRECATION_WARNINGS
+	virtual void PreSave(FObjectPreSaveContext ObjectSaveContext) override;
 	// ~ UObject Interface
 
 #if WITH_EDITORONLY_DATA
@@ -118,11 +122,11 @@ private:
 
 	/** The mesh data asset from which the vector art is sourced */
 	UPROPERTY(EditAnywhere, Category="Vector Art" )
-	UStaticMesh* MeshAsset;
+	TObjectPtr<UStaticMesh> MeshAsset;
 
 	/** The material which we are using, or the material from with the MIC was constructed. */
 	UPROPERTY(Transient)
-	UMaterialInterface* SourceMaterial;
+	TObjectPtr<UMaterialInterface> SourceMaterial;
 #endif
 
 	/** @see GetVertexData() */
@@ -135,7 +139,7 @@ private:
 
 	/** @see GetMaterial() */
 	UPROPERTY()
-	UMaterialInterface* Material;
+	TObjectPtr<UMaterialInterface> Material;
 
 	UPROPERTY()
 	FVector2D ExtentMin;

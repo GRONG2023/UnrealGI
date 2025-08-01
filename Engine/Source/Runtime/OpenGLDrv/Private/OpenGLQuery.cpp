@@ -8,6 +8,7 @@
 #include "Stats/Stats.h"
 #include "OpenGLDrv.h"
 #include "OpenGLDrvPrivate.h"
+#include "RenderCore.h"
 
 static int32 GOpenGLPollRenderQueryResult = 1;
 static FAutoConsoleVariableRef CVarOpenGLPollRenderQueryResult(
@@ -107,14 +108,14 @@ struct FGLQueryBatcher
 				if (Item.BeginSequence < Query->TotalBegins.GetValue())
 				{
 					// stale entry, was never checked, but was reused
-					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, false);
+					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, EAllowShrinking::No);
 					continue;
 				}
 			
 				RHI.GetRenderQueryResult_OnThisThread(Query, false);
 				if (Query->TotalResults.GetValue() == Query->TotalBegins.GetValue())
 				{
-					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, false);
+					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, EAllowShrinking::No);
 				}
 				else
 				{
@@ -164,14 +165,14 @@ struct FGLQueryBatcher
 				if (Item.BeginSequence < Query->TotalBegins.GetValue())
 				{
 					// stale entry, was never checked, but was reused
-					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, false);
+					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, EAllowShrinking::No);
 					continue;
 				}
 
 				RHI.GetRenderQueryResult_OnThisThread(Query, false);
 				if (Query->TotalResults.GetValue() == Query->TotalBegins.GetValue())
 				{
-					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, false);
+					Batch->BatchContents.RemoveAtSwap(IndexInner--, 1, EAllowShrinking::No);
 				}
 			}
 			if (Batch->BatchContents.Num() == 0)
@@ -229,8 +230,7 @@ void BeginOcclusionQueryBatch(uint32 NumOcclusionQueries)
 {
 	if (IsRunningRHIInSeparateThread())
 	{
-
-		GBatcher.StartNewBatch(*(FOpenGLDynamicRHI*)GDynamicRHI);
+		GBatcher.StartNewBatch(*GetDynamicRHI<FOpenGLDynamicRHI>());
 	}
 }
 
@@ -238,15 +238,19 @@ void EndOcclusionQueryBatch()
 {
 	if (IsRunningRHIInSeparateThread())
 	{
-		GBatcher.EndBatch(*(FOpenGLDynamicRHI*)GDynamicRHI);
+		GBatcher.EndBatch(*GetDynamicRHI<FOpenGLDynamicRHI>());
 	}
 }
+
+void OpenGL_PollAllFences();
 
 void FOpenGLDynamicRHI::RHIPollOcclusionQueries()
 {
 	if (IsRunningRHIInSeparateThread())
 	{
-		GBatcher.SoftFlush(*(FOpenGLDynamicRHI*)GDynamicRHI);
+		GBatcher.SoftFlush(*GetDynamicRHI<FOpenGLDynamicRHI>());
+
+		OpenGL_PollAllFences();
 	}
 }
 
@@ -429,7 +433,8 @@ void FOpenGLDynamicRHI::GetRenderQueryResult_OnThisThread(FOpenGLRenderQuery* Qu
 		else if (bWait) // Isn't the query finished yet, and can we wait for it?
 		{
 			SCOPE_CYCLE_COUNTER(STAT_RenderQueryResultTime);
-			uint32 IdleStart = FPlatformTime::Cycles();
+
+			FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
 			GBatcher.Waited();
 			
 			if (GOpenGLPollRenderQueryResult == 0)
@@ -479,17 +484,6 @@ void FOpenGLDynamicRHI::GetRenderQueryResult_OnThisThread(FOpenGLRenderQuery* Qu
 					Query->TotalResults.Increment();
 				}
 			}
-
-			uint32 ThisCycles = FPlatformTime::Cycles() - IdleStart;
-			if (IsInRHIThread())
-			{
-				GWorkingRHIThreadStallTime += ThisCycles;
-			}
-			else
-			{
-				GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += ThisCycles;
-				GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
-			}
 		}
 	}
 }
@@ -523,6 +517,7 @@ public:
 
 	void DoTask(ENamedThreads::Type CurrentThread, const FGraphEventRef& MyCompletionGraphEvent)
 	{
+		check(IsInRHIThread());
 		check(IsRunningRHIInDedicatedThread() && IsInRHIThread()); // this should never be used on a platform that doesn't support the RHI thread, and it can't quite work when running the RHI stuff on task threads
 		if (bWait)
 		{
@@ -572,9 +567,9 @@ bool FOpenGLDynamicRHI::RHIGetRenderQueryResult(FRHIRenderQuery* QueryRHI, uint6
 				if (IsRunningRHIInDedicatedThread())
 				{
 					// send a command that will wait, so if the RHIT runs out of work, it just blocks and waits for the GPU
-					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([=]() {GetRenderQueryResult_OnThisThread(ResourceCast(QueryRHI), true); });
+					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([this, QueryRHI]() {GetRenderQueryResult_OnThisThread(ResourceCast(QueryRHI), true); });
 					FGraphEventRef Done = RHICmdList.RHIThreadFence(false);
-					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([=]() {GBatcher.Flush(*this, QueryRHI); });
+					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([this, QueryRHI]() {GBatcher.Flush(*this, QueryRHI); });
 					RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
 					while (!Done->IsComplete())
 					{
@@ -592,9 +587,9 @@ bool FOpenGLDynamicRHI::RHIGetRenderQueryResult(FRHIRenderQuery* QueryRHI, uint6
 				}
 				else
 				{
-					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([=]() {GetRenderQueryResult_OnThisThread(ResourceCast(QueryRHI), true); });
+					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([this, QueryRHI]() {GetRenderQueryResult_OnThisThread(ResourceCast(QueryRHI), true); });
 					FGraphEventRef Done = RHICmdList.RHIThreadFence(false);
-					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([=]() {GBatcher.Flush(*this, QueryRHI); });
+					ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([this, QueryRHI]() {GBatcher.Flush(*this, QueryRHI); });
 					RHICmdList.ImmediateFlush(EImmediateFlushType::DispatchToRHIThread);
 					FRHICommandListExecutor::WaitOnRHIThreadFence(Done);
 				}
@@ -602,7 +597,7 @@ bool FOpenGLDynamicRHI::RHIGetRenderQueryResult(FRHIRenderQuery* QueryRHI, uint6
 			}
 			else
 			{
-				ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([=]() {GetRenderQueryResult_OnThisThread(ResourceCast(QueryRHI), false); GBatcher.Flush(*this, QueryRHI);  });
+				ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([this, QueryRHI]() {GetRenderQueryResult_OnThisThread(ResourceCast(QueryRHI), false); GBatcher.Flush(*this, QueryRHI);  });
 			}
 		}	
 	}
@@ -642,43 +637,22 @@ FOpenGLRenderQuery::FOpenGLRenderQuery(ERenderQueryType InQueryType)
 	, bInvalidResource(true)
 	, QueryType(InQueryType)
 {
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-
-	const bool bCanRunOnThisThread = RHICmdList.Bypass() || (!IsRunningRHIInSeparateThread() && IsInRenderingThread()) || IsInRHIThread();
-
-	if (bCanRunOnThisThread)
-	{
-		AcquireResource();
-	}
-	else
-	{
-		CreationFence.Reset();
-		ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([=]() {AcquireResource(); CreationFence.WriteAssertFence(); });
-		CreationFence.SetRHIThreadFence();
-	}
+	check(IsInRenderingThread());
+	FRHICommandListExecutor::GetImmediateCommandList().EnqueueLambda(
+		[this](FRHICommandListImmediate&) { AcquireResource(); }
+	);
 }
 
 
 FOpenGLRenderQuery::~FOpenGLRenderQuery()
 {
-
+	VERIFY_GL_SCOPE();
 	OnQueryDeletion( this );
 
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-
-	const bool bCanRunOnThisThread = RHICmdList.Bypass() || (!IsRunningRHIInSeparateThread() && IsInRenderingThread()) || IsInRHIThread();
 	if (Resource && !bInvalidResource)
 	{
 		bInvalidResource = true;
-		if (bCanRunOnThisThread)
-		{
-			ReleaseResource(Resource, ResourceContext);
-		}
-		else
-		{
-			CreationFence.WaitFence();
-			ALLOC_COMMAND_CL(RHICmdList, FRHICommandGLCommand)([Resource = Resource, ResourceContext = ResourceContext]() {VERIFY_GL_SCOPE(); ReleaseResource(Resource, ResourceContext); });
-		}
+		ReleaseResource(Resource, ResourceContext);
 	}
 }
 
@@ -710,7 +684,6 @@ void FOpenGLEventQuery::IssueEvent()
 	FOpenGL::Flush();
 
 	checkSlow(FOpenGL::IsSync(Sync));
-
 }
 
 void FOpenGLEventQuery::WaitForCompletion()
@@ -719,54 +692,46 @@ void FOpenGLEventQuery::WaitForCompletion()
 
 	QUICK_SCOPE_CYCLE_COUNTER(STAT_FOpenGLEventQuery_WaitForCompletion);
 
-
 	checkSlow(FOpenGL::IsSync(Sync));
-
 
 	// Wait up to 1/2 second for sync execution
 	FOpenGL::EFenceResult Status = FOpenGL::ClientWaitSync( Sync, 0, 500*1000*1000);
 
-	if ( Status != FOpenGL::FR_AlreadySignaled && Status != FOpenGL::FR_ConditionSatisfied )
+	switch (Status)
 	{
-		//failure of some type, determine type and send diagnostic message
-		if ( Status == FOpenGL::FR_TimeoutExpired )
-		{
-			UE_LOG(LogRHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms)"));
-		}
-		else if ( Status == FOpenGL::FR_WaitFailed )
-		{
-			UE_LOG(LogRHI, Log, TEXT("Wait on GPU failed in driver"));
-		}
-		else
-		{
-			UE_LOG(LogRHI, Log, TEXT("Unknown error while waiting on GPU"));
-			check(0);
-		}
-	}
+	case FOpenGL::FR_AlreadySignaled:
+	case FOpenGL::FR_ConditionSatisfied:
+		break;
 
+	case FOpenGL::FR_TimeoutExpired:
+		UE_LOG(LogRHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms)"));
+		break;
+
+	case FOpenGL::FR_WaitFailed:
+		UE_LOG(LogRHI, Log, TEXT("Wait on GPU failed in driver"));
+		break;
+
+	default:
+	    UE_LOG(LogRHI, Log, TEXT("Unknown error while waiting on GPU"));
+	    check(0);
+		break;
+	}	
 }
 
-void FOpenGLEventQuery::InitDynamicRHI()
+FOpenGLEventQuery::FOpenGLEventQuery()
 {
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-
-	RHITHREAD_GLCOMMAND_PROLOGUE();
 	VERIFY_GL_SCOPE();
+
 	// Initialize the query by issuing an initial event.
 	IssueEvent();
 
 	check(FOpenGL::IsSync(Sync));
-	RHITHREAD_GLCOMMAND_EPILOGUE();
 }
 
-void FOpenGLEventQuery::ReleaseDynamicRHI()
+FOpenGLEventQuery::~FOpenGLEventQuery()
 {
-	FRHICommandListImmediate& RHICmdList = FRHICommandListExecutor::GetImmediateCommandList();
-
-	RHITHREAD_GLCOMMAND_PROLOGUE();
 	VERIFY_GL_SCOPE();
 	FOpenGL::DeleteSync(Sync);
-	RHITHREAD_GLCOMMAND_EPILOGUE();
 }
 
 /*=============================================================================
@@ -819,8 +784,6 @@ static FOpenGLRenderQuery* GetTimeQuery()
 
 void FOpenGLBufferedGPUTiming::InitResources()
 {
-	VERIFY_GL_SCOPE();
-
 	StaticInitialize(OpenGLRHI, PlatformStaticInitialize);
 
 	CurrentTimestamp = 0;
@@ -1003,46 +966,43 @@ uint64 FOpenGLBufferedGPUTiming::GetTiming(bool bGetCurrentResultsAndBlock)
 			// This really only happens if occlusion and frame sync event queries are disabled, otherwise those will block until the GPU catches up to 1 frame behind
 			const bool bBlocking = ( NumIssuedTimestamps == BufferSize ) || bGetCurrentResultsAndBlock;
 
-			uint32 IdleStart = FPlatformTime::Cycles();
-			double StartTimeoutTime = FPlatformTime::Seconds();
-
 			GLuint EndAvailable = GL_FALSE;
-
-			SCOPE_CYCLE_COUNTER( STAT_RenderQueryResultTime );
-			// If we are blocking, retry until the GPU processes the time stamp command
-			do
 			{
-				FOpenGL::GetQueryObject(EndTimestamps[TimestampIndex]->Resource, FOpenGL::QM_ResultAvailable, &EndAvailable);
+				FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+				double StartTimeoutTime = FPlatformTime::Seconds();
 
-				if ((FPlatformTime::Seconds() - StartTimeoutTime) > 0.5)
-				{
-					UE_LOG(LogRHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms) EndTimeStamp"));
-					return 0;
-				}
-			} while ( EndAvailable == GL_FALSE && bBlocking );
-
-			GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
-			GRenderThreadNumIdle[ERenderThreadIdleTypes::WaitingForGPUQuery]++;
-
-			if ( EndAvailable == GL_TRUE )
-			{
-				IdleStart = FPlatformTime::Cycles();
-				StartTimeoutTime = FPlatformTime::Seconds();
-
-				GLuint StartAvailable = GL_FALSE;
-
+				SCOPE_CYCLE_COUNTER( STAT_RenderQueryResultTime );
+				// If we are blocking, retry until the GPU processes the time stamp command
 				do
 				{
-					FOpenGL::GetQueryObject(StartTimestamps[TimestampIndex]->Resource, FOpenGL::QM_ResultAvailable, &StartAvailable);
+					FOpenGL::GetQueryObject(EndTimestamps[TimestampIndex]->Resource, FOpenGL::QM_ResultAvailable, &EndAvailable);
 
 					if ((FPlatformTime::Seconds() - StartTimeoutTime) > 0.5)
 					{
-						UE_LOG(LogRHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms) StartTimeStamp"));
+						UE_LOG(LogRHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms) EndTimeStamp"));
 						return 0;
 					}
-				} while ( StartAvailable == GL_FALSE && bBlocking );
+				} while ( EndAvailable == GL_FALSE && bBlocking );
+			}
 
-				GRenderThreadIdle[ERenderThreadIdleTypes::WaitingForGPUQuery] += FPlatformTime::Cycles() - IdleStart;
+			if ( EndAvailable == GL_TRUE )
+			{
+				GLuint StartAvailable = GL_FALSE;
+				{
+					FRenderThreadIdleScope IdleScope(ERenderThreadIdleTypes::WaitingForGPUQuery);
+					double StartTimeoutTime = FPlatformTime::Seconds();
+
+					do
+					{
+						FOpenGL::GetQueryObject(StartTimestamps[TimestampIndex]->Resource, FOpenGL::QM_ResultAvailable, &StartAvailable);
+
+						if ((FPlatformTime::Seconds() - StartTimeoutTime) > 0.5)
+						{
+							UE_LOG(LogRHI, Log, TEXT("Timed out while waiting for GPU to catch up. (500 ms) StartTimeStamp"));
+							return 0;
+						}
+					} while ( StartAvailable == GL_FALSE && bBlocking );
+				}
 
 				if(StartAvailable == GL_TRUE)
 				{
@@ -1138,10 +1098,11 @@ bool FOpenGLDisjointTimeStampQuery::GetResult( uint64* OutResult/*=NULL*/ )
 
 void FOpenGLDisjointTimeStampQuery::InitResources()
 {
-	VERIFY_GL_SCOPE();
-	if ( IsSupported() )
+	if (IsSupported())
 	{
-		PlatformGetNewRenderQuery(&DisjointQuery, &Context);
+		FRHICommandListExecutor::GetImmediateCommandList().EnqueueLambda([this](FRHICommandListImmediate&) { 
+				PlatformGetNewRenderQuery(&DisjointQuery, &Context); 
+		});
 	}
 }
 
@@ -1218,11 +1179,15 @@ struct FOpenGLGPUFenceProxy
 
 TArray<FOpenGLGPUFenceProxy*> FOpenGLGPUFenceProxy::AllOpenGLGPUFences;
 
-void BeginFrame_PollAllFences()
+void OpenGL_PollAllFences()
 {
 	if (IsRunningRHIInSeparateThread())
 	{
-		FOpenGLGPUFenceProxy::PollAllFences();
+		RunOnGLRenderContextThread([]()
+		{
+			VERIFY_GL_SCOPE();
+			FOpenGLGPUFenceProxy::PollAllFences();
+		});
 	}
 }
 
@@ -1264,12 +1229,23 @@ bool FOpenGLGPUFence::Poll() const
 		return true;
 	}
 
-	RunOnGLRenderContextThread([Proxy = Proxy]()
+	if (!(IsInRenderingThread() || IsInRHIThread()))
 	{
-		VERIFY_GL_SCOPE();
-		check(Proxy != nullptr);
-		Proxy->Poll();
-	});
+		ENQUEUE_RENDER_COMMAND(FOpenGLGPUFence_Poll)(
+		[this](FRHICommandListImmediate& RHICmdList)
+		{
+			Poll();
+		});
+	}
+	else
+	{
+		RunOnGLRenderContextThread([Proxy = Proxy]()
+		{
+			VERIFY_GL_SCOPE();
+			check(Proxy != nullptr);
+			Proxy->Poll();
+		});
+	}
 
 	return Proxy->bIsSignaled;
 }

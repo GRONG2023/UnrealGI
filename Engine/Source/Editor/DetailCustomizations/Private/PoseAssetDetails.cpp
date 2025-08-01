@@ -1,19 +1,45 @@
 // Copyright Epic Games, Inc. All Rights Reservekd.
 
 #include "PoseAssetDetails.h"
-#include "Misc/MessageDialog.h"
+
+#include "Animation/AnimSequence.h"
+#include "Animation/SmartName.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/Delegate.h"
+#include "DetailCategoryBuilder.h"
+#include "DetailLayoutBuilder.h"
+#include "DetailWidgetRow.h"
+#include "Fonts/SlateFontInfo.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "HAL/PlatformCrt.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Guid.h"
+#include "PropertyCustomizationHelpers.h"
+#include "PropertyEditorModule.h"
+#include "PropertyHandle.h"
+#include "SSearchableComboBox.h"
+#include "ScopedTransaction.h"
+#include "SlotBase.h"
+#include "Templates/Casts.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/SoftObjectPtr.h"
+#include "UObject/UObjectBaseUtility.h"
+#include "UObject/UnrealNames.h"
+#include "UObject/UnrealType.h"
+#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "Animation/AnimSequence.h"
-#include "AssetData.h"
-#include "DetailLayoutBuilder.h"
-#include "DetailCategoryBuilder.h"
-#include "IDetailsView.h"
-#include "PropertyCustomizationHelpers.h"
-#include "ScopedTransaction.h"
-#include "Framework/Notifications/NotificationManager.h"
 #include "Widgets/Notifications/SNotificationList.h"
-#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE	"PoseAssetDetails"
 
@@ -152,8 +178,8 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 	// add ref pose
 	BasePoseComboList.Add(MakeShareable(new FString(REFERENCE_BASE_POSE_NAME)));
 
-	TArray<FSmartName> PoseNames = PoseAsset->GetPoseNames();
-	FSmartName BasePoseName;
+	TArray<FName> PoseNames = PoseAsset->GetPoseFNames();
+	FName BasePoseName;
 
 	if (PoseNames.IsValidIndex(CachedBasePoseIndex))
 	{
@@ -168,7 +194,7 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 		// go through profile and see if it has mine
 		for (const auto& PoseName : PoseNames)
 		{
-			BasePoseComboList.Add(MakeShareable(new FString(PoseName.DisplayName.ToString())));
+			BasePoseComboList.Add(MakeShareable(new FString(PoseName.ToString())));
 
 			if (PoseName == BasePoseName)
 			{
@@ -183,7 +209,9 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 
 	IDetailCategoryBuilder& AdditiveCategory = DetailBuilder.EditCategory("Additive");
 
-	AdditiveCategory.AddCustomRow(LOCTEXT("AdditiveSettingCategoryLabel", "AdditiveSetting"))
+	TSharedPtr<IPropertyHandle> AdditivePropertyHandle = DetailBuilder.GetProperty(GET_MEMBER_NAME_CHECKED(UPoseAsset, bAdditivePose));
+	IDetailPropertyRow& AdditivePropertyRow = AdditiveCategory.AddProperty(AdditivePropertyHandle);
+	AdditivePropertyRow.CustomWidget()
 	.NameContent()
 	[
 		SNew(SCheckBox)
@@ -205,7 +233,7 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 		.AutoWidth()
 		.HAlign(HAlign_Left)
 		.VAlign(VAlign_Center)
-		.Padding(3)
+		.Padding(FMargin(4.0f,5.0f))
 		[
 			SNew(STextBlock)
 			.Text(LOCTEXT("AdditiveBasePoseLabel", "Base Pose"))
@@ -214,9 +242,8 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 
 		// if additive, let them choose base pose
 		+ SHorizontalBox::Slot()
-		.FillWidth(1)
-		.HAlign(HAlign_Fill)
-		.Padding(3)
+		.AutoWidth()
+		.Padding(FMargin(4.0f,5.0f))
 		[
 			SAssignNew(BasePoseComboBox, SSearchableComboBox)
 			.OptionsSource(&BasePoseComboList)
@@ -225,7 +252,6 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 			.OnComboBoxOpening(this, &FPoseAssetDetails::OnBasePoseComboOpening)
 			.InitiallySelectedItem(InitialSelectedPose)
 			.IsEnabled(this, &FPoseAssetDetails::CanSelectBasePose)
-			.ContentPadding(3)
 			.Content()
 			[
 				SNew(STextBlock)
@@ -235,22 +261,10 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 				.Font(IDetailLayoutBuilder::GetDetailFont())
 			]
 		]
-	];
 
-	AdditiveCategory.AddCustomRow(LOCTEXT("AdditiveSettingCategoryLabel_Apply", "AdditiveSetting_ApplyButton"))
-	.NameContent()
-	[
-		SNew(STextBlock)
-		.Text(LOCTEXT("DummyText"," "))
-	]
-	.ValueContent()
-	.MinDesiredWidth(200)
-	[
-		SNew(SBox)
-		.Padding(5)
-		.HAlign(HAlign_Center)
-		.VAlign(VAlign_Center)
-		.WidthOverride(200)
+		+ SHorizontalBox::Slot()
+		.AutoWidth()
+		.Padding(FMargin(4.0f,5.0f))
 		[
 			// apply button 
 			SNew(SButton)
@@ -258,7 +272,8 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 			.ToolTipText(LOCTEXT("ApplySettingButton_Tooltip", "Apply Additive Setting changes"))
 			.OnClicked(this, &FPoseAssetDetails::OnApplyAdditiveSettings)
 			.HAlign(HAlign_Center)
-			.IsEnabled(this, &FPoseAssetDetails::CanApplySettings)
+			.VAlign(VAlign_Center)
+			.Visibility(this, &FPoseAssetDetails::CanApplySettings)
 		]
 	];
 
@@ -269,7 +284,9 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 
 	DetailBuilder.HideProperty(SourceAnimationPropertyHandle);
 
-	SourceCategory.AddCustomRow(SourceAnimationPropertyHandle->GetPropertyDisplayName())
+	TSharedPtr<IPropertyHandle> SourceAnimationProperty = DetailBuilder.GetProperty(TEXT("SourceAnimation"));
+	IDetailPropertyRow& SourceAnimationRow = SourceCategory.AddProperty(SourceAnimationProperty);
+	SourceAnimationRow.CustomWidget()
 	.NameContent()
 	[
 		SourceAnimationPropertyHandle->CreatePropertyNameWidget()
@@ -279,6 +296,7 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 	[
 		SNew(SVerticalBox)
 		+ SVerticalBox::Slot()
+		.HAlign(EHorizontalAlignment::HAlign_Left)
 		.AutoHeight()
 		[
 			SNew(SObjectPropertyEntryBox)
@@ -287,20 +305,15 @@ void FPoseAssetDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBuilder)
 			.PropertyHandle(SourceAnimationPropertyHandle)
 		]
 		+ SVerticalBox::Slot()
+		.HAlign(EHorizontalAlignment::HAlign_Left)
 		.AutoHeight()
 		[
-			SNew(SBox)
-			.Padding(5)
+			SNew(SButton)
+			.Text(this, &FPoseAssetDetails::GetAnimationUpdateButtonText)
+			.ToolTipText(LOCTEXT("UpdateSource_Tooltip", "Update Poses From Source Animation"))
+			.OnClicked(this, &FPoseAssetDetails::OnUpdatePoseSourceAnimation)
+			.IsEnabled(this, &FPoseAssetDetails::IsUpdateSourceEnabled)
 			.HAlign(HAlign_Center)
-			.VAlign(VAlign_Center)
-			.WidthOverride(100)
-			[
-				SNew(SButton)
-				.Text(LOCTEXT("UpdateSource_Lable", "Update Source"))
-				.ToolTipText(LOCTEXT("UpdateSource_Tooltip", "Update Pose From Source Animation"))
-				.OnClicked(this, &FPoseAssetDetails::OnUpdatePoseSourceAnimation)
-				.HAlign(HAlign_Center)
-			]
 		]
 	];
 }
@@ -314,9 +327,7 @@ bool FPoseAssetDetails::ShouldFilterAsset(const FAssetData& AssetData)
 {
 	if (TargetSkeleton.IsValid())
 	{
-		FString SkeletonString = FAssetData(TargetSkeleton.Get()).GetExportTextName();
-		FAssetDataTagMapSharedView::FFindTagResult Result = AssetData.TagsAndValues.FindTag("Skeleton");
-		return (!Result.IsSet() || SkeletonString != Result.GetValue());
+		return !TargetSkeleton->IsCompatibleForEditor(AssetData);
 	}
 
 	return true;
@@ -376,7 +387,7 @@ void FPoseAssetDetails::RefreshBasePoseChanged()
 			CachedBasePoseIndex = -1;
 		}
 
-		TArray<FSmartName> PoseNames = PoseAsset->GetPoseNames();
+		TArray<FName> PoseNames = PoseAsset->GetPoseFNames();
 		// add ref pose
 		BasePoseComboList.Add(MakeShareable(new FString(REFERENCE_BASE_POSE_NAME)));
 
@@ -385,7 +396,7 @@ void FPoseAssetDetails::RefreshBasePoseChanged()
 			// go through profile and see if it has mine
 			for (const auto& PoseName : PoseNames)
 			{
-				BasePoseComboList.Add(MakeShareable(new FString(PoseName.DisplayName.ToString())));
+				BasePoseComboList.Add(MakeShareable(new FString(PoseName.ToString())));
 			}
 		}
 
@@ -576,26 +587,26 @@ void FPoseAssetDetails::CachePoseAssetData()
 
  FReply FPoseAssetDetails::UpdateRetargetSourceAssetData()
  {
-	 RetargetSourceAssetHandle->NotifyPostChange();
+	 RetargetSourceAssetHandle->NotifyPostChange(EPropertyChangeType::Unspecified);
 	 return FReply::Handled();
  }
 
- bool FPoseAssetDetails::CanApplySettings() const
+ EVisibility FPoseAssetDetails::CanApplySettings() const
  {
 	 if (PoseAsset.IsValid())
 	 {
 		 bool bIsAdditiveAsset = PoseAsset->IsValidAdditive();
-		 return (bCachedAdditive != bIsAdditiveAsset || (bIsAdditiveAsset && CachedBasePoseIndex != PoseAsset->GetBasePoseIndex()));
+		 return (bCachedAdditive != bIsAdditiveAsset || (bIsAdditiveAsset && CachedBasePoseIndex != PoseAsset->GetBasePoseIndex())) ? EVisibility::Visible : EVisibility::Collapsed;
 	 }
 
-	 return false;
+	 return EVisibility::Collapsed;
  }
 
  FReply FPoseAssetDetails::OnApplyAdditiveSettings()
  {
 	 if (PoseAsset.IsValid())
 	 {
-		 FScopedTransaction Transaction(LOCTEXT("ApplyAdditiveSetting_Transaciton", "Apply Additive Setting"));
+		 FScopedTransaction Transaction(LOCTEXT("ApplyAdditiveSetting_Transaction", "Apply Additive Setting"));
 		 PoseAsset->Modify();
 
 		 PoseAsset->ConvertSpace(bCachedAdditive, CachedBasePoseIndex);
@@ -636,9 +647,9 @@ void FPoseAssetDetails::CachePoseAssetData()
 		 SourceAnimationPropertyHandle->GetValue(ObjectSet);
 
 		 UAnimSequence* AnimSequenceSelected = Cast<UAnimSequence>(ObjectSet);
-		 if (AnimSequenceSelected && AnimSequenceSelected->GetSkeleton() == PoseAsset->GetSkeleton())
+		 if (AnimSequenceSelected && PoseAsset->GetSkeleton()->IsCompatibleForEditor(AnimSequenceSelected->GetSkeleton()))
 		 {
-			 FScopedTransaction Transaction(LOCTEXT("UpdatePoseSourceAnimation_Transaciton", "Update Pose"));
+			 FScopedTransaction Transaction(LOCTEXT("UpdatePoseSourceAnimation_Transaction", "Update Pose"));
 			 PoseAsset->Modify();
 			 PoseAsset->UpdatePoseFromAnimation(AnimSequenceSelected);
 
@@ -664,7 +675,7 @@ void FPoseAssetDetails::CachePoseAssetData()
 			 Args.Add(TEXT("AssetName"), FText::FromString(PoseAsset->GetName()));
 			 Args.Add(TEXT("SourceAsset"), FText::FromString(GetNameSafe(AnimSequenceSelected)));
 			 Args.Add(TEXT("SkeletonName"), FText::FromString(GetNameSafe(PoseAsset->GetSkeleton())));
-			 FText ResultText = FText::Format(LOCTEXT("UpdatePoseWithInvalidSkeleton", "Source Asset {SourceAsset} is invalid or does not have matching skeleton {SkeletonName} with {AssetName}"), Args);
+			 FText ResultText = FText::Format(LOCTEXT("UpdatePoseWithInvalidSkeleton", "Source Asset {SourceAsset} is invalid or does not have a compatible skeleton {SkeletonName} with {AssetName}"), Args);
 
 			 FNotificationInfo Info(ResultText);
 			 Info.bFireAndForget = true;
@@ -679,5 +690,29 @@ void FPoseAssetDetails::CachePoseAssetData()
 	 }
 	 return FReply::Handled();
  }
+
+bool FPoseAssetDetails::IsUpdateSourceEnabled() const
+{
+	const UObject* ObjectSet;
+	SourceAnimationPropertyHandle->GetValue(ObjectSet);
+
+	const UAnimSequence* AnimSequenceSelected = Cast<UAnimSequence>(ObjectSet);
+	if (AnimSequenceSelected && PoseAsset.IsValid())
+	{
+		return (PoseAsset->SourceAnimation && PoseAsset->SourceAnimation->GetDataModel()->GenerateGuid() != PoseAsset->SourceAnimationRawDataGUID);		
+	}
+
+	return false;
+}
+
+FText FPoseAssetDetails::GetAnimationUpdateButtonText() const
+{
+	if (PoseAsset.IsValid() && !PoseAsset->SourceAnimationRawDataGUID.IsValid())
+	{
+		return LOCTEXT("RestoreSource_Label", "Restore Source");
+	}
+
+	return LOCTEXT("UpdateSource_Label", "Update Source");
+}
 
 #undef LOCTEXT_NAMESPACE

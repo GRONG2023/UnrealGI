@@ -31,10 +31,11 @@ namespace Chaos
 UENUM()
 enum class EClusterConnectionTypeEnum : uint8
 {
-	Chaos_PointImplicit = Chaos::FClusterCreationParameters::PointImplicit UMETA(Hidden),
+	Chaos_PointImplicit = Chaos::FClusterCreationParameters::PointImplicit ,
 	Chaos_DelaunayTriangulation = Chaos::FClusterCreationParameters::DelaunayTriangulation UMETA(Hidden),
-	Chaos_MinimalSpanningSubsetDelaunayTriangulation = Chaos::FClusterCreationParameters::MinimalSpanningSubsetDelaunayTriangulation UMETA(Hidden),
-	Chaos_PointImplicitAugmentedWithMinimalDelaunay = Chaos::FClusterCreationParameters::PointImplicitAugmentedWithMinimalDelaunay UMETA(Hidden),
+	Chaos_MinimalSpanningSubsetDelaunayTriangulation = Chaos::FClusterCreationParameters::MinimalSpanningSubsetDelaunayTriangulation,
+	Chaos_PointImplicitAugmentedWithMinimalDelaunay = Chaos::FClusterCreationParameters::PointImplicitAugmentedWithMinimalDelaunay,
+	Chaos_BoundsOverlapFilteredDelaunayTriangulation = Chaos::FClusterCreationParameters::BoundsOverlapFilteredDelaunayTriangulation,
 	Chaos_None = Chaos::FClusterCreationParameters::None UMETA(Hidden),
 	//
 	Chaos_EClsuterCreationParameters_Max UMETA(Hidden)
@@ -70,8 +71,8 @@ struct FChaosDebugSubstepControl
 #endif
 };
 
-UCLASS()
-class CHAOSSOLVERENGINE_API AChaosSolverActor : public AActor
+UCLASS(MinimalAPI)
+class AChaosSolverActor : public AActor
 {
 	GENERATED_UCLASS_BODY()
 
@@ -107,8 +108,6 @@ public:
 	FSolverTrailingFilterSettings TrailingFilterSettings_DEPRECATED;
 	UPROPERTY()
 	float MassScale_DEPRECATED;
-	UPROPERTY()
-	bool bGenerateContactGraph_DEPRECATED;
 	/** End deprecated properties */
 	
 	UPROPERTY(EditAnywhere, Category = Settings)
@@ -125,50 +124,50 @@ public:
 
 	/** Makes this solver the current world solver. Dynamically spawned objects will have their physics state created in this solver. */
 	UFUNCTION(BlueprintCallable, Category = "ChaosPhysics")
-	void SetAsCurrentWorldSolver();
+	CHAOSSOLVERENGINE_API void SetAsCurrentWorldSolver();
 
 	/** Controls whether the solver is able to simulate particles it controls */
 	UFUNCTION(BlueprintCallable, Category = "ChaosPhysics")
-	virtual void SetSolverActive(bool bActive);
+	CHAOSSOLVERENGINE_API virtual void SetSolverActive(bool bActive);
 
 	/*
 	* Display icon in the editor
 	*/
 	UPROPERTY()
-	UBillboardComponent* SpriteComponent;
+	TObjectPtr<UBillboardComponent> SpriteComponent;
 
 	UChaosGameplayEventDispatcher* GetGameplayEventDispatcher() const { return GameplayEventDispatcherComponent; };
 
 	TSharedPtr<FPhysScene_Chaos> GetPhysicsScene() const { return PhysScene; }
 	Chaos::FPhysicsSolver* GetSolver() const { return Solver; }
 
-	virtual void PostRegisterAllComponents() override;
-	virtual void PreInitializeComponents() override;
+	CHAOSSOLVERENGINE_API virtual void PostRegisterAllComponents() override;
+	CHAOSSOLVERENGINE_API virtual void PreInitializeComponents() override;
 	
-	virtual void BeginPlay() override;
-	virtual void EndPlay(const EEndPlayReason::Type ReasonEnd) override;
+	CHAOSSOLVERENGINE_API virtual void BeginPlay() override;
+	CHAOSSOLVERENGINE_API virtual void EndPlay(const EEndPlayReason::Type ReasonEnd) override;
 
 	/** UObject interface */
 #if WITH_EDITOR
-	virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
+	CHAOSSOLVERENGINE_API virtual void PostEditChangeProperty(struct FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
-	void PostLoad() override;
-	void Serialize(FArchive& Ar) override;
-	void PostDuplicate(EDuplicateMode::Type DuplicateMode) override;
+	CHAOSSOLVERENGINE_API void PostLoad() override;
+	CHAOSSOLVERENGINE_API void Serialize(FArchive& Ar) override;
+	CHAOSSOLVERENGINE_API void PostDuplicate(EDuplicateMode::Type DuplicateMode) override;
 	/** End UObject interface */
 
 private:
 
 	/** If floor is enabled, make a particle to represent it */
-	void MakeFloor();
+	CHAOSSOLVERENGINE_API void MakeFloor();
 
 	TSharedPtr<FPhysScene_Chaos> PhysScene;
 	Chaos::FPhysicsSolver* Solver;
 
 	/** Component responsible for harvesting and triggering physics-related gameplay events (hits, breaks, etc) */
 	UPROPERTY()
-	UChaosGameplayEventDispatcher* GameplayEventDispatcherComponent;
+	TObjectPtr<UChaosGameplayEventDispatcher> GameplayEventDispatcherComponent;
 
 	/** If floor is enabled - this will point to the solver particle for it */
-	FSingleParticlePhysicsProxy* Proxy;
+	Chaos::FSingleParticlePhysicsProxy* Proxy;
 };

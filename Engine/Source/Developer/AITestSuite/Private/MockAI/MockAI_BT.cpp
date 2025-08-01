@@ -5,6 +5,8 @@
 #include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BehaviorTree.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MockAI_BT)
+
 //----------------------------------------------------------------------//
 // 
 //----------------------------------------------------------------------//
@@ -19,6 +21,8 @@ UMockAI_BT::UMockAI_BT(const FObjectInitializer& ObjectInitializer)
 		UseBrainComponent<UBehaviorTreeComponent>();
 
 		BTComp = Cast<UBehaviorTreeComponent>(BrainComp);
+		BTComp->RegisterComponent();
+		BTComp->InitializeComponent();
 	}
 }
 
@@ -43,3 +47,4 @@ void UMockAI_BT::RunBT(UBehaviorTree& BTAsset, EBTExecutionMode::Type RunType)
 
 	BTComp->StartTree(BTAsset, RunType);
 }
+

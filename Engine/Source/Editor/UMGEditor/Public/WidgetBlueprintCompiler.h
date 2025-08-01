@@ -3,12 +3,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "EngineLogs.h"
+#include "Engine/Blueprint.h"
 #include "WidgetBlueprint.h"
 #include "KismetCompiler.h"
 #include "KismetCompilerModule.h"
 #include "ComponentReregisterContext.h"
 #include "Components/WidgetComponent.h"
 
+class FProperty;
+class UEdGraph;
+class UWidget;
+class UWidgetAnimation;
+class UWidgetGraphSchema;
 
 //////////////////////////////////////////////////////////////////////////
 // FWidgetBlueprintCompiler 
@@ -52,11 +59,18 @@ public:
 	virtual ~FWidgetBlueprintCompilerContext();
 
 protected:
-	UWidgetBlueprint* WidgetBlueprint() const { return Cast<UWidgetBlueprint>(Blueprint); }
-
 	void ValidateWidgetNames();
 
-	// FKismetCompilerContext
+	/**
+	 * Checks if the animations' bindings are valid. Shows a compiler warning if any of the animations have a null track, urging the user
+	 * to delete said track to avoid performance hitches when playing said null tracks in large user widgets.
+	*/
+	void ValidateWidgetAnimations();
+
+	/** Validates the Desired Focus name to make sure it's part of the Widget Tree. */
+	void ValidateDesiredFocusWidgetName();
+
+	//~ Begin FKismetCompilerContext
 	virtual UEdGraphSchema_K2* CreateSchema() override;
 	virtual void CreateFunctionList() override;
 	virtual void SpawnNewClass(const FString& NewClassName) override;
@@ -69,25 +83,67 @@ protected:
 	virtual void CopyTermDefaultsToDefaultObject(UObject* DefaultObject);
 	virtual void FinishCompilingClass(UClass* Class) override;
 	virtual bool ValidateGeneratedClass(UBlueprintGeneratedClass* Class) override;
-	virtual void OnPostCDOCompiled() override;
-	// End FKismetCompilerContext
+	virtual void OnPostCDOCompiled(const UObject::FPostCDOCompiledContext& Context) override;
+	//~ End FKismetCompilerContext
 
 	void SanitizeBindings(UBlueprintGeneratedClass* Class);
 
 	void VerifyEventReplysAreNotEmpty(FKismetFunctionContext& Context);
+	void VerifyFieldNotifyFunction(FKismetFunctionContext& Context);
+
+public:
+	UWidgetBlueprint* WidgetBlueprint() const { return Cast<UWidgetBlueprint>(Blueprint); }
+
+	void AddExtension(UWidgetBlueprintGeneratedClass* Class, UWidgetBlueprintGeneratedClassExtension* Extension);
+
+	struct UMGEDITOR_API FCreateVariableContext
+	{
+	public:
+		FProperty* CreateVariable(const FName Name, const FEdGraphPinType& Type) const;
+		void AddGeneratedFunctionGraph(UEdGraph* Graph) const;
+		UWidgetBlueprint* GetWidgetBlueprint() const;
+		UE_DEPRECATED(5.4, "GetSkeletonGeneratedClass renamed to GetGeneratedClass")
+		UWidgetBlueprintGeneratedClass* GetSkeletonGeneratedClass() const;
+		UWidgetBlueprintGeneratedClass* GetGeneratedClass() const;
+		EKismetCompileType::Type GetCompileType() const;
+
+	private:
+		friend FWidgetBlueprintCompilerContext;
+		FCreateVariableContext(FWidgetBlueprintCompilerContext& InContext);
+		FWidgetBlueprintCompilerContext& Context;
+	};
+
+	struct UMGEDITOR_API FCreateFunctionContext
+	{
+	public:
+		void AddGeneratedFunctionGraph(UEdGraph*) const;
+		UWidgetBlueprintGeneratedClass* GetGeneratedClass() const;
+
+	private:
+		friend FWidgetBlueprintCompilerContext;
+		FCreateFunctionContext(FWidgetBlueprintCompilerContext& InContext);
+		FWidgetBlueprintCompilerContext& Context;
+	};
 
 protected:
 	void FixAbandonedWidgetTree(UWidgetBlueprint* WidgetBP);
 
 	UWidgetBlueprintGeneratedClass* NewWidgetBlueprintClass;
 
-	class UWidgetGraphSchema* WidgetSchema;
+	UWidgetTree* OldWidgetTree;
+
+	TArray<UWidgetAnimation*> OldWidgetAnimations;
+
+	UWidgetGraphSchema* WidgetSchema;
 
 	// Map of properties created for widgets; to aid in debug data generation
-	TMap<class UWidget*, class FProperty*> WidgetToMemberVariableMap;
+	TMap<UWidget*, FProperty*> WidgetToMemberVariableMap;
+
+	// Map of properties created in parent widget for bind widget validation
+	TMap<UWidget*, FProperty*> ParentWidgetToBindWidgetMap;
 
 	// Map of properties created for widget animations; to aid in debug data generation
-	TMap<class UWidgetAnimation*, class FProperty*> WidgetAnimToMemberVariableMap;
+	TMap<UWidgetAnimation*, FProperty*> WidgetAnimToMemberVariableMap;
 
 	///----------------------------------------------------------------
 };

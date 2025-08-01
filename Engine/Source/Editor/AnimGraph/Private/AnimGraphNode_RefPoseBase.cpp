@@ -12,12 +12,12 @@ UAnimGraphNode_RefPoseBase::UAnimGraphNode_RefPoseBase(const FObjectInitializer&
 
 FString UAnimGraphNode_RefPoseBase::GetNodeCategory() const
 {
-	return TEXT("Identity");
+	return TEXT("Animation|Poses");
 }
 
 FLinearColor UAnimGraphNode_RefPoseBase::GetNodeTitleColor() const
 {
-	if ( Node.RefPoseType == EIT_Additive )
+	if ( Node.GetRefPoseType() == EIT_Additive )
 	{
 		return FLinearColor(0.10f, 0.60f, 0.12f);
 	}

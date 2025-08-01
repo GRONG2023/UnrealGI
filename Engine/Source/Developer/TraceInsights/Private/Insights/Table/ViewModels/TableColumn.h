@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Types/SlateEnums.h"
 #include "Misc/EnumClassFlags.h"
+#include "Widgets/Views/SHeaderRow.h" // for EColumnSortMode
 
 #include "Insights/Table/ViewModels/TableCellValue.h"
 
@@ -12,6 +13,7 @@ namespace Insights
 {
 
 class FBaseTreeNode;
+class IFilterValueConverter;
 class FTable;
 class ITableCellValueGetter;
 class ITableCellValueFormatter;
@@ -21,12 +23,12 @@ class ITableCellValueSorter;
 
 enum class ETableColumnFlags : uint32
 {
-	None = 0,
-
-	ShouldBeVisible = (1 << 0),
-	CanBeHidden     = (1 << 1),
-	CanBeFiltered   = (1 << 2),
-	IsHierarchy     = (1 << 3),
+	None            = 0,
+	ShouldBeVisible = (1 << 0), // Column should be initially visible.
+	CanBeHidden     = (1 << 1), // Column can be hidden.
+	CanBeFiltered   = (1 << 2), // Column can be used for filtering.
+	IsHierarchy     = (1 << 3), // Column is the hierarchy (name) column, in a tree view.
+	IsDynamic       = (1 << 4), // Column is dynamic. The column's value can not be cached.
 };
 ENUM_CLASS_FLAGS(ETableColumnFlags);
 
@@ -36,10 +38,9 @@ enum class ETableColumnAggregation : uint32
 {
 	None = 0,
 	Sum,
-	//Min,
-	//Max,
-	//Average,
-	//Median,
+	Min,
+	Max,
+	SameValue
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -56,7 +57,6 @@ public:
 	/** Initialization constructor. */
 	FTableColumn(const FName InId)
 		: Id(InId)
-		, Order(0)
 		, Index(-1)
 		, ShortName()
 		, TitleName()
@@ -72,6 +72,7 @@ public:
 		, ValueGetter(GetDefaultValueGetter())
 		, ValueFormatter(GetDefaultValueFormatter())
 		, ValueSorter(nullptr)
+		, InitialSortMode(EColumnSortMode::Ascending)
 		, ParentTable(nullptr)
 	{
 	}
@@ -111,11 +112,14 @@ public:
 	/** Whether this column can be hidden. */
 	bool CanBeHidden() const { return EnumHasAnyFlags(Flags, ETableColumnFlags::CanBeHidden); }
 
-	/** Whether this column can be used for filtering displayed results. */
+	/** Whether this column can be used for filtering. */
 	bool CanBeFiltered() const { return EnumHasAnyFlags(Flags, ETableColumnFlags::CanBeFiltered); }
 
-	/** Whether this column is the hierarcy (name) column, in a tree view. */
+	/** Whether this column is the hierarchy (name) column, in a tree view. */
 	bool IsHierarchy() const { return EnumHasAnyFlags(Flags, ETableColumnFlags::IsHierarchy); }
+
+	/** Whether this column is dynamic or not. If a column is dynamic, the column's value can not be cached. */
+	bool IsDynamic() const { return EnumHasAnyFlags(Flags, ETableColumnFlags::IsDynamic); }
 
 	void SetFlags(ETableColumnFlags InFlags) { Flags = InFlags; }
 
@@ -161,6 +165,7 @@ public:
 	void SetValueGetter(TSharedRef<ITableCellValueGetter> InValueGetter) { ValueGetter = InValueGetter; }
 
 	const TOptional<FTableCellValue> GetValue(const FBaseTreeNode& InNode) const;
+	uint64 GetValueId(const FBaseTreeNode& InNode) const;
 
 	//////////////////////////////////////////////////
 	// Value Formatter
@@ -172,6 +177,12 @@ public:
 
 	FText GetValueAsText(const FBaseTreeNode& InNode) const;
 	FText GetValueAsTooltipText(const FBaseTreeNode& InNode) const;
+	FText GetValueAsGroupingText(const FBaseTreeNode& InNode) const;
+
+	FText CopyValue(const FBaseTreeNode& InNode) const;
+	FText CopyTooltip(const FBaseTreeNode& InNode) const;
+
+	FString GetValueAsSerializableString(const FBaseTreeNode& InNode) const;
 
 	//////////////////////////////////////////////////
 	// Value Sorter (can be nullptr)
@@ -182,17 +193,28 @@ public:
 	/** Whether this column can be used for sorting. */
 	bool CanBeSorted() const { return ValueSorter.IsValid(); }
 
+	/** Gets the initial sorting mode. */
+	EColumnSortMode::Type GetInitialSortMode() const { return InitialSortMode; }
+
+	/** Sets the initial sorting mode. */
+	void SetInitialSortMode(EColumnSortMode::Type InMode) { InitialSortMode = InMode; }
+
+	//////////////////////////////////////////////////
+	// Value Converter (can be nullptr)
+
+	TSharedPtr<IFilterValueConverter> GetValueConverter() const { return ValueConverter; }
+	void SetValueConverter(TSharedPtr<IFilterValueConverter> InValueConverter) { ValueConverter = InValueConverter; }
+
 	//////////////////////////////////////////////////
 
 	TWeakPtr<FTable> GetParentTable() const { return ParentTable; }
 	void SetParentTable(TWeakPtr<FTable> InParentTable) { ParentTable = InParentTable; }
 
+	//////////////////////////////////////////////////
+
 private:
 	/** Id of the column. */
 	FName Id;
-
-	/** Order value, to sort columns in the list/tree view. */
-	int32 Order;
 
 	/** Column index in source table. */
 	int32 Index;
@@ -229,11 +251,17 @@ private:
 	/** Custom getter for values identified by this column. */
 	TSharedRef<ITableCellValueGetter> ValueGetter;
 
-	/** Custom formater for values displayed by this column. */
+	/** Custom formatter for values displayed by this column. */
 	TSharedRef<ITableCellValueFormatter> ValueFormatter;
 
 	/** Custom sorter for values displayed by this column. */
 	TSharedPtr<ITableCellValueSorter> ValueSorter;
+
+	/** Initial sorting mode. */
+	EColumnSortMode::Type InitialSortMode;
+
+	/** Used in FilterConfigurator to convert from string to column's data type. */
+	TSharedPtr<IFilterValueConverter> ValueConverter;
 
 	/* Parent table. Only one table instance can own this column. */
 	TWeakPtr<FTable> ParentTable;

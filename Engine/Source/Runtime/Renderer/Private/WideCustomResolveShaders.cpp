@@ -48,7 +48,7 @@ static void ResolveColorWideInternal2(
 	const FTextureRHIRef& SrcTexture,
 	FRHIShaderResourceView* FmaskSRV,
 	const FIntPoint& SrcOrigin,
-	FRHIVertexBuffer* DummyVB)
+	FRHIBuffer* DummyVB)
 {
 	auto ShaderMap = GetGlobalShaderMap(CurrentFeatureLevel);
 
@@ -60,9 +60,9 @@ static void ResolveColorWideInternal2(
 	GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 	GraphicsPSOInit.PrimitiveType = PT_TriangleList;
 
-	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
-	
-	PixelShader->SetParameters(RHICmdList, SrcTexture, FmaskSRV, SrcOrigin);
+	SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit, 0);
+
+	SetShaderParametersLegacyPS(RHICmdList, PixelShader, SrcTexture, FmaskSRV, SrcOrigin);
 
 	RHICmdList.SetStreamSource(0, DummyVB, 0);
 	RHICmdList.DrawPrimitive(0, 1, 1);
@@ -77,7 +77,7 @@ static void ResolveColorWideInternal(
 	FRHIShaderResourceView* FmaskSRV,
 	const FIntPoint& SrcOrigin, 
 	int32 WideFilterWidth,
-	FRHIVertexBuffer* DummyVB)
+	FRHIBuffer* DummyVB)
 {
 	switch (WideFilterWidth)
 	{
@@ -97,7 +97,7 @@ void ResolveFilterWide(
 	const FIntPoint& SrcOrigin, 
 	int32 NumSamples,
 	int32 WideFilterWidth,
-	FRHIVertexBuffer* DummyVB)
+	FRHIBuffer* DummyVB)
 {	
 	if (FmaskSRV)
 	{

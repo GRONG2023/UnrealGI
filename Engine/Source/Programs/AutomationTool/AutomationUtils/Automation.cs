@@ -7,533 +7,256 @@ using System.IO;
 using System.Reflection;
 using System.Diagnostics;
 using UnrealBuildTool;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using OpenTracing.Util;
+using UnrealBuildBase;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+
+using static AutomationTool.CommandUtils;
 
 namespace AutomationTool
 {
-	/// <summary>
-	/// Command to execute info.
-	/// </summary>
-	class CommandInfo
-	{
-		public string CommandName;
-		public List<string> Arguments = new List<string>();
 
-		public override string ToString()
-		{
-			string Result = CommandName;
-			Result += "(";
-			for (int Index = 0; Index < Arguments.Count; ++Index)
-			{
-				if (Index > 0)
-				{
-					Result += ", ";
-				}
-				Result += Arguments[Index];
-			}
-			Result += ")";
-			return Result;
-		}
-	}
-
-	/// <summary>
-	/// Helper class for automatically registering command line params.
-	/// </summary>
-	public class CommandLineArg
-	{
-		public delegate void OnSetDelegate();
-		public string Name;
-		public OnSetDelegate SetDelegate;
-
-		/// <summary>
-		/// True of this arg was set in the command line.
-		/// </summary>
-		public bool IsSet { get; private set; }
-
-		public CommandLineArg(string InName, OnSetDelegate InSet = null)
-		{
-			Name = InName;
-			SetDelegate = InSet;
-			GlobalCommandLine.RegisteredArgs.Add(Name, this);
-		}
-
-		public void Set()
-		{
-			IsSet = true;
-			if (SetDelegate != null)
-			{
-				SetDelegate();
-			}
-		}
-
-		public override string ToString()
-		{
-			return String.Format("{0}, {1}", Name, IsSet);
-		}
-
-		/// <summary>
-		/// Returns true of this arg was set in the command line.
-		/// </summary>
-		public static implicit operator bool(CommandLineArg Arg)
-		{
-			return Arg.IsSet;
-		}
-	}
-
-	/// <summary>
-	/// Global command line parameters.
-	/// </summary>
-	public static class GlobalCommandLine
-	{
-		/// <summary>
-		/// List of all registered command line parameters (global, not command-specific)
-		/// </summary>
-		public static Dictionary<string, CommandLineArg> RegisteredArgs = new Dictionary<string, CommandLineArg>(StringComparer.InvariantCultureIgnoreCase);
-
-		public static CommandLineArg CompileOnly = new CommandLineArg("-CompileOnly");
-		public static CommandLineArg Verbose = new CommandLineArg("-Verbose");
-		public static CommandLineArg TimeStamps = new CommandLineArg("-TimeStamps");
-		public static CommandLineArg Submit = new CommandLineArg("-Submit");
-		public static CommandLineArg NoSubmit = new CommandLineArg("-NoSubmit");
-		public static CommandLineArg NoP4 = new CommandLineArg("-NoP4");
-		public static CommandLineArg P4 = new CommandLineArg("-P4");
-        public static CommandLineArg Compile = new CommandLineArg("-Compile");
-		public static CommandLineArg IgnoreDependencies = new CommandLineArg("-IgnoreDependencies");
-		/// <summary>
-		/// This command is LEGACY because we used to run UAT.exe to compile scripts by default.
-		/// Now we only compile by default when run via RunUAT.bat, which still understands -nocompile.
-		/// However, the batch file simply passes on all arguments, so UAT will choke when encountering -nocompile.
-		/// Keep this CommandLineArg around so that doesn't happen.
-		/// </summary>
-		public static CommandLineArg NoCompileLegacyDontUse = new CommandLineArg("-NoCompile");
-        public static CommandLineArg NoCompileEditor = new CommandLineArg("-NoCompileEditor");
-		public static CommandLineArg Help = new CommandLineArg("-Help");
-		public static CommandLineArg List = new CommandLineArg("-List");
-		public static CommandLineArg NoKill = new CommandLineArg("-NoKill");
-		public static CommandLineArg UTF8Output = new CommandLineArg("-UTF8Output");
-        public static CommandLineArg AllowStdOutLogVerbosity = new CommandLineArg("-AllowStdOutLogVerbosity");
-        public static CommandLineArg NoAutoSDK = new CommandLineArg("-NoAutoSDK");
-        /// <summary>
-        /// Allows you to use local storage for your root build storage dir (default of P:\Builds (on PC) is changed to Engine\Saved\LocalBuilds). Used for local testing.
-        /// </summary>
-        public static CommandLineArg UseLocalBuildStorage = new CommandLineArg("-UseLocalBuildStorage");
-
-		/// <summary>
-		/// Force initialize static members by calling this.
-		/// </summary>
-		public static void Init()
-		{
-			Log.TraceVerbose("Registered {0} command line parameters.", RegisteredArgs.Count);
-		}
-	}
-
-	[Help(
-@"Executes scripted commands
-
-AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 ...] Command1 [-Arg0 -Arg1 ...] Command2 [-Arg0 ...] Commandn ... [EnvVar0=MyValue0 ... EnvVarn=MyValuen]"
-)]
-	[Help("verbose", "Enables verbose logging")]
-	[Help("nop4", "Disables Perforce functionality (default if not run on a build machine)")]
-	[Help("p4", "Enables Perforce functionality (default if run on a build machine)")]
-	[Help("compileonly", "Does not run any commands, only compiles them")]
-    [Help("compile", "Dynamically compiles all commands (otherwise assumes they are already built)")]
-	[Help("help", "Displays help")]
-	[Help("list", "Lists all available commands")]
-	[Help("submit", "Allows UAT command to submit changes")]
-	[Help("nosubmit", "Prevents any submit attempts")]
-	[Help("nokill", "Does not kill any spawned processes on exit")]
-	[Help("ignorejunk", "Prevents UBT from cleaning junk files")]
-    [Help("UseLocalBuildStorage", @"Allows you to use local storage for your root build storage dir (default of P:\Builds (on PC) is changed to Engine\Saved\LocalBuilds). Used for local testing.")]
     public static class Automation
 	{
-		/// <summary>
-		/// Parses command line parameter.
-		/// </summary>
-		/// <param name="ParamIndex">Parameter index</param>
-		/// <param name="CommandLine">Command line</param>
-		/// <param name="CurrentCommand">Recently parsed command</param>
-		/// <param name="OutScriptsForProjectFileName">The only project to build scripts for</param>
-		/// <param name="OutAdditionalScriptsFolders">Additional script locations</param>
-		/// <returns>True if the parameter has been successfully parsed.</returns>
-		private static void ParseParam(string CurrentParam, CommandInfo CurrentCommand, ref string OutScriptsForProjectFileName, List<string> OutAdditionalScriptsFolders)
-		{
-			bool bGlobalParam = false;
-			foreach (var RegisteredParam in GlobalCommandLine.RegisteredArgs)
-			{
-				if (String.Compare(CurrentParam, RegisteredParam.Key, StringComparison.InvariantCultureIgnoreCase) == 0)
-				{
-					// Register and exit, we're done here.
-					RegisteredParam.Value.Set();
-					bGlobalParam = true;
-					break;
-				}
-			}
-
-			// The parameter was not found in the list of global parameters, continue looking...
-			if (CurrentParam.StartsWith("-ScriptsForProject=", StringComparison.InvariantCultureIgnoreCase))
-			{
-				if(OutScriptsForProjectFileName != null)
-				{
-					throw new AutomationException("The -ProjectScripts argument may only be specified once");
-				}
-				var ProjectFileName = CurrentParam.Substring(CurrentParam.IndexOf('=') + 1).Replace("\"", "");
-				if(!File.Exists(ProjectFileName))
-				{
-					throw new AutomationException("Project '{0}' does not exist", ProjectFileName);
-				}
-				OutScriptsForProjectFileName = Path.GetFullPath(ProjectFileName);
-			}
-			else if (CurrentParam.StartsWith("-ScriptDir=", StringComparison.InvariantCultureIgnoreCase))
-			{
-				var ScriptDir = CurrentParam.Substring(CurrentParam.IndexOf('=') + 1);
-				if (Directory.Exists(ScriptDir))
-				{
-					OutAdditionalScriptsFolders.Add(ScriptDir);
-					Log.TraceVerbose("Found additional script dir: {0}", ScriptDir);
-				}
-				else
-				{
-					throw new AutomationException("Specified ScriptDir doesn't exist: {0}", ScriptDir);
-				}
-			}
-			else if (CurrentParam.StartsWith("-"))
-			{
-				if (CurrentCommand != null)
-				{
-					CurrentCommand.Arguments.Add(CurrentParam.Substring(1));
-				}
-				else if (!bGlobalParam)
-				{
-					throw new AutomationException("Unknown parameter {0} in the command line that does not belong to any command.", CurrentParam);
-				}
-			}
-			else if (CurrentParam.Contains("="))
-			{
-				// Environment variable
-				int ValueStartIndex = CurrentParam.IndexOf('=') + 1;
-				string EnvVarName = CurrentParam.Substring(0, ValueStartIndex - 1);
-				if (String.IsNullOrEmpty(EnvVarName))
-				{
-					throw new AutomationException("Unable to parse environment variable that has no name. Error when parsing command line param {0}", CurrentParam);
-				}
-				string EnvVarValue = CurrentParam.Substring(ValueStartIndex);
-				CommandUtils.SetEnvVar(EnvVarName, EnvVarValue);
-			}
-		}
-
-		private static string ParseString(string Key, string Value)
-		{
-			if (!String.IsNullOrEmpty(Key))
-			{
-				if (Value == "true" || Value == "false")
-				{
-					return "-" + Key;
-				}
-				else
-				{
-					string param = "-" + Key + "=";
-					if (Value.Contains(" "))
-					{
-						param += "\"" + Value + "\"";
-					}
-					else
-					{
-						param += Value;
-					}
-					return param;
-				}
-			}
-			else
-			{
-				return Value;
-			}
-		}
-
-
-		private static string ParseList(string Key, List<object> Value)
-		{
-			string param = "-" + Key + "=";
-			bool bStart = true;
-			foreach (var Val in Value)
-			{
-				if (!bStart)
-				{
-					param += "+";
-				}
-				param += Val as string;
-				bStart = false;
-			}
-			return param;
-		}
-
-		private static void ParseDictionary(Dictionary<string, object> Value, List<string> Arguments)
-		{
-			foreach (var Pair in Value)
-			{
-				if ((Pair.Value as string) != null && !string.IsNullOrEmpty(Pair.Value as string))
-				{
-					Arguments.Add(ParseString(Pair.Key, Pair.Value as string));
-				}
-				else if (Pair.Value.GetType() == typeof(bool))
-				{
-					if ((bool)Pair.Value)
-					{
-						Arguments.Add("-" + Pair.Key);
-					}
-				}
-				else if ((Pair.Value as List<object>) != null)
-				{
-					Arguments.Add(ParseList(Pair.Key, Pair.Value as List<object>));
-				}
-				else if ((Pair.Value as Dictionary<string, object>) != null)
-				{
-					string param = "-" + Pair.Key + "=\"";
-					List<string> Args = new List<string>();
-					ParseDictionary(Pair.Value as Dictionary<string, object>, Args);
-					bool bStart = true;
-					foreach (var Arg in Args)
-					{
-						if (!bStart)
-						{
-							param += " ";
-						}
-						param += Arg.Replace("\"", "\'");
-						bStart = false;
-					}
-					param += "\"";
-					Arguments.Add(param);
-				}
-			}
-		}
-
-		private static void ParseProfile(ref string[] CommandLine)
-		{
-			// find if there is a profile file to read
-			string Profile = "";
-			List<string> Arguments = new List<string>();
-			for (int Index = 0; Index < CommandLine.Length; ++Index)
-			{
-				if (CommandLine[Index].StartsWith("-profile="))
-				{
-					Profile = CommandLine[Index].Substring(CommandLine[Index].IndexOf('=') + 1);
-				}
-				else
-				{
-					Arguments.Add(CommandLine[Index]);
-				}
-			}
-
-			if (!string.IsNullOrEmpty(Profile))
-			{
-				if (File.Exists(Profile))
-				{
-					// find if the command has been specified
-					var text = File.ReadAllText(Profile);
-					var RawObject = fastJSON.JSON.Instance.Parse(text) as Dictionary<string, object>;
-					var Params = RawObject["scripts"] as List<object>;
-					foreach (var Script in Params)
-					{
-						string ScriptName = (Script as Dictionary<string, object>)["script"] as string;
-						if (!string.IsNullOrEmpty(ScriptName) && !Arguments.Contains(ScriptName))
-						{
-							Arguments.Add(ScriptName);
-						}
-						(Script as Dictionary<string, object>).Remove("script");
-						ParseDictionary((Script as Dictionary<string, object>), Arguments);
-					}
-				}
-			}
-
-			CommandLine = Arguments.ToArray();
-		}
+		static ILogger Logger => Log.Logger;
 
 		/// <summary>
-		/// Parse the command line and create a list of commands to execute.
+		/// Keep a persistent reference to the delegate for handling Ctrl-C events. Since it's passed to non-managed code, we have to prevent it from being garbage collected.
 		/// </summary>
-		/// <param name="Arguments">Command line</param>
-		/// <param name="OutCommandsToExecute">List containing the names of commands to execute</param>
-		/// <param name="OutAdditionalScriptsFolders">Optional list of additional paths to look for scripts in</param>
-		private static void ParseCommandLine(string[] Arguments, List<CommandInfo> OutCommandsToExecute, out string OutScriptsForProjectFileName, List<string> OutAdditionalScriptsFolders)
+		static ProcessManager.CtrlHandlerDelegate CtrlHandlerDelegateInstance = CtrlHandler;
+
+        static bool CtrlHandler(CtrlTypes EventType)
 		{
-			// Initialize global command line parameters
-			GlobalCommandLine.Init();
-
-			ParseProfile(ref Arguments);
-
-			Log.TraceInformation("Parsing command line: {0}", CommandUtils.FormatCommandLine(Arguments));
-
-			OutScriptsForProjectFileName = null;
-
-			CommandInfo CurrentCommand = null;
-			for (int Index = 0; Index < Arguments.Length; ++Index)
+			Domain_ProcessExit(null, null);
+			if (EventType == CtrlTypes.CTRL_C_EVENT)
 			{
-				// Guard against empty arguments passed as "" on the command line
-				string Param = Arguments[Index];
-				if(Param.Length > 0) 
-				{
-					if (Param.StartsWith("-") || Param.Contains("="))
-					{
-						ParseParam(Arguments[Index], CurrentCommand, ref OutScriptsForProjectFileName, OutAdditionalScriptsFolders);
-					}
-					else
-					{
-						CurrentCommand = new CommandInfo();
-						CurrentCommand.CommandName = Arguments[Index];
-						OutCommandsToExecute.Add(CurrentCommand);
-					}
-				}
-			}
+				// Force exit
+				Environment.Exit(3);
+			}			
+			return true;
+		}
 
-			// Validate
-			var Result = OutCommandsToExecute.Count > 0 || GlobalCommandLine.Help || GlobalCommandLine.CompileOnly || GlobalCommandLine.List;
-			if (OutCommandsToExecute.Count > 0)
-			{
-				Log.TraceVerbose("Found {0} scripts to execute:", OutCommandsToExecute.Count);
-				foreach (var Command in OutCommandsToExecute)
-				{
-					Log.TraceVerbose("  " + Command.ToString());
-				}
+		static void Domain_ProcessExit(object sender, EventArgs e)
+		{
+			// Kill all spawned processes (Console instead of Log because logging is closed at this time anyway)
+			if (ShouldKillProcesses && RuntimePlatform.IsWindows)
+			{			
+				ProcessManager.KillAll();
 			}
-			else if (!Result)
-			{
-				throw new AutomationException("Failed to find scripts to execute in the command line params.");
-			}
-			if (GlobalCommandLine.NoP4 && GlobalCommandLine.P4)
-			{
-				throw new AutomationException("{0} and {1} can't be set simultaneously.", GlobalCommandLine.NoP4.Name, GlobalCommandLine.P4.Name);
-			}
-			if (GlobalCommandLine.NoSubmit && GlobalCommandLine.Submit)
-			{
-				throw new AutomationException("{0} and {1} can't be set simultaneously.", GlobalCommandLine.NoSubmit.Name, GlobalCommandLine.Submit.Name);
-			}
+			Trace.Close();
 		}
 
 		/// <summary>
 		/// Main method.
 		/// </summary>
 		/// <param name="Arguments">Command line</param>
-		public static ExitCode Process(string[] Arguments, StartupTraceListener StartupListener)
+		public static async Task<ExitCode> ProcessAsync(ParsedCommandLine AutomationToolCommandLine, StartupTraceListener StartupListener, HashSet<FileReference> ScriptModuleAssemblies)
 		{
-			// Initial check for local or build machine runs BEFORE we parse the command line (We need this value set
-			// in case something throws the exception while parsing the command line)
-			IsBuildMachine = Arguments.Any(x => x.Equals("-BuildMachine", StringComparison.InvariantCultureIgnoreCase));
-			if (!IsBuildMachine)
-			{
-				int Value;
-				if (int.TryParse(Environment.GetEnvironmentVariable("IsBuildMachine"), out Value) && Value != 0)
-				{
-					IsBuildMachine = true;
-				}
-			}
-			Log.TraceVerbose("IsBuildMachine={0}", IsBuildMachine);
-			Environment.SetEnvironmentVariable("IsBuildMachine", IsBuildMachine ? "1" : "0");
+			GlobalCommandLine.Initialize(AutomationToolCommandLine);
 
-			// Scan the command line for commands to execute.
-			var CommandsToExecute = new List<CommandInfo>();
-			string OutScriptsForProjectFileName;
-			var AdditionalScriptsFolders = new List<string>();
-			ParseCommandLine(Arguments, CommandsToExecute, out OutScriptsForProjectFileName, AdditionalScriptsFolders);
-
-			// Get the path to the telemetry file, if present
-			string TelemetryFile = CommandUtils.ParseParamValue(Arguments, "-Telemetry");
-
-			// should we kill processes on exit
-			ShouldKillProcesses = !GlobalCommandLine.NoKill;
-			Log.TraceVerbose("ShouldKillProcesses={0}", ShouldKillProcesses);
-
-			if (CommandsToExecute.Count == 0 && GlobalCommandLine.Help)
-			{
-				DisplayHelp();
-				return ExitCode.Success;
-			}
-
-			// Disable AutoSDKs if specified on the command line
-			if (GlobalCommandLine.NoAutoSDK)
-			{
-				PlatformExports.PreventAutoSDKSwitching();
-			}
-
-			// Setup environment
-			Log.TraceLog("Setting up command environment.");
-			CommandUtils.InitCommandEnvironment();
-
-			// Create the log file, and flush the startup listener to it
-			TraceListener LogTraceListener = LogUtils.AddLogFileListener(CommandUtils.CmdEnv.LogFolder, CommandUtils.CmdEnv.FinalLogFolder);
-			StartupListener.CopyTo(LogTraceListener);
-			Trace.Listeners.Remove(StartupListener);
-
-			// Initialize UBT
-			if(!UnrealBuildTool.PlatformExports.Initialize())
-			{
-				Log.TraceInformation("Failed to initialize UBT");
-				return ExitCode.Error_Unknown;
-			}
-
-			// Clean rules folders up
-			ProjectUtils.CleanupFolders();
-
-			// Compile scripts.
-			using(TelemetryStopwatch ScriptCompileStopwatch = new TelemetryStopwatch("ScriptCompile"))
-			{
-				ScriptCompiler.FindAndCompileAllScripts(OutScriptsForProjectFileName, AdditionalScriptsFolders);
-			}
-
-			if (GlobalCommandLine.CompileOnly)
-			{
-				Log.TraceInformation("Compilation successful, exiting (CompileOnly)");
-				return ExitCode.Success;
-			}
-
-			if (GlobalCommandLine.List)
-			{
-				ListAvailableCommands(ScriptCompiler.Commands);
-				return ExitCode.Success;
-			}
-
-			if (GlobalCommandLine.Help)
-			{
-				DisplayHelp(CommandsToExecute, ScriptCompiler.Commands);
-				return ExitCode.Success;
-			}
-
-			// Enable or disable P4 support
-			CommandUtils.InitP4Support(CommandsToExecute, ScriptCompiler.Commands);
-			if (CommandUtils.P4Enabled)
-			{
-				Log.TraceLog("Setting up Perforce environment.");
-				CommandUtils.InitP4Environment();
-				CommandUtils.InitDefaultP4Connection();
-			}
+			// Hook up exit callbacks
+			AppDomain Domain = AppDomain.CurrentDomain;
+			Domain.ProcessExit += Domain_ProcessExit;
+			Domain.DomainUnload += Domain_ProcessExit;
+			HostPlatform.Current.SetConsoleCtrlHandler(CtrlHandlerDelegateInstance);
 
 			try
 			{
-				// Find and execute commands.
-				ExitCode Result = Execute(CommandsToExecute, ScriptCompiler.Commands);
-				if (TelemetryFile != null)
+				IsBuildMachine = GlobalCommandLine.BuildMachine;
+				if (!IsBuildMachine)
 				{
-					Directory.CreateDirectory(Path.GetDirectoryName(TelemetryFile));
-					CommandUtils.Telemetry.Write(TelemetryFile);
+					int Value;
+					if (int.TryParse(Environment.GetEnvironmentVariable("IsBuildMachine"), out Value) && Value != 0)
+					{
+						IsBuildMachine = true;
+					}
 				}
-				return Result;
+
+				Logger.LogDebug("IsBuildMachine={IsBuildMachine}", IsBuildMachine);
+				Environment.SetEnvironmentVariable("IsBuildMachine", IsBuildMachine ? "1" : "0");
+
+				// Register all the log event matchers
+				Assembly AutomationUtilsAssembly = Assembly.GetExecutingAssembly();
+				Log.EventParser.AddMatchersFromAssembly(AutomationUtilsAssembly);
+
+				Assembly UnrealBuildToolAssembly = typeof(UnrealBuildTool.BuildVersion).Assembly;
+				Log.EventParser.AddMatchersFromAssembly(UnrealBuildToolAssembly);
+
+				// Get the path to the telemetry file, if present
+				string TelemetryFile = GlobalCommandLine.TelemetryPath;
+				JsonTracer Tracer = JsonTracer.TryRegisterAsGlobalTracer();
+
+				// should we kill processes on exit
+				ShouldKillProcesses = !GlobalCommandLine.NoKill;
+				Logger.LogDebug("ShouldKillProcesses={ShouldKillProcesses}", ShouldKillProcesses);
+
+				if (AutomationToolCommandLine.CommandsToExecute.Count == 0 && GlobalCommandLine.Help)
+				{
+					DisplayHelp(AutomationToolCommandLine.GlobalParameters);
+					return ExitCode.Success;
+				}
+
+				// Disable AutoSDKs if specified on the command line
+				if (GlobalCommandLine.NoAutoSDK)
+				{
+					PlatformExports.PreventAutoSDKSwitching();
+				}
+
+				// Setup environment
+				Logger.LogDebug("Setting up command environment.");
+				CommandUtils.InitCommandEnvironment();
+
+				// Create the log file, and flush the startup listener to it
+				LogUtils.AddLogFileListener(new DirectoryReference(CommandUtils.CmdEnv.LogFolder), new DirectoryReference(CommandUtils.CmdEnv.FinalLogFolder));
+				if (LogUtils.FinalLogFileName != LogUtils.LogFileName)
+				{
+					Logger.LogInformation("Final log location: {Location}", LogUtils.FinalLogFileName);
+				}
+				
+				// Initialize UBT
+				if (!UnrealBuildTool.PlatformExports.Initialize(Environment.GetCommandLineArgs(), Log.Logger))
+				{
+					Logger.LogInformation("Failed to initialize UBT");
+					return ExitCode.Error_Unknown;
+				}
+				
+				// Clean rules folders up
+				if (!CommandUtils.CmdEnv.IsChildInstance)
+				{
+					ProjectUtils.CleanupFolders();
+				}
+
+				// Compile scripts.
+				using (GlobalTracer.Instance.BuildSpan("ScriptLoad").StartActive())
+				{
+					ScriptManager.LoadScriptAssemblies(ScriptModuleAssemblies, Logger);
+				}
+
+				if (GlobalCommandLine.List)
+				{
+					ListAvailableCommands(ScriptManager.Commands);
+					return ExitCode.Success;
+				}
+
+				if (GlobalCommandLine.Help)
+				{
+					DisplayHelp(AutomationToolCommandLine.CommandsToExecute, ScriptManager.Commands);
+					return ExitCode.Success;
+				}
+
+				// Enable or disable P4 support
+				CommandUtils.InitP4Support(AutomationToolCommandLine.CommandsToExecute, ScriptManager.Commands);
+				if (CommandUtils.P4Enabled)
+				{
+					Logger.LogDebug("Setting up Perforce environment.");
+					using (GlobalTracer.Instance.BuildSpan("InitP4").StartActive())
+					{
+						CommandUtils.InitP4Environment();
+						CommandUtils.InitDefaultP4Connection();
+					}
+				}
+
+				try
+				{
+					// Find and execute commands.
+					ExitCode Result = await ExecuteAsync(AutomationToolCommandLine.CommandsToExecute, ScriptManager.Commands);
+					if (TelemetryFile != null)
+					{
+						Directory.CreateDirectory(Path.GetDirectoryName(TelemetryFile));
+						CommandUtils.Telemetry.Write(TelemetryFile);
+					}
+
+					return Result;
+				}
+				finally
+				{
+					// Flush any timing data
+					TraceSpan.Flush();
+					
+					if (Tracer != null)
+					{
+						Tracer.Flush();
+					}
+				}
+			}
+			catch (AutomationException Ex)
+			{
+				// Output the message in the desired format
+				if (Ex.OutputFormat == AutomationExceptionOutputFormat.Silent)
+				{
+					Logger.LogDebug("{Arg0}", ExceptionUtils.FormatExceptionDetails(Ex));
+				}
+				else if (Ex.OutputFormat == AutomationExceptionOutputFormat.Minimal)
+				{
+					Logger.LogInformation(Ex, "{Message}", Ex.ToString().Replace("\n", "\n  "));
+					Logger.LogDebug(Ex, "{Details}", ExceptionUtils.FormatExceptionDetails(Ex));
+				}
+				else if (Ex.OutputFormat == AutomationExceptionOutputFormat.MinimalError)
+				{
+					Logger.LogError(Ex, "{Message}", Ex.ToString().Replace("\n", "\n  "));
+					Logger.LogDebug(Ex, "{Details}", ExceptionUtils.FormatExceptionDetails(Ex));
+				}
+				else
+				{
+					Log.WriteException(Ex, LogUtils.FinalLogFileName);
+				}
+
+				// Take the exit code from the exception
+				return Ex.ErrorCode;
+			}
+			catch (Exception Ex)
+			{
+				// Use a default exit code
+				Log.WriteException(Ex, LogUtils.FinalLogFileName);
+				return ExitCode.Error_Unknown;
 			}
 			finally
 			{
-				// Flush any timing data
-				TraceSpan.Flush();
+				// In all cases, do necessary shut down stuff, but don't let any additional exceptions leak out while trying to shut down.
+
+				// Make sure there's no directories on the stack.
+				NoThrow(() => CommandUtils.ClearDirStack(), "Clear Dir Stack");
+
+				// Try to kill process before app domain exits to leave the other KillAll call to extreme edge cases
+				NoThrow(() =>
+				{
+					if (ShouldKillProcesses && RuntimePlatform.IsWindows) ProcessManager.KillAll();
+				}, "Kill All Processes");
 			}
 		}
+
+		/// <summary>
+		/// Wraps an action in an exception block.
+		/// Ensures individual actions can be performed and exceptions won't prevent further actions from being executed.
+		/// Useful for shutdown code where shutdown may be in several stages and it's important that all stages get a chance to run.
+		/// </summary>
+		/// <param name="Action"></param>
+		private static void NoThrow(System.Action Action, string ActionDesc)
+        {
+            try
+            {
+                Action();
+            }
+            catch (Exception Ex)
+            {
+                Logger.LogError(Ex, "Exception performing nothrow action \"{ActionDesc}\": {Exception}", ActionDesc, ExceptionUtils.FormatException(Ex));
+            }
+        }
 
 		/// <summary>
 		/// Execute commands specified in the command line.
 		/// </summary>
 		/// <param name="CommandsToExecute"></param>
 		/// <param name="Commands"></param>
-		private static ExitCode Execute(List<CommandInfo> CommandsToExecute, Dictionary<string, Type> Commands)
+		public static async Task<ExitCode> ExecuteAsync(List<CommandInfo> CommandsToExecute, Dictionary<string, Type> Commands)
 		{
+			Logger.LogInformation("Executing commands...");
 			for (int CommandIndex = 0; CommandIndex < CommandsToExecute.Count; ++CommandIndex)
 			{
 				var CommandInfo = CommandsToExecute[CommandIndex];
-				Log.TraceVerbose("Attempting to execute {0}", CommandInfo.ToString());
+				Logger.LogDebug("Attempting to execute {CommandInfo}", CommandInfo.ToString());
 				Type CommandType;
 				if (!Commands.TryGetValue(CommandInfo.CommandName, out CommandType))
 				{
@@ -544,12 +267,12 @@ AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 .
 				Command.Params = CommandInfo.Arguments.ToArray();
 				try
 				{
-					ExitCode Result = Command.Execute();
+					ExitCode Result = await Command.ExecuteAsync();
 					if(Result != ExitCode.Success)
 					{
 						return Result;
 					}
-					CommandUtils.LogInformation("BUILD SUCCESSFUL");
+					Logger.LogInformation("BUILD SUCCESSFUL");
 				}
 				finally
 				{
@@ -580,7 +303,7 @@ AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 .
 				Type CommandType;
 				if (Commands.TryGetValue(CommandInfo.CommandName, out CommandType) == false)
 				{
-					Log.TraceError("Help: Failed to find command {0}", CommandInfo.CommandName);
+					Logger.LogError("Help: Failed to find command {CommandName}", CommandInfo.CommandName);
 				}
 				else
 				{
@@ -592,8 +315,13 @@ AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 .
 		/// <summary>
 		/// Display AutomationTool.exe help.
 		/// </summary>
-		private static void DisplayHelp()
+		private static void DisplayHelp(Dictionary<string, string> ParamDict)
 		{
+			HelpUtils.PrintHelp("Automation Help:",
+@"Executes scripted commands
+
+AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 ...] Command1 [-Arg0 -Arg1 ...] Command2 [-Arg0 ...] Commandn ... [EnvVar0=MyValue0 ... EnvVarn=MyValuen]",
+				ParamDict.ToList());
 			CommandUtils.LogHelp(typeof(Automation));
 		}
 
@@ -605,21 +333,20 @@ AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 .
 		{
 			string Message = Environment.NewLine;
 			Message += "Available commands:" + Environment.NewLine;
-			foreach (var AvailableCommand in Commands)
+			string AssemblyName = "";
+			foreach (var AvailableCommand in 
+				Commands.OrderBy(Command => Command.Value.Assembly.GetName().Name).ThenBy(Command => Command.Key))
 			{
-				Message += String.Format("  {0}{1}", AvailableCommand.Key, Environment.NewLine);
+				string NewAssemblyName = AvailableCommand.Value.Assembly.GetName().Name;
+				if (!String.Equals(AssemblyName, NewAssemblyName))
+				{
+					AssemblyName = NewAssemblyName;
+					Message += $"  {AssemblyName}:\n";
+				}
+				Message += String.Format($"    {AvailableCommand.Key}\n");
 			}
-			CommandUtils.LogInformation(Message);
-		}
-
-		/// <summary>
-		/// Returns true if AutomationTool is running using installed Engine components
-		/// </summary>
-		/// <returns>True if running using installed Engine components</returns>
-		[Obsolete("IsEngineInstalled() is deprecated in 4.22. Call CommandUtils.IsEngineInstalled instead.")]
-		static public bool IsEngineInstalled()
-		{
-			return CommandUtils.IsEngineInstalled();
+			
+			Logger.LogInformation("{Text}", Message);
 		}
 
 		/// <summary>
@@ -650,18 +377,151 @@ AutomationTool.exe [-verbose] [-compileonly] [-p4] Command0 [-Arg0 -Arg1 -Arg2 .
 		{
 			get
 			{
-				if (!bShouldKillProcesses.HasValue)
-				{
-					throw new AutomationException("Trying to access ShouldKillProcesses property before it was initialized.");
-				}
-				return (bool)bShouldKillProcesses;
+				return bShouldKillProcesses;
 			}
 			private set
 			{
 				bShouldKillProcesses = value;
 			}
 		}
-		private static bool? bShouldKillProcesses;
+		private static bool bShouldKillProcesses = true;
 	}
 
+
+	// This class turns stringly-typed commandline option values into named compile-time values
+	public class GlobalCommandLine
+	{
+		// Descriptions for these command line options may be found in AutomationTool/Program.cs
+
+		public static void Initialize(ParsedCommandLine AutomationToolCommandLine)
+		{
+			BuildMachine = AutomationToolCommandLine.IsSetGlobal("-BuildMachine");
+			NoKill = AutomationToolCommandLine.IsSetGlobal("-NoKill");
+			Help = AutomationToolCommandLine.IsSetGlobal("-Help");
+			NoAutoSDK = AutomationToolCommandLine.IsSetGlobal("-NoAutoSDK");
+			List = AutomationToolCommandLine.IsSetGlobal("-List");
+			TelemetryPath = (string)AutomationToolCommandLine.GetValueUnchecked("-Telemetry");
+			Verbose = AutomationToolCommandLine.IsSetGlobal("-Verbose");
+			AllowStdOutLogVerbosity = AutomationToolCommandLine.IsSetGlobal("-AllowStdOutLogVerbosity");
+			UTF8Output = AutomationToolCommandLine.IsSetGlobal("-UTF8Output");
+			UseLocalBuildStorage = AutomationToolCommandLine.IsSetGlobal("-UseLocalBuildStorage");
+			Submit = AutomationToolCommandLine.IsSetGlobal("-Submit");
+			NoSubmit = AutomationToolCommandLine.IsSetGlobal("-NoSubmit");
+			P4 = AutomationToolCommandLine.IsSetGlobal("-P4");
+			NoP4 = AutomationToolCommandLine.IsSetGlobal("-NoP4");
+
+			int WaitTimeMs;
+			if (int.TryParse((string)AutomationToolCommandLine.GetValueUnchecked("-WaitForStdStreams"), out WaitTimeMs))
+			{
+				WaitForStdStreams = WaitTimeMs;
+			}
+		}
+
+		// Using Nullable bools here to ensure that Initialize() has been called before the members are accesed.
+		// Accessing the value before it has been set will cause an InvalidOperationException to be thrown.
+		// Private setters ensure values are set by Initialize()
+
+		private static bool? bBuildMachine;
+		public static bool BuildMachine
+		{
+			get => bBuildMachine.Value; 
+			private set { bBuildMachine = value; }
+		}
+
+		private static bool? bNoKill;
+		public static bool NoKill 
+		{ 
+			get => bNoKill.Value; 
+			private set { bNoKill = value; } 
+		}
+
+		private static bool? bHelp;
+		public static bool Help
+		{
+			get => bHelp.Value; 
+			private set { bHelp = value; }
+		}
+
+		private static bool? bNoAutoSDK;
+		public static bool NoAutoSDK
+		{
+			get => bNoAutoSDK.Value; 
+			private set { bNoAutoSDK = value; }
+		}
+
+		private static bool? bList;
+		public static bool List
+		{
+			get => bList.Value; 
+			private set { bList = value; }
+		}
+		
+		private static bool? bVerbose;
+		public static bool Verbose
+		{
+			get => bVerbose.Value; 
+			private set { bVerbose = value; }
+		}
+		
+		private static bool? bAllowStdOutLogVerbosity;
+		public static bool AllowStdOutLogVerbosity
+		{
+			get => bAllowStdOutLogVerbosity.Value; 
+			private set { bAllowStdOutLogVerbosity = value; }
+		}
+		
+		private static bool? bUTF8Output;
+		public static bool UTF8Output
+		{
+			get => bUTF8Output.Value; 
+			private set { bUTF8Output = value; }
+		}
+		
+		private static bool? bUseLocalBuildStorage;
+		public static bool UseLocalBuildStorage
+		{
+			get => bUseLocalBuildStorage.Value; 
+			private set { bUseLocalBuildStorage = value; }
+		}
+		
+		private static bool? bSubmit;
+		public static bool Submit
+		{
+			get => bSubmit.Value; 
+			private set { bSubmit = value; }
+		}
+		
+		private static bool? bNoSubmit;
+		public static bool NoSubmit
+		{
+			get => bNoSubmit.Value; 
+			private set { bNoSubmit = value; }
+		}
+		
+		private static bool? bP4;
+		public static bool P4
+		{
+			get => bP4.Value; 
+			private set { bP4 = value; }
+		}
+		
+		private static bool? bNoP4;
+		public static bool NoP4
+		{
+			get => bNoP4.Value; 
+			private set { bNoP4 = value; }
+		}
+		
+		public static string TelemetryPath
+		{
+			get; 
+			private set;
+		}
+
+		public static int WaitForStdStreams
+		{
+			get;
+			private set;
+		} = -1;
+	}
 }

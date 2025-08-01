@@ -2,17 +2,21 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "IContentSource.h"
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "Delegates/IDelegateInstance.h"
 #include "IContentSourceProvider.h"
 #include "IDirectoryWatcher.h"
+#include "Templates/SharedPointer.h"
+
+class IContentSource;
 
 /** A content source provider for available content upacks. */
 class FFeaturePackContentSourceProvider : public IContentSourceProvider
 {
 public:
 	FFeaturePackContentSourceProvider();
-	virtual const TArray<TSharedRef<IContentSource>> GetContentSources() override;
+	virtual const TArray<TSharedRef<IContentSource>>& GetContentSources() const override;
 	virtual void SetContentSourcesChanged(FOnContentSourcesChanged OnContentSourcesChangedIn) override;
 
 	virtual ~FFeaturePackContentSourceProvider();

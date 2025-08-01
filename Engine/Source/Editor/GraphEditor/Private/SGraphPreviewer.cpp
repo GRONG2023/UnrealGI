@@ -2,10 +2,17 @@
 
 
 #include "SGraphPreviewer.h"
+
+#include "Delegates/Delegate.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "Layout/Visibility.h"
+#include "SGraphPanel.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Types/WidgetActiveTimerDelegate.h"
 #include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
-#include "EditorStyleSet.h"
-#include "SGraphPanel.h"
 
 EActiveTimerReturnType SGraphPreviewer::RefreshGraphTimer(const double InCurrentTime, const float InDeltaTime)
 {
@@ -24,7 +31,7 @@ EActiveTimerReturnType SGraphPreviewer::RefreshGraphTimer(const double InCurrent
 void SGraphPreviewer::Construct( const FArguments& InArgs, UEdGraph* InGraphObj )
 {
 	EdGraphObj = InGraphObj;
-	NeedsRefreshCounter = 2;
+	NeedsRefreshCounter = 0;
 
 	TSharedPtr<SOverlay> DisplayStack;
 
@@ -36,10 +43,11 @@ void SGraphPreviewer::Construct( const FArguments& InArgs, UEdGraph* InGraphObj 
 		+SOverlay::Slot()
 		[
 			SAssignNew(GraphPanel, SGraphPanel)
-			.GraphObj( EdGraphObj )
-			.IsEditable( false )
+			.GraphObj(EdGraphObj)
+			.IsEditable(false)
 			.ShowGraphStateOverlay(InArgs._ShowGraphStateOverlay)
-			.InitialZoomToFit( true )
+			.InitialZoomToFit(true)
+			.OnUpdateGraphPanel(this, &SGraphPreviewer::OnUpdateGraphPanel)
 		]
 
 		// Bottom-right corner text indicating the type of tool
@@ -50,11 +58,12 @@ void SGraphPreviewer::Construct( const FArguments& InArgs, UEdGraph* InGraphObj 
 		[
 			SNew(STextBlock)
 			.Visibility( EVisibility::HitTestInvisible )
-			.TextStyle( FEditorStyle::Get(), "GraphPreview.CornerText" )
+			.TextStyle( FAppStyle::Get(), "GraphPreview.CornerText" )
 			.Text( InArgs._CornerOverlayText )
 		]
 	];
 
+	// Note - this will also invoke OnUpdateGraphPanel (see below)
 	GraphPanel->Update();
 
 	// Add the title bar if specified
@@ -66,6 +75,14 @@ void SGraphPreviewer::Construct( const FArguments& InArgs, UEdGraph* InGraphObj 
 				InArgs._TitleBar.ToSharedRef()
 			];
 	}
+}
 
-	RegisterActiveTimer(0.0f, FWidgetActiveTimerDelegate::CreateSP(this, &SGraphPreviewer::RefreshGraphTimer));
+void SGraphPreviewer::OnUpdateGraphPanel()
+{
+	if (!NeedsRefreshCounter)
+	{
+		// As node's bounds don't get updated immediately, to truly zoom out to fit we need to tick a couple times
+		NeedsRefreshCounter = 2;
+		RegisterActiveTimer(0.0f, FWidgetActiveTimerDelegate::CreateSP(this, &SGraphPreviewer::RefreshGraphTimer));
+	}
 }

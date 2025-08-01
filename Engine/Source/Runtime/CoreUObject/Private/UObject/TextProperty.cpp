@@ -12,16 +12,22 @@
 
 IMPLEMENT_FIELD(FTextProperty)
 
-EConvertFromTypeResult FTextProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct)
+FTextProperty::FTextProperty(FFieldVariant InOwner, const UECodeGen_Private::FTextPropertyParams& Prop)
+	: FTextProperty_Super(InOwner, (const UECodeGen_Private::FPropertyParamsBaseWithOffset&)Prop)
+{
+}
+
+EConvertFromTypeResult FTextProperty::ConvertFromType(const FPropertyTag& Tag, FStructuredArchive::FSlot Slot, uint8* Data, UStruct* DefaultsStruct, const uint8* Defaults)
 {
 	// Convert serialized string to text.
 	if (Tag.Type==NAME_StrProperty)
 	{
-		FString str;
-		Slot << str;
-		FText Text = FText::FromString(str);
-		Text.TextData->PersistText();
+		FString Str;
+		Slot << Str;
+
+		FText Text = FText::FromString(MoveTemp(Str));
 		Text.Flags |= ETextFlag::ConvertedProperty;
+		
 		SetPropertyValue_InContainer(Data, Text, Tag.ArrayIndex);
 		return EConvertFromTypeResult::Converted;
 	}
@@ -31,8 +37,10 @@ EConvertFromTypeResult FTextProperty::ConvertFromType(const FPropertyTag& Tag, F
 	{
 		FName Name;
 		Slot << Name;
+
 		FText Text = FText::FromName(Name);
 		Text.Flags |= ETextFlag::ConvertedProperty;
+		
 		SetPropertyValue_InContainer(Data, Text, Tag.ArrayIndex);
 		return EConvertFromTypeResult::Converted;
 	}
@@ -42,10 +50,17 @@ EConvertFromTypeResult FTextProperty::ConvertFromType(const FPropertyTag& Tag, F
 
 bool FTextProperty::Identical_Implementation(const FText& ValueA, const FText& ValueB, uint32 PortFlags)
 {
+	// We compare the display strings in editor (as we author in the native language)
+	return Identical_Implementation(ValueA, ValueB, PortFlags, GIsEditor ? EIdenticalLexicalCompareMethod::DisplayString : EIdenticalLexicalCompareMethod::None);
+}
+
+bool FTextProperty::Identical_Implementation(const FText& ValueA, const FText& ValueB, uint32 PortFlags, EIdenticalLexicalCompareMethod LexicalCompareMethod)
+{
 	// A culture variant text is never equal to a culture invariant text
 	// A transient text is never equal to a non-transient text
 	// An empty text is never equal to a non-empty text
-	if (ValueA.IsCultureInvariant() != ValueB.IsCultureInvariant() || ValueA.IsTransient() != ValueB.IsTransient() || ValueA.IsEmpty() != ValueB.IsEmpty())
+	// Text from a string table is never equal to text not from a string table
+	if (ValueA.IsCultureInvariant() != ValueB.IsCultureInvariant() || ValueA.IsTransient() != ValueB.IsTransient() || ValueA.IsEmpty() != ValueB.IsEmpty() || ValueA.IsFromStringTable() != ValueB.IsFromStringTable())
 	{
 		return false;
 	}
@@ -56,34 +71,39 @@ bool FTextProperty::Identical_Implementation(const FText& ValueA, const FText& V
 		return true;
 	}
 
+	// String table entries should only be considered equal if they're using the same string table and key.
+	if (ValueA.IsFromStringTable())
+	{
+		FName ValueAStringTableId;
+		FTextKey ValueAStringTableEntryKey;
+		FTextInspector::GetTableIdAndKey(ValueA, ValueAStringTableId, ValueAStringTableEntryKey);
+
+		FName ValueBStringTableId;
+		FTextKey ValueBStringTableEntryKey;
+		FTextInspector::GetTableIdAndKey(ValueB, ValueBStringTableId, ValueBStringTableEntryKey);
+
+		return ValueAStringTableId == ValueBStringTableId && ValueAStringTableEntryKey == ValueBStringTableEntryKey;
+	}
+
 	// If both texts share the same pointer, then they must be equal
 	if (ValueA.IdenticalTo(ValueB))
 	{
-		// Placeholder string table entries will have the same pointer, but should only be considered equal if they're using the same string table and key
-		if (ValueA.IsFromStringTable() && FTextInspector::GetSourceString(ValueA) == &FStringTableEntry::GetPlaceholderSourceString())
-		{
-			FName ValueAStringTableId;
-			FString ValueAStringTableEntryKey;
-			FTextInspector::GetTableIdAndKey(ValueA, ValueAStringTableId, ValueAStringTableEntryKey);
-
-			FName ValueBStringTableId;
-			FString ValueBStringTableEntryKey;
-			FTextInspector::GetTableIdAndKey(ValueB, ValueBStringTableId, ValueBStringTableEntryKey);
-
-			return ValueAStringTableId == ValueBStringTableId && ValueAStringTableEntryKey.Equals(ValueBStringTableEntryKey, ESearchCase::CaseSensitive);
-		}
-
-		// Otherwise they're equal
 		return true;
 	}
 
-	// We compare the display strings in editor (as we author in the native language)
+	// We compare the display strings if asked
 	// We compare the display string for culture invariant and transient texts as they don't have an identity
-	if (GIsEditor || ValueA.IsCultureInvariant() || ValueA.IsTransient())
+	if (LexicalCompareMethod == EIdenticalLexicalCompareMethod::DisplayString || ValueA.IsCultureInvariant() || ValueA.IsTransient())
 	{
 		return FTextInspector::GetDisplayString(ValueA).Equals(FTextInspector::GetDisplayString(ValueB), ESearchCase::CaseSensitive);
 	}
 	
+	// We compare the source strings if asked
+	if (LexicalCompareMethod == EIdenticalLexicalCompareMethod::SourceString)
+	{
+		return FTextInspector::GetSourceString(ValueA)->Equals(*FTextInspector::GetSourceString(ValueB), ESearchCase::CaseSensitive);
+	}
+
 	// If we got this far then the texts don't share the same pointer, which means that they can't share the same identity
 	return false;
 }
@@ -106,15 +126,21 @@ void FTextProperty::SerializeItem(FStructuredArchive::FSlot Slot, void* Value, v
 	Slot << *TextPtr;
 }
 
-void FTextProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
+void FTextProperty::ExportText_Internal( FString& ValueStr, const void* PropertyValueOrContainer, EPropertyPointerType PropertyPointerType, const void* DefaultValue, UObject* Parent, int32 PortFlags, UObject* ExportRootScope ) const
 {
-	const FText& TextValue = GetPropertyValue(PropertyValue);
-
-	if (PortFlags & PPF_ExportCpp)
+	// get current value:
+	FText TextValue;
+	if (PropertyPointerType == EPropertyPointerType::Container && HasGetter())
 	{
-		ValueStr += GenerateCppCodeForTextValue(TextValue, FString());
+		GetValue_InContainer(PropertyValueOrContainer, &TextValue);
 	}
-	else if (PortFlags & PPF_PropertyWindow)
+	else
+	{
+		TextValue = GetPropertyValue(PointerToValuePtr(PropertyValueOrContainer, PropertyPointerType));
+	}
+
+	// export based on flags:
+	auto WriteSimpleTextToBuffer = [&ValueStr, &TextValue, PortFlags]()
 	{
 		if (PortFlags & PPF_Delimited)
 		{
@@ -126,16 +152,40 @@ void FTextProperty::ExportTextItem( FString& ValueStr, const void* PropertyValue
 		{
 			ValueStr += TextValue.ToString();
 		}
+	};
+
+	auto WriteComplexTextToBuffer = [&ValueStr, &TextValue, PortFlags]()
+	{
+		FTextStringHelper::WriteToBuffer(ValueStr, TextValue, !!(PortFlags & PPF_Delimited));
+	};
+
+	if (PortFlags & PPF_ForDiff)
+	{
+		if (TextValue.IsCultureInvariant() || TextValue.IsFromStringTable())
+		{
+			// Invariant and StringTable text values still need to export in their complex text form for diffing to avoid invariant and non-invariant text, 
+			// and different StringTable values that have a different ID but the same display string from being considered identical
+			WriteComplexTextToBuffer();
+		}
+		else
+		{
+			// Any other kind of text should exported as a simple string, to avoid ID changes from instancing text into other packages from being treated as significant
+			WriteSimpleTextToBuffer();
+		}
+	}
+	else if (PortFlags & PPF_PropertyWindow)
+	{
+		WriteSimpleTextToBuffer();
 	}
 	else
 	{
-		FTextStringHelper::WriteToBuffer(ValueStr, TextValue, !!(PortFlags & PPF_Delimited));
+		WriteComplexTextToBuffer();
 	}
 }
 
-const TCHAR* FTextProperty::ImportText_Internal( const TCHAR* Buffer, void* Data, int32 PortFlags, UObject* Parent, FOutputDevice* ErrorText ) const
+const TCHAR* FTextProperty::ImportText_Internal( const TCHAR* Buffer, void* ContainerOrPropertyPtr, EPropertyPointerType PropertyPointerType, UObject* Parent, int32 PortFlags, FOutputDevice* ErrorText ) const
 {
-	FText* TextPtr = GetPropertyValuePtr(Data);
+	FText ImportedText;
 
 	FString TextNamespace;
 	if (Parent && HasAnyPropertyFlags(CPF_Config))
@@ -173,49 +223,20 @@ const TCHAR* FTextProperty::ImportText_Internal( const TCHAR* Buffer, void* Data
 	}
 #endif // USE_STABLE_LOCALIZATION_KEYS
 
-	return FTextStringHelper::ReadFromBuffer(Buffer, *TextPtr, *TextNamespace, *PackageNamespace, !!(PortFlags & PPF_Delimited));
-}
-
-FString FTextProperty::GenerateCppCodeForTextValue(const FText& InValue, const FString& Indent)
-{
-	FString CppCode;
-
-	if (InValue.IsEmpty())
+	const TCHAR* Result = FTextStringHelper::ReadFromBuffer(Buffer, ImportedText, *TextNamespace, *PackageNamespace, !!(PortFlags & PPF_Delimited));
+	if (Result)
 	{
-		CppCode += TEXT("FText::GetEmpty()");
-	}
-	else if (InValue.IsCultureInvariant())
-	{
-		const FString& StringValue = FTextInspector::GetDisplayString(InValue);
-
-		// Produces FText::AsCultureInvariant(TEXT("..."))
-		CppCode += TEXT("FText::AsCultureInvariant(\n");
-		CppCode += FStrProperty::ExportCppHardcodedText(StringValue, Indent + TEXT("\t\t"));
-		CppCode += TEXT("\t)");
-	}
-	else
-	{
-		FString ExportedText;
-		FTextStringHelper::WriteToBuffer(ExportedText, InValue);
-
-		if (FTextStringHelper::IsComplexText(*ExportedText))
+		if (PropertyPointerType == EPropertyPointerType::Container && HasSetter())
 		{
-			// Produces FTextStringHelper::CreateFromBuffer(TEXT("..."))
-			CppCode += TEXT("FTextStringHelper::CreateFromBuffer(\n");
-			CppCode += FStrProperty::ExportCppHardcodedText(ExportedText, Indent + TEXT("\t\t"));
-			CppCode += Indent;
-			CppCode += TEXT("\t)");
+			SetValue_InContainer(ContainerOrPropertyPtr, ImportedText);
 		}
 		else
 		{
-			// Produces FText::FromString(TEXT("..."))
-			CppCode += TEXT("FText::FromString(\n");
-			CppCode += FStrProperty::ExportCppHardcodedText(ExportedText, Indent + TEXT("\t\t"));
-			CppCode += TEXT("\t)");
+			FText* TextPtr = GetPropertyValuePtr(PointerToValuePtr(ContainerOrPropertyPtr, PropertyPointerType));
+			*TextPtr = ImportedText;
 		}
 	}
-
-	return CppCode;
+	return Result;
 }
 
 FString FTextProperty::GetCPPTypeForwardDeclaration() const

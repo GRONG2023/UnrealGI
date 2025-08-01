@@ -14,7 +14,7 @@ struct FAnimSegment;
 UENUM()
 namespace EAnimLinkMethod
 {
-	enum Type
+	enum Type : int
 	{
 		/** Element stays at a specific time without moving. */
 		Absolute,
@@ -61,23 +61,25 @@ struct FAnimLinkableElement
 	ENGINE_API void Update();
 
 	/** Link this element to an animation object (Sequence or Montage)
-	 *	@param AnimObject The object to link to
+	 *	@param AnimSequenceBase The object to link to
 	 *	@param AbsTime The absolute time to place this element
 	 *	@param InSlotIndex Slot index for montages (ignored otherwise)
 	 */
-	ENGINE_API void Link(UAnimSequenceBase* AnimObject, float AbsTime, int32 InSlotIndex = 0);
+	ENGINE_API void Link(UAnimSequenceBase* AnimSequenceBase, float AbsTime, int32 InSlotIndex = 0);
 
 	/** Link this element to a montage 
 	 * @param Montage The montage to link to
 	 * @param AbsMontageTime The time in the montage that this element should be placed at
 	 * @param InSlotIndex The slot in the montage to detect segments in
 	 */
+	UE_DEPRECATED(5.1, "LinkMontage has been deprecated, use Link instead")
 	ENGINE_API void LinkMontage(UAnimMontage* Montage, float AbsMontageTime, int32 InSlotIndex = 0);
 
 	/** Link this element to a Sequence, Just setting basic data as sequences don't need full linking 
 	 * @param Sequence The sequence to link to
 	 * @param AbsSequenceTime The time in the sequence that this element should be placed at
 	 */
+	UE_DEPRECATED(5.1, "LinkSequence has been deprecated, use Link instead")
 	ENGINE_API void LinkSequence(UAnimSequenceBase* Sequence, float AbsSequenceTime);
 
 	/** Clear the linking information from this element, leaves montage link intact */
@@ -98,10 +100,10 @@ struct FAnimLinkableElement
 	ENGINE_API virtual void SetTime(float NewTime, EAnimLinkMethod::Type ReferenceFrame = EAnimLinkMethod::Absolute);
 
 	/** Gets the sequence this element is linked to */
-	ENGINE_API const UAnimSequenceBase* GetLinkedSequence() {return LinkedSequence;}
+	const UAnimSequenceBase* GetLinkedSequence() const {return LinkedSequence;}
 
 	/** Gets the Montage this element is linked to, if any */
-	ENGINE_API const UAnimMontage* GetLinkedMontage() const { return LinkedMontage; }
+	const UAnimMontage* GetLinkedMontage() const { return LinkedMontage; }
 
 	/** Changes the way this element is linked to its segment
 	 * @param NewLinkMethod The new linking method to use
@@ -114,18 +116,18 @@ struct FAnimLinkableElement
 	ENGINE_API void ChangeSlotIndex(int32 NewSlotIndex);
 
 	/** Get the method used to link this element to its segment */
-	ENGINE_API EAnimLinkMethod::Type GetLinkMethod() const {return LinkMethod;}
+	EAnimLinkMethod::Type GetLinkMethod() const {return LinkMethod;}
 
 	/** Get the slot index this element is currently linked to */
-	ENGINE_API int32 GetSlotIndex() const {return SlotIndex;}
+	int32 GetSlotIndex() const {return SlotIndex;}
 	
 	/** Get the index of the segment this element is currently linked to */
-	ENGINE_API int32 GetSegmentIndex() const {return SegmentIndex;}
+	int32 GetSegmentIndex() const {return SegmentIndex;}
 
 	/** Directly sets segment index
 	 *	@param NewSegmentIndex New segment index
 	 */
-	ENGINE_API void SetSegmentIndex(int32 NewSegmentIndex) {SegmentIndex = NewSegmentIndex;}
+	void SetSegmentIndex(int32 NewSegmentIndex) {SegmentIndex = NewSegmentIndex;}
 
 	/** Relinks this element if internal state requires relinking */
 	ENGINE_API bool ConditionalRelink();
@@ -142,7 +144,7 @@ protected:
 
 	/** The montage that this element is currently linked to */
 	UPROPERTY()
-	UAnimMontage* LinkedMontage;
+	TObjectPtr<UAnimMontage> LinkedMontage;
 
 	/** The slot index we are currently using within LinkedMontage */
 	UPROPERTY(EditAnywhere, Category=AnimLink)
@@ -177,7 +179,7 @@ protected:
 	 * in either length or rate; the element will correctly place itself in relation to the sequence
 	 */
 	UPROPERTY(VisibleAnywhere, AdvancedDisplay, Category=AnimLink)
-	UAnimSequenceBase* LinkedSequence;
+	TObjectPtr<UAnimSequenceBase> LinkedSequence;
 
 private:
 

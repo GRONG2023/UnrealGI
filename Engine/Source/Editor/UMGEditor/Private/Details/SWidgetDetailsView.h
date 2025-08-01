@@ -46,11 +46,15 @@ private:
 	/** Handles the callback from the property detail view confirming the list of objects being edited has changed */
 	void OnPropertyViewObjectArrayChanged(const FString& InTitle, const TArray<UObject*>& InObjects);
 
+	bool IsDetailsPanelEditingAllowed() const;
+
+	bool IsWidgetNameFieldEnabled() const;
+
 	void ClearFocusIfOwned();
 
+	bool IsPropertyVisible(const FPropertyAndParent& PropertyAndParent) const;
+	
 	bool IsWidgetCDOSelected() const;
-
-	EVisibility GetBorderAreaVisibility() const;
 
 	EVisibility GetNameAreaVisibility() const;
 
@@ -76,6 +80,9 @@ private:
 private:
 	/** The editor that owns this details view */
 	TWeakPtr<class FWidgetBlueprintEditor> BlueprintEditor;
+
+	/** The container widget for the class link users can click to open another asset */
+	TSharedPtr<SWidget> BorderArea;
 
 	/** The name text box that users can use to rename their widgets */
 	TSharedPtr<SEditableTextBox> NameTextBox;

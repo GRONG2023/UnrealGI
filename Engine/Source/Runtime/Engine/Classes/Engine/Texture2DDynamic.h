@@ -28,6 +28,8 @@ struct FTexture2DDynamicCreateInfo
 	ESamplerAddressMode SamplerAddressMode;
 };
 
+// note : UTexture2DDynamic derives directly from UTexture not from UTexture2D
+// UTexture2DDynamic is a base for textures that don't have a TextureSource
 UCLASS(hidecategories=Object, MinimalAPI)
 class UTexture2DDynamic : public UTexture
 {
@@ -54,10 +56,13 @@ class UTexture2DDynamic : public UTexture
 	
 public:
 	//~ Begin UTexture Interface.
+	virtual ETextureClass GetTextureClass() const { return ETextureClass::TwoDDynamic; }
 	ENGINE_API virtual FTextureResource* CreateResource() override;
 	virtual EMaterialValueType GetMaterialType() const override { return MCT_Texture2D; }
 	ENGINE_API virtual float GetSurfaceWidth() const override;
 	ENGINE_API virtual float GetSurfaceHeight() const override;
+	virtual float GetSurfaceDepth() const override { return 0; }
+	virtual uint32 GetSurfaceArraySize() const override { return 0; }
 	//~ End UTexture Interface.
 	
 	/**

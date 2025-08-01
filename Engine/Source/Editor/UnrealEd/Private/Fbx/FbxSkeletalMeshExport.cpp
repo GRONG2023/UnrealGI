@@ -5,8 +5,12 @@
 =============================================================================*/
 
 #include "CoreMinimal.h"
+#include "Animation/Skeleton.h"
+#include "BoneWeights.h"
 #include "GPUSkinPublicDefs.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "Animation/AnimSequence.h"
 #include "Rendering/SkeletalMeshModel.h"
 
@@ -29,7 +33,7 @@ FbxNode* FFbxExporter::CreateSkeleton(const USkeletalMesh* SkelMesh, TArray<FbxN
 
 	if(RefSkeleton.GetRawBoneNum() == 0)
 	{
-		return NULL;
+		return nullptr;
 	}
 
 	// Create a list of the nodes we create for each bone, so that children can 
@@ -116,13 +120,13 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 	const int32 VertexCount = SourceModel.GetNumNonClothingVertices();
 
 	// Verify the integrity of the mesh.
-	if (VertexCount == 0) return NULL;
+	if (VertexCount == 0) return nullptr;
 
 	// Copy all the vertex data from the various chunks to a single buffer.
 	// Makes the rest of the code in this function cleaner and easier to maintain.  
 	TArray<FSoftSkinVertex> Vertices;
 	SourceModel.GetNonClothVertices(Vertices);
-	if (Vertices.Num() != VertexCount) return NULL;
+	if (Vertices.Num() != VertexCount) return nullptr;
 
 	FbxMesh* Mesh = FbxMesh::Create(Scene, TCHAR_TO_UTF8(MeshName));
 
@@ -131,13 +135,13 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 	FbxVector4* ControlPoints = Mesh->GetControlPoints();
 	for (int32 VertIndex = 0; VertIndex < VertexCount; ++VertIndex)
 	{
-		FVector Position			= Vertices[VertIndex].Position;
+		FVector Position			= (FVector)Vertices[VertIndex].Position;
 		ControlPoints[VertIndex]	= Converter.ConvertToFbxPos(Position);
 	}
 
 	// Create Layer 0 to hold the normals
 	FbxLayer* LayerZero = Mesh->GetLayer(0);
-	if (LayerZero == NULL)
+	if (LayerZero == nullptr)
 	{
 		Mesh->CreateLayer();
 		LayerZero = Mesh->GetLayer(0);
@@ -153,7 +157,7 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 
 	for (int32 VertIndex = 0; VertIndex < VertexCount; ++VertIndex)
 	{
-		FVector Normal			= Vertices[VertIndex].TangentZ;
+		FVector Normal			= (FVector4)Vertices[VertIndex].TangentZ;
 		FbxVector4 FbxNormal	= Converter.ConvertToFbxPos(Normal);
 
 		LayerElementNormal->GetDirectArray().Add(FbxNormal);
@@ -169,7 +173,7 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 	for (int32 TexCoordSourceIndex = 0; TexCoordSourceIndex < TexCoordSourceCount; ++TexCoordSourceIndex)
 	{
 		FbxLayer* Layer = Mesh->GetLayer(TexCoordSourceIndex);
-		if (Layer == NULL)
+		if (Layer == nullptr)
 		{
 			Mesh->CreateLayer();
 			Layer = Mesh->GetLayer(TexCoordSourceIndex);
@@ -191,7 +195,7 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 		// Create the texture coordinate data source.
 		for (int32 TexCoordIndex = 0; TexCoordIndex < VertexCount; ++TexCoordIndex)
 		{
-			const FVector2D& TexCoord = Vertices[TexCoordIndex].UVs[TexCoordSourceIndex];
+			const FVector2D& TexCoord = FVector2D(Vertices[TexCoordIndex].UVs[TexCoordSourceIndex]);
 			UVDiffuseLayer->GetDirectArray().Add(FbxVector2(TexCoord.X, -TexCoord.Y + 1.0));
 		}
 
@@ -255,7 +259,6 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 
 	if (GetExportOptions()->bExportMorphTargets && SkelMesh->GetSkeleton()) //The skeleton can be null if this is a destructible mesh.
 	{
-		const FSmartNameMapping* SmartNameMapping = SkelMesh->GetSkeleton()->GetSmartNameContainer(USkeleton::AnimCurveMappingName);
 		TMap<FName, FbxAnimCurve*> BlendShapeCurvesMap;
 
 		if (SkelMesh->GetMorphTargets().Num())
@@ -279,16 +282,16 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 					// Replicate the base mesh in the shape control points to set up the data.
 					for (int32 VertIndex = 0; VertIndex < VertexCount; ++VertIndex)
 					{
-						FVector Position = Vertices[VertIndex].Position;
+						FVector Position = (FVector)Vertices[VertIndex].Position;
 						ShapeControlPoints[VertIndex] = Converter.ConvertToFbxPos(Position);
 					}
 				
 					int32 NumberOfDeltas = 0;
-					FMorphTargetDelta* MorphTargetDeltas = MorphTarget->GetMorphTargetDelta(LODIndex, NumberOfDeltas);
+					const FMorphTargetDelta* MorphTargetDeltas = MorphTarget->GetMorphTargetDelta(LODIndex, NumberOfDeltas);
 					for (int32 MorphTargetDeltaIndex = 0; MorphTargetDeltaIndex < NumberOfDeltas; ++MorphTargetDeltaIndex)
 					{
 						// Apply the morph target deltas to the control points.
-						FMorphTargetDelta& CurrentDelta = MorphTargetDeltas[MorphTargetDeltaIndex];
+						const FMorphTargetDelta& CurrentDelta = MorphTargetDeltas[MorphTargetDeltaIndex];
 						uint32 RemappedSourceIndex = CurrentDelta.SourceIdx;
 
 						if (VertexIndexOffsetPairArray.Num() > 1)
@@ -301,7 +304,7 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 
 						if ( RemappedSourceIndex < static_cast<uint32>( VertexCount ) )
 						{
-							ShapeControlPoints[RemappedSourceIndex] = Converter.ConvertToFbxPos(Vertices[RemappedSourceIndex].Position + CurrentDelta.PositionDelta);
+							ShapeControlPoints[RemappedSourceIndex] = Converter.ConvertToFbxPos(FVector(Vertices[RemappedSourceIndex].Position + CurrentDelta.PositionDelta));
 						}
 						else
 						{
@@ -311,7 +314,8 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 
 					BlendShapeChannel->AddTargetShape(Shape);
 					FName MorphTargetName = MorphTarget->GetFName();
-					if (AnimSeq && SmartNameMapping && SmartNameMapping->GetCurveMetaData(MorphTargetName) && SmartNameMapping->GetCurveMetaData(MorphTargetName)->Type.bMorphtarget)
+					const FCurveMetaData* CurveMetaData = SkelMesh->GetSkeleton()->GetCurveMetaData(MorphTargetName);
+					if (AnimSeq && CurveMetaData && CurveMetaData->Type.bMorphtarget)
 					{
 						FbxAnimCurve* AnimCurve = Mesh->GetShapeChannel(DeformerIndex, BlendShape->GetBlendShapeChannelCount() - 1, AnimLayer, true);
 						BlendShapeCurvesMap.Add(MorphTargetName, AnimCurve);
@@ -328,18 +332,16 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 		if(AnimSeq && BlendShapeCurvesMap.Num() > 0)
 		{
 			ExportCustomAnimCurvesToFbx(BlendShapeCurvesMap, AnimSeq,
-				0.f,		// AnimStartOffset
-				0.f,		// AnimEndOffset
-				1.f,		// AnimPlayRate
-				0.f,		// StartTime
+				FFrameTime(0),													// Start frame to export
+				FFrameTime(AnimSeq->GetDataModel()->GetNumberOfFrames()),		// Final frame to export
+				1.f,												// Frame rate scale
+				0.f,												// FBX StartTime
 				100.f);		// ValueScale, for some reason we need to scale BlendShape curves by a factor of 100.
 		}
 	}
 
 	FbxNode* MeshNode = FbxNode::Create(Scene, TCHAR_TO_UTF8(MeshName));
 	MeshNode->SetNodeAttribute(Mesh);
-
-
 
 	// Add the materials for the mesh
 	const TArray<FSkeletalMaterial>& SkelMeshMaterials = SkelMesh->GetMaterials();
@@ -355,10 +357,10 @@ FbxNode* FFbxExporter::CreateMesh(const USkeletalMesh* SkelMesh, const TCHAR* Me
 		}
 		else
 		{
-			MatInterface = SkelMesh->GetMaterials()[MaterialIndex].MaterialInterface;
+			MatInterface = SkelMeshMaterials[MaterialIndex].MaterialInterface;
 		}
 
-		FbxSurfaceMaterial* FbxMaterial = NULL;
+		FbxSurfaceMaterial* FbxMaterial = nullptr;
 		if (LODIndex == 0)
 		{
 			if (MatInterface && !FbxMaterials.Find(MatInterface))
@@ -452,8 +454,8 @@ void FFbxExporter::BindMeshToSkeleton(const USkeletalMesh* SkelMesh, FbxNode* Me
 
 				for(int32 InfluenceIndex = 0; InfluenceIndex < MAX_TOTAL_INFLUENCES; ++InfluenceIndex)
 				{
-					int32 InfluenceBone		= Section.BoneMap[ Vert.InfluenceBones[InfluenceIndex] ];
-					float InfluenceWeight	= Vert.InfluenceWeights[InfluenceIndex] / 255.f;
+					const int32 InfluenceBone		= Section.BoneMap[ Vert.InfluenceBones[InfluenceIndex] ];
+					const float InfluenceWeight	= Vert.InfluenceWeights[InfluenceIndex] / UE::AnimationCore::MaxRawBoneWeightFloat;
 
 					if(InfluenceBone == BoneIndex && InfluenceWeight > 0.f)
 					{
@@ -587,11 +589,11 @@ void FFbxExporter::CreateBindPose(FbxNode* MeshRootNode)
 
 void FFbxExporter::ExportSkeletalMeshComponent(USkeletalMeshComponent* SkelMeshComp, const TCHAR* MeshName, FbxNode* ActorRootNode, INodeNameAdapter& NodeNameAdapter, bool bSaveAnimSeq)
 {
-	if (SkelMeshComp && SkelMeshComp->SkeletalMesh)
+	if (SkelMeshComp && SkelMeshComp->GetSkeletalMeshAsset())
 	{
 		UAnimSequence* AnimSeq = (bSaveAnimSeq && SkelMeshComp->GetAnimationMode() == EAnimationMode::AnimationSingleNode) ? 
-			Cast<UAnimSequence>(SkelMeshComp->AnimationData.AnimToPlay) : NULL;
-		FbxNode* SkeletonRootNode = ExportSkeletalMeshToFbx(SkelMeshComp->SkeletalMesh, AnimSeq, MeshName, ActorRootNode, &SkelMeshComp->OverrideMaterials);
+			Cast<UAnimSequence>(SkelMeshComp->AnimationData.AnimToPlay) : nullptr;
+		FbxNode* SkeletonRootNode = ExportSkeletalMeshToFbx(SkelMeshComp->GetSkeletalMeshAsset(), AnimSeq, MeshName, ActorRootNode, &ToRawPtrTArrayUnsafe(SkelMeshComp->OverrideMaterials));
 		if(SkeletonRootNode)
 		{
 			FbxSkeletonRoots.Add(SkelMeshComp, SkeletonRootNode);
@@ -634,7 +636,7 @@ void ExportObjectMetadataToBones(const UObject* ObjectToExport, const TArray<Fbx
 					NodeName = TagAsString.Left(CharPos);
 
 					// The remaining part is the actual metadata tag
-					TagAsString.RightChopInline(CharPos + 1, false); // exclude the period
+					TagAsString.RightChopInline(CharPos + 1, EAllowShrinking::No); // exclude the period
 				}
 
 				// Try to attach the metadata to its associated node by name
@@ -765,8 +767,6 @@ FbxNode* FFbxExporter::ExportSkeletalMeshToFbx(const USkeletalMesh* SkeletalMesh
 		Scene->RemoveNode(TmpNodeNoTransform);
 		return SkeletonRootNode;
 	}
-
-	return NULL;
 }
 
 } // namespace UnFbx

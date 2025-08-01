@@ -22,6 +22,8 @@ private:
 	mutable TFieldPath<T> Field;
 
 public:
+	using ElementType = T;
+	
 	TWeakFieldPtr() = default;
 	TWeakFieldPtr(const TWeakFieldPtr&) = default;
 	TWeakFieldPtr& operator=(const TWeakFieldPtr&) = default;
@@ -212,11 +214,10 @@ public:
 		return GetTypeHash(WeakObjectPtr.Field);
 	}
 
-	friend FArchive& operator<<(FArchive& Ar, TWeakFieldPtr& InWeakFieldPtr)
+	FORCEINLINE void Serialize(FArchive& Ar)
 	{
-		Ar << InWeakFieldPtr.Owner;
-		Ar << InWeakFieldPtr.Field;
-		return Ar;
+		Ar << Owner;
+		Ar << Field;
 	}
 
 	/**
@@ -226,8 +227,8 @@ public:
 	template <typename TOther>
 	FORCEINLINE bool operator==(const TWeakFieldPtr<TOther> &Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<TOther, FField>::Value, "TWeakFieldPtr can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<T, TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
+		static_assert(TPointerIsConvertibleFromTo<TOther, const FField>::Value, "TWeakFieldPtr can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<T, const TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
 
 		return Field == Other.Field;
 	}
@@ -239,8 +240,8 @@ public:
 	template <typename TOther>
 	FORCEINLINE bool operator!=(const TWeakFieldPtr<TOther> &Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<TOther, FField>::Value, "TWeakFieldPtr can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<T, TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
+		static_assert(TPointerIsConvertibleFromTo<TOther, const FField>::Value, "TWeakFieldPtr can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<T, const TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
 
 		return Field != Other.Field;
 	}
@@ -252,8 +253,8 @@ public:
 	template <typename TOther>
 	FORCEINLINE bool operator==(const TOther* Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<TOther, FField>::Value, "TWeakFieldPtr can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<T, TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
+		static_assert(TPointerIsConvertibleFromTo<TOther, const FField>::Value, "TWeakFieldPtr can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<T, const TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
 
 		return Field == Other;
 	}
@@ -265,8 +266,8 @@ public:
 	template <typename TOther>
 	FORCEINLINE bool operator!=(const TOther* Other) const
 	{
-		static_assert(TPointerIsConvertibleFromTo<TOther, FField>::Value, "TWeakFieldPtr can only be compared with FField types");
-		static_assert(TPointerIsConvertibleFromTo<T, TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
+		static_assert(TPointerIsConvertibleFromTo<TOther, const FField>::Value, "TWeakFieldPtr can only be compared with FField types");
+		static_assert(TPointerIsConvertibleFromTo<T, const TOther>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
 
 		return Field != Other;
 	}
@@ -284,7 +285,7 @@ FORCENOINLINE bool operator==(const LhsT* Lhs, const TWeakFieldPtr<RhsT>& Rhs)
 {
 	// It's also possible that these static_asserts may fail for valid conversions because
 	// one or both of the types have only been forward-declared.
-	static_assert(TPointerIsConvertibleFromTo<LhsT, FField>::Value, "TWeakFieldPtr can only be compared with FField types");
+	static_assert(TPointerIsConvertibleFromTo<LhsT, const FField>::Value, "TWeakFieldPtr can only be compared with FField types");
 	static_assert(TPointerIsConvertibleFromTo<LhsT, RhsT>::Value || TPointerIsConvertibleFromTo<RhsT, LhsT>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
 
 	return Rhs == Lhs;
@@ -307,7 +308,7 @@ FORCENOINLINE bool operator!=(const LhsT* Lhs, const TWeakFieldPtr<RhsT>& Rhs)
 {
 	// It's also possible that these static_asserts may fail for valid conversions because
 	// one or both of the types have only been forward-declared.
-	static_assert(TPointerIsConvertibleFromTo<LhsT, FField>::Value, "TWeakFieldPtr can only be compared with FField types");
+	static_assert(TPointerIsConvertibleFromTo<LhsT, const FField>::Value, "TWeakFieldPtr can only be compared with FField types");
 	static_assert(TPointerIsConvertibleFromTo<LhsT, RhsT>::Value || TPointerIsConvertibleFromTo<RhsT, LhsT>::Value, "Unable to compare TWeakFieldPtr with raw pointer - types are incompatible");
 
 	return Rhs != Lhs;
@@ -348,3 +349,10 @@ struct TWeakFieldPtrMapKeyFuncs : public TDefaultMapKeyFuncs<KeyType, ValueType,
 		return GetTypeHash(Key);
 	}
 };
+
+template<class T>
+FArchive& operator<<(FArchive& Ar, TWeakFieldPtr<T>& WeakFieldPtr)
+{
+	WeakFieldPtr.Serialize(Ar);
+	return Ar;
+}

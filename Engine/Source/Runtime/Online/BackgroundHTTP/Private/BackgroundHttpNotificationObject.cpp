@@ -11,11 +11,11 @@
 #include "LocalNotification.h"
 
 FBackgroundHttpNotificationObject::FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess)
-	: FBackgroundHttpNotificationObject(InNotificationTitle, InNotificationBody, InNotificationAction, InNotificationActivationString, InNotifyOnlyOnFullSuccess, true)
+	: FBackgroundHttpNotificationObject(InNotificationTitle, InNotificationBody, InNotificationAction, InNotificationActivationString, InNotifyOnlyOnFullSuccess, true, -1)
 {
 }
 
-FBackgroundHttpNotificationObject::FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess, bool InbOnlySendNotificationInBackground)
+FBackgroundHttpNotificationObject::FBackgroundHttpNotificationObject(FText InNotificationTitle, FText InNotificationBody, FText InNotificationAction, const FString& InNotificationActivationString, bool InNotifyOnlyOnFullSuccess, bool InbOnlySendNotificationInBackground, int32 InIdOverride)
 	: NotificationTitle(InNotificationTitle)
     , NotificationAction(InNotificationAction)
     , NotificationBody(InNotificationBody)
@@ -24,6 +24,7 @@ FBackgroundHttpNotificationObject::FBackgroundHttpNotificationObject(FText InNot
     , bNotifyOnlyOnFullSuccess(InNotifyOnlyOnFullSuccess)
 	, bIsInBackground(false)
 	, NumFailedDownloads(0)
+	, IdOverride(InIdOverride)
     , PlatformNotificationService(nullptr)
     , OnApp_EnteringForegroundHandle()
 	, OnApp_EnteringBackgroundHandle()
@@ -81,13 +82,11 @@ FBackgroundHttpNotificationObject::~FBackgroundHttpNotificationObject()
 	{
 		if (!bNotifyOnlyOnFullSuccess || (NumFailedDownloads == 0))
 		{
-			//make a notification 1 second from now
-			FDateTime TargetTime = FDateTime::Now();
-			TargetTime += FTimespan::FromSeconds(15);
-
+			//Setting the datetime to 0 forcing the local notifcation to be sent as soon as possible
+			FDateTime TargetTime = FDateTime();
 			if (nullptr != PlatformNotificationService)
 			{
-				PlatformNotificationService->ScheduleLocalNotificationAtTime(TargetTime, true, NotificationTitle, NotificationBody, NotificationAction, NotificationActivationString);
+				PlatformNotificationService->ScheduleLocalNotificationAtTimeOverrideId(TargetTime, true, NotificationTitle, NotificationBody, NotificationAction, NotificationActivationString, IdOverride);
 			}
 		}
 	}

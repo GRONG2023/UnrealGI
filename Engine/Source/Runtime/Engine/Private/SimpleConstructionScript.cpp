@@ -1,17 +1,19 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/SimpleConstructionScript.h"
-#include "Engine/Blueprint.h"
 #include "Components/InputComponent.h"
-#include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/SCS_Node.h"
+#include "EngineLogs.h"
 #include "UObject/BlueprintsObjectVersion.h"
-#include "UObject/LinkerLoad.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SimpleConstructionScript)
+
 #if WITH_EDITOR
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/ComponentEditorUtils.h"
-#include "Kismet2/Kismet2NameValidators.h"
+#else
+#include "UObject/LinkerLoad.h"
 #endif
 
 //////////////////////////////////////////////////////////////////////////
@@ -24,6 +26,8 @@ USimpleConstructionScript::USimpleConstructionScript(const FObjectInitializer& O
 	: Super(ObjectInitializer)
 {
 	DefaultSceneRootNode = nullptr;
+	NameToSCSNodeMapRefCount = 0;
+	ReregisterContext = nullptr;
 
 #if WITH_EDITOR
 	bIsConstructingEditorComponents = false;
@@ -45,7 +49,7 @@ void USimpleConstructionScript::Serialize(FArchive& Ar)
 #if WITH_EDITORONLY_DATA
 	if(Ar.IsLoading())
 	{
-		if(Ar.UE4Ver() < VER_UE4_REMOVE_NATIVE_COMPONENTS_FROM_BLUEPRINT_SCS)
+		if(Ar.UEVer() < VER_UE4_REMOVE_NATIVE_COMPONENTS_FROM_BLUEPRINT_SCS)
 		{
 			// If we previously had a root node, we need to move it into the new RootNodes array. This is done in Serialize() in order to support SCS preloading (which relies on a valid RootNodes array).
 			if(RootNode_DEPRECATED != NULL)
@@ -241,7 +245,7 @@ void USimpleConstructionScript::PostLoad()
 	// Reset non-native "root" scene component scale values, prior to the change in which
 	// we began applying custom scale values to root components at construction time. This
 	// way older, existing Blueprint actor instances won't start unexpectedly getting scaled.
-	if(GetLinkerUE4Version() < VER_UE4_BLUEPRINT_USE_SCS_ROOTCOMPONENT_SCALE)
+	if(GetLinkerUEVersion() < VER_UE4_BLUEPRINT_USE_SCS_ROOTCOMPONENT_SCALE)
 	{
 		if(BPGeneratedClass != nullptr)
 		{
@@ -279,7 +283,7 @@ void USimpleConstructionScript::PostLoad()
 		}
 	}
 
-	if (GetLinkerUE4Version() < VER_UE4_SCS_STORES_ALLNODES_ARRAY)
+	if (GetLinkerUEVersion() < VER_UE4_SCS_STORES_ALLNODES_ARRAY)
 	{
 		// Fill out AllNodes if this is an older object
 		if (RootNodes.Num() > 0)
@@ -336,7 +340,6 @@ void USimpleConstructionScript::FixupSceneNodeHierarchy()
 		FSceneHierarchyMapper(TArray<USCS_Node*>& RootNodesIn)
 			: RootNodeList(RootNodesIn)
 			, PendingParent(nullptr)
-			, bBreak(false)
 		{}
 
 		/** Identifies orphan (root) nodes, and fixes up broken/cyclic tree linkages */
@@ -440,7 +443,7 @@ void USimpleConstructionScript::FixupSceneNodeHierarchy()
 					}
 				};
 
-				if (UClass* ComponentClass = (Node->ComponentClass ? Node->ComponentClass : (Node->ComponentTemplate ? Node->ComponentTemplate->GetClass() : nullptr)))
+				if (UClass* ComponentClass = (Node->ComponentClass ? ToRawPtr(Node->ComponentClass) : (Node->ComponentTemplate ? Node->ComponentTemplate->GetClass() : nullptr)))
 				{
 					if (ComponentClass->IsChildOf<USceneComponent>())
 					{
@@ -508,10 +511,9 @@ void USimpleConstructionScript::FixupSceneNodeHierarchy()
 		TSet<USCS_Node*> VisitedNodes;
 		TSet<USCS_Node*> OrphanedNodes;
 		USCS_Node* PendingParent;
-		bool bBreak;
 	};
 
-	FSceneHierarchyMapper HierarchyMapper(RootNodes);
+	FSceneHierarchyMapper HierarchyMapper(MutableView(RootNodes));
 	// identify orphan (root) nodes, and fixup cyclic hierarchies
 	HierarchyMapper.MapHierarchy(AllNodes);
 	// nest all orphaned nodes under the primary root node
@@ -629,13 +631,13 @@ void USimpleConstructionScript::RegisterInstancedComponent(UActorComponent* Inst
 		}
 	}
 
-	if (InstancedComponent != nullptr && !InstancedComponent->IsRegistered() && InstancedComponent->bAutoRegister && !InstancedComponent->IsPendingKill())
+	if (IsValid(InstancedComponent) && !InstancedComponent->IsRegistered() && InstancedComponent->bAutoRegister)
 	{
 		InstancedComponent->RegisterComponent();
 	}
 }
 
-void USimpleConstructionScript::ExecuteScriptOnActor(AActor* Actor, const TInlineComponentArray<USceneComponent*>& NativeSceneComponents, const FTransform& RootTransform, const FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform)
+void USimpleConstructionScript::ExecuteScriptOnActor(AActor* Actor, const TInlineComponentArray<USceneComponent*>& NativeSceneComponents, const FTransform& RootTransform, const FRotationConversionCache* RootRelativeRotationCache, bool bIsDefaultTransform, ESpawnActorScaleMethod TransformScaleMethod)
 {
 	if(RootNodes.Num() > 0)
 	{
@@ -683,14 +685,20 @@ void USimpleConstructionScript::ExecuteScriptOnActor(AActor* Actor, const TInlin
 				}
 
 				// Create the new component instance and any child components it may have
-				RootNode->ExecuteNodeOnActor(Actor, ParentComponent != nullptr ? ParentComponent : RootComponent, &RootTransform, RootRelativeRotationCache, bIsDefaultTransform);
+				RootNode->ExecuteNodeOnActor(Actor, ParentComponent != nullptr ? ParentComponent : RootComponent, &RootTransform, RootRelativeRotationCache, bIsDefaultTransform, TransformScaleMethod);
 			}
 		}
 	}
 	else if(Actor->GetRootComponent() == nullptr) // Must have a root component at the end of SCS, so if we don't have one already (from base class), create a SceneComponent now
 	{
 		USceneComponent* SceneComp = NewObject<USceneComponent>(Actor);
-		SceneComp->SetFlags(RF_Transactional);
+
+		// The object is new, so its safe for us to atomically set the flag in the open.
+		UE_AUTORTFM_OPEN(
+			{
+				SceneComp->SetFlags(RF_Transactional);
+			});
+
 		SceneComp->CreationMethod = EComponentCreationMethod::SimpleConstructionScript;
 		if (RootRelativeRotationCache)
 		{   // Enforces using the same rotator as much as possible.
@@ -704,26 +712,36 @@ void USimpleConstructionScript::ExecuteScriptOnActor(AActor* Actor, const TInlin
 
 void USimpleConstructionScript::CreateNameToSCSNodeMap()
 {
-	const TArray<USCS_Node*>& Nodes = GetAllNodes();
-	NameToSCSNodeMap.Reserve(Nodes.Num() * 2);
-
-	for (USCS_Node* SCSNode : Nodes)
+	if (NameToSCSNodeMapRefCount == 0)
 	{
-		if (SCSNode)
-		{
-			NameToSCSNodeMap.Add(SCSNode->GetVariableName(), SCSNode);
+		const TArray<USCS_Node*>& Nodes = GetAllNodes();
+		NameToSCSNodeMap.Reserve(Nodes.Num() * 2);
 
-			if (SCSNode->ComponentTemplate)
+		for (USCS_Node* SCSNode : Nodes)
+		{
+			if (SCSNode)
 			{
-				NameToSCSNodeMap.Add(SCSNode->ComponentTemplate->GetFName(), SCSNode);
+				NameToSCSNodeMap.Add(SCSNode->GetVariableName(), SCSNode);
+
+				if (SCSNode->ComponentTemplate)
+				{
+					NameToSCSNodeMap.Add(SCSNode->ComponentTemplate->GetFName(), SCSNode);
+				}
 			}
 		}
 	}
+	NameToSCSNodeMapRefCount++;
 }
 
 void USimpleConstructionScript::RemoveNameToSCSNodeMap()
 {
-	NameToSCSNodeMap.Reset();
+	NameToSCSNodeMapRefCount--;
+	check(NameToSCSNodeMapRefCount >= 0);
+
+	if (NameToSCSNodeMapRefCount == 0)
+	{
+		NameToSCSNodeMap.Reset();
+	}
 }
 
 #if WITH_EDITOR
@@ -1216,16 +1234,16 @@ void USimpleConstructionScript::ValidateSceneRootNodes()
 }
 
 #if WITH_EDITOR
-EDataValidationResult USimpleConstructionScript::IsDataValid(TArray<FText>& ValidationErrors)
+EDataValidationResult USimpleConstructionScript::IsDataValid(FDataValidationContext& Context) const
 {
-	EDataValidationResult Result = Super::IsDataValid(ValidationErrors);
+	EDataValidationResult Result = Super::IsDataValid(Context);
 	Result = (Result == EDataValidationResult::NotValidated) ? EDataValidationResult::Valid : Result;
 
 	for (USCS_Node* Node : RootNodes)
 	{
 		if (Node)
 		{
-			EDataValidationResult NodeResult = Node->IsDataValid(ValidationErrors);
+			EDataValidationResult NodeResult = Node->IsDataValid(Context);
 			Result = CombineDataValidationResults(Result, NodeResult);
 		}
 	}
@@ -1321,7 +1339,7 @@ FName USimpleConstructionScript::GenerateNewComponentName(const UClass* Componen
 					FString NumericSuffix = ComponentName.RightChop(Index);
 					Counter = FCString::Atoi(*NumericSuffix);
 					NumericSuffix = FString::Printf(TEXT("%d"), Counter); // Restringify the counter to account for leading 0s that we don't want to remove
-					ComponentName.RemoveAt(ComponentName.Len() - NumericSuffix.Len(), NumericSuffix.Len(), false);
+					ComponentName.RemoveAt(ComponentName.Len() - NumericSuffix.Len(), NumericSuffix.Len(), EAllowShrinking::No);
 					++Counter;
 					NewName = BuildNewName();
 				}
@@ -1496,10 +1514,15 @@ void USimpleConstructionScript::ValidateNodeVariableNames(FCompilerResultsLog& M
 void USimpleConstructionScript::ValidateNodeTemplates(FCompilerResultsLog& MessageLog)
 {
 	TArray<USCS_Node*> Nodes = GetAllNodes();
+	UClass* OwningClass = GetOwnerClass();
+
+	// it's likely that we shouldn't run any of this for diff loaded packages, but don't 
+	// want to destabilize anyone.. so just soldering off my new logic
+	const bool bForDiff = OwningClass->GetOutermost()->HasAnyPackageFlags(PKG_ForDiffing);
 
 	for (USCS_Node* Node : Nodes)
 	{
-		if (GetLinkerUE4Version() < VER_UE4_REMOVE_INPUT_COMPONENTS_FROM_BLUEPRINTS)
+		if (GetLinkerUEVersion() < VER_UE4_REMOVE_INPUT_COMPONENTS_FROM_BLUEPRINTS)
 		{
 			if (!Node->bIsNative_DEPRECATED && Node->ComponentTemplate && Node->ComponentTemplate->IsA<UInputComponent>())
 			{
@@ -1536,6 +1559,34 @@ void USimpleConstructionScript::ValidateNodeTemplates(FCompilerResultsLog& Messa
 				RemoveNodeAndPromoteChildren(Node);
 			}
 		}
+		else if (!bForDiff)
+		{
+			if (Node->ComponentTemplate->GetOuter() != OwningClass)
+			{
+				// this component template is somehow not owned by the class, recreate it:
+				FString VariableName = Node->GetVariableName().ToString();
+				if (Node->ComponentTemplate->HasAnyFlags(RF_ClassDefaultObject))
+				{
+					// duplicate won't work on CDOs because SDO will (for no good reason) reset loaders when duplicating a CDO...
+					Node->ComponentTemplate = NewObject<UActorComponent>(
+						OwningClass, 
+						Node->ComponentTemplate->GetClass(), 
+						*(VariableName + ComponentTemplateNameSuffix), 
+						RF_ArchetypeObject | RF_Transactional | RF_Public);
+				}
+				else
+				{
+					Node->ComponentTemplate = static_cast<UActorComponent*>(StaticDuplicateObject(
+						Node->ComponentTemplate, 
+						OwningClass, 
+						*(VariableName + ComponentTemplateNameSuffix)));
+					Node->ComponentTemplate->SetFlags(RF_ArchetypeObject | RF_Transactional | RF_Public);
+				}
+				MessageLog.Warning(*FText::Format(NSLOCTEXT(
+					"SimpleConstructionScript", "CorruptComponentFixed", 
+					"SCS Node component template {0} has been recreated because it was unexpectedly not owned by the class"), FText::FromString(VariableName)).ToString());
+			}
+		}
 	}
 }
 
@@ -1565,3 +1616,4 @@ void USimpleConstructionScript::EndEditorComponentConstruction()
 	bIsConstructingEditorComponents = false;
 }
 #endif
+

@@ -4,90 +4,72 @@
 
 #include "CoreMinimal.h"
 #include "Widgets/SWidget.h"
-#include "ITreeItem.h"
+#include "ActorBaseTreeItem.h"
 #include "UObject/ObjectKey.h"
 
-namespace SceneOutliner
+/** A tree item that represents an actor in the world */
+struct SCENEOUTLINER_API FActorTreeItem : IActorBaseTreeItem
 {
-	/** Helper class to manage moving abritrary data onto an actor */
-	struct FActorDropTarget : IDropTarget
-	{
-		/** The actor this tree item is associated with. */
-		TWeakObjectPtr<AActor> Actor;
+public:
+	DECLARE_DELEGATE_RetVal_OneParam(bool, FFilterPredicate, const AActor*);
+	DECLARE_DELEGATE_RetVal_OneParam(bool, FInteractivePredicate, const AActor*);
 		
-		/** Construct this object out of an Actor */
-		FActorDropTarget(AActor* InActor) : Actor(InActor) {}
-
-	public:
-
-		/** Called to test whether the specified payload can be dropped onto this tree item */
-		virtual FDragValidationInfo ValidateDrop(FDragDropPayload& DraggedObjects, UWorld& World) const override;
-
-		/** Called to drop the specified objects on this item. Only called if ValidateDrop() allows. */
-		virtual void OnDrop(FDragDropPayload& DraggedObjects, UWorld& World, const FDragValidationInfo& ValidationInfo, TSharedRef<SWidget> DroppedOnWidget) override;
-
-	protected:
-
-		/** Attach our actor to the specified parent and socket */
-		static void PerformAttachment(FName SocketName, TWeakObjectPtr<AActor> Parent, const FActorArray NewAttachments);
-
-		/** Detach the specified actor from this actor */
-		void DetachActorFromParent(AActor* ChildActor);
-
-	};
-
-	/** A tree item that represents an actor in the world */
-	struct FActorTreeItem : ITreeItem
+	bool Filter(FFilterPredicate Pred) const
 	{
-		/** The actor this tree item is associated with. */
-		mutable TWeakObjectPtr<AActor> Actor;
+		return Pred.Execute(Actor.Get());
+	}
 
-		/** Constant identifier for this tree item */
-		const FObjectKey ID;
+	bool GetInteractiveState(FInteractivePredicate Pred) const 
+	{
+		return Pred.Execute(Actor.Get());
+	}
 
-		/** Construct this item from an actor */
-		FActorTreeItem(AActor* InActor);
+	/** The actor this tree item is associated with. */
+	mutable TWeakObjectPtr<AActor> Actor;
 
-		/** Get this item's parent item. It is valid to return nullptr if this item has no parent */
-		virtual FTreeItemPtr FindParent(const FTreeItemMap& ExistingItems) const override;
+	/** Constant identifier for this tree item */
+	const FObjectKey ID;
 
-		/** Create this item's parent. It is valid to return nullptr if this item has no parent */
-		virtual FTreeItemPtr CreateParent() const override;
+	/** Static type identifier for this tree item class */
+	static const FSceneOutlinerTreeItemType Type;
 
- 		/** Visit this tree item */
- 		virtual void Visit(const ITreeItemVisitor& Visitor) const override;
- 		virtual void Visit(const IMutableTreeItemVisitor& Visitor) override;
+	/** Construct this item from an actor */
+	FActorTreeItem(AActor* InActor);
 
-	public:
+	/* Begin ISceneOutlinerTreeItem Implementation */
+	virtual bool IsValid() const override { return Actor.IsValid(); }
+	virtual FSceneOutlinerTreeItemID GetID() const override;
+	virtual FFolder::FRootObject GetRootObject() const override;
+	virtual FString GetDisplayString() const override;
+	virtual bool CanInteract() const override;
+	virtual TSharedRef<SWidget> GenerateLabelWidget(ISceneOutliner& Outliner, const STableRow<FSceneOutlinerTreeItemPtr>& InRow) override;
+	virtual void OnVisibilityChanged(const bool bNewVisibility) override;
+	virtual bool HasVisibilityInfo() const override { return true; }
+	virtual bool GetVisibility() const override;
+	virtual bool ShouldShowPinnedState() const override;
+	virtual bool ShouldShowVisibilityState() const override;
+	virtual bool HasPinnedStateInfo() const override { return true; };
+	virtual bool GetPinnedState() const override;
+	virtual void OnLabelChanged() override;
+	virtual void GenerateContextMenu(UToolMenu* Menu, SSceneOutliner& Outliner) override;
+	/* End ISceneOutlinerTreeItem Implementation */
 
-		/** Get the ID that represents this tree item. Used to reference this item in a map */
-		virtual FTreeItemID GetID() const override;
+	/* Begin IActorBaseTreeItem Implementation */
+	virtual const FGuid& GetGuid() const override;
+	/* End IActorBaseTreeItem Implementation */
 
-		/** Get the raw string to display for this tree item - used for sorting */
-		virtual FString GetDisplayString() const override;
+	/** true if this item exists in both the current world and PIE. */
+	bool bExistsInCurrentWorldAndPIE;
 
-		/** Get the sort priority given to this item's type */
-		virtual int32 GetTypeSortPriority() const override;
+protected:
+	/** For use by derived classes, as it allows for passing down their own type. */
+	FActorTreeItem(FSceneOutlinerTreeItemType TypeIn, AActor* InActor);
 
-		/** Check whether it should be possible to interact with this tree item */
-		virtual bool CanInteract() const override;
+	virtual void UpdateDisplayString();
 
-	public:
+	/** Cached display string */
+	FString DisplayString;
 
-		/** Populate the specified drag/drop payload with any relevant information for this type */
-		virtual void PopulateDragDropPayload(FDragDropPayload& Payload) const override;
-
-		/** Called to test whether the specified payload can be dropped onto this tree item */
-		virtual FDragValidationInfo ValidateDrop(FDragDropPayload& DraggedObjects, UWorld& World) const override;
-
-		/** Called to drop the specified objects on this item. Only called if ValidateDrop() allows. */
-		virtual void OnDrop(FDragDropPayload& DraggedObjects, UWorld& World, const FDragValidationInfo& ValidationInfo, TSharedRef<SWidget> DroppedOnWidget) override;
-
-	public:
-
-		/** true if this item exists in both the current world and PIE. */
-		bool bExistsInCurrentWorldAndPIE;
-
-	};
-
-}		// namespace SceneOutliner
+private:
+	void UpdateDisplayStringInternal();
+};

@@ -3,6 +3,7 @@
 #include "Quartz/AudioMixerClockManager.h"
 #include "AudioMixerDevice.h"
 #include "Misc/ScopeLock.h"
+#include "ProfilingDebugging/CountersTrace.h"
 
 namespace Audio
 {
@@ -19,6 +20,7 @@ namespace Audio
 	void FQuartzClockManager::Update(int32 NumFramesUntilNextUpdate)
 	{
 		// if this is owned by a MixerDevice, this function should only be called on the Audio Render Thread
+		TRACE_CPUPROFILER_EVENT_SCOPE(QuartzClockManager::Update)
 		if (MixerDevice)
 		{
 			check(MixerDevice->IsAudioRenderingThread());
@@ -30,6 +32,7 @@ namespace Audio
 
 	void FQuartzClockManager::LowResoultionUpdate(float DeltaTimeSeconds)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(QuartzClockManager::Update_LowRes)
 		FScopeLock Lock(&ActiveClockCritSec);
 
 		for (auto& Clock : ActiveClocks)
@@ -49,7 +52,7 @@ namespace Audio
 		}
 	}
 
-	TSharedPtr<FQuartzClock> FQuartzClockManager::GetOrCreateClock(const FName& InClockName, const FQuartzClockSettings& InClockSettings, bool bOverrideTickRateIfClockExists)
+	FQuartzClockProxy FQuartzClockManager::GetOrCreateClock(const FName& InClockName, const FQuartzClockSettings& InClockSettings, bool bOverrideTickRateIfClockExists)
 	{
 		FScopeLock Lock(&ActiveClockCritSec);
 
@@ -67,11 +70,25 @@ namespace Audio
 				Clock->ChangeTimeSignature(NewSettings.TimeSignature);
 			}
 
-			return Clock;
+			return FQuartzClockProxy(Clock);
 		}
 
 		// doesn't exist, create new clock
-		return ActiveClocks.Emplace_GetRef(MakeShared<FQuartzClock>(InClockName, NewSettings, this));
+		return FQuartzClockProxy(ActiveClocks.Emplace_GetRef(MakeShared<FQuartzClock>(InClockName, NewSettings, this)));
+	}
+
+	FQuartzClockProxy FQuartzClockManager::GetClock(const FName& InClockName)
+	{
+		FScopeLock Lock(&ActiveClockCritSec);
+		TSharedPtr<FQuartzClock> ClockPtr = FindClock(InClockName);
+
+		if (ClockPtr)
+		{
+			return FQuartzClockProxy(ClockPtr);
+		}
+
+		UE_LOG(LogAudioQuartz, Warning, TEXT("Could not find Clock: %s (returning empty handle)"), *ClockPtr->GetName().ToString());
+		return {};
 	}
 
 	bool FQuartzClockManager::DoesClockExist(const FName& InClockName)
@@ -144,9 +161,9 @@ namespace Audio
 		return INDEX_NONE;
 	}
 
-	void FQuartzClockManager::RemoveClock(const FName& InName)
+	void FQuartzClockManager::RemoveClock(const FName& InName, bool bForceSynchronous)
 	{
-		if (MixerDevice && !MixerDevice->IsAudioRenderingThread())
+		if (!bForceSynchronous && MixerDevice && !MixerDevice->IsAudioRenderingThread())
 		{
 			MixerDevice->AudioRenderThreadCommand([this, InName]()
 			{
@@ -163,7 +180,7 @@ namespace Audio
 		{
 			if (ActiveClocks[i]->GetName() == InName)
 			{
-				UE_LOG(LogAudioQuartz, Display, TEXT("Removing Clock: %s"), *InName.ToString());
+				UE_LOG(LogAudioQuartz, Verbose, TEXT("Removing Clock: %s"), *InName.ToString());
 				ActiveClocks.RemoveAtSwap(i);
 			}
 		}
@@ -286,11 +303,6 @@ namespace Audio
 
 	void FQuartzClockManager::Shutdown()
 	{
-		if (MixerDevice)
-		{
-			check(MixerDevice->IsAudioRenderingThread());
-		}
-
 		FScopeLock Lock(&ActiveClockCritSec);
 		ActiveClocks.Reset();
 	}
@@ -346,7 +358,7 @@ namespace Audio
 		TSharedPtr<FQuartzClock> Clock = FindClock(InClockName);
 		if (Clock)
 		{
-			Clock->SubscribeToTimeDivision(InListenerQueue, InQuantizationBoundary);
+			Clock->SubscribeToTimeDivision(FQuartzGameThreadSubscriber(InListenerQueue), InQuantizationBoundary);
 		}
 	}
 
@@ -367,7 +379,7 @@ namespace Audio
 		TSharedPtr<FQuartzClock> Clock = FindClock(InClockName);
 		if (Clock)
 		{
-			Clock->SubscribeToAllTimeDivisions(InListenerQueue);
+			Clock->SubscribeToAllTimeDivisions(FQuartzGameThreadSubscriber(InListenerQueue));
 		}
 	}
 
@@ -388,7 +400,7 @@ namespace Audio
 		TSharedPtr<FQuartzClock> Clock = FindClock(InClockName);
 		if (Clock)
 		{
-			Clock->UnsubscribeFromTimeDivision(InListenerQueue, InQuantizationBoundary);
+			Clock->UnsubscribeFromTimeDivision(FQuartzGameThreadSubscriber(InListenerQueue), InQuantizationBoundary);
 		}
 	}
 
@@ -409,7 +421,7 @@ namespace Audio
 		TSharedPtr<FQuartzClock> Clock = FindClock(InClockName);
 		if (Clock)
 		{
-			Clock->UnsubscribeFromAllTimeDivisions(InListenerQueue);
+			Clock->UnsubscribeFromAllTimeDivisions(FQuartzGameThreadSubscriber(InListenerQueue));
 		}
 	}
 
@@ -446,7 +458,7 @@ namespace Audio
 			{
 				// if this clock is earlier in the array than the last clock we ticked,
 				// then it has already been ticked this update
-				if (&ClockPtr < &ActiveClocks[LastClockTickedIndex.GetValue()])
+				if (i < LastClockTickedIndex.GetValue())
 				{
 					return true;
 				}
@@ -465,6 +477,9 @@ namespace Audio
 
 	void FQuartzClockManager::TickClocks(int32 NumFramesToTick)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(QuartzClockManager::TickClocks);
+		int32 TotalNumPendingCommands = 0;
+
 		if (MixerDevice)
 		{
 			// This function should only be called on the Audio Render Thread
@@ -474,9 +489,13 @@ namespace Audio
 		FScopeLock Lock(&ActiveClockCritSec);
 		for (auto& Clock : ActiveClocks)
 		{
+			TotalNumPendingCommands += Clock->NumPendingEvents();
 			Clock->Tick(NumFramesToTick);
 			LastClockTickedIndex.Increment();
 		}
+
+		TRACE_INT_VALUE(TEXT("QuartzClockManager::NumActiveClocks"), ActiveClocks.Num());
+		TRACE_INT_VALUE(TEXT("QuartzClockManager::NumTotalPendingCommands"), TotalNumPendingCommands);
 
 		LastClockTickedIndex.Reset();
 	}

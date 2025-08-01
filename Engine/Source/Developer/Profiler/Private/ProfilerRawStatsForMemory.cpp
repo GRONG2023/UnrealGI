@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ProfilerRawStatsForMemory.h"
+
+#if STATS && UE_STATS_MEMORY_PROFILER_ENABLED
+
 #include "Stats/StatsMisc.h"
 #include "ProfilingDebugging/DiagnosticTable.h"
 
@@ -884,3 +887,5 @@ void FRawStatsMemoryProfiler::CompareSnapshotsHumanReadable( const FName BeginSn
 		out_Result.ValueSort( FCombinedAllocationInfoSizeGreater() );
 	}
 }
+
+#endif // STATS && UE_STATS_MEMORY_PROFILER_ENABLED

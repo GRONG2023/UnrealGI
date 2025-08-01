@@ -6,6 +6,7 @@
 #include "HAL/FileManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
+#include "HAL/PlatformMemoryHelpers.h"
 #include "HAL/PlatformTime.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/RunnableThread.h"
@@ -51,7 +52,7 @@ bool FPerfCounters::Initialize()
 	{
 		InternalCountersUpdateInterval = ConfigInternalCountersUpdateInterval;
 	}
-	LastTimeInternalCountersUpdated = FPlatformTime::Seconds() - InternalCountersUpdateInterval * FMath::FRand();	// randomize between servers
+	LastTimeInternalCountersUpdated = static_cast<float>(FPlatformTime::Seconds()) - InternalCountersUpdateInterval * FMath::FRand();	// randomize between servers
 
 	// get the requested port from the command line (if specified)
 	const int32 StatsPort = IPerfCountersModule::GetHTTPStatsPort();
@@ -62,7 +63,7 @@ bool FPerfCounters::Initialize()
 	}
 
 	// Get an IHttpRouter on the command-line designated port
-	HttpRouter = FHttpServerModule::Get().GetHttpRouter(StatsPort);
+	HttpRouter = FHttpServerModule::Get().GetHttpRouter(StatsPort, /* bFailOnBindFailure = */ true);
 	if (!HttpRouter)
 	{
 		UE_LOG(LogPerfCounters, Error, 
@@ -73,12 +74,7 @@ bool FPerfCounters::Initialize()
 	// Register a handler for /stats
 	TWeakPtr<FPerfCounters> WeakThisPtr(AsShared());
     StatsRouteHandle = HttpRouter->BindRoute(FHttpPath("/stats"), EHttpServerRequestVerbs::VERB_GET,
-		[WeakThisPtr](const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
-	{
-		auto SharedThis = WeakThisPtr.Pin();
-		if (!SharedThis.IsValid()) { return false; }
-		return SharedThis->ProcessStatsRequest(Request, OnComplete);
-	});
+		FHttpRequestHandler::CreateSP(this, &FPerfCounters::ProcessStatsRequest));
 	if(!StatsRouteHandle.IsValid())
 	{
 		UE_LOG(LogPerfCounters, Error,
@@ -88,12 +84,7 @@ bool FPerfCounters::Initialize()
 
 	// Register a handler for /exec
 	ExecRouteHandle = HttpRouter->BindRoute(FHttpPath("/exec"), EHttpServerRequestVerbs::VERB_GET,
-		[WeakThisPtr] (const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
-	{
-		auto SharedThis = WeakThisPtr.Pin();
-		if (!SharedThis.IsValid()) { return false; }
-		return SharedThis->ProcessExecRequest(Request, OnComplete);
-	});
+		FHttpRequestHandler::CreateSP(this, &FPerfCounters::ProcessExecRequest));
 	if(!ExecRouteHandle.IsValid())
 	{
 		UE_LOG(LogPerfCounters, Error,
@@ -189,7 +180,7 @@ void FPerfCounters::TickZeroLoad(float DeltaTime)
 void FPerfCounters::TickSystemCounters(float DeltaTime)
 {
 	// set some internal perf stats ([RCL] FIXME 2015-12-08: move to a better place)
-	float CurrentTime = FPlatformTime::Seconds();
+	float CurrentTime = static_cast<float>(FPlatformTime::Seconds());
 	if (CurrentTime - LastTimeInternalCountersUpdated > InternalCountersUpdateInterval)
 	{
 		// get CPU stats first
@@ -197,7 +188,7 @@ void FPerfCounters::TickSystemCounters(float DeltaTime)
 		Set(TEXT("ProcessCPUUsageRelativeToCore"), CPUStats.CPUTimePctRelative);
 
 		// memory
-		FPlatformMemoryStats Stats = FPlatformMemory::GetStats();
+		FPlatformMemoryStats Stats = PlatformMemoryHelpers::GetFrameMemoryStats();
 		Set(TEXT("AvailablePhysicalMemoryMB"), static_cast<uint64>(Stats.AvailablePhysical / (1024 * 1024)));
 		Set(TEXT("AvailableVirtualMemoryMB"), static_cast<uint64>(Stats.AvailableVirtual / (1024 * 1024)));
 		Set(TEXT("ProcessPhysicalMemoryMB"), static_cast<uint64>(Stats.UsedPhysical/ (1024 * 1024)));
@@ -215,7 +206,7 @@ void FPerfCounters::TickSystemCounters(float DeltaTime)
 	}
 }
 
-bool FPerfCounters::Exec(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
+bool FPerfCounters::Exec_Runtime(UWorld* InWorld, const TCHAR* Cmd, FOutputDevice& Ar)
 {
 	// ignore everything that doesn't start with PerfCounters
 	if (!FParse::Command(&Cmd, TEXT("perfcounters")))
@@ -253,7 +244,20 @@ bool FPerfCounters::ProcessExecRequest(const FHttpServerRequest& Request, const 
 		{
 			bExecCommandSuccess = ExecCmdCallback.Execute(*ExecCmd, StringOutDevice);
 		}
+		else
+		{
+			auto Response = FHttpServerResponse::Error(EHttpServerResponseCodes::NotSupported,
+				TEXT("exec handler not found"));
+			OnComplete(MoveTemp(Response));
+		}
 	}
+	else
+	{
+		auto Response = FHttpServerResponse::Error(EHttpServerResponseCodes::NotSupported,
+			TEXT("exec missing query command (c=MyCommand)"));
+		OnComplete(MoveTemp(Response));
+	}
+
 
 	if (bExecCommandSuccess)
 	{
@@ -262,8 +266,7 @@ bool FPerfCounters::ProcessExecRequest(const FHttpServerRequest& Request, const 
 	}
 	else
 	{
-		auto Response = FHttpServerResponse::Error(EHttpServerResponseCodes::NotSupported, 
-			TEXT("exec handler not found"));
+		auto Response = FHttpServerResponse::Error(EHttpServerResponseCodes::NotSupported, StringOutDevice);
 		OnComplete(MoveTemp(Response));
 	}
 
@@ -385,7 +388,7 @@ bool FPerfCounters::ReportUnplayableCondition(const FString& ConditionDescriptio
 
 	// include description for debugging
 	FTCHARToUTF8 Converter(*FString::Printf(TEXT("Unplayable condition encountered: %s\n"), *ConditionDescription));
-	ReportFile->Serialize(reinterpret_cast<void *>(const_cast<char *>(Converter.Get())), Converter.Length());
+	ReportFile->Serialize(reinterpret_cast<void *>(const_cast<char *>(reinterpret_cast<const char *>(Converter.Get()))), Converter.Length());
 
 	ReportFile->Close();
 	delete ReportFile;

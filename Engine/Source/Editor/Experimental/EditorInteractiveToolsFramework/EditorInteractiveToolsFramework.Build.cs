@@ -6,59 +6,39 @@ public class EditorInteractiveToolsFramework : ModuleRules
 {
 	public EditorInteractiveToolsFramework(ReadOnlyTargetRules Target) : base(Target)
 	{
-		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
-		
-		PublicIncludePaths.AddRange(
-			new string[] {
-                //"ContentBrowser"
-				// ... add public include paths required here ...
-			}
-			);
-				
-		
-		PrivateIncludePaths.AddRange(
-			new string[] {
-				// ... add other private include paths required here ...
-			}
-			);
-			
+		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;			
 		
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core"
+				"Core",
+				"TypedElementFramework",
 				// ... add other public dependencies that you statically link with here ...
 			}
-			);
-			
+			);			
 		
 		PrivateDependencyModuleNames.AddRange(
 			new string[]
 			{
 				"CoreUObject",
 				"Engine",
-                "Slate",
+				"RenderCore",
+				"Slate",
                 "SlateCore",
                 "InputCore",
+				"EditorFramework",
 				"UnrealEd",
                 "ContentBrowser",
                 "LevelEditor",
                 "ApplicationCore",
-                "EditorStyle",
                 "InteractiveToolsFramework",
 				"MeshDescription",
-				"StaticMeshDescription"
+				"StaticMeshDescription",
+                "EditorSubsystem",
+                "TypedElementRuntime"
 
 				// ... add private dependencies that you statically link with here ...	
 			}
             );
-		
-		
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[]
-			{
-				// ... add any modules that your module loads dynamically here ...
-			}
-			);
 	}
 }

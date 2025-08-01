@@ -27,7 +27,7 @@ namespace Insights
 	class FTable;
 	class FTableColumn;
 	class ITableCellValueSorter;
-	class SAggregatorStatus;
+	class SAsyncOperationStatus;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -54,13 +54,13 @@ public:
 	void Construct(const FArguments& InArgs, const FText& InViewName);
 
 	void Reset();
-	void SetTree(const Trace::FTimingProfilerButterflyNode& Root);
+	void SetTree(const TraceServices::FTimingProfilerButterflyNode& Root);
 
 	virtual FReply OnKeyDown(const FGeometry& MyGeometry, const FKeyEvent& InKeyEvent) override;
 
 private:
 	void InitCommandList();
-	FTimerNodePtr CreateTimerNodeRec(const Trace::FTimingProfilerButterflyNode& Node);
+	FTimerNodePtr CreateTimerNodeRec(const TraceServices::FTimingProfilerButterflyNode& Node);
 	void ExpandNodesRec(FTimerNodePtr NodePtr, int32 Depth);
 
 	////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -228,13 +228,7 @@ private:
 	/** How we sort the nodes? Ascending or Descending. */
 	EColumnSortMode::Type ColumnSortMode;
 
-	//////////////////////////////////////////////////
-
-	double StatsStartTime;
-	double StatsEndTime;
-	uint32 StatsTimerId;
-
-	TSharedPtr<Insights::SAggregatorStatus> AggregatorStatus;
+	TSharedPtr<Insights::SAsyncOperationStatus> AsyncOperationStatus;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

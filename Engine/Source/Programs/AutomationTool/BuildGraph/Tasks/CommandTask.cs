@@ -9,9 +9,15 @@ using AutomationTool;
 using UnrealBuildTool;
 using System.Xml;
 using System.IO;
-using Tools.DotNETCommon;
+using EpicGames.Core;
+using UnrealBuildBase;
+using EpicGames.BuildGraph;
+using AutomationTool.Tasks;
+using Microsoft.Extensions.Logging;
 
-namespace BuildGraph.Tasks
+using static AutomationTool.CommandUtils;
+
+namespace AutomationTool.Tasks
 {
 	static class StringExtensions
 	{
@@ -49,7 +55,7 @@ namespace BuildGraph.Tasks
 	/// Invokes an AutomationTool child process to run the given command.
 	/// </summary>
 	[TaskElement("Command", typeof(CommandTaskParameters))]
-	public class CommandTask : CustomTask
+	public class CommandTask : BgTaskImpl
 	{
 		/// <summary>
 		/// Parameters for this task
@@ -71,13 +77,13 @@ namespace BuildGraph.Tasks
 		/// <param name="Job">Information about the current job</param>
 		/// <param name="BuildProducts">Set of build products produced by this node.</param>
 		/// <param name="TagNameToFileSet">Mapping from tag names to the set of files they include</param>
-		public override void Execute(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
+		public override Task ExecuteAsync(JobContext Job, HashSet<FileReference> BuildProducts, Dictionary<string, HashSet<FileReference>> TagNameToFileSet)
 		{
 			// If we're merging telemetry from the child process, get a temp filename for it
 			FileReference TelemetryFile = null;
 			if (Parameters.MergeTelemetryWithPrefix != null)
 			{
-				TelemetryFile = FileReference.Combine(CommandUtils.RootDirectory, "Engine", "Intermediate", "UAT", "Telemetry.json");
+				TelemetryFile = FileReference.Combine(Unreal.RootDirectory, "Engine", "Intermediate", "UAT", "Telemetry.json");
 				DirectoryReference.CreateDirectory(TelemetryFile.Directory);
 			}
 
@@ -89,15 +95,24 @@ namespace BuildGraph.Tasks
 			}
 			if (Parameters.Arguments == null || (!Parameters.Arguments.CaseInsensitiveContains("-submit") && !Parameters.Arguments.CaseInsensitiveContains("-nosubmit")))
 			{
-				if(GlobalCommandLine.Submit.IsSet)
+				if(GlobalCommandLine.Submit)
 				{
 					CommandLine.Append("-submit ");
 				}
-				if(GlobalCommandLine.NoSubmit.IsSet)
+				if(GlobalCommandLine.NoSubmit)
 				{
 					CommandLine.Append("-nosubmit ");
 				}
 			}
+			if (Parameters.Arguments == null || !Parameters.Arguments.CaseInsensitiveContains("-uselocalbuildstorage"))
+			{
+				if (GlobalCommandLine.UseLocalBuildStorage)
+				{
+					CommandLine.Append("-uselocalbuildstorage ");
+				}
+			}
+
+			CommandLine.Append("-NoCompile ");
 			CommandLine.Append(Parameters.Name);
 			if (!String.IsNullOrEmpty(Parameters.Arguments))
 			{
@@ -112,7 +127,7 @@ namespace BuildGraph.Tasks
 			// Merge in any new telemetry data that was produced
 			if (TelemetryFile != null && FileReference.Exists(TelemetryFile))
 			{
-				Log.TraceLog("Merging telemetry from {0}", TelemetryFile);
+				Logger.LogDebug("Merging telemetry from {TelemetryFile}", TelemetryFile);
 
 				TelemetryData NewTelemetry;
 				if (TelemetryData.TryRead(TelemetryFile, out NewTelemetry))
@@ -121,9 +136,10 @@ namespace BuildGraph.Tasks
 				}
 				else
 				{
-					Log.TraceWarning("Unable to read UAT telemetry file from {0}", TelemetryFile);
+					Logger.LogWarning("Unable to read UAT telemetry file from {TelemetryFile}", TelemetryFile);
 				}
 			}
+			return Task.CompletedTask;
 		}
 
 		/// <summary>
@@ -159,6 +175,26 @@ namespace BuildGraph.Tasks
 		public override IEnumerable<string> FindProducedTagNames()
 		{
 			yield break;
+		}
+	}
+
+	public static partial class StandardTasks
+	{
+		/// <summary>
+		/// Runs another UAT command
+		/// </summary>
+		/// <param name="State">The execution state</param>
+		/// <param name="Name">Name of the command to run</param>
+		/// <param name="Arguments">Arguments for the command</param>
+		/// <param name="MergeTelemetryWithPrefix">If non-null, instructs telemetry from the command to be merged into the telemetry for this UAT instance with the given prefix. May be an empty (non-null) string.</param>
+		public static async Task CommandAsync(this BgContext State, string Name, string Arguments = null, string MergeTelemetryWithPrefix = null)
+		{
+			CommandTaskParameters Parameters = new CommandTaskParameters();
+			Parameters.Name = Name;
+			Parameters.Arguments = Arguments ?? Parameters.Arguments;
+			Parameters.MergeTelemetryWithPrefix = MergeTelemetryWithPrefix ?? Parameters.MergeTelemetryWithPrefix;
+
+			await ExecuteAsync(new CommandTask(Parameters));
 		}
 	}
 }

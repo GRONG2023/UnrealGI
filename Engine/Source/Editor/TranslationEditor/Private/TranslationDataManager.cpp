@@ -10,7 +10,7 @@
 #include "Misc/App.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonSerializer.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "SourceControlOperations.h"
 #include "ISourceControlState.h"
 #include "ISourceControlProvider.h"
@@ -29,6 +29,7 @@
 #include "LocalizationConfigurationScript.h"
 #include "Serialization/JsonInternationalizationArchiveSerializer.h"
 #include "Serialization/JsonInternationalizationManifestSerializer.h"
+#include "GeneralProjectSettings.h"
 
 
 DEFINE_LOG_CATEGORY_STATIC(LogTranslationEditor, Log, All);
@@ -385,7 +386,7 @@ bool FTranslationDataManager::WriteJSONToTextFile(TSharedRef<FJsonObject>& Outpu
 
 		// Make a note in the Source Control log, including a note to check in the file later via source control application
 		FMessageLog TranslationEditorMessageLog("SourceControl");
-		TranslationEditorMessageLog.Info(FText::Format(LOCTEXT("TranslationArchiveCheckedOut", "Successfully checked out and saved translation archive '{Filename}'. Please check-in this file later via your source control application."), Arguments));
+		TranslationEditorMessageLog.Info(FText::Format(LOCTEXT("TranslationArchiveCheckedOut", "Successfully checked out and saved translation archive '{Filename}'. Please check-in this file later via your revision control application."), Arguments));
 
 		// Display notification that save was successful, along with a link to the Source Control log so the user can see the above message.
 		FNotificationInfo Info( LOCTEXT("ArchiveCheckedOut", "Translation Archive Successfully Checked Out and Saved.") );
@@ -394,7 +395,7 @@ bool FTranslationDataManager::WriteJSONToTextFile(TSharedRef<FJsonObject>& Outpu
 		Info.HyperlinkText = LOCTEXT("ShowMessageLogHyperlink", "Show Message Log");
 		Info.bFireAndForget = true;
 		Info.bUseSuccessFailIcons = true;
-		Info.Image = FEditorStyle::GetBrush(TEXT("NotificationList.SuccessImage"));
+		Info.Image = FAppStyle::GetBrush(TEXT("NotificationList.SuccessImage"));
 		FSlateNotificationManager::Get().AddNotification(Info);
 	}
 
@@ -403,7 +404,7 @@ bool FTranslationDataManager::WriteJSONToTextFile(TSharedRef<FJsonObject>& Outpu
 
 void FTranslationDataManager::GetHistoryForTranslationUnits()
 {
-	GWarn->BeginSlowTask(LOCTEXT("LoadingSourceControlHistory", "Loading Translation History from Source Control..."), true);
+	GWarn->BeginSlowTask(LOCTEXT("LoadingSourceControlHistory", "Loading Translation History from Revision Control..."), true);
 
 	TArray<UTranslationUnit*>& TranslationUnits = AllTranslations;
 	const FString& InManifestFilePath = OpenedManifestFilePath;
@@ -437,7 +438,7 @@ void FTranslationDataManager::GetHistoryForTranslationUnits()
 
 		for (int HistoryItemIndex = HistorySize-1; HistoryItemIndex >=0; --HistoryItemIndex)
 		{
-			GWarn->StatusUpdate(HistorySize - HistoryItemIndex, HistorySize, FText::Format(LOCTEXT("LoadingOldManifestRevisionNumber", "Loading Translation History from Manifest Revision {0} of {1} from Source Control..."), FText::AsNumber(HistorySize - HistoryItemIndex), FText::AsNumber(HistorySize)));
+			GWarn->StatusUpdate(HistorySize - HistoryItemIndex, HistorySize, FText::Format(LOCTEXT("LoadingOldManifestRevisionNumber", "Loading Translation History from Manifest Revision {0} of {1} from Revision Control..."), FText::AsNumber(HistorySize - HistoryItemIndex), FText::AsNumber(HistorySize)));
 
 			TSharedPtr<ISourceControlRevision, ESPMode::ThreadSafe> Revision = SourceControlState->GetHistoryItem(HistoryItemIndex);
 			if(Revision.IsValid())
@@ -455,7 +456,7 @@ void FTranslationDataManager::GetHistoryForTranslationUnits()
 				FString SavedDir;	// Store these cached translation history files in the saved directory
 				if (IsEngineManifest)
 				{
-					ProjectName = "Engine";
+					ProjectName = TEXT("Engine");
 					SavedDir = FPaths::EngineSavedDir();
 				}
 				else
@@ -464,8 +465,7 @@ void FTranslationDataManager::GetHistoryForTranslationUnits()
 					SavedDir = FPaths::ProjectSavedDir();
 				}
 
-				FString TempFileName = SavedDir / "CachedTranslationHistory" / "UE4-Manifest-" + ProjectName + "-" + FPaths::GetBaseFilename(InManifestFilePath) + "-Rev-" + FString::FromInt(Revision->GetRevisionNumber());
-
+				FString TempFileName = SavedDir / TEXT("CachedTranslationHistory") / FString::Printf(TEXT("Manifest-%s-%s-Rev-%d"), *ProjectName, *FPaths::GetBaseFilename(InManifestFilePath), Revision->GetRevisionNumber());
 				
 				if (!FPaths::FileExists(TempFileName))	// Don't bother syncing again if we already have this manifest version cached locally
 				{
@@ -483,7 +483,7 @@ void FTranslationDataManager::GetHistoryForTranslationUnits()
 						{
 							for (FTranslationContextInfo& ContextInfo : TranslationUnit->Contexts)
 							{
-								FString PreviousSourceText = "";
+								FString PreviousSourceText;
 
 								// If we already have history, then compare against the newest history so far
 								if (ContextInfo.Changes.Num() > 0)
@@ -533,8 +533,8 @@ void FTranslationDataManager::GetHistoryForTranslationUnits()
 		FFormatNamedArguments Arguments;
 		Arguments.Add(TEXT("ManifestFilePath"), FText::FromString(InManifestFilePath));
 		FMessageLog TranslationEditorMessageLog("SourceControl");
-		TranslationEditorMessageLog.Warning(FText::Format(LOCTEXT("SourceControlStateQueryFailed", "Failed to query source control state of file {ManifestFilePath}."), Arguments));
-		TranslationEditorMessageLog.Notify(LOCTEXT("RetrieveTranslationHistoryFailed", "Unable to Retrieve Translation History from Source Control!"));
+		TranslationEditorMessageLog.Warning(FText::Format(LOCTEXT("SourceControlStateQueryFailed", "Failed to query revision control state of file {ManifestFilePath}."), Arguments));
+		TranslationEditorMessageLog.Notify(LOCTEXT("RetrieveTranslationHistoryFailed", "Unable to Retrieve Translation History from Revision Control!"));
 	}
 
 
@@ -891,7 +891,7 @@ bool FTranslationDataManager::SaveSelectedTranslations(TArray<UTranslationUnit*>
 				FPortableObjectFormatDOM PortableObjectDom;
 				PortableObjectDom.SetProjectName(ManifestAndArchiveName);
 				PortableObjectDom.SetLanguage(CultureName);
-				PortableObjectDom.CreateNewHeader();
+				PortableObjectDom.CreateNewHeader(GetDefault<UGeneralProjectSettings>()->CopyrightNotice);
 				PortableObjectPipeline::UpdatePOFileHeaderForSettings(PortableObjectDom, LocalizationTarget->Settings.ExportSettings.CollapseMode, LocalizationTarget->Settings.ExportSettings.POFormat);
 
 				TArray<UTranslationUnit*>& TranslationsArray = DataManager->GetAllTranslationsArray();

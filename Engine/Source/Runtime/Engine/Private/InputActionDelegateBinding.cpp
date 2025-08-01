@@ -1,15 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/InputActionDelegateBinding.h"
-#include "GameFramework/Actor.h"
 #include "Components/InputComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InputActionDelegateBinding)
 
 UInputActionDelegateBinding::UInputActionDelegateBinding(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
 {
 }
 
-void UInputActionDelegateBinding::BindToInputComponent(UInputComponent* InputComponent) const
+void UInputActionDelegateBinding::BindToInputComponent(UInputComponent* InputComponent, UObject* ObjectToBindTo) const
 {
 	TArray<FInputActionBinding> BindsToAdd;
 
@@ -20,7 +21,7 @@ void UInputActionDelegateBinding::BindToInputComponent(UInputComponent* InputCom
 		FInputActionBinding AB( Binding.InputActionName, Binding.InputKeyEvent );
 		AB.bConsumeInput = Binding.bConsumeInput;
 		AB.bExecuteWhenPaused = Binding.bExecuteWhenPaused;
-		AB.ActionDelegate.BindDelegate(InputComponent->GetOwner(), Binding.FunctionNameToBind);
+		AB.ActionDelegate.BindDelegate(ObjectToBindTo, Binding.FunctionNameToBind);
 
 		if (Binding.bOverrideParentBinding)
 		{
@@ -43,3 +44,4 @@ void UInputActionDelegateBinding::BindToInputComponent(UInputComponent* InputCom
 		InputComponent->AddActionBinding(BindsToAdd[Index]);
 	}
 }
+

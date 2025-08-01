@@ -2,15 +2,23 @@
 
 #pragma once
 
+#include "Containers/Array.h"
+#include "Containers/UnrealString.h"
+#include "CoreGlobals.h"
 #include "CoreMinimal.h"
-#include "UObject/Object.h"
-#include "Serialization/MemoryWriter.h"
+#include "HAL/Platform.h"
+#include "Internationalization/TextNamespaceFwd.h"
 #include "Internationalization/TextPackageNamespaceUtil.h"
+#include "Serialization/MemoryWriter.h"
+#include "UObject/Object.h"
 #include "UObject/PropertyPortFlags.h"
 
+class FArchive;
+class FName;
 struct FLazyObjectPtr;
-struct FSoftObjectPtr;
+struct FObjectPtr;
 struct FSoftObjectPath;
+struct FSoftObjectPtr;
 struct FWeakObjectPtr;
 
 /**
@@ -41,6 +49,7 @@ public:
 	//~ Begin FArchive Interface
 	COREUOBJECT_API virtual FArchive& operator<<(FName& N) override;
 	COREUOBJECT_API virtual FArchive& operator<<(UObject*& Res) override;
+	COREUOBJECT_API virtual FArchive& operator<<(FObjectPtr& Value) override;
 	COREUOBJECT_API virtual FArchive& operator<<(FLazyObjectPtr& Value) override;
 	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPtr& Value) override;
 	COREUOBJECT_API virtual FArchive& operator<<(FSoftObjectPath& Value) override;

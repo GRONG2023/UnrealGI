@@ -22,33 +22,34 @@ class FJpegImageWrapper
 public:
 
 	/** Default constructor. */
+	// NumComponents == 1 for GrayscaleJPEG , but not supported by TJPEG path so currently broken
 	FJpegImageWrapper(int32 InNumComponents = 4);
 
-#if WITH_LIBJPEGTURBO
 	virtual ~FJpegImageWrapper();
-#endif	// WITH_LIBJPEGTURBO
+	virtual void Reset() override;
 
 public:
 
 	//~ FImageWrapperBase interface
 
 	virtual bool SetCompressed(const void* InCompressedData, int64 InCompressedSize) override;
-	virtual bool SetRaw(const void* InRawData, int64 InRawSize, const int32 InWidth, const int32 InHeight, const ERGBFormat InFormat, const int32 InBitDepth) override;
 	virtual void Uncompress(const ERGBFormat InFormat, int32 InBitDepth) override;
 	virtual void Compress(int32 Quality) override;
+	
+	virtual bool CanSetRawFormat(const ERGBFormat InFormat, const int32 InBitDepth) const override;
+	virtual ERawImageFormat::Type GetSupportedRawFormat(const ERawImageFormat::Type InFormat) const override;
 
+private:
+
+	int32 NumComponents;
+	
 #if WITH_LIBJPEGTURBO
 	bool SetCompressedTurbo(const void* InCompressedData, int64 InCompressedSize);
 	void CompressTurbo(int32 Quality);
 	void UncompressTurbo(const ERGBFormat InFormat, int32 InBitDepth);
 #endif	// WITH_LIBJPEGTURBO
 
-private:
-
-	int32 NumComponents;
-
 #if WITH_LIBJPEGTURBO
-	tjhandle Compressor;
 	tjhandle Decompressor;
 #endif	// WITH_LIBJPEGTURBO
 };

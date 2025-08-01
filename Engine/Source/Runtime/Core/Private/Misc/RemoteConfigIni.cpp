@@ -1,13 +1,23 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Misc/RemoteConfigIni.h"
+
 #include "Async/AsyncWork.h"
+#include "CoreGlobals.h"
 #include "HAL/FileManager.h"
-#include "Misc/ScopeLock.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
+#include "HAL/UnrealMemory.h"
+#include "Misc/App.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/CString.h"
+#include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Misc/ConfigCacheIni.h"
-#include "Misc/App.h"
+#include "Misc/ScopeLock.h"
+#include "Stats/Stats.h"
+#include "Templates/TypeHash.h"
 
 // Globals
 FRemoteConfig GRemoteConfig;
@@ -23,20 +33,6 @@ FRemoteConfigAsyncIOInfo::FRemoteConfigAsyncIOInfo(const TCHAR* InDefaultIniFile
 	, bWasProcessed(false)
 {
 	FCString::Strcpy(DefaultIniFile, InDefaultIniFile);
-}
-
-
-FRemoteConfigAsyncIOInfo& FRemoteConfigAsyncIOInfo::operator=(const FRemoteConfigAsyncIOInfo& Other)
-{
-	Buffer = Other.Buffer;
-	TimeStamp = Other.TimeStamp;
-	StartReadTime = Other.StartReadTime;
-	StartWriteTime = Other.StartWriteTime;
-	bReadIOFailed = Other.bReadIOFailed;
-	bWasProcessed = Other.bWasProcessed;
-	FMemory::Memcpy(DefaultIniFile, Other.DefaultIniFile, 1024);
-
-	return *this;
 }
 
 
@@ -306,7 +302,7 @@ bool FRemoteConfig::ShouldReadRemoteFile(const TCHAR* Filename)
 
 FRemoteConfigAsyncIOInfo* FRemoteConfig::FindConfig(const TCHAR* Filename)
 {
-	return ConfigBuffers.Find(FString(Filename));
+	return ConfigBuffers.FindByHash(FCrc::Strihash_DEPRECATED(Filename), Filename);
 }
 
 
@@ -483,11 +479,11 @@ void ProcessIniContents(const TCHAR* FilenameToLoad, const TCHAR* IniFileName, F
 		
 		if (bDoCombine)
 		{
-			Config->CombineFromBuffer(RemoteInfo->Buffer);
+			Config->CombineFromBuffer(RemoteInfo->Buffer, FilenameToLoad);
 		}
 		else
 		{
-			Config->ProcessInputFileContents(RemoteInfo->Buffer);
+			Config->ProcessInputFileContents(RemoteInfo->Buffer, FilenameToLoad);
 		}
 	}
 }
@@ -523,7 +519,7 @@ void MakeLocalCopy(const TCHAR* Filename)
 		FString FilenameStr = Filename;
 		if (FCString::Stristr(*FilenameStr, TEXT(".ini")))
 		{
-			FilenameStr.LeftChopInline(4, false);
+			FilenameStr.LeftChopInline(4, EAllowShrinking::No);
 		} 
 		else
 		{

@@ -7,6 +7,7 @@ FTextureStreamIn.cpp : Implement a generic texture stream in strategy.
 #include "Streaming/TextureStreamIn.h"
 #include "Engine/Texture.h"
 #include "Streaming/RenderAssetUpdate.inl"
+#include "Streaming/TextureMipAllocator.h"
 
 template class TRenderAssetUpdate<FTextureUpdateContext>;
 
@@ -385,8 +386,7 @@ void FTextureStreamIn::FinalizeNewMips(const FContext& Context)
 	DECLARE_SCOPE_CYCLE_COUNTER(TEXT("FTextureStreamIn::FinalizeNewMips"), STAT_TextureStreamIn_FinalizeNewMips, STATGROUP_StreamingDetails);
 
 	// Execute
-	const bool bSuccessfullyFinalized = DoFinalizeNewMips(Context);
-	if (!bSuccessfullyFinalized)
+	if (!DoFinalizeNewMips(Context))
 	{
 		MarkAsCancelled();
 	}
@@ -394,18 +394,15 @@ void FTextureStreamIn::FinalizeNewMips(const FContext& Context)
 	// Schedule the next update step.
 	EThreadType NextThread = GetMipAllocatorThread(FTextureMipAllocator::ETickState::FinalizeMips);
 
-	if (bSuccessfullyFinalized && NextThread == TT_None)
-	{
-		// RHI resource swap has happened so treat the stream-in as successful
-		MarkAsSuccessfullyFinished();
-	}
-
 	if (NextThread != TT_None) // Loop on this state.
 	{
 		PushTask(Context, NextThread, SRA_UPDATE_CALLBACK(FinalizeNewMips), GetCancelThread(), SRA_UPDATE_CALLBACK(Cancel));
 	}
 	else if (!IsCancelled())
 	{
+		// Finalize new mips completed successfully.
+		MarkAsSuccessfullyFinished();
+		
 		// Release the mip allocator.
 		MipAllocator.Reset();
 		MipInfos.Empty();
@@ -423,6 +420,12 @@ void FTextureStreamIn::FinalizeNewMips(const FContext& Context)
 	}
 	else
 	{
+		// Mark as successfully finished even if cancelled to keep the CachedSRRState in sync with the RHI texture.
+		if (MipAllocator->GetNextTickState() == FTextureMipAllocator::ETickState::Done)
+		{
+			MarkAsSuccessfullyFinished();
+		}
+
 		PushTask(Context, TT_None, nullptr, GetCancelThread(), SRA_UPDATE_CALLBACK(Cancel));
 	}
 }

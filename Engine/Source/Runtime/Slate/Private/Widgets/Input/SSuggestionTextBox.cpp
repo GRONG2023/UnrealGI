@@ -29,6 +29,8 @@ void SSuggestionTextBox::Construct( const FArguments& InArgs )
 	OnTextChanged = InArgs._OnTextChanged;
 	OnTextCommitted = InArgs._OnTextCommitted;
 
+	FSlateApplication::Get().OnFocusChanging().AddSP(this, &SSuggestionTextBox::OnGlobalFocusChanging);
+
 	ChildSlot
 	[
 		SAssignNew(MenuAnchor, SMenuAnchor)
@@ -36,16 +38,16 @@ void SSuggestionTextBox::Construct( const FArguments& InArgs )
 			[
 				SAssignNew(TextBox, SEditableTextBox)
 					.BackgroundColor(InArgs._BackgroundColor)
-					.ClearKeyboardFocusOnCommit(InArgs._ClearKeyboardFocusOnCommit.Get())
+					.ClearKeyboardFocusOnCommit(InArgs._ClearKeyboardFocusOnCommit)
 					.ErrorReporting(InArgs._ErrorReporting)
 					.Font(InArgs._Font)
 					.ForegroundColor(InArgs._ForegroundColor)
 					.HintText(InArgs._HintText)
 					.IsCaretMovedWhenGainFocus(InArgs._IsCaretMovedWhenGainFocus)
 					.MinDesiredWidth(InArgs._MinDesiredWidth)
-					.RevertTextOnEscape(InArgs._RevertTextOnEscape.Get())
+					.RevertTextOnEscape(InArgs._RevertTextOnEscape)
 					.SelectAllTextOnCommit(InArgs._SelectAllTextOnCommit)
-					.SelectAllTextWhenFocused(InArgs._SelectAllTextWhenFocused.Get())
+					.SelectAllTextWhenFocused(InArgs._SelectAllTextWhenFocused)
 					.Style(InArgs._TextStyle)
 					.Text(InArgs._Text)
 					.OnKeyDownHandler(this, &SSuggestionTextBox::OnKeyDown)
@@ -58,18 +60,18 @@ void SSuggestionTextBox::Construct( const FArguments& InArgs )
 					.BorderImage(InArgs._BackgroundImage)
 					.Padding(FMargin(2))
 					[
-						SNew(SVerticalBox)
+						SAssignNew(VerticalBox, SVerticalBox)
 						
 						+ SVerticalBox::Slot()
 							.AutoHeight()
 							.MaxHeight(InArgs._SuggestionListMaxHeight)
 							[
 								SAssignNew(SuggestionListView, SListView< TSharedPtr<FString> >)
-									.ItemHeight(18)
-									.ListItemsSource(&Suggestions)
-									.SelectionMode(ESelectionMode::Single)
-									.OnGenerateRow(this, &SSuggestionTextBox::HandleSuggestionListViewGenerateRow)
-									.OnSelectionChanged(this, &SSuggestionTextBox::HandleSuggestionListViewSelectionChanged)
+								.ItemHeight(18.f)
+								.ListItemsSource(&Suggestions)
+								.SelectionMode(ESelectionMode::Single)
+								.OnGenerateRow(this, &SSuggestionTextBox::HandleSuggestionListViewGenerateRow)
+								.OnSelectionChanged(this, &SSuggestionTextBox::HandleSuggestionListViewSelectionChanged)
 							]
 					]
 			)
@@ -171,7 +173,9 @@ void SSuggestionTextBox::SetSuggestions( TArray<FString>& SuggestionStrings, boo
 	{
 		// @todo Slate: make the window title not flicker when the box toggles visibility
 		MenuAnchor->SetIsOpen(true, false);
-		SuggestionListView->RequestScrollIntoView(Suggestions.Last());
+
+		int32 SuggestionIndexToScrollIntoView = FMath::Max(0, SelectedSuggestion);
+		SuggestionListView->RequestScrollIntoView(Suggestions[SuggestionIndexToScrollIntoView]);
 
 		FocusTextBox();
 	}
@@ -348,6 +352,8 @@ FText SSuggestionTextBox::HandleSuggestionListWidgetHighlightText( ) const
 
 void SSuggestionTextBox::HandleTextBoxTextChanged( const FText& InText )
 {
+	OnTextChanged.ExecuteIfBound(InText);
+
 	if (!IgnoreUIUpdate)
 	{
 		const FString& InputTextStr = TextBox->GetText().ToString();
@@ -372,8 +378,6 @@ void SSuggestionTextBox::HandleTextBoxTextChanged( const FText& InText )
 			ClearSuggestions();
 		}
 	}
-
-	OnTextChanged.ExecuteIfBound(InText);
 }
 
 
@@ -387,5 +391,19 @@ void SSuggestionTextBox::HandleTextBoxTextCommitted( const FText& InText, ETextC
 	if ((CommitInfo == ETextCommit::OnEnter) || (CommitInfo == ETextCommit::OnCleared))
 	{
 		ClearSuggestions();
+	}
+}
+
+
+void SSuggestionTextBox::OnGlobalFocusChanging(const FFocusEvent& FocusEvent, const FWeakWidgetPath& OldFocusedWidgetPath, const TSharedPtr<SWidget>& OldFocusedWidget, const FWidgetPath& NewFocusedWidgetPath, const TSharedPtr<SWidget>& NewFocusedWidget)
+{
+	if (TextBox.IsValid() && OldFocusedWidgetPath.ContainsWidget(TextBox.Get()) && FocusEvent.GetCause() == EFocusCause::Mouse)
+	{
+		// If the textbox has lost focus and the SuggestionList has not gained it, then we assume the user clicked somewhere else in the app and clear the SuggestionList.
+		if (VerticalBox.IsValid() && !NewFocusedWidgetPath.ContainsWidget(VerticalBox.Get()))
+		{
+			ClearSuggestions();
+			OnTextCommitted.ExecuteIfBound(TextBox->GetText(), ETextCommit::Type::OnUserMovedFocus);
+		}
 	}
 }

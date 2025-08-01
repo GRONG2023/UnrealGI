@@ -1,13 +1,16 @@
-// Copyright 2011-2019 Molecular Matters GmbH, all rights reserved.
+// Copyright 2011-2020 Molecular Matters GmbH, all rights reserved.
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "LC_Process.h"
+#include "LC_ProcessTypes.h"
+#include "LC_ThreadTypes.h"
 #include "LC_Executable.h"
 #include "LC_MemoryBlock.h"
+#include "LC_VirtualMemoryRange.h"
+// BEGIN EPIC MOD
 #include "LC_Types.h"
 #include "VisualStudioDTE.h"
+// END EPIC MOD
 
 
 class DuplexPipe;
@@ -16,7 +19,7 @@ class CodeCave;
 class LiveProcess
 {
 public:
-	LiveProcess(process::Handle processHandle, unsigned int processId, unsigned int commandThreadId, const void* jumpToSelf, const DuplexPipe* pipe,
+	LiveProcess(Process::Handle processHandle, Process::Id processId, Thread::Id commandThreadId, const void* jumpToSelf, const DuplexPipe* pipe,
 		const wchar_t* imagePath, const wchar_t* commandLine, const wchar_t* workingDirectory, const void* environment, size_t environmentSize);
 
 	void ReadHeartBeatDelta(const wchar_t* const processGroupName);
@@ -40,21 +43,27 @@ public:
 
 	bool PrepareForRestart(void);
 	void WaitForExitBeforeRestart(void);
+	// BEGIN EPIC MOD
 	void Restart(void* restartJob);
+	// END EPIC MOD
 	bool WasSuccessfulRestart(void) const;
 
 
-	inline process::Handle GetProcessHandle(void) const
+	void ReserveVirtualMemoryPages(void* moduleBase);
+	void FreeVirtualMemoryPages(void* moduleBase);
+
+
+	inline Process::Handle GetProcessHandle(void) const
 	{
 		return m_processHandle;
 	}
 
-	inline unsigned int GetProcessId(void) const
+	inline Process::Id GetProcessId(void) const
 	{
 		return m_processId;
 	}
 
-	inline unsigned int GetCommandThreadId(void) const
+	inline Thread::Id GetCommandThreadId(void) const
 	{
 		return m_commandThreadId;
 	}
@@ -82,16 +91,52 @@ public:
 	// END EPIC MOD
 
 	// BEGIN EPIC MOD - Allow lazy-loading modules
+	struct LazyLoadedModule
+	{
+		Windows::HMODULE m_moduleBase;
+		bool m_loaded;
+	};
+
 	void AddLazyLoadedModule(const std::wstring moduleName, Windows::HMODULE moduleBase);
 	void SetLazyLoadedModuleAsLoaded(const std::wstring moduleName);
 	bool IsPendingLazyLoadedModule(const std::wstring& moduleName) const;
+	const types::unordered_map<std::wstring, LazyLoadedModule>& GetLazyLoadedModules() const { return m_lazyLoadedModules; }
 	Windows::HMODULE GetLazyLoadedModuleBase(const std::wstring& moduleName) const;
 	// END EPIC MOD
 
+	// BEGIN EPIC MOD
+	void SetReinstancingFlow(bool enable)
+	{
+		m_reinstancingFlow = enable;
+	}
+	bool IsReinstancingFlowEnabled() const
+	{
+		return m_reinstancingFlow;
+	}
+	// END EPIC MOD
+
+	// BEGIN EPIC MOD
+	void DisableCompileFinishNotification()
+	{
+		m_disableCompileFinishNotification = true;
+	}
+	bool IsDisableCompileFinishNotification()
+	{
+		return m_disableCompileFinishNotification;
+	}
+	// END EPIC MOD
+
+	// BEGIN EPIC MOD
+	void AddPage(void *page)
+	{
+		m_virtualMemoryRange.AddPage(page);
+	}
+	// END EPIC MOD
+
 private:
-	process::Handle m_processHandle;
-	unsigned int m_processId;
-	unsigned int m_commandThreadId;
+	Process::Handle m_processHandle;
+	Process::Id m_processId;
+	Thread::Id m_commandThreadId;
 	const void* m_jumpToSelf;
 	const DuplexPipe* m_pipe;
 
@@ -105,13 +150,15 @@ private:
 	// END EPIC MOD
 
 	// BEGIN EPIC MOD - Allow lazy-loading modules
-	struct LazyLoadedModule
-	{
-		Windows::HMODULE m_moduleBase;
-		bool m_loaded;
-	};
-
 	types::unordered_map<std::wstring, LazyLoadedModule> m_lazyLoadedModules;
+	// END EPIC MOD
+
+	// BEGIN EPIC MOD
+	bool m_reinstancingFlow = false;
+	// END EPIC MOD
+
+	// BEGIN EPIC MOD
+	bool m_disableCompileFinishNotification = false;
 	// END EPIC MOD
 
 	// loaded modules are not identified by their full path, but by their executable image header.
@@ -121,11 +168,15 @@ private:
 
 	uint64_t m_heartBeatDelta;
 
+// BEGIN EPIC MOD
 #if WITH_VISUALSTUDIO_DTE
+// END EPIC MOD
 	// for handling communication with the VS debugger
 	EnvDTE::DebuggerPtr m_vsDebugger;
 	types::vector<EnvDTE::ThreadPtr> m_vsDebuggerThreads;
+// BEGIN EPIC MOD
 #endif
+// END EPIC MOD
 
 	// fallback in case communication with the VS debugger is not possible
 	CodeCave* m_codeCave;
@@ -144,6 +195,8 @@ private:
 	};
 
 	RestartState::Enum m_restartState;
+
+	VirtualMemoryRange m_virtualMemoryRange;
 
 	LC_DISABLE_COPY(LiveProcess);
 	LC_DISABLE_MOVE(LiveProcess);

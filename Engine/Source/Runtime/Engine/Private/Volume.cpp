@@ -5,8 +5,11 @@
 =============================================================================*/
 
 #include "GameFramework/Volume.h"
-#include "EngineDefines.h"
+#include "Async/TaskGraphInterfaces.h"
 #include "Components/BrushComponent.h"
+#include "UObject/UnrealType.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(Volume)
 
 #if WITH_EDITOR
 /** Define static delegate */
@@ -47,7 +50,9 @@ void AVolume::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent
 	static FName NAME_BrushBuilder(TEXT("BrushBuilder"));
 
 	// The brush builder that created this volume has changed. Notify listeners
-	if( PropertyChangedEvent.ChangeType != EPropertyChangeType::Interactive && PropertyChangedEvent.MemberProperty && PropertyChangedEvent.MemberProperty->GetFName() == NAME_BrushBuilder )
+	// Also notify on null property change events submitted during undo/redo
+	if( PropertyChangedEvent.ChangeType != EPropertyChangeType::Interactive &&
+		((GIsTransacting && !PropertyChangedEvent.MemberProperty) || (PropertyChangedEvent.MemberProperty && PropertyChangedEvent.MemberProperty->GetFName() == NAME_BrushBuilder)) )
 	{
 		OnVolumeShapeChanged.Broadcast(*this);
 	}
@@ -73,7 +78,7 @@ bool AVolume::EncompassesPoint(FVector Point, float SphereRadius/*=0.f*/, float*
 {
 	if (GetBrushComponent())
 	{
-#if WITH_PHYSX
+#if 1
 		FVector ClosestPoint;
 		float DistanceSqr;
 
@@ -118,6 +123,7 @@ bool AVolume::IsVolumeBrush() const
 {
 	return true;
 }
+
 
 
 

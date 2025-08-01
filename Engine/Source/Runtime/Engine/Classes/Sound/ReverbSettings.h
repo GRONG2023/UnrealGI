@@ -15,7 +15,7 @@ class USoundEffectSubmixPreset;
  *
  */
 UENUM()
-enum ReverbPreset
+enum ReverbPreset : int
 {
 	REVERB_Default,
 	REVERB_Bathroom,
@@ -61,13 +61,13 @@ struct FReverbSettings
 
 	/** The reverb asset to employ. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=ReverbSettings)
-	UReverbEffect* ReverbEffect;
+	TObjectPtr<UReverbEffect> ReverbEffect;
 
 	/** This is used to apply plugin-specific settings when a Reverb Plugin is being used. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = ReverbSettings)
-	USoundEffectSubmixPreset* ReverbPluginEffect;
+	TObjectPtr<USoundEffectSubmixPreset> ReverbPluginEffect;
 
-	/** Volume level of the reverb affect. */
+	/** Volume level of the reverb effect. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = ReverbSettings)
 	float Volume;
 
@@ -87,11 +87,11 @@ struct FReverbSettings
 	{
 	}
 
-	bool operator==(const FReverbSettings& Other) const;
+	ENGINE_API bool operator==(const FReverbSettings& Other) const;
 	bool operator!=(const FReverbSettings& Other) const { return !(*this == Other); }
 
 #if WITH_EDITORONLY_DATA
-	void PostSerialize(const FArchive& Ar);
+	ENGINE_API void PostSerialize(const FArchive& Ar);
 #endif // WITH_EDITORONLY_DATA
 };
 

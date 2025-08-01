@@ -9,6 +9,7 @@
 #include "CoreMinimal.h"
 #include "ProfilingDebugging/ResourceSize.h"
 #include "RenderResource.h"
+#include "RayTracingGeometry.h"
 #include "LocalVertexFactory.h"
 #include "Components/SkinnedMeshComponent.h"
 #include "SkeletalRenderPublic.h"
@@ -24,7 +25,7 @@ class UMorphTarget;
 * Stores the updated matrices needed to skin the verts.
 * Created by the game thread and sent to the rendering thread as an update 
 */
-class ENGINE_API FDynamicSkelMeshObjectDataCPUSkin
+class FDynamicSkelMeshObjectDataCPUSkin
 {
 public:
 
@@ -36,23 +37,21 @@ public:
 	* @param	InActiveMorphTargets - Active Morph Targets to blend with during skinning
 	* @param	InMorphTargetWeights - All Morph Target weights to blend with during skinning
 	*/
-	FDynamicSkelMeshObjectDataCPUSkin(
+	ENGINE_API FDynamicSkelMeshObjectDataCPUSkin(
 		USkinnedMeshComponent* InMeshComponent,
 		FSkeletalMeshRenderData* InSkelMeshRenderData,
 		int32 InLODIndex,
-		const TArray<FActiveMorphTarget>& InActiveMorphTargets,
+		const FMorphTargetWeightMap& InActiveMorphTargets,
 		const TArray<float>& InMorphTargetWeights
 		);
 
-	virtual ~FDynamicSkelMeshObjectDataCPUSkin()
-	{
-	}
+	ENGINE_API virtual ~FDynamicSkelMeshObjectDataCPUSkin();
 
 	/** Local to world transform, used for cloth as sim data is in world space */
 	FMatrix WorldToLocal;
 
 	/** ref pose to local space transforms */
-	TArray<FMatrix> ReferenceToLocal;
+	TArray<FMatrix44f> ReferenceToLocal;
 
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST) 
 	/** component space bone transforms*/
@@ -61,7 +60,7 @@ public:
 	/** currently LOD for bones being updated */
 	int32 LODIndex;
 	/** Morphs to blend when skinning verts */
-	TArray<FActiveMorphTarget> ActiveMorphTargets;
+	FMorphTargetWeightMap ActiveMorphTargets;
 	/** Morph Weights to blend when skinning verts */
 	TArray<float> MorphTargetWeights;
 
@@ -81,31 +80,39 @@ public:
  	}
 
 	/** Update Simulated Positions & Normals from Clothing actor */
-	bool UpdateClothSimulationData(USkinnedMeshComponent* InMeshComponent);
+	UE_DEPRECATED(5.2, "Use USkinnedMeshComponent::GetUpdateClothSimulationData_AnyThread() instead.")
+	ENGINE_API bool UpdateClothSimulationData(USkinnedMeshComponent* InMeshComponent);
 };
 
 /**
  * Render data for a CPU skinned mesh
  */
-class ENGINE_API FSkeletalMeshObjectCPUSkin : public FSkeletalMeshObject
+class FSkeletalMeshObjectCPUSkin : public FSkeletalMeshObject
 {
 public:
 
 	/** @param	InSkeletalMeshComponent - skeletal mesh primitive we want to render */
-	FSkeletalMeshObjectCPUSkin(USkinnedMeshComponent* InMeshComponent, FSkeletalMeshRenderData* InSkelMeshRenderData, ERHIFeatureLevel::Type InFeatureLevel);
-	virtual ~FSkeletalMeshObjectCPUSkin();
+	ENGINE_API FSkeletalMeshObjectCPUSkin(USkinnedMeshComponent* InMeshComponent, FSkeletalMeshRenderData* InSkelMeshRenderData, ERHIFeatureLevel::Type InFeatureLevel);
+	ENGINE_API virtual ~FSkeletalMeshObjectCPUSkin();
 
 	//~ Begin FSkeletalMeshObject Interface
-	virtual void InitResources(USkinnedMeshComponent* InMeshComponent) override;
-	virtual void ReleaseResources() override;
-	virtual void Update(int32 LODIndex,USkinnedMeshComponent* InMeshComponent,const TArray<FActiveMorphTarget>& ActiveMorphTargets, const TArray<float>& MorphTargetsWeights, EPreviousBoneTransformUpdateMode PreviousBoneTransformUpdateMode) override;
-	void UpdateDynamicData_RenderThread(FRHICommandListImmediate& RHICmdList, FDynamicSkelMeshObjectDataCPUSkin* InDynamicData, uint32 FrameNumberToPrepare, uint32 RevisionNumber);
-	virtual void EnableOverlayRendering(bool bEnabled, const TArray<int32>* InBonesOfInterest, const TArray<UMorphTarget*>* InMorphTargetOfInterest) override;
-	virtual void CacheVertices(int32 LODIndex, bool bForce) const override;
+	ENGINE_API virtual void InitResources(USkinnedMeshComponent* InMeshComponent) override;
+	ENGINE_API virtual void ReleaseResources() override;
+	ENGINE_API virtual void Update(int32 LODIndex,USkinnedMeshComponent* InMeshComponent,const FMorphTargetWeightMap& InActiveMorphTargets, const TArray<float>& MorphTargetsWeights, EPreviousBoneTransformUpdateMode PreviousBoneTransformUpdateMode, const FExternalMorphWeightData& InExternalMorphWeightData) override;
+	ENGINE_API void UpdateDynamicData_RenderThread(FRHICommandList& RHICmdList, FDynamicSkelMeshObjectDataCPUSkin* InDynamicData, uint64 FrameNumberToPrepare, uint32 RevisionNumber);
+	ENGINE_API virtual void EnableOverlayRendering(bool bEnabled, const TArray<int32>* InBonesOfInterest, const TArray<UMorphTarget*>* InMorphTargetOfInterest) override;
 	virtual bool IsCPUSkinned() const override { return true; }
-	virtual const FVertexFactory* GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx) const override;
-	virtual TArray<FTransform>* GetComponentSpaceTransforms() const override;
-	virtual const TArray<FMatrix>& GetReferenceToLocalMatrices() const override;
+	ENGINE_API virtual const FVertexFactory* GetSkinVertexFactory(const FSceneView* View, int32 LODIndex, int32 ChunkIdx, ESkinVertexFactoryMode VFMode = ESkinVertexFactoryMode::Default) const override;
+	ENGINE_API virtual TArray<FTransform>* GetComponentSpaceTransforms() const override;
+	ENGINE_API virtual const TArray<FMatrix44f>& GetReferenceToLocalMatrices() const override;
+
+	/**
+	 * Re-skin cached vertices for an LOD and update the vertex buffer. Note that this
+	 * function is called from the render thread!
+	 * @param	LODIndex - index to LODs
+	 * @param	bForce - force update even if LOD index hasn't changed
+	 */
+	ENGINE_API void CacheVertices(int32 LODIndex, bool bForce, FRHICommandList& RHICmdList) const;
 
 	virtual int32 GetLOD() const override
 	{
@@ -119,7 +126,7 @@ public:
 		}
 	}
 
-	virtual bool HaveValidDynamicData() override
+	virtual bool HaveValidDynamicData() const override
 	{ 
 		return ( DynamicData!=NULL ); 
 	}
@@ -145,14 +152,14 @@ public:
 		CumulativeResourceSize.AddDedicatedSystemMemoryBytes(BonesOfInterest.GetAllocatedSize());
 	}
 
-	virtual void DrawVertexElements(FPrimitiveDrawInterface* PDI, const FMatrix& ToWorldSpace, bool bDrawNormals, bool bDrawTangents, bool bDrawBinormals) const override;
+	ENGINE_API virtual void DrawVertexElements(FPrimitiveDrawInterface* PDI, const FMatrix& ToWorldSpace, bool bDrawNormals, bool bDrawTangents, bool bDrawBinormals) const override;
 	//~ End FSkeletalMeshObject Interface
 
 	/** Access cached final vertices */
 	const TArray<FFinalSkinVertex>& GetCachedFinalVertices() const { return CachedFinalVertices; }
 
 
-	virtual void UpdateSkinWeightBuffer(USkinnedMeshComponent* InMeshComponent) override;
+	ENGINE_API virtual void UpdateSkinWeightBuffer(USkinnedMeshComponent* InMeshComponent) override;
 
 private:
 	/** vertex data for rendering a single LOD */

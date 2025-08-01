@@ -2,27 +2,30 @@
 
 #pragma once
 
-#include "Engine.h"
+#include "Analysis/Engine.h"
 #include "HAL/Runnable.h"
+#include "Logging/MessageLog.h"
+#include "Trace/Analysis.h"
 
 class FEvent;
 class FRunnableThread;
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 ////////////////////////////////////////////////////////////////////////////////
 class FAnalysisProcessor::FImpl
 	: public FRunnable
 {
 public:
-						FImpl(IInDataStream& DataStream, TArray<IAnalyzer*>&& InAnalyzers);
+						FImpl(IInDataStream& DataStream, TArray<IAnalyzer*>&& InAnalyzers, FMessageDelegate&& InMessage);
 						~FImpl();
 	virtual uint32		Run() override;
 	bool				IsActive() const;
 	void				StopAnalysis();
 	void				WaitOnAnalysis();
 	void				PauseAnalysis(bool bState);
+	FMessageLog*		GetLog();
 
 private:
 	FAnalysisEngine		AnalysisEngine;
@@ -34,3 +37,4 @@ private:
 };
 
 } // namespace Trace
+} // namespace UE

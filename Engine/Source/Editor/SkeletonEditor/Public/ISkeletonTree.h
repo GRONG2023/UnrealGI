@@ -48,21 +48,14 @@ struct FSkeletonTreeArgs
 		, ContextName(TEXT("SkeletonTree"))
 		, bShowBlendProfiles(true)
 		, bShowFilterMenu(true)
+		, bShowDebugVisualizationOptions(false)
 		, bAllowMeshOperations(true)
 		, bAllowSkeletonOperations(true)
 		, bHideBonesByDefault(false)
 	{}
 
-	PRAGMA_DISABLE_DEPRECATION_WARNINGS
-	~FSkeletonTreeArgs()
-	{}
-	PRAGMA_ENABLE_DEPRECATION_WARNINGS
-
 	/** Delegate called by the tree when a socket is selected */
 	FOnSkeletonTreeSelectionChanged OnSelectionChanged;
-
-	UE_DEPRECATED(4.17, "Please use OnSelectionChanged")
-	FOnObjectSelected OnObjectSelected;
 
 	/** Delegate that allows custom filtering text to be shown on the filter button */
 	FOnGetFilterText OnGetFilterText;
@@ -88,6 +81,9 @@ struct FSkeletonTreeArgs
 	/** Whether to show the filter menu to allow filtering of active bones, sockets etc. */
 	bool bShowFilterMenu;
 
+	/** Whether to show the filter option to allow filtering of debug draw elements in the viewport. */
+	bool bShowDebugVisualizationOptions;
+
 	/** Whether to allow operations that modify the mesh */
 	bool bAllowMeshOperations;
 
@@ -107,7 +103,10 @@ public:
 		static const FName Name;
 		static const FName Retargeting;
 		static const FName BlendProfile;
+		static const FName DebugVisualization;
 	};
+
+	static const FName DebugVisualizationOptionsName() { return Columns::DebugVisualization; };
 
 	/** Manually refresh the tree */
 	virtual void Refresh() = 0;
@@ -163,11 +162,4 @@ public:
 
 	/** Get the pinned commands widget, if any, for this tree */
 	virtual TSharedPtr<IPinnedCommandList> GetPinnedCommandList() const = 0;
-
-	UE_DEPRECATED(4.17, "Please use RegisterOnSelectionChanged")
-	virtual void RegisterOnObjectSelected(const FOnObjectSelected& Delegate) = 0;
-
-	UE_DEPRECATED(4.17, "Please use UnregisterOnSelectionChanged")
-	virtual void UnregisterOnObjectSelected(SWidget* Widget) = 0;
-
 };

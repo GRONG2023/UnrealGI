@@ -17,9 +17,9 @@
 
 
 // From MetalPipeline.cpp:
-extern FMetalShaderPipeline* GetMTLRenderPipeline(bool const bSync, FMetalGraphicsPipelineState const* State, const FGraphicsPipelineStateInitializer& Init, EMetalIndexType const IndexType);
-extern void ReleaseMTLRenderPipeline(FMetalShaderPipeline* Pipeline);
+extern FMetalShaderPipelinePtr GetMTLRenderPipeline(bool const bSync, FMetalGraphicsPipelineState const* State, const FGraphicsPipelineStateInitializer& Init);
 
+extern void ReleaseMTLRenderPipeline(FMetalShaderPipelinePtr Pipeline);
 
 //------------------------------------------------------------------------------
 
@@ -28,46 +28,34 @@ extern void ReleaseMTLRenderPipeline(FMetalShaderPipeline* Pipeline);
 
 FMetalGraphicsPipelineState::FMetalGraphicsPipelineState(const FGraphicsPipelineStateInitializer& Init)
 	: Initializer(Init)
+	, PipelineState(nullptr)
 {
 	// void
 }
 
 bool FMetalGraphicsPipelineState::Compile()
 {
-	FMemory::Memzero(PipelineStates);
-
-	for (uint32 i = 0; i < EMetalIndexType_Num; i++)
-	{
-		PipelineStates[i] = [GetMTLRenderPipeline(true, this, Initializer, (EMetalIndexType)i) retain];
-		if(!PipelineStates[i])
-		{
-			return false;
-		}
-	}
-
-	return true;
+	check(PipelineState == nullptr);
+	PipelineState = GetMTLRenderPipeline(true, this, Initializer);
+	return (PipelineState != nullptr);
 }
 
 FMetalGraphicsPipelineState::~FMetalGraphicsPipelineState()
 {
-	for (uint32 i = 0; i < EMetalIndexType_Num; i++)
+	if (PipelineState != nullptr)
 	{
-		ReleaseMTLRenderPipeline(PipelineStates[i]);
-		PipelineStates[i] = nil;
+		ReleaseMTLRenderPipeline(PipelineState);
+		PipelineState = nullptr;
 	}
 }
 
-FMetalShaderPipeline* FMetalGraphicsPipelineState::GetPipeline(EMetalIndexType IndexType)
+FMetalShaderPipelinePtr FMetalGraphicsPipelineState::GetPipeline()
 {
-	check(IndexType < EMetalIndexType_Num);
-
-	if (!PipelineStates[IndexType])
+	if (PipelineState == nullptr)
 	{
-		PipelineStates[IndexType] = [GetMTLRenderPipeline(true, this, Initializer, IndexType) retain];
+		PipelineState = GetMTLRenderPipeline(true, this, Initializer);
+		check(PipelineState != nullptr);
 	}
 
-	FMetalShaderPipeline* Pipe = PipelineStates[IndexType];
-	check(Pipe);
-
-    return Pipe;
+    return PipelineState;
 }

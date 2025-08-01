@@ -1,18 +1,39 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "SaveLayoutDialog.h"
-#include "EditorStyleSet.h"
+#include "Menus/SaveLayoutDialog.h"
+
 #include "Framework/Application/SlateApplication.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformCrt.h"
+#include "HAL/PlatformMisc.h"
+#include "Input/Reply.h"
 #include "Interfaces/IMainFrameModule.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/Visibility.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/Attribute.h"
+#include "Misc/Char.h"
 #include "Misc/FileHelper.h"
 #include "Misc/MessageDialog.h"
-#include "SlateOptMacros.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "SPrimaryButton.h"
+#include "SlotBase.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Types/SlateEnums.h"
+#include "Types/SlateStructs.h"
+#include "UObject/NameTypes.h"
 #include "Widgets/DeclarativeSyntaxSupport.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SGridPanel.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/SCompoundWidget.h"
+#include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 
 #define LOCTEXT_NAMESPACE "SaveLayoutDialog"
@@ -121,7 +142,7 @@ bool FSaveLayoutDialogUtils::OverrideLayoutDialog(const FString& LayoutIniFileNa
 	const FText TextBody = FText::Format(
 		LOCTEXT("ActionOverrideLayoutMsg", "Are you sure you want to permanently override the layout profile \"{0}\" with the current layout profile? This action cannot be undone."), TextFileNameToRemove);
 	const FText TextTitle = FText::Format(LOCTEXT("OverrideUILayout_Title", "Override UI Layout \"{0}\"?"), TextFileNameToRemove);
-	return (EAppReturnType::Ok == FMessageDialog::Open(EAppMsgType::OkCancel, TextBody, &TextTitle));
+	return (EAppReturnType::Ok == FMessageDialog::Open(EAppMsgType::OkCancel, TextBody, TextTitle));
 }
 
 bool FSaveLayoutDialogUtils::CreateSaveLayoutAsDialogInStandaloneWindow(const TSharedRef<FSaveLayoutDialogParams>& InSaveLayoutDialogParams)
@@ -130,11 +151,11 @@ bool FSaveLayoutDialogUtils::CreateSaveLayoutAsDialogInStandaloneWindow(const TS
 	TSharedRef<SSaveLayoutDialog> SaveLayoutDialog = SNew(SSaveLayoutDialog, InSaveLayoutDialogParams);
 
 	// Create SWindow that contains SSaveLayoutDialog
-	const FVector2D WindowSize(720.f, 130.f);
 	TSharedRef<SWindow> DialogWindow =
 		SNew(SWindow)
 		.Title(LOCTEXT("GenericAssetDialogWindowHeader", "Save Layout As"))
-		.ClientSize(WindowSize);
+		.SizingRule(ESizingRule::Autosized);
+
 	DialogWindow->SetContent(SaveLayoutDialog);
 
 	// Launch SSaveLayoutDialog and block thread until user finishes with it
@@ -162,7 +183,6 @@ SSaveLayoutDialog::~SSaveLayoutDialog()
 {
 }
 
-BEGIN_SLATE_FUNCTION_BUILD_OPTIMIZATION
 void SSaveLayoutDialog::Construct(const FArguments& InArgs, const TSharedRef<FSaveLayoutDialogParams>& InSaveLayoutDialogParams)
 {
 	SaveLayoutDialogParams = InSaveLayoutDialogParams;
@@ -183,135 +203,104 @@ void SSaveLayoutDialog::Construct(const FArguments& InArgs, const TSharedRef<FSa
 		CurrentlyEnteredLayoutDescription = SaveLayoutDialogParams->LayoutDescriptions[0];
 	}
 
-	// UI part
-	// The root SWidget in this dialog
-	TSharedRef<SVerticalBox> MainVerticalBox = SNew(SVerticalBox);
-	TSharedRef<SVerticalBox> LabelsBox = SNew(SVerticalBox);
-	TSharedRef<SVerticalBox> ContentBox = SNew(SVerticalBox);
-
-	// Layout Name
-	LabelsBox->AddSlot()
-		.FillHeight(1)
-		.VAlign(VAlign_Center)
-		.Padding(0, 3.625f, 0, 3.625f)
-		[
-			SNew(STextBlock).Text(LOCTEXT("LayoutNameBoxLabel", "Name:"))
-		];
-	ContentBox->AddSlot()
-		.FillHeight(1)
-		.VAlign(VAlign_Center)
-		.Padding(0, 2.f, 0, 2.f)
-		[
-			SNew(SEditableTextBox)
-			.Text(CurrentlyEnteredLayoutName)
-			.OnTextCommitted(this, &SSaveLayoutDialog::OnLayoutNameTextCommited)
-			.OnTextChanged(this, &SSaveLayoutDialog::OnLayoutNameTextCommited, ETextCommit::Default)
-			.SelectAllTextWhenFocused(true)
-		];
-
-	// Layout Description
-	LabelsBox->AddSlot()
-		.FillHeight(1)
-		.VAlign(VAlign_Center)
-		.Padding(0, 3.625f, 0, 3.625f)
-		[
-			SNew(STextBlock).Text(LOCTEXT("LayoutDescriptionBoxLabel", "Description (Optional):"))
-		];
-	ContentBox->AddSlot()
-		.FillHeight(1)
-		.VAlign(VAlign_Center)
-		.Padding(0, 2.f, 0, 2.f)
-		[
-			SNew(SEditableTextBox)
-			.Text(CurrentlyEnteredLayoutDescription)
-			.OnTextCommitted(this, &SSaveLayoutDialog::OnLayoutDescriptionTextCommited)
-			.OnTextChanged(this, &SSaveLayoutDialog::OnLayoutDescriptionTextCommited, ETextCommit::Default)
-			.SelectAllTextWhenFocused(true)
-		];
-
-	// Buttons and asset name
-	TSharedRef<SHorizontalBox> LabelAndContentBox = SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.HAlign(HAlign_Right)
-		.VAlign(VAlign_Bottom)
-		.Padding(30, 30, 4, 3)
-		[
-			LabelsBox
-		]
-		+ SHorizontalBox::Slot()
-		.FillWidth(1)
-		.VAlign(VAlign_Bottom)
-		.Padding(4, 3, 30, 4)
-		[
-			ContentBox
-		];
-	MainVerticalBox->AddSlot()
-		.AutoHeight()
-		.HAlign(HAlign_Fill)
-		.Padding(0)
-		[
-			LabelAndContentBox
-		];
-
-	// Name Error label
-	MainVerticalBox->AddSlot()
-	.AutoHeight()
+	ChildSlot
 	[
-		// Constant height, whether the label is visible or not
-		SNew(SBox).HeightOverride(20)
+		SNew(SBorder)
+		.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
+		.Padding(16.0f)
 		[
-			SNew(SBorder)
-			.Visibility( this, &SSaveLayoutDialog::GetNameErrorLabelVisibility )
-			.BorderImage( FEditorStyle::GetBrush("AssetDialog.ErrorLabelBorder") )
-			.Content()
+			SNew(SBox)
+			.WidthOverride(600.f)
 			[
-				SNew(STextBlock)
-				.Text( this, &SSaveLayoutDialog::GetNameErrorLabelText )
-				.ToolTipText(this, &SSaveLayoutDialog::GetNameErrorLabelText)
-				.TextStyle( FEditorStyle::Get(), "AssetDialog.ErrorLabelFont" )
+				// Layout Name
+				SNew(SVerticalBox)
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					SNew(SGridPanel)
+					.FillColumn(1, 1.0f)
+					+SGridPanel::Slot(0,0)
+					.HAlign(HAlign_Right)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("LayoutNameBoxLabel", "Name"))
+						.Margin(FMargin(0, 0, 8, 8))
+					]
+					+SGridPanel::Slot(0,1)
+					.HAlign(HAlign_Right)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Text(LOCTEXT("LayoutDescriptionBoxLabel", "Description"))
+						.Margin(FMargin(0, 0, 8, 8))
+					]
+					+SGridPanel::Slot(1,0)
+					.Padding(0, 0, 0, 8)
+					[
+						SNew(SEditableTextBox)
+						.Text(CurrentlyEnteredLayoutName)
+						.OnTextCommitted(this, &SSaveLayoutDialog::OnLayoutNameTextCommited)
+						.OnTextChanged(this, &SSaveLayoutDialog::OnLayoutNameTextCommited, ETextCommit::Default)
+						.SelectAllTextWhenFocused(true)
+					]
+					+SGridPanel::Slot(1,1)
+					.Padding(0, 0, 0, 8)
+					[
+						SNew(SEditableTextBox)
+						.Text(CurrentlyEnteredLayoutDescription)
+						.HintText(LOCTEXT("LayoutDescriptionInputBoxHintText", "Optional"))
+						.OnTextCommitted(this, &SSaveLayoutDialog::OnLayoutDescriptionTextCommited)
+						.OnTextChanged(this, &SSaveLayoutDialog::OnLayoutDescriptionTextCommited, ETextCommit::Default)
+						.SelectAllTextWhenFocused(true)
+					]
+				]
+				+ SVerticalBox::Slot()
+				.AutoHeight()
+				[
+					// Constant height, whether the label is visible or not
+					SNew(SBox)
+					.HeightOverride(20.f)
+					[
+						SNew(SBorder)
+						.Visibility( this, &SSaveLayoutDialog::GetNameErrorLabelVisibility )
+						.BorderImage( FAppStyle::GetBrush("AssetDialog.ErrorLabelBorder") )
+						.Content()
+						[
+							SNew(STextBlock)
+							.Text( this, &SSaveLayoutDialog::GetNameErrorLabelText )
+							.ToolTipText(this, &SSaveLayoutDialog::GetNameErrorLabelText)
+						]
+					]
+				]
+				+ SVerticalBox::Slot()
+				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Bottom)
+				[
+					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Bottom)
+					.Padding(0,0,8,0)
+					[
+						SNew(SPrimaryButton)
+						.Text(LOCTEXT("SaveLayoutDialogSaveButton", "Save"))
+						.IsEnabled(this, &SSaveLayoutDialog::IsConfirmButtonEnabled)
+						.OnClicked(this, &SSaveLayoutDialog::OnConfirmClicked)
+					]
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					.VAlign(VAlign_Bottom)
+					[
+						SNew(SButton)
+						.Text(LOCTEXT("SaveLayoutDialogCancelButton", "Cancel"))
+						.OnClicked(this, &SSaveLayoutDialog::OnCancelClicked)
+					]
+				]
 			]
 		]
 	];
-
-	// Buttons
-	TSharedRef<SHorizontalBox> ButtonBox = SNew(SHorizontalBox)
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.VAlign(VAlign_Bottom)
-		.Padding(4, 3)
-		[
-			SNew(SButton)
-			.Text(LOCTEXT("SaveLayoutDialogSaveButton", "Save"))
-			.ContentPadding(FMargin(8, 2, 8, 2))
-			.IsEnabled(this, &SSaveLayoutDialog::IsConfirmButtonEnabled)
-			.OnClicked(this, &SSaveLayoutDialog::OnConfirmClicked)
-		]
-		+ SHorizontalBox::Slot()
-		.AutoWidth()
-		.VAlign(VAlign_Bottom)
-		.Padding(4, 3)
-		[
-			SNew(SButton)
-			.ContentPadding(FMargin(8, 2, 8, 2))
-			.Text(LOCTEXT("SaveLayoutDialogCancelButton", "Cancel"))
-			.OnClicked(this, &SSaveLayoutDialog::OnCancelClicked)
-		];
-	MainVerticalBox->AddSlot()
-		.HAlign(HAlign_Right)
-		.VAlign(VAlign_Bottom)
-		.Padding(0, 0, 5, 5)
-		[
-			ButtonBox
-		];
-
-	// Add to ChildSlot
-	ChildSlot
-	[
-		MainVerticalBox
-	];
 }
-END_SLATE_FUNCTION_BUILD_OPTIMIZATION
 
 FText SSaveLayoutDialog::GetFileNameText() const
 {
@@ -368,6 +357,14 @@ FReply SSaveLayoutDialog::OnConfirmClicked()
 FReply SSaveLayoutDialog::OnCancelClicked()
 {
 	bLastInputValidityCheckSuccessful = false;
+	if (SaveLayoutDialogParams.IsValid())
+	{
+		SaveLayoutDialogParams->bWereFilesSelected = false;
+		SaveLayoutDialogParams->LayoutFilePaths.Empty();
+		SaveLayoutDialogParams->LayoutNames.Empty();
+		SaveLayoutDialogParams->LayoutDescriptions.Empty();
+	}
+	
 	CloseDialog();
 	return FReply::Handled();
 }

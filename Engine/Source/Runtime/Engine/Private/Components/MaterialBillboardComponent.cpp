@@ -1,32 +1,29 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Components/MaterialBillboardComponent.h"
-#include "EngineGlobals.h"
-#include "RHI.h"
-#include "RenderResource.h"
-#include "VertexFactory.h"
-#include "PackedNormal.h"
-#include "LocalVertexFactory.h"
 #include "PrimitiveViewRelevance.h"
 #include "Materials/MaterialInterface.h"
 #include "PrimitiveSceneProxy.h"
 #include "Engine/CollisionProfile.h"
 #include "Curves/CurveFloat.h"
+#include "SceneInterface.h"
 #include "SceneManagement.h"
 #include "Engine/Engine.h"
-#include "Engine/LevelStreaming.h"
-#include "LevelUtils.h"
 #include "PrimitiveSceneProxy.h"
 #include "StaticMeshResources.h"
+#include "PSOPrecache.h"
+#include "DataDrivenShaderPlatformInfo.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(MaterialBillboardComponent)
 
 /** A material sprite vertex. */
 struct FMaterialSpriteVertex
 {
-	FVector Position;
+	FVector3f Position;
 	FPackedNormal TangentX;
 	FPackedNormal TangentZ;
 	FColor Color;
-	FVector2D TexCoords;
+	FVector2f TexCoords;
 };
 
 /** A dummy vertex buffer used to give the FMaterialSpriteVertexFactory something to reference as a stream source. */
@@ -34,10 +31,10 @@ class FMaterialSpriteVertexBuffer : public FVertexBuffer
 {
 public:
 
-	virtual void InitRHI() override
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override
 	{
-		FRHIResourceCreateInfo CreateInfo;
-		VertexBufferRHI = RHICreateVertexBuffer(sizeof(FMaterialSpriteVertex),BUF_Static,CreateInfo);
+		FRHIResourceCreateInfo CreateInfo(TEXT("FMaterialSpriteVertexBuffer"));
+		VertexBufferRHI = RHICmdList.CreateVertexBuffer(sizeof(FMaterialSpriteVertex),BUF_Static,CreateInfo);
 	}
 };
 static TGlobalResource<FMaterialSpriteVertexBuffer> GDummyMaterialSpriteVertexBuffer;
@@ -65,19 +62,6 @@ public:
 	, BaseColor(FColor::White)
 	, VertexFactory(GetScene().GetFeatureLevel(), "FMaterialSpriteSceneProxy")
 	{
-		AActor* Owner = InComponent->GetOwner();
-		if (Owner)
-		{
-			// Level colorization
-			ULevel* Level = Owner->GetLevel();
-			ULevelStreaming* LevelStreaming = FLevelUtils::FindStreamingLevel( Level );
-			if ( LevelStreaming )
-			{
-				// Selection takes priority over level coloration.
-				SetLevelColor(LevelStreaming->LevelColor);
-			}
-		}
-
 		for (int32 ElementIndex = 0; ElementIndex < Elements.Num(); ElementIndex++)
 		{
 			UMaterialInterface* Material = Elements[ElementIndex].Material;
@@ -87,10 +71,6 @@ public:
 			}
 		}
 
-		FColor NewPropertyColor;
-		GEngine->GetPropertyColorationColor( (UObject*)InComponent, NewPropertyColor );
-		SetPropertyColor(NewPropertyColor);
-
 		StaticMeshVertexBuffers.PositionVertexBuffer.Init(1);
 		StaticMeshVertexBuffers.StaticMeshVertexBuffer.Init(1, 1);
 		StaticMeshVertexBuffers.ColorVertexBuffer.Init(1);
@@ -99,9 +79,9 @@ public:
 		ENQUEUE_RENDER_COMMAND(FMaterialSpriteSceneProxyInit)(
 			[Self](FRHICommandListImmediate& RHICmdList)
 		{
-			Self->StaticMeshVertexBuffers.PositionVertexBuffer.InitResource();
-			Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.InitResource();
-			Self->StaticMeshVertexBuffers.ColorVertexBuffer.InitResource();
+			Self->StaticMeshVertexBuffers.PositionVertexBuffer.InitResource(RHICmdList);
+			Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.InitResource(RHICmdList);
+			Self->StaticMeshVertexBuffers.ColorVertexBuffer.InitResource(RHICmdList);
 
 			FLocalVertexFactory::FDataType Data;
 			Self->StaticMeshVertexBuffers.PositionVertexBuffer.BindPositionVertexBuffer(&Self->VertexFactory, Data);
@@ -109,9 +89,9 @@ public:
 			Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindPackedTexCoordVertexBuffer(&Self->VertexFactory, Data);
 			Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindLightMapVertexBuffer(&Self->VertexFactory, Data, 0);
 			Self->StaticMeshVertexBuffers.ColorVertexBuffer.BindColorVertexBuffer(&Self->VertexFactory, Data);
-			Self->VertexFactory.SetData(Data);
+			Self->VertexFactory.SetData(RHICmdList, Data);
 
-			Self->VertexFactory.InitResource();
+			Self->VertexFactory.InitResource(RHICmdList);
 		});
 	}
 
@@ -194,20 +174,20 @@ public:
 							{
 								const int WriteIndex = WriteOffset + VertexIndex;
 								// correct TBN of billboard by ViewToLocal, notice that we use -TangentX
-								StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(WriteIndex, -TangentX, TangentY, TangentZ);
+								StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexTangents(WriteIndex, (FVector3f)-TangentX, (FVector3f)TangentY, (FVector3f)TangentZ);
 								StaticMeshVertexBuffers.ColorVertexBuffer.VertexColor(WriteIndex) = Color.ToFColor(true);
 							}
 
 							// Set up the sprite vertex positions and texture coordinates.
-							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 0) = -WorldSizeX * TangentY + +WorldSizeY * TangentX;
-							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 1) = +WorldSizeX * TangentY + +WorldSizeY * TangentX;
-							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 2) = -WorldSizeX * TangentY + -WorldSizeY * TangentX;
-							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 3) = +WorldSizeX * TangentY + -WorldSizeY * TangentX;
+							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 0) = FVector3f(-WorldSizeX * TangentY + +WorldSizeY * TangentX);
+							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 1) = FVector3f(+WorldSizeX * TangentY + +WorldSizeY * TangentX);
+							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 2) = FVector3f(-WorldSizeX * TangentY + -WorldSizeY * TangentX);
+							StaticMeshVertexBuffers.PositionVertexBuffer.VertexPosition(WriteOffset + 3) = FVector3f(+WorldSizeX * TangentY + -WorldSizeY * TangentX);
 
-							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 0, 0, FVector2D(0, 0));
-							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 1, 0, FVector2D(0, 1));
-							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 2, 0, FVector2D(1, 0));
-							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 3, 0, FVector2D(1, 1));
+							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 0, 0, FVector2f(0, 0));
+							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 1, 0, FVector2f(0, 1));
+							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 2, 0, FVector2f(1, 0));
+							StaticMeshVertexBuffers.StaticMeshVertexBuffer.SetVertexUV(WriteOffset + 3, 0, FVector2f(1, 1));
 
 							// Set up the FMeshElement.
 							FMeshBatch& Mesh = Collector.AllocateMesh();
@@ -240,24 +220,19 @@ public:
 			}
 
 			FLocalVertexFactory* VertexFactoryPtr = &VertexFactory;
-			const FMaterialSpriteSceneProxy* Self = this;
-			ENQUEUE_RENDER_COMMAND(FMaterialSpriteSceneProxyLegacyInit)(
-				[VertexFactoryPtr, Self](FRHICommandListImmediate& RHICmdList)
-			{
-				Self->StaticMeshVertexBuffers.PositionVertexBuffer.UpdateRHI();
-				Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.UpdateRHI();
-				Self->StaticMeshVertexBuffers.ColorVertexBuffer.UpdateRHI();
+			FRHICommandListBase& RHICmdList = Collector.GetRHICommandList();
 
-				FLocalVertexFactory::FDataType Data;
-				Self->StaticMeshVertexBuffers.PositionVertexBuffer.BindPositionVertexBuffer(VertexFactoryPtr, Data);
-				Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindTangentVertexBuffer(VertexFactoryPtr, Data);
-				Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindPackedTexCoordVertexBuffer(VertexFactoryPtr, Data);
-				Self->StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindLightMapVertexBuffer(VertexFactoryPtr, Data, 0);
-				Self->StaticMeshVertexBuffers.ColorVertexBuffer.BindColorVertexBuffer(VertexFactoryPtr, Data);
-				VertexFactoryPtr->SetData(Data);
+			StaticMeshVertexBuffers.PositionVertexBuffer.UpdateRHI(RHICmdList);
+			StaticMeshVertexBuffers.StaticMeshVertexBuffer.UpdateRHI(RHICmdList);
+			StaticMeshVertexBuffers.ColorVertexBuffer.UpdateRHI(RHICmdList);
 
-				VertexFactoryPtr->UpdateRHI();
-			});
+			FLocalVertexFactory::FDataType Data;
+			StaticMeshVertexBuffers.PositionVertexBuffer.BindPositionVertexBuffer(VertexFactoryPtr, Data);
+			StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindTangentVertexBuffer(VertexFactoryPtr, Data);
+			StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindPackedTexCoordVertexBuffer(VertexFactoryPtr, Data);
+			StaticMeshVertexBuffers.StaticMeshVertexBuffer.BindLightMapVertexBuffer(VertexFactoryPtr, Data, 0);
+			StaticMeshVertexBuffers.ColorVertexBuffer.BindColorVertexBuffer(VertexFactoryPtr, Data);
+			VertexFactoryPtr->SetData(RHICmdList, Data);
 		}
 	}
 
@@ -269,6 +244,7 @@ public:
 		Result.bDynamicRelevance = true;
 		Result.bShadowRelevance = IsShadowCast(View);
 		MaterialRelevance.SetPrimitiveViewRelevance(Result);
+		Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 		return Result;
 	}
 	virtual bool CanBeOccluded() const override { return !MaterialRelevance.bDisableDepthTest; }
@@ -298,25 +274,41 @@ FPrimitiveSceneProxy* UMaterialBillboardComponent::CreateSceneProxy()
 
 FBoxSphereBounds UMaterialBillboardComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	float BoundsSize = 1.0f;
+	FTransform::FReal BoundsSize = 1.0f;
 	for (int32 i = 0; i < Elements.Num(); ++i)
 	{
 		if (Elements[i].bSizeIsInScreenSpace)
 		{
 			// Workaround static bounds by disabling culling. Still allows override such as 'use parent bounds', etc.
 			// Note: Bounds are dynamically calculated at draw time per view, so difficult to cull correctly. (UE-4725)
-			BoundsSize = float(HALF_WORLD_MAX); 
+			BoundsSize = HALF_WORLD_MAX; 
 			break;
 		}
 		else
 		{
-			BoundsSize = FMath::Max3(BoundsSize, Elements[i].BaseSizeX, Elements[i].BaseSizeY);
+			BoundsSize = FMath::Max3<FTransform::FReal>(BoundsSize, Elements[i].BaseSizeX, Elements[i].BaseSizeY);
 		}
 	}
 	BoundsSize *= LocalToWorld.GetMaximumAxisScale();
 
 	return FBoxSphereBounds(LocalToWorld.GetLocation(),FVector(BoundsSize,BoundsSize,BoundsSize),FMath::Sqrt(3.0f * FMath::Square(BoundsSize)));
 }
+
+#if WITH_EDITOR
+bool UMaterialBillboardComponent::GetMaterialPropertyPath(int32 ElementIndex, UObject*& OutOwner, FString& OutPropertyPath, FProperty*& OutProperty)
+{
+	if (Elements.IsValidIndex(ElementIndex))
+	{
+		OutOwner = this;
+		OutPropertyPath = FString::Printf(TEXT("%s[%d].%s"), GET_MEMBER_NAME_STRING_CHECKED(UMaterialBillboardComponent, Elements), ElementIndex, GET_MEMBER_NAME_STRING_CHECKED(FMaterialSpriteElement, Material));
+		OutProperty = FMaterialSpriteElement::StaticStruct()->FindPropertyByName(GET_MEMBER_NAME_CHECKED(FMaterialSpriteElement, Material));
+
+		return true;
+	}
+
+	return false;
+}
+#endif // WITH_EDITOR
 
 void UMaterialBillboardComponent::AddElement(
 	class UMaterialInterface* Material,
@@ -356,6 +348,33 @@ UMaterialInterface* UMaterialBillboardComponent::GetMaterial(int32 Index) const
 		ResultMI = Elements[Index].Material;
 	}
 	return ResultMI;
+}
+
+void UMaterialBillboardComponent::PostLoad()
+{
+	Super::PostLoad();
+
+	if (IsComponentPSOPrecachingEnabled()
+		// FIXME: need to collect an actual vertex declaration for non-MVF path
+		&& RHISupportsManualVertexFetch(GMaxRHIShaderPlatform))
+	{
+		FPSOPrecacheParams PrecachePSOParams;
+		SetupPrecachePSOParams(PrecachePSOParams);
+		PrecachePSOParams.PrimitiveType = PT_TriangleStrip;
+		PrecachePSOParams.bDisableBackFaceCulling = true;
+
+		const FVertexFactoryType* VFType = &FLocalVertexFactory::StaticType;
+
+		TArray<UMaterialInterface*> UsedMaterials;
+		GetUsedMaterials(UsedMaterials, false);
+		for (UMaterialInterface* MaterialInterface : UsedMaterials)
+		{
+			if (MaterialInterface)
+			{
+				MaterialInterface->PrecachePSOs(VFType, PrecachePSOParams);
+			}
+		}
+	}
 }
 
 void UMaterialBillboardComponent::SetMaterial(int32 ElementIndex, class UMaterialInterface* Material)

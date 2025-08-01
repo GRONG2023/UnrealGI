@@ -39,7 +39,7 @@ bool FProjectManager::LoadProjectFile( const FString& InProjectFile )
 	}
 
 #if PLATFORM_IOS
-	FString UpdatedMessage = FString::Printf(TEXT("%s\n%s"), *FailureReason.ToString(), TEXT("For troubleshooting, please go to https://docs.unrealengine.com/latest/INT/Platforms/iOS/GettingStarted/index.html"));
+	FString UpdatedMessage = FString::Printf(TEXT("%s\n%s"), *FailureReason.ToString(), TEXT("For troubleshooting, please go to https://docs.unrealengine.com/SharingAndReleasing/Mobile/iOS"));
 	FailureReason = FText::FromString(UpdatedMessage);
 #endif
 	UE_LOG(LogProjectManager, Error, TEXT("%s"), *FailureReason.ToString());
@@ -105,6 +105,25 @@ bool FProjectManager::LoadModulesForProject( const ELoadingPhase::Type LoadingPh
 	OnLoadingPhaseCompleteEvent.Broadcast(LoadingPhase, bSuccess);
 	return bSuccess;
 } 
+
+bool FProjectManager::SubstituteModule(const FString& OriginalModuleName, const FString& NewModuleName)
+{
+	if (!CurrentProject.IsValid())
+	{
+		return false;
+	}
+	const int ModuleCount = CurrentProject->Modules.Num();
+	for (int32 Idx = 0; Idx < ModuleCount; Idx++)
+	{
+		if (CurrentProject->Modules[Idx].Name.IsEqual(*OriginalModuleName))
+		{
+			CurrentProject->Modules[Idx].Name = FName(*NewModuleName);
+			return true;
+		}
+	}
+	return false;
+}
+
 
 #if !IS_MONOLITHIC
 bool FProjectManager::CheckModuleCompatibility(TArray<FString>& OutIncompatibleModules)
@@ -359,7 +378,7 @@ bool FProjectManager::SetPluginEnabled(const FString& PluginName, bool bEnabled,
 	}
 
 	// If the current plugin reference is the default, just remove it from the list
-	if (PluginRef.WhitelistPlatforms.Num() == 0 && PluginRef.BlacklistPlatforms.Num() == 0)
+	if (PluginRef.PlatformAllowList.Num() == 0 && PluginRef.PlatformDenyList.Num() == 0)
 	{
 		// We alway need to be explicit about installed plugins, because they'll be auto-enabled again if we're not.
 		if (!Plugin.IsValid() || !Plugin->GetDescriptor().bInstalled)

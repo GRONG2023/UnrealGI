@@ -6,6 +6,7 @@
 #include "InputCoreTypes.h"
 #include "UObject/GCObject.h"
 #include "UnrealClient.h"
+#include "ViewportClient.h"
 
 class FCanvas;
 class ITextureEditorToolkit;
@@ -23,14 +24,18 @@ public:
 
 	/** FViewportClient interface */
 	virtual void Draw(FViewport* Viewport, FCanvas* Canvas) override;
-	virtual bool InputKey(FViewport* Viewport, int32 ControllerId, FKey Key, EInputEvent Event, float AmountDepressed = 1.0f, bool bGamepad = false) override;
-	virtual bool InputAxis(FViewport* Viewport,int32 ControllerId,FKey Key,float Delta,float DeltaTime,int32 NumSamples=1,bool bGamepad=false) override;
+	virtual bool InputKey(const FInputKeyEventArgs& InEventArgs) override;
+	virtual bool InputAxis(FViewport* Viewport, FInputDeviceId DeviceId, FKey Key, float Delta, float DeltaTime, int32 NumSamples = 1, bool bGamepad = false) override;
 	virtual bool InputGesture(FViewport* Viewport, EGestureEvent GestureType, const FVector2D& GestureDelta, bool bIsDirectionInvertedFromDevice) override;
 	virtual UWorld* GetWorld() const override { return nullptr; }
 	virtual EMouseCursor::Type GetCursor(FViewport* Viewport, int32 X, int32 Y) override;
 
 	/** FGCObject interface */
 	virtual void AddReferencedObjects(FReferenceCollector& Collector) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("FTextureEditorViewportClient");
+	}
 
 	/** Modifies the checkerboard texture's data */
 	void ModifyCheckerboardTextureColors();
@@ -63,5 +68,8 @@ private:
 	TWeakPtr<STextureEditorViewport> TextureEditorViewportPtr;
 
 	/** Checkerboard texture */
-	UTexture2D* CheckerboardTexture;
+	TObjectPtr<UTexture2D> CheckerboardTexture;
+
+	/** Output device to monitor the output log for anything relevant to us.*/
+	TUniquePtr<struct FTextureErrorLogger> TextureConsoleCapture;
 };

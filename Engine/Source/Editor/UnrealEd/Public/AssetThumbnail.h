@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Stats/Stats.h"
 #include "Misc/Attribute.h"
-#include "AssetData.h"
+#include "AssetRegistry/AssetData.h"
 #include "Rendering/RenderingCommon.h"
 #include "Widgets/SWidget.h"
 #include "TickableEditorObject.h"
@@ -27,6 +27,26 @@ namespace EThumbnailLabel
 	};
 };
 
+enum class EThumbnailSize : uint8
+{
+	Tiny = 0,
+	Small,
+	Medium,
+	Large,
+	Huge,
+
+	// Not a size
+	MAX
+};
+
+/** The edge of the thumbnail along which to display the color strip */
+enum class EThumbnailColorStripOrientation : uint8
+{
+	/** Display the color strip as a horizontal line along the bottom edge */
+	HorizontalBottomEdge,
+	/** Display the color strip as a vertical line along the right edge */
+	VerticalRightEdge,
+};
 
 /** A struct containing details about how the asset thumbnail should behave */
 struct FAssetThumbnailConfig
@@ -35,24 +55,30 @@ struct FAssetThumbnailConfig
 		: bAllowFadeIn( false )
 		, bForceGenericThumbnail( false )
 		, bAllowHintText( true )
+		, bAllowRealTimeOnHovered( true )
 		, bAllowAssetSpecificThumbnailOverlay( false )
 		, ClassThumbnailBrushOverride( NAME_None )
 		, ThumbnailLabel( EThumbnailLabel::ClassName )
 		, HighlightedText( FText::GetEmpty() )
 		, HintColorAndOpacity( FLinearColor( 0.0f, 0.0f, 0.0f, 0.0f ) )
 		, AssetTypeColorOverride()
+		, Padding(0)
 	{
 	}
 
 	bool bAllowFadeIn;
 	bool bForceGenericThumbnail;
 	bool bAllowHintText;
+	bool bAllowRealTimeOnHovered;
 	bool bAllowAssetSpecificThumbnailOverlay;
 	FName ClassThumbnailBrushOverride;
 	EThumbnailLabel::Type ThumbnailLabel;
 	TAttribute< FText > HighlightedText;
 	TAttribute< FLinearColor > HintColorAndOpacity;
 	TOptional< FLinearColor > AssetTypeColorOverride;
+	FMargin Padding;
+	TAttribute<int32> GenericThumbnailSize = 64;
+	EThumbnailColorStripOrientation ColorStripOrientation = EThumbnailColorStripOrientation::HorizontalBottomEdge;
 };
 
 
@@ -121,6 +147,9 @@ public:
 	/** Re-renders this thumbnail */
 	UNREALED_API void RefreshThumbnail();
 
+	/** Updates if this thumbnail should be realtime rendered via the pool */
+	UNREALED_API void SetRealTime( bool bRealTime );
+
 	DECLARE_EVENT(FAssetThumbnail, FOnAssetDataChanged);
 	FOnAssetDataChanged& OnAssetDataChanged() { return AssetDataChangedEvent; }
 
@@ -143,6 +172,7 @@ private:
 class FAssetThumbnailPool : public FTickableEditorObject
 {
 public:
+	UNREALED_API static FName CustomThumbnailTagName;
 
 	/**
 	 * Constructor 
@@ -152,7 +182,7 @@ public:
 	 * @param InMaxFrameTimeAllowance			The maximum number of seconds per tick to spend rendering thumbnails
 	 * @param InMaxRealTimeThumbnailsPerFrame	The maximum number of real-time thumbnails to render per tick
 	 */
-	UNREALED_API FAssetThumbnailPool( uint32 InNumInPool, const TAttribute<bool>& InAreRealTimeThumbnailsAllowed = true, double InMaxFrameTimeAllowance = 0.005, uint32 InMaxRealTimeThumbnailsPerFrame = 3 );
+	UNREALED_API FAssetThumbnailPool( uint32 InNumInPool, double InMaxFrameTimeAllowance = 0.005, uint32 InMaxRealTimeThumbnailsPerFrame = 3 );
 
 	/** Destructor to free all remaining resources */
 	UNREALED_API ~FAssetThumbnailPool();
@@ -209,6 +239,9 @@ public:
 	/** Re-renders the specified thumbnail */
 	UNREALED_API void RefreshThumbnail( const TSharedPtr<FAssetThumbnail>& ThumbnailToRefresh );
 
+	/** Enables/disables realtime thumbnail behavior */
+	UNREALED_API void SetRealTimeThumbnail(const TSharedPtr<FAssetThumbnail>& Thumbnail, bool bRealTimeThumbnail);
+
 private:
 
 	/**
@@ -223,22 +256,16 @@ private:
 	 * @param Width 		The width of the thumbnail to free
 	 * @param Height		The height of the thumbnail to free
 	 */
-	void FreeThumbnail( const FName& ObjectPath, uint32 Width, uint32 Height );
+	void FreeThumbnail( const FSoftObjectPath& ObjectPath, uint32 Width, uint32 Height );
 
 	/** Adds the thumbnails associated with the object found at ObjectPath to the render stack */
-	void RefreshThumbnailsFor( FName ObjectPath );
+	void RefreshThumbnailsFor( const FSoftObjectPath& ObjectPath );
 
 	/** Handler for when an asset is loaded */
 	void OnAssetLoaded( UObject* Asset );
 
-	/** Handler for when an actor is moved in a level. Used to update world asset thumbnails. */
-	void OnActorPostEditMove( AActor* Actor );
-
-	/** Handler for when an asset is loaded */
-	void OnObjectPropertyChanged( UObject* Asset, FPropertyChangedEvent& PropertyChangedEvent );
-
-	/** Handler to dirty cached thumbnails in packages to make sure they are re-rendered later */
-	void DirtyThumbnailForObject( UObject* ObjectBeingModified );
+	/** Handler for when a thumbnail gets flagged as dirty. Used to refresh the thumbnail. */
+	void OnThumbnailDirtied( const FSoftObjectPath& ObjectPath );
 
 private:
 	/** Information about a thumbnail */
@@ -247,19 +274,29 @@ private:
 		/** The object whose thumbnail is rendered */
 		FAssetData AssetData;
 		/** Rendering resource for slate */
-		FSlateTexture2DRHIRef* ThumbnailTexture;
+		FSlateTexture2DRHIRef* ThumbnailTexture = nullptr;
 		/** Render target for slate */
-		FSlateTextureRenderTarget2DResource* ThumbnailRenderTarget;
+		FSlateTextureRenderTarget2DResource* ThumbnailRenderTarget = nullptr;
 		/** The time since last access */
-		float LastAccessTime;
+		double LastAccessTime = 0.0;
 		/** The time since last update */
-		float LastUpdateTime;
+		double LastUpdateTime = 0.0;
 		/** Width of the thumbnail */
-		uint32 Width;
+		uint32 Width = 0;
 		/** Height of the thumbnail */
-		uint32 Height;
+		uint32 Height = 0;
 		~FThumbnailInfo();
 	};
+	/**
+	 * Assign a thumbnail from its render target and re-render it if necessary.
+	 *
+	 * @param ThumbnailInfo The thumbnail info to assign a texture to
+	 * @param bIsAssetStillCompiling If the asset we want to load the thumbnail is compiling, this flag will be set to true, it wont be touch in other cases.
+	 * @param CustomAssetToRender The asset to render when generating the texture
+	 *
+	 * @return true if the thumbnail was assigned to a valid texture
+	 */
+	bool LoadThumbnail(TSharedRef<FThumbnailInfo> ThumbnailInfo, bool& bIsAssetStillCompiling, const FAssetData& CustomAssetToRender = FAssetData());
 
 	struct FThumbnailInfo_RenderThread
 	{
@@ -283,12 +320,12 @@ private:
 	/** Key for looking up thumbnails in a map */
 	struct FThumbId
 	{
-		FName ObjectPath;
+		FSoftObjectPath ObjectPath;
 		uint32 Width;
 		uint32 Height;
 
-		FThumbId( const FName& InObjectPath, uint32 InWidth, uint32 InHeight )
-			: ObjectPath( InObjectPath )
+		FThumbId( FSoftObjectPath InObjectPath, uint32 InWidth, uint32 InHeight )
+			: ObjectPath( MoveTemp(InObjectPath) )
 			, Width( InWidth )
 			, Height( InHeight )
 		{}
@@ -328,13 +365,16 @@ private:
 	TMap< FThumbId, int32 > RefCountMap;
 
 	/** A list of object paths for recently loaded assets whose thumbnails need to be refreshed. */
-	TArray<FName> RecentlyLoadedAssets;
+	TArray<FSoftObjectPath> RecentlyLoadedAssets;
 
 	/** Attribute that determines if real-time thumbnails are allowed. Called every frame. */
 	TAttribute<bool> AreRealTimeThumbnailsAllowed;
 
 	/** Max number of thumbnails in the pool */
 	uint32 NumInPool;
+
+	/** Shaders are still building */
+	bool bWereShadersCompilingLastFrame = false;
 
 	/** Max number of dynamic thumbnails to update per frame */
 	uint32 MaxRealTimeThumbnailsPerFrame;

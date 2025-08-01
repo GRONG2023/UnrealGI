@@ -1,21 +1,52 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SPackagesDialog.h"
-#include "Widgets/Text/STextBlock.h"
-#include "Widgets/Views/SListView.h"
-#include "UObject/UObjectHash.h"
-#include "Textures/SlateIcon.h"
+
+#include "AssetRegistry/AssetData.h"
+#include "AssetToolsModule.h"
 #include "Framework/Commands/UIAction.h"
-#include "Widgets/Layout/SSpacer.h"
-#include "Widgets/Images/SImage.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Framework/Views/ITypedTableView.h"
+#include "HAL/PlatformApplicationMisc.h"
 #include "IAssetTools.h"
 #include "IAssetTypeActions.h"
-#include "AssetRegistry/IAssetRegistry.h"
-#include "AssetToolsModule.h"
+#include "Input/Events.h"
+#include "InputCoreTypes.h"
+#include "Internationalization/Internationalization.h"
+#include "Layout/Children.h"
+#include "Layout/ChildrenBase.h"
+#include "Layout/Margin.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/AssetRegistryInterface.h"
+#include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
+#include "SWarningOrErrorBox.h"
+#include "SlotBase.h"
+#include "Algo/AnyOf.h"
+#include "Styling/AppStyle.h"
+#include "Styling/ISlateStyle.h"
+#include "Styling/SlateColor.h"
+#include "Styling/StyleDefaults.h"
+#include "Textures/SlateIcon.h"
+#include "Types/SlateEnums.h"
+#include "UObject/Object.h"
+#include "UObject/UObjectHash.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SSpacer.h"
+#include "Widgets/SBoxPanel.h"
+#include "Widgets/SNullWidget.h"
+#include "Widgets/SWidget.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SListView.h"
+
+class ITableRow;
+class STableViewBase;
+struct FGeometry;
+struct FSlateBrush;
 
 #define LOCTEXT_NAMESPACE "SPackagesDialog"
 
@@ -29,57 +60,48 @@ namespace SPackagesDialogDefs
 	const FName ColumnID_TypeLabel( "Type" );
 	const FName ColumnID_CheckedOutByLabel( "CheckedOutBy" );
 
-	const float CheckBoxColumnWidth = 23.0f;
-	const float IconColumnWidth = 21.0f;
+	const float CheckBoxColumnWidth = 38.0f;
+	const float IconColumnWidth = 22.0f;
 }
 
 
 UObject* FPackageItem::GetPackageObject() const
 {
+	UObject* FoundObject = nullptr;
 	if ( !FileName.StartsWith(TEXT("/Temp/Untitled")) )
 	{
-		TArray<UObject*> ObjectsInPackage;
-		GetObjectsWithPackage(Package, ObjectsInPackage, false);
-		for (UObject* Obj : ObjectsInPackage)
-		{
-			if (Obj->IsAsset() && !UE::AssetRegistry::FFiltering::ShouldSkipAsset(Obj))
-			{
-				return Obj;
-			}
-		}
+		FoundObject = Package->FindAssetInPackage();
 	}
-	return nullptr;
+	return FoundObject;
 }
 
 bool FPackageItem::HasMultipleAssets() const
 {
-	bool bHasMultipleAssets = false;
 	if ( !FileName.StartsWith(TEXT("/Temp/Untitled")) )
 	{
-		TArray<UObject*> ObjectsInPackage;
-		GetObjectsWithPackage(Package, ObjectsInPackage, false);
-		UObject* FirstObj = nullptr;
-		for (UObject* Obj : ObjectsInPackage)
-		{
-			if (Obj->IsAsset() && !UE::AssetRegistry::FFiltering::ShouldSkipAsset(Obj))
+		int32 NumAssets = 0;
+		int32 NumDeleted = 0;
+		ForEachObjectWithPackage(Package, [&NumAssets,&NumDeleted](UObject* Obj)
 			{
-				if(FirstObj == nullptr)
+				if (Obj->IsAsset() && !UE::AssetRegistry::FFiltering::ShouldSkipAsset(Obj))
 				{
-					FirstObj = Obj;
+					++NumAssets;
+
+					if (!IsValid(Obj))
+					{
+						++NumDeleted;
+					}
 				}
-				else
-				{
-					bHasMultipleAssets = true;
-					break;
-				}
-			}
-		}
+				return true;
+			}, false /*bIncludeNestedObjects*/);
+
+		return (NumAssets - NumDeleted) > 1;
 	}
-	return bHasMultipleAssets;
+
+	return false;
 }
 
-
-bool FPackageItem::GetTypeNameAndColor(FString& OutName, FColor& OutColor) const
+bool FPackageItem::GetTypeNameAndColor(FText& OutName, FColor& OutColor) const
 {
 	// Resolve the object belonging to the package and cache.
 	if (!Object.IsValid())
@@ -98,17 +120,14 @@ bool FPackageItem::GetTypeNameAndColor(FString& OutName, FColor& OutColor) const
 			if(HasMultipleAssets())
 			{
 				OutColor = FColor::White;
-				OutName = LOCTEXT("MultipleAssets", "Multiple Assets").ToString();
+				OutName = LOCTEXT("MultipleAssets", "Multiple Assets");
 			}
-			else
+			else // Just one asset in the package.
 			{
-				const FColor EngineBorderColor = ObjectPtr->IsPendingKill() ? FColor::Red : AssetTypeActions->GetTypeColor();
-				OutColor = FColor(						// Copied from ContentBrowserCLR.cpp
-					127 + EngineBorderColor.R / 2,		// Desaturate the colors a bit (GB colors were too.. much)
-					127 + EngineBorderColor.G / 2,
-					127 + EngineBorderColor.B / 2, 
-					200);		// Opacity
-				OutName = AssetTypeActions->GetName().ToString();
+				OutColor = !IsValidChecked(ObjectPtr) ? FColor::Red : AssetTypeActions->GetTypeColor();
+
+				FAssetData AssetData(ObjectPtr);
+				OutName = FText::FromString(AssetData.AssetClassPath.ToString());
 			}
 			return true;
 		}
@@ -116,7 +135,7 @@ bool FPackageItem::GetTypeNameAndColor(FString& OutName, FColor& OutColor) const
 	// if we do not find any package object, consider the package empty, return a red `Empty Package`
 	else
 	{
-		OutName = FString(TEXT("Empty Package"));
+		OutName = LOCTEXT("NoAssets", "Empty Package");
 		OutColor = FColor(					// Copied from ContentBrowserCLR.cpp
 			127 + FColor::Red.R / 2,		// Desaturate the colors a bit (GB colors were too.. much)
 			127 + FColor::Red.G / 2,
@@ -152,10 +171,11 @@ void SPackagesDialog::Construct(const FArguments& InArgs)
 		.Padding( 2 )
 		[
 			SNew(SButton) 
-				.Text(LOCTEXT("ConnectToSourceControl", "Connect To Source Control"))
-				.ToolTipText(LOCTEXT("ConnectToSourceControl_Tooltip", "Connect to source control to allow source control operations to be performed on content and levels."))
+				.Text(LOCTEXT("ConnectToSourceControl", "Connect To Revision Control"))
+				.ToolTipText(LOCTEXT("ConnectToSourceControl_Tooltip", "Connect to a revision control system for tracking changes to your content and levels."))
 				.ContentPadding(FMargin(10, 3))
 				.HAlign(HAlign_Right)
+				.VAlign(VAlign_Center)
 				.Visibility(this, &SPackagesDialog::GetConnectToSourceControlVisibility)
 				.OnClicked(this, &SPackagesDialog::OnConnectToSourceControlClicked)
 		];
@@ -168,9 +188,14 @@ void SPackagesDialog::Construct(const FArguments& InArgs)
 		HeaderRowWidget->AddColumn(
 			SHeaderRow::Column( SPackagesDialogDefs::ColumnID_CheckBoxLabel )
 			[
-				SAssignNew( ToggleSelectedCheckBox, SCheckBox )
-				.IsChecked(this, &SPackagesDialog::GetToggleSelectedState)
-				.OnCheckStateChanged(this, &SPackagesDialog::OnToggleSelectedCheckBox)
+				SNew(SBox)
+				.Padding(FMargin(6,3,6,3))
+				.HAlign(HAlign_Center)
+				[
+					SAssignNew( ToggleSelectedCheckBox, SCheckBox )
+					.IsChecked(this, &SPackagesDialog::GetToggleSelectedState)
+					.OnCheckStateChanged(this, &SPackagesDialog::OnToggleSelectedCheckBox)
+				]
 			]
 			.FixedWidth( SPackagesDialogDefs::CheckBoxColumnWidth )
 		);
@@ -184,7 +209,7 @@ void SPackagesDialog::Construct(const FArguments& InArgs)
 		.SortMode( this, &SPackagesDialog::GetColumnSortMode, SPackagesDialogDefs::ColumnID_IconLabel )
 		.OnSort( this, &SPackagesDialog::OnColumnSortModeChanged )
 		.FixedWidth( SPackagesDialogDefs::IconColumnWidth )
-		);
+	);
 
 	HeaderRowWidget->AddColumn(
 		SHeaderRow::Column( SPackagesDialogDefs::ColumnID_AssetLabel )
@@ -193,14 +218,16 @@ void SPackagesDialog::Construct(const FArguments& InArgs)
 		.OnSort( this, &SPackagesDialog::OnColumnSortModeChanged )
 		.FillWidth( 5.0f )
 	);
+/*
 
 	HeaderRowWidget->AddColumn(
-		SHeaderRow::Column( SPackagesDialogDefs::ColumnID_OwnerLabel )
-		.DefaultLabel( LOCTEXT("OwnerColumnLabel", "Owner" ) )
-		.SortMode( this, &SPackagesDialog::GetColumnSortMode, SPackagesDialogDefs::ColumnID_OwnerLabel )
-		.OnSort( this, &SPackagesDialog::OnColumnSortModeChanged )
-		.FillWidth( 7.0f )
+		SHeaderRow::Column(SPackagesDialogDefs::ColumnID_OwnerLabel)
+		.DefaultLabel(LOCTEXT("OwnerColumnLabel", "Owner"))
+		.SortMode(this, &SPackagesDialog::GetColumnSortMode, SPackagesDialogDefs::ColumnID_OwnerLabel)
+		.OnSort(this, &SPackagesDialog::OnColumnSortModeChanged)
+		.FillWidth(7.0f)
 	);
+*/
 
 	HeaderRowWidget->AddColumn(
 		SHeaderRow::Column( SPackagesDialogDefs::ColumnID_PackageLabel )
@@ -232,24 +259,21 @@ void SPackagesDialog::Construct(const FArguments& InArgs)
 	this->ChildSlot
 	[
 		SNew(SBorder)
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::Get().GetBrush("Brushes.Panel"))
+		.Padding(FMargin(16))
 		[
 			SNew(SVerticalBox)
-			+SVerticalBox::Slot() .Padding(10) .AutoHeight()
+			+SVerticalBox::Slot()
+			.AutoHeight()
+			.Padding(0.0f,0.0f,0.0f,8.0f)
 			[
-					SNew( STextBlock )
-					.Text( this, &SPackagesDialog::GetMessage )
-				.AutoWrapText( true )
-				]
-			+SVerticalBox::Slot() .Padding(FMargin(10, 0, 10, 10)) .AutoHeight()
-			[
-				SNew( STextBlock )
-				.Text( this, &SPackagesDialog::GetWarning )
-				.ColorAndOpacity( FLinearColor::Yellow )
-				.AutoWrapText( true )
-				.Visibility( this, &SPackagesDialog::GetWarningVisibility )
+				SNew(STextBlock)
+				.Text(this, &SPackagesDialog::GetMessage)
+				.AutoWrapText(true)
 			]
-			+SVerticalBox::Slot()  .FillHeight(0.8)
+
+			+SVerticalBox::Slot()
+			.FillHeight(0.8)
 			[
 				SAssignNew(ItemListView, SListView< TSharedPtr<FPackageItem> >)
 					.ListItemsSource(&Items)
@@ -257,9 +281,21 @@ void SPackagesDialog::Construct(const FArguments& InArgs)
 					.OnContextMenuOpening(this, &SPackagesDialog::MakePackageListContextMenu)
 					.ItemHeight(20)
 					.HeaderRow( HeaderRowWidget )
-					.SelectionMode( ESelectionMode::None )
+					.SelectionMode( ESelectionMode::Single )
 			]
-			+SVerticalBox::Slot() .AutoHeight() .Padding(2) .HAlign(HAlign_Right) .VAlign(VAlign_Bottom)
+			+ SVerticalBox::Slot()
+			.Padding(0, 16.0f, 0, 0)
+			.AutoHeight()
+			[
+				SNew(SWarningOrErrorBox)
+				.Visibility(this, &SPackagesDialog::GetWarningVisibility)
+				.Message(this, &SPackagesDialog::GetWarning)
+			]
+			+SVerticalBox::Slot() 
+			.AutoHeight()
+			.Padding(0.0f, 16.0f, 0.0f, 0.0f)
+			.HAlign(HAlign_Right) 
+			.VAlign(VAlign_Bottom)
 			[
 				ButtonsBox.ToSharedRef()
 			]
@@ -299,14 +335,16 @@ void SPackagesDialog::AddButton(TSharedPtr<FPackageButton> Button)
 
 	ButtonsBox->AddSlot()
 	.AutoWidth()
-	.Padding( 2 )
+	.Padding(5, 0)
 	[
 		SNew(SButton) 
+			.ButtonStyle(&FAppStyle::Get(), (Button->GetStyle() == DBS_Primary) ? "PrimaryButton" : "Button")
+			.TextStyle(&FAppStyle::Get(), (Button->GetStyle() == DBS_Primary) ? "PrimaryButtonText" : "ButtonText")
 			.Text(Button->GetName())
-			.ContentPadding(FMargin(10, 3))
 			.ToolTipText(Button->GetToolTip())
-			.IsEnabled(Button.Get(), &FPackageButton::IsEnabled )
+			.IsEnabled(Button.Get(), &FPackageButton::IsEnabled)
 			.HAlign(HAlign_Right)
+			.VAlign(VAlign_Center)
 			.OnClicked(Button.Get(), &FPackageButton::OnButtonClicked)
 	];
 }
@@ -432,17 +470,15 @@ void SPackagesDialog::RefreshButtons()
 		FPackageButton& Button = *Buttons[ButtonIndex];
 		if(Button.GetType() == DRT_MakeWritable)
 		{
-			if(UndeterminedItems > 0 || CheckedItems > 0)
-				Button.SetDisabled(false);
-			else
-				Button.SetDisabled(true);
+			Button.SetDisabled(UndeterminedItems == 0 && CheckedItems == 0);
 		}
 		else if(Button.GetType() == DRT_CheckOut)
 		{
-			if(CheckedItems > 0)
-				Button.SetDisabled(false);
-			else
-				Button.SetDisabled(true);
+			Button.SetDisabled(CheckedItems == 0);
+		}
+		else if (Button.GetType() == DRT_Skip)
+		{
+			Button.SetDisabled(CheckedItems > 0);
 		}
 	}
 }
@@ -463,17 +499,14 @@ TSharedRef<SWidget> SPackagesDialog::GenerateWidgetForItemAndColumn( TSharedPtr<
 	check(Item.IsValid());
 
 	// Choose the icon based on the severity
-	const FSlateBrush* IconBrush = FEditorStyle::GetBrush( *( Item->GetIconName() ) );
+	const FSlateBrush* IconBrush = Item->GetIconName().IsEmpty() ? FStyleDefaults::GetNoBrush() : FAppStyle::GetBrush(*(Item->GetIconName()));
 
-	const FMargin RowPadding(3, 0, 0, 0);
+	const FMargin RowPadding(3, 3, 3, 3);
 
 	// Extract the type and color for the package
 	FColor PackageColor;
-	FString PackageType;
-	if (Item->GetTypeNameAndColor(PackageType, PackageColor))
-	{
-		PackageType = FString(TEXT("(")) + PackageType + FString(TEXT(")"));
-	}
+	FText PackageType;
+	Item->GetTypeNameAndColor(PackageType, PackageColor);
 
 	const FString AssetName = Item->GetAssetName();
 	const FString OwnerName = Item->GetOwnerName();
@@ -486,7 +519,7 @@ TSharedRef<SWidget> SPackagesDialog::GenerateWidgetForItemAndColumn( TSharedPtr<
 	{
 		ItemContentWidget = SNew(SHorizontalBox)
 			+SHorizontalBox::Slot()
-			.Padding(RowPadding)
+			.Padding(FMargin(10, 3, 6, 3))
 			[
 				SNew(SCheckBox)
 				.IsChecked(Item.Get(), &FPackageItem::OnGetDisplayCheckState)
@@ -548,8 +581,8 @@ TSharedRef<SWidget> SPackagesDialog::GenerateWidgetForItemAndColumn( TSharedPtr<
 			.Padding(RowPadding)
 			[
 				SNew(STextBlock)
-				.Text(FText::FromString(PackageType))
-				.ToolTipText(FText::FromString(PackageType))
+				.Text(PackageType)
+				.ToolTipText(PackageType)
 				.IsEnabled(!Item->IsDisabled())
 				.ColorAndOpacity(PackageColor)
 			];
@@ -568,7 +601,6 @@ TSharedRef<SWidget> SPackagesDialog::GenerateWidgetForItemAndColumn( TSharedPtr<
 				.Text(FText::FromString(CheckedOutByString))
 				.ToolTipText(FText::FromString(CheckedOutByString))
 				.IsEnabled(!Item->IsDisabled())
-				.ColorAndOpacity(PackageColor)
 			];
 	}
 
@@ -586,11 +618,56 @@ TSharedPtr<SWidget> SPackagesDialog::MakePackageListContextMenu() const
 		{
 			MenuBuilder.AddMenuEntry(
 				LOCTEXT("SCCDiffAgainstDepot", "Diff Against Depot"),
-				LOCTEXT("SCCDiffAgainstDepotTooltip", "Look at differences between your version of the asset and that in source control."),
+				LOCTEXT("SCCDiffAgainstDepotTooltip", "Look at differences between your version of the asset and that in revision control."),
 				FSlateIcon(),
 				FUIAction(
 					FExecuteAction::CreateSP( this, &SPackagesDialog::ExecuteSCCDiffAgainstDepot ),
 					FCanExecuteAction::CreateSP( this, &SPackagesDialog::CanExecuteSCCDiffAgainstDepot )
+				)
+			);	
+			MenuBuilder.AddMenuEntry(
+				LOCTEXT("SCCCopyFilePathToClipboard", "Copy File Path"),
+				LOCTEXT("SCCCopyFilePathToClipboardTooltip", "Copies the file path on disk to the clipboard."),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateLambda( [SelectedItems] ()
+					{
+						TArray<FString> Paths;
+						for (const TSharedPtr<FPackageItem>& PackageItem: SelectedItems)
+						{
+							if (!PackageItem->GetFileName().IsEmpty())
+							{
+								Paths.Add(PackageItem->GetFileName());
+							}
+						}
+						FPlatformApplicationMisc::ClipboardCopy(*FString::Join(Paths, TEXT("\n")));
+					} ),
+					FCanExecuteAction::CreateLambda( [SelectedItems] ()
+					{
+						return Algo::AnyOf(SelectedItems, [](const TSharedPtr<FPackageItem>& PackageItem)
+						{
+							return !PackageItem->GetFileName().IsEmpty();
+						});
+					} )
+				)
+			);	
+			MenuBuilder.AddMenuEntry(
+				LOCTEXT("SCCCopyPackagePathToClipboard", "Copy Package Path"),
+				LOCTEXT("SCCCopyPackagePathToClipboardTooltip", "Copies the package path to the clipboard."),
+				FSlateIcon(),
+				FUIAction(
+					FExecuteAction::CreateLambda( [SelectedItems] ()
+					{
+						TArray<FString> Paths;
+						for (const TSharedPtr<FPackageItem>& PackageItem: SelectedItems)
+						{
+							if (!PackageItem->GetFileName().IsEmpty())
+							{
+								Paths.Add(PackageItem->GetPackageName());
+							}
+						}
+						FPlatformApplicationMisc::ClipboardCopy(*FString::Join(Paths, TEXT("\n")));
+					} )
 				)
 			);	
 		}
@@ -789,7 +866,7 @@ FText SPackagesDialog::GetWarning() const
 
 EVisibility SPackagesDialog::GetWarningVisibility() const
 {
-	return (Warning.IsEmpty()) ? EVisibility::Collapsed : EVisibility::Visible;
+	return (Warning.IsEmpty()) ? EVisibility::Collapsed : EVisibility::HitTestInvisible;
 }
 
 EColumnSortMode::Type SPackagesDialog::GetColumnSortMode( const FName ColumnId ) const
@@ -861,12 +938,12 @@ void SPackagesDialog::SortTree()
 		if (SortMode == EColumnSortMode::Ascending)
 		{
 			Items.Sort([](const TSharedPtr<FPackageItem>& A, const TSharedPtr<FPackageItem>& B) {
-				return A->GetTypeName() < B->GetTypeName(); } );
+				return A->GetTypeName().CompareTo(B->GetTypeName()) < 0; } );
 		}
 		else if (SortMode == EColumnSortMode::Descending)
 		{
 			Items.Sort([](const TSharedPtr<FPackageItem>& A, const TSharedPtr<FPackageItem>& B) {
-				return A->GetTypeName() >= B->GetTypeName(); } );
+				return A->GetTypeName().CompareTo(B->GetTypeName()) >= 0; } );
 		}
 	}
 	else if (SortByColumn == SPackagesDialogDefs::ColumnID_IconLabel)

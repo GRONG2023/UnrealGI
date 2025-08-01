@@ -1,12 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 #include "Engine/SkeletalMeshEditorData.h"
 
-#include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Object.h"
-#include "Templates/SubclassOf.h"
-#include "EngineDefines.h"
-#include "Engine/EngineTypes.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SkeletalMeshEditorData)
 
 #if WITH_EDITORONLY_DATA
 
@@ -37,10 +33,6 @@ FRawSkeletalMeshBulkData& USkeletalMeshEditorData::GetLODImportedData(int32 LODI
 	check(LODIndex >= 0);
 	if (LODIndex >= RawSkeletalMeshBulkDatas.Num())
 	{
-		//Avoid changing the array outside of the main thread
-		//The allocation must be done before going multi thread
-		//TArray is not thread safe when allocating
-		check(IsInGameThread());
 		const int32 AddItemCount = 1 + (LODIndex - RawSkeletalMeshBulkDatas.Num());
 		RawSkeletalMeshBulkDatas.Reserve(AddItemCount);
 		while (LODIndex >= RawSkeletalMeshBulkDatas.Num())
@@ -72,6 +64,12 @@ bool USkeletalMeshEditorData::RemoveLODImportedData(int32 LODIndex)
 void USkeletalMeshEditorData::Serialize(FArchive& Ar)
 {
 	Super::Serialize(Ar);
+	
+	if (!Ar.IsLoading() && !Ar.IsSaving() && Ar.IsObjectReferenceCollector())
+	{
+		//There is no UObject reference in the skeletal mesh editor data
+		return;
+	}
 
 	//Serialize all LODs Raw imported source data
 	FRawSkeletalMeshBulkData::Serialize(Ar, RawSkeletalMeshBulkDatas, this);
@@ -80,3 +78,4 @@ void USkeletalMeshEditorData::Serialize(FArchive& Ar)
 #endif //WITH_EDITORONLY_DATA
 
 #undef LOCTEXT_NAMESPACE
+

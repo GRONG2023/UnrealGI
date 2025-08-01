@@ -9,9 +9,10 @@
 #include "Insights/ViewModels/BaseTimingTrack.h"
 #include "Insights/ViewModels/TrackHeader.h"
 
-namespace Trace
+namespace TraceServices
 {
-	struct FLogMessage;
+	struct FLogCategoryInfo;
+	struct FLogMessageInfo;
 	class ILogProvider;
 }
 
@@ -36,6 +37,7 @@ struct FTimeMarkerTextInfo
 	FLinearColor Color;
 	FString Category; // truncated Category string
 	FString Message; // truncated Message string
+	uint64 LogIndex;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -64,8 +66,11 @@ public:
 		bUseOnlyBookmarks = bInUseOnlyBookmarks;
 		UpdateTrackNameAndHeight();
 	}
-	void SetBookmarksTrack() { SetBookmarksTrackFlag(true); }
-	void SetLogsTrack() { SetBookmarksTrackFlag(false); }
+	void SetBookmarksTrack() { SetBookmarksTrackFlag(true); SetDirtyFlag(); }
+	void SetLogsTrack() { SetBookmarksTrackFlag(false); SetDirtyFlag(); }
+
+	bool SaveScreenshot_CanExecute();
+	void SaveScreenshot_Execute();
 
 	// Stats
 	int32 GetNumLogMessages() const { return NumLogMessages; }
@@ -73,6 +78,7 @@ public:
 	int32 GetNumTexts() const { return TimeMarkerTexts.Num(); }
 
 	// FBaseTimingTrack
+	virtual void PreUpdate(const ITimingTrackUpdateContext& Context) override;
 	virtual void Update(const ITimingTrackUpdateContext& Context) override;
 	virtual void PostUpdate(const ITimingTrackUpdateContext& Context) override;
 	virtual void Draw(const ITimingTrackDrawContext& Context) const override;
@@ -80,6 +86,10 @@ public:
 	virtual FReply OnMouseButtonDown(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual FReply OnMouseButtonDoubleClick(const FGeometry& MyGeometry, const FPointerEvent& MouseEvent) override;
 	virtual void BuildContextMenu(FMenuBuilder& MenuBuilder) override;
+	virtual const TSharedPtr<const ITimingEvent> GetEvent(float InPosX, float InPosY, const FTimingTrackViewport& Viewport) const override;
+	virtual void InitTooltip(FTooltipDrawState& InOutTooltip, const ITimingEvent& InTooltipEvent) const override;
+
+	double Snap(double Time, double SnapTolerance);
 
 private:
 	void ResetCache()
@@ -89,13 +99,19 @@ private:
 	}
 
 	void UpdateTrackNameAndHeight();
-	void UpdateDrawState(const FTimingTrackViewport& Viewport);
+	void UpdateDrawState(const ITimingTrackUpdateContext& Context);
+
+	void UpdateCategory(const TraceServices::FLogCategoryInfo*& InOutCategory, const TCHAR* CategoryName);
+
+	bool TryGetHoveredEventScreenshotId(uint32& OutScreenshotId);
 
 private:
 	TArray<FTimeMarkerBoxInfo> TimeMarkerBoxes;
 	TArray<FTimeMarkerTextInfo> TimeMarkerTexts;
 
 	bool bUseOnlyBookmarks; // If true, uses only bookmarks; otherwise it uses all log messages.
+	const TraceServices::FLogCategoryInfo* BookmarkCategory;
+	const TraceServices::FLogCategoryInfo* ScreenshotCategory;
 
 	FTrackHeader Header;
 
@@ -107,6 +123,7 @@ private:
 	// Slate resources
 	const FSlateBrush* WhiteBrush;
 	const FSlateFontInfo Font;
+	uint32 LastScreenshotId;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -114,7 +131,7 @@ private:
 class FTimeMarkerTrackBuilder
 {
 public:
-	explicit FTimeMarkerTrackBuilder(FMarkersTimingTrack& InTrack, const FTimingTrackViewport& InViewport);
+	explicit FTimeMarkerTrackBuilder(FMarkersTimingTrack& InTrack, const FTimingTrackViewport& InViewport, float InFontScale);
 
 	/**
 	 * Non-copyable
@@ -124,8 +141,8 @@ public:
 
 	const FTimingTrackViewport& GetViewport() { return Viewport; }
 
-	void BeginLog(const Trace::ILogProvider& LogProvider);
-	void AddLogMessage(const Trace::FLogMessage& Message);
+	void BeginLog(const TraceServices::ILogProvider& LogProvider);
+	void AddLogMessage(const TraceServices::FLogMessageInfo& Message);
 	void EndLog();
 
 	static FLinearColor GetColorByCategory(const TCHAR* const Category);
@@ -141,8 +158,9 @@ private:
 
 	const TSharedRef<class FSlateFontMeasure> FontMeasureService;
 	const FSlateFontInfo Font;
+	float FontScale;
 
-	const Trace::ILogProvider* LogProviderPtr; // valid only between BeginLog() and EndLog()
+	const TraceServices::ILogProvider* LogProviderPtr; // valid only between BeginLog() and EndLog()
 
 	float LastX1;
 	float LastX2;

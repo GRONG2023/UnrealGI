@@ -2,15 +2,19 @@
 
 #pragma once
 
-#include "CoreTypes.h"
-#include "Templates/UnrealTemplate.h"
-#include "Misc/Crc.h"
-#include "Containers/UnrealString.h"
+#include "Containers/Array.h"
 #include "Containers/Set.h"
-#include "UObject/NameTypes.h"
+#include "Containers/UnrealString.h"
+#include "CoreTypes.h"
+#include "HAL/PlatformCrt.h"
+#include "Misc/Crc.h"
 #include "Misc/Guid.h"
+#include "Misc/Optional.h"
 #include "Serialization/StructuredArchive.h"
+#include "Templates/UnrealTemplate.h"
+#include "UObject/NameTypes.h"
 
+class FArchive;
 class FCustomVersionContainer;
 struct FCustomVersion;
 
@@ -35,7 +39,7 @@ typedef bool (*CustomVersionValidatorFunc)(const FCustomVersion& Version, const 
 /**
  * Structure to hold unique custom key with its version.
  */
-struct CORE_API FCustomVersion
+struct FCustomVersion
 {
 	friend class FCustomVersionContainer;
 
@@ -83,7 +87,7 @@ struct CORE_API FCustomVersion
 	CORE_API friend void operator<<(FStructuredArchive::FSlot Slot, FCustomVersion& Version);
 
 	/** Gets the friendly name for error messages or whatever */
-	const FName GetFriendlyName() const;
+	CORE_API const FName GetFriendlyName() const;
 
 private:
 
@@ -93,10 +97,20 @@ private:
 
 class CORE_API FCustomVersionRegistration;
 
+/** Flags defining how the Custom Version should be applied */
+enum class ESetCustomVersionFlags : uint8
+{
+	None,
+
+	// If Set, it will not query the versions registry to update the version data if the key is already in the container 
+	SkipUpdateExistingVersion = 0x01,
+};
+ENUM_CLASS_FLAGS(ESetCustomVersionFlags)
+
 /**
  * Container for all available/serialized custom versions.
  */
-class CORE_API FCustomVersionContainer
+class FCustomVersionContainer
 {
 	friend struct FStaticCustomVersionRegistry;
 
@@ -113,7 +127,7 @@ public:
 	 * @param CustomKey Custom key for which to retrieve the version.
 	 * @return The FCustomVersion for the specified custom key, or nullptr if the key doesn't exist in the container.
 	 */
-	const FCustomVersion* GetVersion(FGuid CustomKey) const;
+	CORE_API const FCustomVersion* GetVersion(FGuid CustomKey) const;
 
 	/**
 	* Gets a custom version friendly name from the container.
@@ -121,7 +135,7 @@ public:
 	* @param CustomKey Custom key for which to retrieve the version.
 	* @return The friendly name for the specified custom key, or NAME_None if the key doesn't exist in the container.
 	*/
-	const FName GetFriendlyName(FGuid CustomKey) const;
+	CORE_API const FName GetFriendlyName(FGuid CustomKey) const;
 
 	/**
 	 * Sets a specific custom version in the container.
@@ -130,11 +144,18 @@ public:
 	 * @param Version The version number for the specified custom key
 	 * @param FriendlyName A friendly name to assign to this version
 	 */
-	void SetVersion(FGuid CustomKey, int32 Version, FName FriendlyName);
+	CORE_API void SetVersion(FGuid CustomKey, int32 Version, FName FriendlyName);
+
+	/**
+	 * Sets a specific custom version in the container. It queries the versions registry to get the version data for the provided key
+	 * @param CustomKey Custom key for which to retrieve the version.
+	 * @param Options Optional flags used to alter the behavior of this method
+	 */
+	CORE_API void SetVersionUsingRegistry(FGuid CustomKey, ESetCustomVersionFlags Options = ESetCustomVersionFlags::None);
 
 	/** Serialization. */
-	void Serialize(FArchive& Ar, ECustomVersionSerializationFormat::Type Format = ECustomVersionSerializationFormat::Latest);
-	void Serialize(FStructuredArchive::FSlot Slot, ECustomVersionSerializationFormat::Type Format = ECustomVersionSerializationFormat::Latest);
+	CORE_API void Serialize(FArchive& Ar, ECustomVersionSerializationFormat::Type Format = ECustomVersionSerializationFormat::Latest);
+	CORE_API void Serialize(FStructuredArchive::FSlot Slot, ECustomVersionSerializationFormat::Type Format = ECustomVersionSerializationFormat::Latest);
 
 	/**
 	 * Gets a singleton with the registered versions.
@@ -142,20 +163,20 @@ public:
 	 * @return The registered version container.
 	 */
 	UE_DEPRECATED(4.24, "Use one of the thread-safe FCurrentCustomVersions methods instead")
-	static const FCustomVersionContainer& GetRegistered();
+	static CORE_API const FCustomVersionContainer& GetRegistered();
 
 	/**
 	 * Empties the custom version container.
 	 */
-	void Empty();
+	CORE_API void Empty();
 
 	/**
 	 * Sorts the custom version container by key.
 	 */
-	void SortByKey();
+	CORE_API void SortByKey();
 
 	/** Return a string representation of custom versions. Used for debug. */
-	FString ToString(const FString& Indent) const;
+	CORE_API FString ToString(const FString& Indent) const;
 
 private:
 
@@ -173,23 +194,23 @@ struct FCustomVersionDifference
 };
 
 /** Provides access to code-defined custom versions registered via FCustomVersionRegistration. */
-class CORE_API FCurrentCustomVersions
+class FCurrentCustomVersions
 {
 public:
 	/** Get a copy of all versions that has been statically registered so far in the module loading process. */
-	static FCustomVersionContainer GetAll();
+	static CORE_API FCustomVersionContainer GetAll();
 
 	/** Get a copy of a single statically registered version if it exists. */
-	static TOptional<FCustomVersion> Get(const FGuid& Guid);
+	static CORE_API TOptional<FCustomVersion> Get(const FGuid& Guid);
 
 	/** Compare a number of versions to current ones and return potential differences. */
-	static TArray<FCustomVersionDifference> Compare(const FCustomVersionArray& CompareVersions, const TCHAR* DebugContext);
+	static CORE_API TArray<FCustomVersionDifference> Compare(const FCustomVersionArray& CompareVersions, const TCHAR* DebugContext);
 
 private:
 	friend class FCustomVersionRegistration;
 
-	static void Register(const FGuid& Key, int32 Version, const TCHAR* FriendlyName, CustomVersionValidatorFunc ValidatorFunc);
-	static void Unregister(const FGuid& Key);
+	static CORE_API void Register(const FGuid& Key, int32 Version, const TCHAR* FriendlyName, CustomVersionValidatorFunc ValidatorFunc);
+	static CORE_API void Unregister(const FGuid& Key);
 };
 
 

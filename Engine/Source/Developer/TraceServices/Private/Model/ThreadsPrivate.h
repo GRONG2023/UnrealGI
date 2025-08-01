@@ -2,23 +2,25 @@
 
 #pragma once
 
-#include "TraceServices/Model/AnalysisSession.h"
-#include "ProfilingDebugging/MiscTrace.h"
-#include "HAL/PlatformAffinity.h"
 #include "Containers/Map.h"
+#include "HAL/PlatformAffinity.h"
+#include "ProfilingDebugging/MiscTrace.h"
+#include "TraceServices/Model/AnalysisSession.h"
+#include "TraceServices/Model/Threads.h"
 
-namespace Trace
+namespace TraceServices
 {
 
 class FThreadProvider
 	: public IThreadProvider
+	, public IEditableThreadProvider
 {
 public:
-	static const FName ProviderName;
-	FThreadProvider(IAnalysisSession& Session);
-	~FThreadProvider();
+	explicit FThreadProvider(IAnalysisSession& Session);
+	virtual ~FThreadProvider();
+
 	void AddGameThread(uint32 Id);
-	void AddThread(uint32 Id, const TCHAR* Name, EThreadPriority Priority);
+	virtual void AddThread(uint32 Id, const TCHAR* Name, EThreadPriority Priority) override;
 	void SetThreadPriority(uint32 Id, EThreadPriority Priority);
 	void SetThreadGroup(uint32 Id, const TCHAR* GroupName);
 	virtual uint64 GetModCount() const override { return ModCount; }
@@ -48,4 +50,4 @@ private:
 	TArray<FThreadInfoInternal*> SortedThreads;
 };
 
-}
+} // namespace TraceServices

@@ -9,37 +9,38 @@ D3D12Util.h: D3D RHI utility implementation.
 #include "RendererInterface.h"
 #include "CoreGlobals.h"
 #include "Misc/OutputDeviceRedirector.h"
-#include "Windows/WindowsPlatformCrashContext.h"
 #include "HAL/ExceptionHandling.h"
+#if PLATFORM_WINDOWS
+#include "HAL/PlatformCrashContext.h"
+#endif
+#include "GenericPlatform/GenericPlatformCrashContext.h"
 
 #define D3DERR(x) case x: ErrorCodeText = TEXT(#x); break;
 #define LOCTEXT_NAMESPACE "Developer.MessageLog"
 
-#ifndef _FACD3D 
-#define _FACD3D  0x876
-#endif	//_FACD3D 
-#ifndef MAKE_D3DHRESULT
-#define _FACD3D  0x876
-#define MAKE_D3DHRESULT( code )  MAKE_HRESULT( 1, _FACD3D, code )
-#endif	//MAKE_D3DHRESULT
-
-#if WITH_D3DX_LIBS
-#ifndef D3DERR_INVALIDCALL
-#define D3DERR_INVALIDCALL MAKE_D3DHRESULT(2156)
-#endif//D3DERR_INVALIDCALL
-#ifndef D3DERR_WASSTILLDRAWING
-#define D3DERR_WASSTILLDRAWING MAKE_D3DHRESULT(540)
-#endif//D3DERR_WASSTILLDRAWING
-#endif
-
 // GPU crashes are nonfatal on windows/nonshipping so as not to interfere with GPU crash dump processing
-#if PLATFORM_WINDOWS || PLATFORM_HOLOLENS || !UE_BUILD_SHIPPING
+#if PLATFORM_WINDOWS || !UE_BUILD_SHIPPING
   #define D3D12RHI_GPU_CRASH_LOG_VERBOSITY Error
 #else
   #define D3D12RHI_GPU_CRASH_LOG_VERBOSITY Fatal
 #endif
 
-extern bool D3D12RHI_ShouldCreateWithD3DDebug();
+template<typename PerDeviceFunction>
+void FD3D12DynamicRHI::ForEachDevice(ID3D12Device* inDevice, const PerDeviceFunction& pfPerDeviceFunction)
+{
+	for (uint32 AdapterIndex = 0; AdapterIndex < GetNumAdapters(); ++AdapterIndex)
+	{
+		FD3D12Adapter& D3D12Adapter = GetAdapter(AdapterIndex);
+		for (uint32 GPUIndex : FRHIGPUMask::All())
+		{
+			FD3D12Device* D3D12Device = D3D12Adapter.GetDevice(GPUIndex);
+			if (inDevice == nullptr || D3D12Device->GetDevice() == inDevice)
+			{
+				pfPerDeviceFunction(D3D12Device);
+			}
+		}
+	}
+}
 
 static FString GetUniqueName()
 {
@@ -111,14 +112,11 @@ static FString GetD3D12ErrorString(HRESULT ErrorCode, ID3D12Device* Device)
 		D3DERR(S_OK);
 		D3DERR(D3D11_ERROR_FILE_NOT_FOUND)
 		D3DERR(D3D11_ERROR_TOO_MANY_UNIQUE_STATE_OBJECTS)
-#if WITH_D3DX_LIBS
-		D3DERR(D3DERR_INVALIDCALL)
-		D3DERR(D3DERR_WASSTILLDRAWING)
-#endif	//WITH_D3DX_LIBS
 		D3DERR(E_FAIL)
 		D3DERR(E_INVALIDARG)
 		D3DERR(E_OUTOFMEMORY)
 		D3DERR(DXGI_ERROR_INVALID_CALL)
+		D3DERR(DXGI_ERROR_WAS_STILL_DRAWING)
 		D3DERR(E_NOINTERFACE)
 		D3DERR(DXGI_ERROR_DEVICE_REMOVED)
 #if PLATFORM_WINDOWS
@@ -137,68 +135,7 @@ static FString GetD3D12ErrorString(HRESULT ErrorCode, ID3D12Device* Device)
 	return ErrorCodeText;
 }
 
-/** Build string name of command queue type */
-static const TCHAR* GetD3DCommandQueueTypeName(ED3D12CommandQueueType QueueType)
-{
-	switch (QueueType)
-	{
-	case ED3D12CommandQueueType::Default:	 return TEXT("3D");
-	case ED3D12CommandQueueType::Async:		 return TEXT("Compute");
-	case ED3D12CommandQueueType::Copy:		 return TEXT("Copy");
-	}
-
-	return nullptr;
-}
-
 #undef D3DERR
-
-namespace D3D12RHI
-{
-	const TCHAR* GetD3D12TextureFormatString(DXGI_FORMAT TextureFormat)
-	{
-		static const TCHAR* EmptyString = TEXT("");
-		const TCHAR* TextureFormatText = EmptyString;
-#define D3DFORMATCASE(x) case x: TextureFormatText = TEXT(#x); break;
-		switch (TextureFormat)
-		{
-			D3DFORMATCASE(DXGI_FORMAT_R8G8B8A8_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_B8G8R8A8_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_B8G8R8X8_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_BC1_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_BC2_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_BC3_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_BC4_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_R16G16B16A16_FLOAT)
-				D3DFORMATCASE(DXGI_FORMAT_R32G32B32A32_FLOAT)
-				D3DFORMATCASE(DXGI_FORMAT_UNKNOWN)
-				D3DFORMATCASE(DXGI_FORMAT_R8_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_D32_FLOAT_S8X24_UINT)
-				D3DFORMATCASE(DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS)
-				D3DFORMATCASE(DXGI_FORMAT_R32G8X24_TYPELESS)
-				D3DFORMATCASE(DXGI_FORMAT_D24_UNORM_S8_UINT)
-				D3DFORMATCASE(DXGI_FORMAT_R24_UNORM_X8_TYPELESS)
-				D3DFORMATCASE(DXGI_FORMAT_R32_FLOAT)
-				D3DFORMATCASE(DXGI_FORMAT_R16G16_UINT)
-				D3DFORMATCASE(DXGI_FORMAT_R16G16_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_R16G16_SNORM)
-				D3DFORMATCASE(DXGI_FORMAT_R16G16_FLOAT)
-				D3DFORMATCASE(DXGI_FORMAT_R32G32_FLOAT)
-				D3DFORMATCASE(DXGI_FORMAT_R10G10B10A2_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_R16G16B16A16_UINT)
-				D3DFORMATCASE(DXGI_FORMAT_R8G8_SNORM)
-				D3DFORMATCASE(DXGI_FORMAT_BC5_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_R1_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_R8G8B8A8_TYPELESS)
-				D3DFORMATCASE(DXGI_FORMAT_B8G8R8A8_TYPELESS)
-				D3DFORMATCASE(DXGI_FORMAT_BC7_UNORM)
-				D3DFORMATCASE(DXGI_FORMAT_BC6H_UF16)
-		default: TextureFormatText = EmptyString;
-		}
-#undef D3DFORMATCASE
-		return TextureFormatText;
-	}
-}
-using namespace D3D12RHI;
 
 static FString GetD3D12TextureFlagString(uint32 TextureFlags)
 {
@@ -226,42 +163,175 @@ static FString GetD3D12TextureFlagString(uint32 TextureFlags)
 	return TextureFormatText;
 }
 
-/** Log the GPU progress of the given CommandListManager to the Error log if breadcrumb data is available */
-static bool LogBreadcrumbData(D3D12RHI::FD3DGPUProfiler& GPUProfiler, FD3D12CommandListManager& CommandListManager)
+/* Export GPU breadcrumbs data as part of the crash payload. RHI breadcrumbs are preferred over other types and will overwrite if necessary. */
+static void ExportBreadcrumbDataAsCrashPayload(const FString& BreadcrumbSource, const FString& GPUQueueName, const TArray<FBreadcrumbNode>& Breadcrumbs)
 {
-	uint32* BreadCrumbData = (uint32*)CommandListManager.GetBreadCrumbResourceAddress();
-	if (BreadCrumbData == nullptr)
-	{
-		return false;
-	}
+	const FString& CurrentSource = FGenericCrashContext::GetGPUBreadcrumbsSource();
 
-	uint32 EventCount = BreadCrumbData[0];
-	bool bBeginEvent = BreadCrumbData[1] > 0;
-	check(EventCount >= 0 && EventCount < (MAX_GPU_BREADCRUMB_DEPTH - 2));
-
-	FString gpu_progress = FString::Printf(TEXT("[GPUBreadCrumb]\t%s Queue %d - %s"), GetD3DCommandQueueTypeName(CommandListManager.GetQueueType()), 
-		CommandListManager.GetGPUIndex(), EventCount == 0 ? TEXT("No Data") : (bBeginEvent ? TEXT("Begin: ") : TEXT("End: ")));
-	for (uint32 EventIndex = 0; EventIndex < EventCount; ++EventIndex)
+	if (CurrentSource.IsEmpty() || BreadcrumbSource == CurrentSource || BreadcrumbSource == TEXT("RHI"))
 	{
-		if (EventIndex > 0)
+		if (CurrentSource != BreadcrumbSource)
 		{
-			gpu_progress.Append(TEXT(" - "));
+			FGenericCrashContext::ResetGPUBreadcrumbsData();
 		}
 
-		// get the crc and try and translate back into a string
-		uint32 event_crc = BreadCrumbData[EventIndex + 2];
-		const FString* event_name = GPUProfiler.FindEventString(event_crc);
-		if (event_name)
+		FGenericCrashContext::SetGPUBreadcrumbsSource(BreadcrumbSource);
+		FGenericCrashContext::SetGPUBreadcrumbs(GPUQueueName, Breadcrumbs);
+	}
+}
+
+FBreadcrumbNode CollectBreadcrumbNode(
+	D3D12RHI::FD3DGPUProfiler& GPUProfiler,
+	const TSharedPtr<FBreadcrumbStack>& Stack,
+	const FBreadcrumbStack::FScope& Scope)
+{
+	FBreadcrumbNode Node;
+
+	const volatile uint32* Markers = reinterpret_cast<uint32*>(Stack->CPUAddress);
+	const bool bHaveMarkerIndex = (Scope.MarkerIndex < Stack->MaxMarkers);
+	Node.State = bHaveMarkerIndex ? (EBreadcrumbState)Markers[Scope.MarkerIndex] : EBreadcrumbState::Overflow;
+
+	const FString* EventName = GPUProfiler.FindEventString(Scope.NameCRC);
+	Node.Name = EventName ? *EventName : TEXT("Unknown");
+
+	if (Node.State == EBreadcrumbState::Active)
+	{
+		for (uint32 Child = Scope.Child; Child != 0; Child = Stack->Scopes[Child].Sibling)
 		{
-			gpu_progress.Append(*event_name);
+			Node.Children.Emplace(CollectBreadcrumbNode(GPUProfiler, Stack, Stack->Scopes[Child]));
+		}
+	}
+
+	return Node;
+};
+
+void BuildBreadcrumbsDumpString(const FBreadcrumbNode& Breadcrumb, FString& OutString, uint32 Indent)
+{
+	const TCHAR* Prefix = TEXT("  ");
+	if (Breadcrumb.State == EBreadcrumbState::Finished)
+	{
+		Prefix = TEXT("| ");
+	}
+	else if (Breadcrumb.State == EBreadcrumbState::Active)
+	{
+		Prefix = TEXT("> ");
+	}
+
+	const TCHAR* Suffix = TEXT("");
+	if (Breadcrumb.State == EBreadcrumbState::Overflow)
+	{
+		Suffix = TEXT(" [overflow]");
+	}
+
+	for (uint32 Idx = 0; Idx < Indent * 2; ++Idx)
+	{
+		OutString.AppendChar(' ');
+	}
+
+	OutString.Append(FString::Printf(TEXT("Breadcrumbs: %s%s [%s]%s\n"), Prefix, *Breadcrumb.Name, Breadcrumb.GetStateString(), Suffix));
+
+	for (const FBreadcrumbNode& Child : Breadcrumb.Children)
+	{
+		BuildBreadcrumbsDumpString(Child, OutString, Indent + 1);
+	}
+}
+
+/** Log the GPU progress of the given queue to the Error log if breadcrumb data is available */
+static bool LogBreadcrumbData(D3D12RHI::FD3DGPUProfiler& GPUProfiler, FD3D12Queue& Queue)
+{
+	FString GPUQueueName = FString::Printf(TEXT("%s Queue %d"), GetD3DCommandQueueTypeName(Queue.QueueType),
+		Queue.Device->GetGPUIndex());
+
+	FString GpuProgress = FString::Printf(TEXT("[GPUBreadCrumb]\t%s\n"), *GPUQueueName);
+
+	TArray<TSharedPtr<FBreadcrumbStack>, TInlineAllocator<8>> UniqueStacks;
+
+	while (const FD3D12Payload* Payload = Queue.PendingInterrupt.Peek())
+	{
+		for (const TSharedPtr<FBreadcrumbStack>& Stack : Payload->BreadcrumbStacks)
+		{
+			UniqueStacks.AddUnique(Stack);
+		}
+		Queue.PendingInterrupt.Pop();
+	}
+
+	TArray<FBreadcrumbNode> Nodes;
+	for (const TSharedPtr<FBreadcrumbStack>& Stack : UniqueStacks)
+	{
+		if (!Stack->Scopes.IsEmpty())
+		{
+			if (Stack->ContextId > 0)
+			{
+				uint32 Scope = 0;
+				do
+				{
+					Nodes.Emplace(CollectBreadcrumbNode(GPUProfiler, Stack, Stack->Scopes[Scope]));
+					Scope = Stack->Scopes[Scope].Sibling;
+				} while (Scope != 0);
+			}
+		}
+	}
+
+	for (const FBreadcrumbNode& Node : Nodes)
+	{
+		BuildBreadcrumbsDumpString(Node, GpuProgress, 0);
+	}
+
+	UE_LOG(LogD3D12RHI, Error, TEXT("%s"), *GpuProgress);
+
+	if (!Nodes.IsEmpty())
+	{
+		ExportBreadcrumbDataAsCrashPayload(TEXT("RHI"), GPUQueueName, MoveTemp(Nodes));
+	}
+
+	const FD3D12DiagnosticBufferData* DiagnosticData = Queue.GetDiagnosticBufferData();
+	if (DiagnosticData && DiagnosticData->Counter)
+	{
+		const uint32 Line = DiagnosticData->Payload.AsUint[0];
+		const FString* File = UE::RHICore::GetDiagnosticMessage(DiagnosticData->Payload.AsUint[1]);
+		const FString* Message = UE::RHICore::GetDiagnosticMessage(DiagnosticData->Payload.AsUint[2]);
+		if (File && Message)
+		{
+			UE_LOG(LogD3D12RHI, Error, TEXT("[GPUBreadCrumb]\t\tShader assertion failed - %s:%d - %s"), **File, Line, **Message);
 		}
 		else
 		{
-			gpu_progress.Append(TEXT("Unknown Event"));
+			UE_LOG(LogD3D12RHI, Error, TEXT("[GPUBreadCrumb]\t\tShader assertion failed! ID: 0x%08X (%d)"), DiagnosticData->MessageID, DiagnosticData->MessageID);
+		}
+
+		{
+			const int32* Payload = DiagnosticData->Payload.AsInt;
+			if (Payload[0] < 0 || Payload[1] < 0 || Payload[2] < 0 || Payload[3] < 0)
+			{
+				UE_LOG(LogD3D12RHI, Error,
+					TEXT("[GPUBreadCrumb]\t\tPayload  [int32]: %d %d %d %d"),
+					Payload[0], Payload[1], Payload[2], Payload[3]);
+			}
+		}
+
+		{
+			const uint32* Payload = DiagnosticData->Payload.AsUint;
+			UE_LOG(LogD3D12RHI, Error,
+				TEXT("[GPUBreadCrumb]\t\tPayload [uint32]: %u %u %u %u"),
+				Payload[0], Payload[1], Payload[2], Payload[3]);
+		}
+
+		{
+			const uint32* Payload = DiagnosticData->Payload.AsUint;
+			UE_LOG(LogD3D12RHI, Error,
+				TEXT("[GPUBreadCrumb]\t\tPayload    [hex]: 0x%08X 0x%08X 0x%08X 0x%08X"),
+				Payload[0], Payload[1], Payload[2], Payload[3]);
+		}
+
+		{
+			const float* Payload = DiagnosticData->Payload.AsFloat;
+			UE_LOG(LogD3D12RHI, Error,
+				TEXT("[GPUBreadCrumb]\t\tPayload  [float]: %f %f %f %f"),
+				Payload[0], Payload[1], Payload[2], Payload[3]);
 		}
 	}
 
-	UE_LOG(LogD3D12RHI, Error, TEXT("%s"), *gpu_progress);
+	GLog->Panic();
 
 	return true;
 }
@@ -277,9 +347,10 @@ static void LogBreadcrumbData(ID3D12Device* Device)
 	FD3D12DynamicRHI* D3D12RHI = FD3D12DynamicRHI::GetD3DRHI();
 	D3D12RHI->ForEachDevice(Device, [&](FD3D12Device* Device)
 	{
-		bValidData = bValidData && LogBreadcrumbData(Device->GetGPUProfiler(), Device->GetCommandListManager());
-		bValidData = bValidData && LogBreadcrumbData(Device->GetGPUProfiler(), Device->GetAsyncCommandListManager());
-		bValidData = bValidData && LogBreadcrumbData(Device->GetGPUProfiler(), Device->GetCopyCommandListManager());
+		for (uint32 QueueTypeIndex = 0; QueueTypeIndex < (uint32)ED3D12QueueType::Count; ++QueueTypeIndex)
+		{
+			bValidData = bValidData && LogBreadcrumbData(Device->GetGPUProfiler(), Device->GetQueue((ED3D12QueueType)QueueTypeIndex));
+		}
 	});
 
 	if (!bValidData)
@@ -334,58 +405,176 @@ struct FDred_1_2
 	const D3D12_AUTO_BREADCRUMB_NODE1* BreadcrumbHead = nullptr;
 };
 
+// Should match all values from D3D12_AUTO_BREADCRUMB_OP
+static const TCHAR* BreadcrumbOpNames[] =
+{
+	TEXT("SetMarker"),
+	TEXT("BeginEvent"),
+	TEXT("EndEvent"),
+	TEXT("DrawInstanced"),
+	TEXT("DrawIndexedInstanced"),
+	TEXT("ExecuteIndirect"),
+	TEXT("Dispatch"),
+	TEXT("CopyBufferRegion"),
+	TEXT("CopyTextureRegion"),
+	TEXT("CopyResource"),
+	TEXT("CopyTiles"),
+	TEXT("ResolveSubresource"),
+	TEXT("ClearRenderTargetView"),
+	TEXT("ClearUnorderedAccessView"),
+	TEXT("ClearDepthStencilView"),
+	TEXT("ResourceBarrier"),
+	TEXT("ExecuteBundle"),
+	TEXT("Present"),
+	TEXT("ResolveQueryData"),
+	TEXT("BeginSubmission"),
+	TEXT("EndSubmission"),
+	TEXT("DecodeFrame"),
+	TEXT("ProcessFrames"),
+	TEXT("AtomicCopyBufferUint"),
+	TEXT("AtomicCopyBufferUint64"),
+	TEXT("ResolveSubresourceRegion"),
+	TEXT("WriteBufferImmediate"),
+	TEXT("DecodeFrame1"),
+	TEXT("SetProtectedResourceSession"),
+	TEXT("DecodeFrame2"),
+	TEXT("ProcessFrames1"),
+	TEXT("BuildRaytracingAccelerationStructure"),
+	TEXT("EmitRaytracingAccelerationStructurePostBuildInfo"),
+	TEXT("CopyRaytracingAccelerationStructure"),
+	TEXT("DispatchRays"),
+	TEXT("InitializeMetaCommand"),
+	TEXT("ExecuteMetaCommand"),
+	TEXT("EstimateMotion"),
+	TEXT("ResolveMotionVectorHeap"),
+	TEXT("SetPipelineState1"),
+	TEXT("InitializeExtensionCommand"),
+	TEXT("ExecuteExtensionCommand"),
+};
+static_assert(UE_ARRAY_COUNT(BreadcrumbOpNames) == D3D12_AUTO_BREADCRUMB_OP_EXECUTEEXTENSIONCOMMAND + 1, "OpNames array length mismatch");
+
+/** 
+ * Calculate the number of active scopes in the case of a DRED history where the number of 
+ * EndEvent operations does not match the number of BeginEvent operations.
+ * Practically, this would be the number of "missing" BeginEvent operations that, if added at
+ * the beginning of the history, would balance out all EndEvent operations found later on.
+ */
+template <typename FDredNode_T>
+static uint32 CalculateDREDUnknownActiveScopes(const FDredNode_T* DredNode)
+{
+	check(DredNode);
+
+	int32 NumOpenEvents = 0;
+	int32 MaxUnknownActiveScopes = 0;
+	for (uint32 Op = 0; Op < DredNode->BreadcrumbCount; ++Op)
+	{
+		D3D12_AUTO_BREADCRUMB_OP BreadcrumbOp = DredNode->pCommandHistory[Op];
+		if (BreadcrumbOp == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT)
+		{
+			NumOpenEvents++;
+		}
+		else if (BreadcrumbOp == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT)
+		{
+			NumOpenEvents--;
+		}
+
+		MaxUnknownActiveScopes = FMath::Min(NumOpenEvents, MaxUnknownActiveScopes);
+	}
+
+	return FMath::Abs(MaxUnknownActiveScopes);
+}
+
+template <typename FDredNode_T>
+static TArray<FBreadcrumbNode> CollectDREDBreadcrumbNodes(const FDredNode_T* DredNode)
+{
+	check(DredNode && DredNode->pLastBreadcrumbValue);
+	uint32 LastCompletedOp = *DredNode->pLastBreadcrumbValue;
+	if (LastCompletedOp == DredNode->BreadcrumbCount || LastCompletedOp == 0)
+	{
+		return {};
+	}
+
+	TMap<uint32, const wchar_t*> ContextStrings;
+	for (const D3D12_DRED_BREADCRUMB_CONTEXT& Context : GetBreadcrumbContexts(DredNode))
+	{
+		ContextStrings.Add(Context.BreadcrumbIndex, Context.pContextString);
+	}
+
+	// Create a root node that will hold all events as children. The root itself will be discarded.
+	FBreadcrumbNode Root;
+	Root.Name = TEXT("");
+	Root.State = EBreadcrumbState::Invalid;
+
+	TArray<FBreadcrumbNode*> ParentChain = { &Root };
+
+	// If we have open scopes, create them now as "Unknown events".
+	uint32 NumOpenScopes = CalculateDREDUnknownActiveScopes(DredNode);
+	for (uint32 i = 0; i < NumOpenScopes; ++i)
+	{
+		FBreadcrumbNode& UnknownNode = ParentChain.Last()->Children.Emplace_GetRef();
+		UnknownNode.Name = TEXT("Unknown event");
+		UnknownNode.State = EBreadcrumbState::Active;
+		ParentChain.Push(&UnknownNode);
+	}
+
+	for (uint32 Op = 0; Op < DredNode->BreadcrumbCount; ++Op)
+	{
+		D3D12_AUTO_BREADCRUMB_OP BreadcrumbOp = DredNode->pCommandHistory[Op];
+		bool bCompleted = Op < LastCompletedOp;
+		auto OpContextStr = ContextStrings.Find(Op);
+
+		if (BreadcrumbOp == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT)
+		{
+			// This is a begin event, potentially with children events.
+			FBreadcrumbNode& BreadcrumbNode = ParentChain.Last()->Children.Emplace_GetRef();
+			BreadcrumbNode.Name = OpContextStr ? *OpContextStr : TEXT("Unknown event");
+			BreadcrumbNode.State = bCompleted ? EBreadcrumbState::Active : EBreadcrumbState::NotStarted;
+
+			ParentChain.Push(&BreadcrumbNode);
+		}
+		else if (BreadcrumbOp == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT)
+		{
+			FBreadcrumbNode* Parent = ParentChain.Pop();
+			if (Parent->State == EBreadcrumbState::Invalid)
+			{
+				// If we reach this point, the DRED breadcrumbs are malformed, and some
+				// basic invariants around matching BeginEvent/EndEvent do not hold.
+				// Return gracefully and do not attempt to process further.
+				return {};
+			}
+
+			// This is the end event for the parent node. Mark the whole event as finished
+			// if this end event was completed.
+			if (bCompleted && Parent->State == EBreadcrumbState::Active)
+			{
+				Parent->State = EBreadcrumbState::Finished;
+			}
+		}
+		else
+		{
+			// This is a miscellaneous event between a BeginEvent and an EndEvent.
+			const TCHAR* OpName = (BreadcrumbOp < UE_ARRAY_COUNT(BreadcrumbOpNames)) ? BreadcrumbOpNames[BreadcrumbOp] : TEXT("Unknown Op");
+
+			FBreadcrumbNode& BreadcrumbNode = ParentChain.Last()->Children.Emplace_GetRef();
+			if (OpContextStr)
+			{
+				BreadcrumbNode.Name = FString::Printf(TEXT("%s [%s]"), OpName, *OpContextStr);
+			}
+			else
+			{
+				BreadcrumbNode.Name = OpName;
+			}
+			BreadcrumbNode.State = bCompleted ? EBreadcrumbState::Finished : EBreadcrumbState::NotStarted;
+		}
+	}
+
+	return Root.Children;
+}
+
 /** Log the DRED data to Error log if available */
 template <typename FDred_T>
-static bool LogDREDData(ID3D12Device* Device)
+static bool LogDREDData(ID3D12Device* Device, bool bTrackingAllAllocations, D3D12_GPU_VIRTUAL_ADDRESS& OutPageFaultGPUAddress)
 {
-	// Should match all values from D3D12_AUTO_BREADCRUMB_OP
-	static const TCHAR* OpNames[] =
-	{
-		TEXT("SetMarker"),
-		TEXT("BeginEvent"),
-		TEXT("EndEvent"),
-		TEXT("DrawInstanced"),
-		TEXT("DrawIndexedInstanced"),
-		TEXT("ExecuteIndirect"),
-		TEXT("Dispatch"),
-		TEXT("CopyBufferRegion"),
-		TEXT("CopyTextureRegion"),
-		TEXT("CopyResource"),
-		TEXT("CopyTiles"),
-		TEXT("ResolveSubresource"),
-		TEXT("ClearRenderTargetView"),
-		TEXT("ClearUnorderedAccessView"),
-		TEXT("ClearDepthStencilView"),
-		TEXT("ResourceBarrier"),
-		TEXT("ExecuteBundle"),
-		TEXT("Present"),
-		TEXT("ResolveQueryData"),
-		TEXT("BeginSubmission"),
-		TEXT("EndSubmission"),
-		TEXT("DecodeFrame"),
-		TEXT("ProcessFrames"),
-		TEXT("AtomicCopyBufferUint"),
-		TEXT("AtomicCopyBufferUint64"),
-		TEXT("ResolveSubresourceRegion"),
-		TEXT("WriteBufferImmediate"),
-		TEXT("DecodeFrame1"),
-		TEXT("SetProtectedResourceSession"),
-		TEXT("DecodeFrame2"),
-		TEXT("ProcessFrames1"),
-		TEXT("BuildRaytracingAccelerationStructure"),
-		TEXT("EmitRaytracingAccelerationStructurePostBuildInfo"),
-		TEXT("CopyRaytracingAccelerationStructure"),
-		TEXT("DispatchRays"),
-		TEXT("InitializeMetaCommand"),
-		TEXT("ExecuteMetaCommand"),
-		TEXT("EstimateMotion"),
-		TEXT("ResolveMotionVectorHeap"),
-		TEXT("SetPipelineState1"),
-		TEXT("InitializeExtensionCommand"),
-		TEXT("ExecuteExtensionCommand"),
-	};
-	static_assert(UE_ARRAY_COUNT(OpNames) == D3D12_AUTO_BREADCRUMB_OP_EXECUTEEXTENSIONCOMMAND + 1, "OpNames array length mismatch");
-
 	// Should match all valid values from D3D12_DRED_ALLOCATION_TYPE
 	static const TCHAR* AllocTypesNames[] =
 	{
@@ -421,6 +610,7 @@ static bool LogDREDData(ID3D12Device* Device)
 	};
 	static_assert(UE_ARRAY_COUNT(AllocTypesNames) == D3D12_DRED_ALLOCATION_TYPE_VIDEO_EXTENSION_COMMAND - D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE + 1, "AllocTypes array length mismatch");
 
+	bool bHasValidBreadcrumbData = false;
 	FDred_T Dred(Device);
 	if (Dred.Data.IsValid())
 	{
@@ -439,6 +629,7 @@ static bool LogDREDData(ID3D12Device* Device)
 
 				if (LastCompletedOp != Node->BreadcrumbCount && LastCompletedOp != 0)
 				{
+					bHasValidBreadcrumbData = true;
 					UE_LOG(LogD3D12RHI, Error, TEXT("DRED: Commandlist \"%s\" on CommandQueue \"%s\", %d completed of %d"), Node->pCommandListDebugNameW, Node->pCommandQueueDebugNameW, LastCompletedOp, Node->BreadcrumbCount);
 					TracedCommandLists++;
 
@@ -467,8 +658,15 @@ static bool LogDREDData(ID3D12Device* Device)
 							ContextStr.Reset();
 						}
 
-						const TCHAR* OpName = (BreadcrumbOp < UE_ARRAY_COUNT(OpNames)) ? OpNames[BreadcrumbOp] : TEXT("Unknown Op");
+						const TCHAR* OpName = (BreadcrumbOp < UE_ARRAY_COUNT(BreadcrumbOpNames)) ? BreadcrumbOpNames[BreadcrumbOp] : TEXT("Unknown Op");
 						UE_LOG(LogD3D12RHI, Error, TEXT("\tOp: %d, %s%s%s"), Op, OpName, *ContextStr, (Op + 1 == LastCompletedOp) ? TEXT(" - LAST COMPLETED") : TEXT(""));
+					}
+
+					// Collect and export breadcrumb data separately as part of the crash payload.
+					TArray<FBreadcrumbNode> Breadcrumbs = CollectDREDBreadcrumbNodes(Node);
+					if (!Breadcrumbs.IsEmpty())
+					{
+						ExportBreadcrumbDataAsCrashPayload(TEXT("DRED"), Node->pCommandQueueDebugNameW, MoveTemp(Breadcrumbs));
 					}
 				}
 
@@ -480,22 +678,35 @@ static bool LogDREDData(ID3D12Device* Device)
 				UE_LOG(LogD3D12RHI, Error, TEXT("DRED: No command list found with active outstanding operations (all finished or not started yet)."));
 			}
 		}
+		else
+		{
+			UE_LOG(LogD3D12RHI, Error, TEXT("DRED: No breadcrumb head found."));
+		}
 
+		FPlatformCrashContext::SetEngineData(TEXT("RHI.DREDHasBreadcrumbData"), bHasValidBreadcrumbData ? TEXT("true") : TEXT("false"));
+
+		bool bHasValidPageFaultData = false;
 		D3D12_DRED_PAGE_FAULT_OUTPUT DredPageFaultOutput;
 		if (SUCCEEDED(Dred.Data->GetPageFaultAllocationOutput(&DredPageFaultOutput)) && DredPageFaultOutput.PageFaultVA != 0)
 		{
+			bHasValidPageFaultData = true;
+			OutPageFaultGPUAddress = DredPageFaultOutput.PageFaultVA;
 			UE_LOG(LogD3D12RHI, Error, TEXT("DRED: PageFault at VA GPUAddress \"0x%llX\""), (long long)DredPageFaultOutput.PageFaultVA);
-
+			
 			const D3D12_DRED_ALLOCATION_NODE* Node = DredPageFaultOutput.pHeadExistingAllocationNode;
 			if (Node)
 			{
 				UE_LOG(LogD3D12RHI, Error, TEXT("DRED: Active objects with VA ranges that match the faulting VA:"));
 				while (Node)
 				{
-					int32 alloc_type_index = Node->AllocationType - D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE;
-					const TCHAR* AllocTypeName = (alloc_type_index < UE_ARRAY_COUNT(AllocTypesNames)) ? AllocTypesNames[alloc_type_index] : TEXT("Unknown Alloc");
-					UE_LOG(LogD3D12RHI, Error, TEXT("\tName: %s (Type: %s)"), Node->ObjectNameW, AllocTypeName);
-
+					// When tracking all allocations then empty named dummy resources (heap & buffer)
+					// are created for each texture to extract the GPUBaseAddress so don't write these out
+					if (!bTrackingAllAllocations || Node->ObjectNameW)
+					{
+						int32 alloc_type_index = Node->AllocationType - D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE;
+						const TCHAR* AllocTypeName = (alloc_type_index < UE_ARRAY_COUNT(AllocTypesNames)) ? AllocTypesNames[alloc_type_index] : TEXT("Unknown Alloc");
+						UE_LOG(LogD3D12RHI, Error, TEXT("\tName: %s (Type: %s)"), Node->ObjectNameW, AllocTypeName);
+					}
 					Node = Node->pNext;
 				}
 			}
@@ -506,9 +717,13 @@ static bool LogDREDData(ID3D12Device* Device)
 				UE_LOG(LogD3D12RHI, Error, TEXT("DRED: Recent freed objects with VA ranges that match the faulting VA:"));
 				while (Node)
 				{
-					int32 alloc_type_index = Node->AllocationType - D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE;
-					const TCHAR* AllocTypeName = (alloc_type_index < UE_ARRAY_COUNT(AllocTypesNames)) ? AllocTypesNames[alloc_type_index] : TEXT("Unknown Alloc");
-					UE_LOG(LogD3D12RHI, Error, TEXT("\tName: %s (Type: %s)"), Node->ObjectNameW, AllocTypeName);
+					// See comments above
+					if (!bTrackingAllAllocations || Node->ObjectNameW)
+					{
+						int32 alloc_type_index = Node->AllocationType - D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE;
+						const TCHAR* AllocTypeName = (alloc_type_index < UE_ARRAY_COUNT(AllocTypesNames)) ? AllocTypesNames[alloc_type_index] : TEXT("Unknown Alloc");
+						UE_LOG(LogD3D12RHI, Error, TEXT("\tName: %s (Type: %s)"), Node->ObjectNameW, AllocTypeName);
+					}
 
 					Node = Node->pNext;
 				}
@@ -519,6 +734,8 @@ static bool LogDREDData(ID3D12Device* Device)
 			UE_LOG(LogD3D12RHI, Error, TEXT("DRED: No PageFault data."));
 		}
 
+		FPlatformCrashContext::SetEngineData(TEXT("RHI.DREDHasPageFaultData"), bHasValidPageFaultData ? TEXT("true") : TEXT("false"));
+
 		return true;
 	}
 	else
@@ -527,41 +744,202 @@ static bool LogDREDData(ID3D12Device* Device)
 	}
 }
 
+
+namespace D3D12RHI
+{
+
+
+static FString MakeResourceDescDebugString(const D3D12_RESOURCE_DESC& Desc)
+{
+	FString ResourceDescString;
+	switch (Desc.Dimension)
+	{
+	default:
+		ResourceDescString = TEXT("Unknown");
+		break;
+	case D3D12_RESOURCE_DIMENSION_BUFFER:
+		ResourceDescString = FString::Printf(TEXT("Buffer %d bytes"), Desc.Width);
+		break;
+	case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+	case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+	case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+		ResourceDescString = FString::Printf(TEXT("Texture %dx%dx%d %s"), Desc.Width, Desc.Height, Desc.DepthOrArraySize, LexToString(Desc.Format));
+	}
+	return ResourceDescString;
+}
+
+void LogPageFaultData(FD3D12Adapter* InAdapter, FD3D12Device* InDevice, D3D12_GPU_VIRTUAL_ADDRESS InPageFaultAddress)
+{
+	if (InPageFaultAddress == 0)
+	{
+		return;
+	}
+
+	FD3D12ManualFence& FrameFence = InAdapter->GetFrameFence();
+
+	UE_LOG(LogD3D12RHI, Error, TEXT("PageFault: PageFault at VA GPUAddress \"0x%llX\" (GPU %d)"), (long long)InPageFaultAddress, InDevice->GetGPUIndex());
+	uint64 CachedFenceValue = FrameFence.GetCompletedFenceValue(false);
+	uint64 ActualFenceValue = FrameFence.GetCompletedFenceValue(true);
+	uint64 NextFenceValue = FrameFence.GetNextFenceToSignal();
+	UE_LOG(LogD3D12RHI, Error, TEXT("PageFault: Last completed frame ID: %d (cached: %d) - Current frame ID: %d"), ActualFenceValue, CachedFenceValue, NextFenceValue);
+	UE_LOG(LogD3D12RHI, Error, TEXT("PageFault: Logging all resource enabled: %s"), InAdapter->IsTrackingAllAllocations() ? TEXT("Yes") : TEXT("No"));
+
+	// Try and find all current allocations near that range
+	static const int64 CheckRangeRadius = 16 * 1024 * 1024;
+	TArray<FD3D12Adapter::FAllocatedResourceResult> OverlappingResources;
+	InAdapter->FindResourcesNearGPUAddress(InPageFaultAddress, CheckRangeRadius, OverlappingResources);
+	UE_LOG(LogD3D12RHI, Error, TEXT("PageFault: Found %d active tracked resources in %3.2f MB range of page fault address"), OverlappingResources.Num(), CheckRangeRadius / (1024.0f * 1024));
+	if (OverlappingResources.Num() > 0)
+	{
+		uint32 PrintCount = FMath::Min(OverlappingResources.Num(), 100);
+		for (uint32 Index = 0; Index < PrintCount; ++Index)
+		{
+			FD3D12Adapter::FAllocatedResourceResult OverlappingResource = OverlappingResources[Index];
+			D3D12_GPU_VIRTUAL_ADDRESS ResourceAddress = OverlappingResource.Allocation->GetGPUVirtualAddress();
+
+			const FD3D12Resource* Resource = OverlappingResource.Allocation->GetResource();
+			FString ResourceDescString = MakeResourceDescDebugString(Resource->GetDesc());
+
+			UE_LOG(LogD3D12RHI, Error, TEXT("\tGPU Address: [0x%llX .. 0x%llX] - Size: %lld bytes, %3.2f MB - Distance to page fault: %lld bytes, %3.2f MB - Transient: %d - Name: %s - Desc: %s"),
+				(uint64)ResourceAddress,
+				(uint64)ResourceAddress + OverlappingResource.Allocation->GetSize(),
+				OverlappingResource.Allocation->GetSize(),
+				OverlappingResource.Allocation->GetSize() / (1024.0f * 1024), 
+				OverlappingResource.Distance,
+				OverlappingResource.Distance / (1024.0f * 1024), 
+				OverlappingResource.Allocation->IsTransient(), 
+				*Resource->GetName().ToString(),
+				*ResourceDescString);
+		}
+	}
+
+	// Try and find all current heaps containing the page fault address
+	TArray<FD3D12Heap*> OverlappingHeaps;
+	InAdapter->FindHeapsContainingGPUAddress(InPageFaultAddress, OverlappingHeaps);
+	UE_LOG(LogD3D12RHI, Error, TEXT("PageFault: Found %d active heaps containing page fault address"), OverlappingHeaps.Num());
+	for (int32 Index = 0; Index < OverlappingHeaps.Num(); ++Index)
+	{
+		FD3D12Heap* Heap = OverlappingHeaps[Index];
+		UE_LOG(LogD3D12RHI, Error, TEXT("\tGPU Address: \"0x%llX\" - Size: %3.2f MB - Name: %s"),
+			(long long)Heap->GetGPUVirtualAddress(), Heap->GetHeapDesc().SizeInBytes / (1024.0f * 1024), *(Heap->GetName().ToString()));
+	}
+
+	// Try and find all released allocations within the faulting address
+	TArray<FD3D12Adapter::FReleasedAllocationData> ReleasedResources;
+	InAdapter->FindReleasedAllocationData(InPageFaultAddress, ReleasedResources);
+	UE_LOG(LogD3D12RHI, Error, TEXT("PageFault: Found %d released resources containing the page fault address during last 100 frames"), ReleasedResources.Num());
+	if (ReleasedResources.Num() > 0)
+	{
+		uint32 PrintCount = FMath::Min(ReleasedResources.Num(), 100);
+		for (uint32 Index = 0; Index < PrintCount; ++Index)
+		{
+			FD3D12Adapter::FReleasedAllocationData& AllocationData = ReleasedResources[Index];
+
+			FString ResourceDescString = MakeResourceDescDebugString(AllocationData.ResourceDesc);
+
+			UE_LOG(LogD3D12RHI, Error, TEXT("\tGPU Address: [0x%llX .. 0x%llX] - Size: %lld bytes, %3.2f MB - FrameID: %4d - DefragFree: %d - Transient: %d - Heap: %d - Name: %s - Desc: %s"),
+				(uint64)AllocationData.GPUVirtualAddress,
+				(uint64)AllocationData.GPUVirtualAddress + AllocationData.AllocationSize,
+				AllocationData.AllocationSize,
+				AllocationData.AllocationSize / (1024.0f * 1024),
+				AllocationData.ReleasedFrameID,
+				AllocationData.bDefragFree,
+				AllocationData.bTransient,
+				AllocationData.bHeap,
+				*AllocationData.ResourceName.ToString(),
+				*ResourceDescString);
+		}
+	}
+}
+
+} // namespace D3D12RHI
+
+void LogMemoryInfo(FD3D12Adapter* InAdapter)
+{	
+	const FD3D12MemoryInfo& MemoryInfo = InAdapter->GetMemoryInfo();
+
+	UE_LOG(LogD3D12RHI, Error, TEXT("Memory Info from frame ID %d:"), MemoryInfo.UpdateFrameNumber);
+	UE_LOG(LogD3D12RHI, Error, TEXT("\tBudget:\t%7.2f MB"), MemoryInfo.LocalMemoryInfo.Budget / (1024.0f * 1024));
+	UE_LOG(LogD3D12RHI, Error, TEXT("\tUsed:\t%7.2f MB"), MemoryInfo.LocalMemoryInfo.CurrentUsage / (1024.0f * 1024));
+}
+
 #endif  // PLATFORM_WINDOWS
 
 extern CORE_API bool GIsGPUCrashed;
 
-static void TerminateOnOutOfMemory(HRESULT D3DResult, bool bCreatingTextures)
+static void TerminateOnOutOfMemory(ID3D12Device* InDevice, HRESULT D3DResult, bool bCreatingTextures)
 {
 #if PLATFORM_WINDOWS
-	if (bCreatingTextures)
+	// send telemetry event with current adapter's memory info
+	FD3D12DynamicRHI* D3D12RHI = FD3D12DynamicRHI::GetD3DRHI();
+	FD3D12Adapter* Adapter = nullptr;
+	D3D12RHI->ForEachDevice(InDevice, [&](FD3D12Device* IterationDevice)
+		{
+			if (InDevice == IterationDevice->GetDevice())
+			{
+				Adapter = IterationDevice->GetParentAdapter();
+			}
+		});
+	// if InDevice == nullptr, just pick the first available adapter
+	if (!Adapter && D3D12RHI->GetNumAdapters() == 1)
 	{
-		FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *LOCTEXT("OutOfVideoMemoryTextures", "Out of video memory trying to allocate a texture! Make sure your video card has the minimum required memory, try lowering the resolution and/or closing other applications that are running. Exiting...").ToString(), TEXT("Error"));
+		check(!InDevice);
+		Adapter = &D3D12RHI->GetAdapter(0);
 	}
-	else
+	if (Adapter)
 	{
-		FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *NSLOCTEXT("D3D12RHI", "OutOfMemory", "Out of video memory trying to allocate a rendering resource. Make sure your video card has the minimum required memory, try lowering the resolution and/or closing other applications that are running. Exiting...").ToString(), TEXT("Error"));
+		const auto& MemoryInfo = Adapter->GetMemoryInfo().LocalMemoryInfo;
+		FCoreDelegates::GetGPUOutOfMemoryDelegate().Broadcast(MemoryInfo.Budget, MemoryInfo.CurrentUsage);
 	}
+
+	if (!FApp::IsUnattended())
+	{
+		if (bCreatingTextures)
+		{
+			FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *LOCTEXT("OutOfVideoMemoryTextures", "Out of video memory trying to allocate a texture! Make sure your video card has the minimum required memory, try lowering the resolution and/or closing other applications that are running. Exiting...").ToString(), TEXT("Error"));
+		}
+		else
+		{
+			FPlatformMisc::MessageBoxExt(EAppMsgType::Ok, *NSLOCTEXT("D3D12RHI", "OutOfMemory", "Out of video memory trying to allocate a rendering resource. Make sure your video card has the minimum required memory, try lowering the resolution and/or closing other applications that are running. Exiting...").ToString(), TEXT("Error"));
+		}
+	}
+
 #if STATS
 	GetRendererModule().DebugLogOnCrash();
 #endif
-	FPlatformMisc::RequestExit(true);
+
+	static IConsoleVariable* GPUCrashOOM = IConsoleManager::Get().FindConsoleVariable(TEXT("r.GPUCrashOnOutOfMemory"));
+	const bool bGPUCrashOOM = GPUCrashOOM && GPUCrashOOM->GetInt();
+	if (bGPUCrashOOM)
+	{
+		// If no device provided then try and log the DRED status of each device
+		D3D12RHI->ForEachDevice(InDevice, [&](FD3D12Device* IterationDevice)
+			{
+				if (InDevice == nullptr || InDevice == IterationDevice->GetDevice())
+				{
+					FD3D12Adapter* Adapter = IterationDevice->GetParentAdapter();
+					LogMemoryInfo(Adapter);
+				}
+			});
+	}
+	
+	UE_LOG(LogD3D12RHI, Fatal, TEXT("Out of video memory trying to allocate a rendering resource"));
+	if (!bGPUCrashOOM)
+	{
+		// Exit silently without reporting a crash because an OOM is not necessarily our fault		
+		FPlatformMisc::RequestExit(true, TEXT("D3D12Util.TerminateOnOutOfMemory"));
+	}
+
 #else // PLATFORM_WINDOWS
 	UE_LOG(LogInit, Fatal, TEXT("Out of video memory trying to allocate a rendering resource"));
 #endif // !PLATFORM_WINDOWS
 }
 
-#ifndef MAKE_D3DHRESULT
-#define _FACD3D						0x876
-#define MAKE_D3DHRESULT( code)		MAKE_HRESULT( 1, _FACD3D, code )
-#endif	//MAKE_D3DHRESULT
-
 namespace D3D12RHI
 {
-	void TerminateOnGPUCrash(ID3D12Device* InDevice, const void* InGPUCrashDump, const size_t InGPUCrashDumpSize)
+	void TerminateOnGPUCrash(ID3D12Device* InDevice)
 	{		
-		// Lock the cs, and never unlock - don't want another thread processing the same GPU crash
-		// This call will force a request exit
+		// This function can be called outside of VerifyD3D12Result & co, so it uses its own critical section to make sure it's not re-entered.
 		static FCriticalSection cs;
 		cs.Lock();
 
@@ -585,39 +963,65 @@ namespace D3D12RHI
 			{
 				if (InDevice == nullptr || InDevice == IterationDevice->GetDevice())
 				{
-					if (!LogDREDData<FDred_1_2>(IterationDevice->GetDevice()))
+					D3D12_GPU_VIRTUAL_ADDRESS PageFaultAddress = 0;
+					bool bIsTrackingAllAllocations = IterationDevice->GetParentAdapter()->IsTrackingAllAllocations();
+					if (!LogDREDData<FDred_1_2>(IterationDevice->GetDevice(), bIsTrackingAllAllocations, PageFaultAddress))
 					{
-						LogDREDData<FDred_1_1>(IterationDevice->GetDevice());
+						if (!LogDREDData<FDred_1_1>(IterationDevice->GetDevice(), bIsTrackingAllAllocations, PageFaultAddress))
+						{
+							UE_LOG(LogD3D12RHI, Error, TEXT("DRED: could not find DRED data (might not be enabled or available). Run with -dred or -gpucrashdebugging to enable dred if available."));
+						}						
 					}
+
+					FD3D12Adapter* Adapter = IterationDevice->GetParentAdapter();
+					LogPageFaultData(Adapter, IterationDevice, PageFaultAddress);
+					LogMemoryInfo(Adapter);
 				}
 			});
 #endif  // PLATFORM_WINDOWS
+
+#if NV_AFTERMATH
+		GFSDK_Aftermath_CrashDump_Status AftermathStatus{};
+		if (GDX12NVAfterMathEnabled)
+		{
+			GFSDK_Aftermath_GetCrashDumpStatus(&AftermathStatus);
+			if (AftermathStatus != GFSDK_Aftermath_CrashDump_Status_Unknown && AftermathStatus != GFSDK_Aftermath_CrashDump_Status_NotStarted)
+			{
+				const float StartTime = FPlatformTime::Seconds();
+				const float EndTime = StartTime + GDX12NVAfterMathDumpWaitTime;
+				while (AftermathStatus != GFSDK_Aftermath_CrashDump_Status_CollectingDataFailed
+					&& AftermathStatus != GFSDK_Aftermath_CrashDump_Status_Finished
+					&& FPlatformTime::Seconds() < EndTime)
+				{
+					FPlatformProcess::Sleep(0.01f);
+					GFSDK_Aftermath_GetCrashDumpStatus(&AftermathStatus);
+				}
+			}
+		}
+#endif
 		
 		// Build the error message
 		FTextBuilder ErrorMessage;
 		ErrorMessage.AppendLine(LOCTEXT("GPU Crashed", "GPU Crashed or D3D Device Removed.\n"));
-		if (!D3D12RHI->GetAdapter().IsDebugDevice())
-		{
-			ErrorMessage.AppendLine(LOCTEXT("D3D Debug Device", "Use -d3ddebug to enable the D3D debug device."));
-		}
-		if (D3D12RHI->GetAdapter().GetGPUCrashDebuggingMode() != ED3D12GPUCrashDebugginMode::Disabled)
+		if (D3D12RHI->GetAdapter().GetGPUCrashDebuggingModes() != ED3D12GPUCrashDebuggingModes::None)
 		{
 			ErrorMessage.AppendLine(LOCTEXT("GPU Crash Debugging enabled", "Check log for GPU state information."));
 		}
 		else
 		{
-			ErrorMessage.AppendLine(LOCTEXT("GPU Crash Debugging disabled", "Use -gpucrashdebugging to track current GPU state."));
+			ErrorMessage.AppendLine(LOCTEXT("GPU Crash Debugging disabled", "Use -gpucrashdebugging to enable GPU state tracking."));
 		}
 
 		// And info on gpu crash dump as well
-		if (InGPUCrashDump)
+#if NV_AFTERMATH
+		if (AftermathStatus == GFSDK_Aftermath_CrashDump_Status_Finished)
 		{
-			ErrorMessage.AppendLine(LOCTEXT("GPU CrashDump", "\nA GPU mini dump will be saved in the Crashes folder."));
+			ErrorMessage.AppendLine(LOCTEXT("GPU CrashDump", "\nA GPU mini dump was be saved in the Logs folder."));
 		}
+#endif
 		
 		// Make sure the log is flushed!
-		GLog->PanicFlushThreadedLogs();
-		GLog->Flush();
+		GLog->Panic();
 
 		// Show message box or trace information
 #if !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
@@ -631,68 +1035,59 @@ namespace D3D12RHI
 			UE_LOG(LogD3D12RHI, D3D12RHI_GPU_CRASH_LOG_VERBOSITY, TEXT("%s"), *ErrorMessage.ToText().ToString());
 		}
 
-#if PLATFORM_WINDOWS
-		// If we have crash dump data then dump to disc
-		if (InGPUCrashDump != nullptr)
-		{
-			// Write out crash dump to project log dir - exception handling code will take care of copying it to the correct location
-			const FString GPUMiniDumpPath = FPaths::Combine(FPaths::ProjectLogDir(), FWindowsPlatformCrashContext::UE4GPUAftermathMinidumpName);
-
-			// Just use raw windows file routines for the GPU minidump (TODO: refactor to our own functions?)
-			HANDLE FileHandle = CreateFileW(*GPUMiniDumpPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-			if (FileHandle != INVALID_HANDLE_VALUE)
-			{
-				WriteFile(FileHandle, InGPUCrashDump, InGPUCrashDumpSize, nullptr, nullptr);
-			}
-			CloseHandle(FileHandle);
-
-			// Report the GPU crash which will raise the exception (only interesting if we have a GPU dump)
-			ReportGPUCrash(TEXT("Aftermath GPU Crash dump Triggered"), 0);
-
-			// Force shutdown, we can't do anything useful anymore.
-			FPlatformMisc::RequestExit(true);
-		}
-#endif // PLATFORM_WINDOWS
-
 		// hard break here when the debugger is attached
 		if (IsDebuggerPresent())
 		{
 			UE_DEBUG_BREAK();
 		}
+
+#if PLATFORM_WINDOWS
+		ReportGPUCrash(TEXT("GPU Crash dump Triggered"), nullptr);
+#endif
+
+		// Force shutdown, we can't do anything useful anymore.
+		FPlatformMisc::RequestExit(true, TEXT("D3D12Util.TerminateOnGPUCrash"));
 	}
+
+	// It's possible for multiple threads to catch GPU crashes or other D3D errors at the same time. Make sure we only log the error once by acquiring
+	// this critical section inside VerifyD3D12Result and VerifyD3D12CreateTextureResult (and never releasing it, because those functions don't return).
+	static FCriticalSection GD3DCallFailedCS;
 
 	void VerifyD3D12Result(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, ID3D12Device* Device, FString Message)
 	{
 		check(FAILED(D3DResult));
+		
+		GD3DCallFailedCS.Lock();
 
 		const FString& ErrorString = GetD3D12ErrorString(D3DResult, Device);
 		UE_LOG(LogD3D12RHI, Error, TEXT("%s failed \n at %s:%u \n with error %s\n%s"), ANSI_TO_TCHAR(Code), ANSI_TO_TCHAR(Filename), Line, *ErrorString, *Message);
 		
 		if (D3DResult == E_OUTOFMEMORY)
 		{
-			TerminateOnOutOfMemory(D3DResult, false);
+			TerminateOnOutOfMemory(Device, D3DResult, false);
 		}
-		else
+		else if (D3DResult == DXGI_ERROR_DEVICE_REMOVED || D3DResult == DXGI_ERROR_DEVICE_HUNG || D3DResult == DXGI_ERROR_DEVICE_RESET)
 		{
-			TerminateOnGPUCrash(Device, nullptr, 0);
+			TerminateOnGPUCrash(Device);
 		}
 
 		// Make sure the log is flushed!
-		GLog->PanicFlushThreadedLogs();
-		GLog->Flush();
+		GLog->Panic();
 
 		UE_LOG(LogD3D12RHI, Fatal, TEXT("%s failed \n at %s:%u \n with error %s\n%s"), ANSI_TO_TCHAR(Code), ANSI_TO_TCHAR(Filename), Line, *ErrorString, *Message);
 
 		// Force shutdown, we can't do anything useful anymore.
-		FPlatformMisc::RequestExit(true);
+		FPlatformMisc::RequestExit(true, TEXT("D3D12Util.VerifyD3D12Result"));
 	}
 
 	void VerifyD3D12CreateTextureResult(HRESULT D3DResult, const ANSICHAR* Code, const ANSICHAR* Filename, uint32 Line, const D3D12_RESOURCE_DESC& TextureDesc, ID3D12Device* Device)
 	{
 		check(FAILED(D3DResult));
 
+		GD3DCallFailedCS.Lock();
+
 		const FString ErrorString = GetD3D12ErrorString(D3DResult, nullptr);
-		const TCHAR* D3DFormatString = GetD3D12TextureFormatString(TextureDesc.Format);
+		const TCHAR* D3DFormatString = UE::DXGIUtilities::GetFormatString(TextureDesc.Format);
 
 		UE_LOG(LogD3D12RHI, Error,
 			TEXT("%s failed \n at %s:%u \n with error %s, \n Size=%ix%ix%i Format=%s(0x%08X), NumMips=%i, Flags=%s"),
@@ -709,13 +1104,13 @@ namespace D3D12RHI
 			*GetD3D12TextureFlagString(TextureDesc.Flags));
 
 		// Terminate with device removed but we don't have any GPU crash dump information
-		if (D3DResult == DXGI_ERROR_DEVICE_REMOVED || D3DResult == DXGI_ERROR_DEVICE_HUNG)
+		if (D3DResult == DXGI_ERROR_DEVICE_REMOVED || D3DResult == DXGI_ERROR_DEVICE_HUNG || D3DResult == DXGI_ERROR_DEVICE_RESET)
 		{
-			TerminateOnGPUCrash(Device, nullptr, 0);
+			TerminateOnGPUCrash(Device);
 		}
 		else if (D3DResult == E_OUTOFMEMORY)
 		{
-			TerminateOnOutOfMemory(D3DResult, true);
+			TerminateOnOutOfMemory(Device, D3DResult, true);
 
 #if STATS
 			GetRendererModule().DebugLogOnCrash();
@@ -723,8 +1118,7 @@ namespace D3D12RHI
 		}
 
 		// Make sure the log is flushed!
-		GLog->PanicFlushThreadedLogs();
-		GLog->Flush();
+		GLog->Panic();
 
 		UE_LOG(LogD3D12RHI, Fatal,
 			TEXT("%s failed \n at %s:%u \n with error %s, \n Size=%ix%ix%i Format=%s(0x%08X), NumMips=%i, Flags=%s"),
@@ -741,7 +1135,7 @@ namespace D3D12RHI
 			*GetD3D12TextureFlagString(TextureDesc.Flags));
 
 		// Force shutdown, we can't do anything useful anymore.
-		FPlatformMisc::RequestExit(true);
+		FPlatformMisc::RequestExit(true, TEXT("D3D12Util.VerifyD3D12CreateTextureResult"));
 	}
 
 	void VerifyComRefCount(IUnknown* Object, int32 ExpectedRefs, const TCHAR* Code, const TCHAR* Filename, int32 Line)
@@ -772,15 +1166,22 @@ namespace D3D12RHI
 	}
 }
 
-void FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(const D3D12_RESOURCE_BINDING_TIER& ResourceBindingTier, const FShaderCodePackedResourceCounts& Counts, FShaderRegisterCounts& Shader, bool bAllowUAVs)
+void FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(const D3D12_RESOURCE_BINDING_TIER ResourceBindingTier, const FShaderCodePackedResourceCounts& Counts, FShaderRegisterCounts& Shader, bool bAllowUAVs)
 {
-	static const uint32 MaxSamplerCount = MAX_SAMPLERS;
-	static const uint32 MaxConstantBufferCount = MAX_CBS;
-	static const uint32 MaxShaderResourceCount = MAX_SRVS;
-	static const uint32 MaxUnorderedAccessCount = MAX_UAVS;
+	uint32 MaxSRVs = MAX_SRVS;
+	uint32 MaxSamplers = MAX_SAMPLERS;
+	uint32 MaxUAVs = MAX_UAVS;
+	uint32 MaxCBs = MAX_CBS;
 
-	// Round up and clamp values to their max
-	// Note: Rounding and setting counts based on binding tier allows us to create fewer root signatures.
+	// On tier 1 & 2 HW the actual descriptor table size used during the draw/dispatch must match that of the
+	// root signature so we round the size up to the closest power of 2 to accomplish 2 goals: 1) keep the size of
+	// the table closer to the required size to limit descriptor heap usage due to required empty descriptors,
+	// 2) encourage root signature reuse by having other shader root signature table sizes fall within the size rounding.
+	// Sampler and Shader resouce view table sizes must match signature on Tier 1 hardware and Constant buffer and
+	// Unorded access views table sizes must match signature on tier 2 hardware. On hardware > tier 2 the actual descriptor
+	// table size used during the draw/dispatch doesn't need to match the root signature size so we encourage reuse by using
+	// the max size. More info here: https://learn.microsoft.com/en-us/windows/win32/direct3d12/hardware-support,
+	// https://en.wikipedia.org/wiki/Feature_levels_in_Direct3D
 
 	// To reduce the size of the root signature, we only allow UAVs for certain shaders. 
 	// This code makes the assumption that the engine only uses UAVs at the PS or CS shader stages.
@@ -788,126 +1189,307 @@ void FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(const D3D12_RESOU
 
 	if (ResourceBindingTier <= D3D12_RESOURCE_BINDING_TIER_1)
 	{
-		Shader.SamplerCount = (Counts.NumSamplers > 0) ? FMath::Min(MaxSamplerCount, FMath::RoundUpToPowerOfTwo(Counts.NumSamplers)) : Counts.NumSamplers;
-		Shader.ShaderResourceCount = (Counts.NumSRVs > 0) ? FMath::Min(MaxShaderResourceCount, FMath::RoundUpToPowerOfTwo(Counts.NumSRVs)) : Counts.NumSRVs;
+		Shader.SamplerCount = (Counts.NumSamplers > 0) ? FMath::Min(MaxSamplers, FMath::RoundUpToPowerOfTwo(Counts.NumSamplers)) : Counts.NumSamplers;
+		Shader.ShaderResourceCount = (Counts.NumSRVs > 0) ? FMath::Min(MaxSRVs, FMath::RoundUpToPowerOfTwo(Counts.NumSRVs)) : Counts.NumSRVs;
 	}
 	else
 	{
-		Shader.SamplerCount = MaxSamplerCount;
-		Shader.ShaderResourceCount = MaxShaderResourceCount;
+		Shader.SamplerCount = Counts.NumSamplers > 0 ? MaxSamplers : 0;
+		Shader.ShaderResourceCount = Counts.NumSRVs > 0 ? MaxSRVs : 0;
 	}
 
 	if (ResourceBindingTier <= D3D12_RESOURCE_BINDING_TIER_2)
 	{
-		Shader.ConstantBufferCount = (Counts.NumCBs > MAX_ROOT_CBVS) ? FMath::Min(MaxConstantBufferCount, FMath::RoundUpToPowerOfTwo(Counts.NumCBs)) : Counts.NumCBs;
-		Shader.UnorderedAccessCount = (Counts.NumUAVs > 0 && bAllowUAVs) ? FMath::Min(MaxUnorderedAccessCount, FMath::RoundUpToPowerOfTwo(Counts.NumUAVs)) : 0;
+		Shader.ConstantBufferCount = (Counts.NumCBs > MAX_ROOT_CBVS) ? FMath::Min(MaxCBs, FMath::RoundUpToPowerOfTwo(Counts.NumCBs)) : Counts.NumCBs;
+		Shader.UnorderedAccessCount = (Counts.NumUAVs > 0 && bAllowUAVs) ? FMath::Min(MaxUAVs, FMath::RoundUpToPowerOfTwo(Counts.NumUAVs)) : 0;
 	}
 	else
 	{
-		Shader.ConstantBufferCount = (Counts.NumCBs > MAX_ROOT_CBVS) ? MaxConstantBufferCount : Counts.NumCBs;
-		Shader.UnorderedAccessCount = (bAllowUAVs) ? MaxUnorderedAccessCount : 0;
+		Shader.ConstantBufferCount = (Counts.NumCBs > MAX_ROOT_CBVS) ? MaxCBs : Counts.NumCBs;
+		Shader.UnorderedAccessCount = (Counts.NumUAVs > 0 && bAllowUAVs) ? MaxUAVs : 0;
 	}
 }
 
-void QuantizeBoundShaderState(
-	const D3D12_RESOURCE_BINDING_TIER& ResourceBindingTier,
-	const FD3D12BoundShaderState* const BSS,
-	FD3D12QuantizedBoundShaderState &QBSS
-	)
+bool NeedsAgsIntrinsicsSpace(const FD3D12ShaderData& ShaderData)
 {
-	// BSS quantizer. There is a 1:1 mapping of quantized bound shader state objects to root signatures.
-	// The objective is to allow a single root signature to represent many bound shader state objects.
-	// The bigger the quantization step sizes, the fewer the root signatures.
-	FMemory::Memzero(&QBSS, sizeof(QBSS));
-	QBSS.bAllowIAInputLayout = BSS->GetVertexDeclaration() != nullptr;	// Does the root signature need access to vertex buffers?
+#if D3D12RHI_NEEDS_VENDOR_EXTENSIONS
+	for (const FShaderCodeVendorExtension& Extension : ShaderData.VendorExtensions)
+	{
+		if (Extension.VendorId == EGpuVendorId::Amd)
+		{
+			// https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/master/ags_lib/hlsl/ags_shader_intrinsics_dx12.hlsl
+			return true;
+		}
+	}
+#endif
 
-	const FD3D12VertexShader* const VertexShader = BSS->GetVertexShader();
-	const FD3D12PixelShader* const PixelShader = BSS->GetPixelShader();
-	const FD3D12HullShader* const HullShader = BSS->GetHullShader();
-	const FD3D12DomainShader* const DomainShader = BSS->GetDomainShader();
-	const FD3D12GeometryShader* const GeometryShader = BSS->GetGeometryShader();
-	if (VertexShader) FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, VertexShader->ResourceCounts, QBSS.RegisterCounts[SV_Vertex]);
-	if (PixelShader) FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, PixelShader->ResourceCounts, QBSS.RegisterCounts[SV_Pixel], true);
-	if (HullShader) FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, HullShader->ResourceCounts, QBSS.RegisterCounts[SV_Hull]);
-	if (DomainShader) FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, DomainShader->ResourceCounts, QBSS.RegisterCounts[SV_Domain]);
-	if (GeometryShader) FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, GeometryShader->ResourceCounts, QBSS.RegisterCounts[SV_Geometry]);
+	return false;
+}
+
+static void SetBoundShaderStateFlags(FD3D12QuantizedBoundShaderState& OutQBSS, const FD3D12ShaderData* ShaderData)
+{
+	if (ShaderData)
+	{
+		OutQBSS.bUseDiagnosticBuffer |= ShaderData->UsesDiagnosticBuffer();
+#if PLATFORM_SUPPORTS_BINDLESS_RENDERING
+		OutQBSS.bUseDirectlyIndexedResourceHeap |= ShaderData->UsesBindlessResources();
+		OutQBSS.bUseDirectlyIndexedSamplerHeap |= ShaderData->UsesBindlessSamplers();
+#endif
+		if (GRHISupportsShaderRootConstants)
+		{
+			OutQBSS.bUseRootConstants |= ShaderData->UsesRootConstants();
+		}
+	}
 }
 
 static void QuantizeBoundShaderStateCommon(
+	FD3D12QuantizedBoundShaderState& OutQBSS,
+	const FD3D12ShaderData* ShaderData,
 	D3D12_RESOURCE_BINDING_TIER ResourceBindingTier,
-	const FShaderCodePackedResourceCounts& ResourceCounts,
 	EShaderVisibility ShaderVisibility,
-	bool bAllowUAVs,
-	FD3D12QuantizedBoundShaderState &OutQBSS
+	bool bAllowUAVs = false
 )
 {
+	if (ShaderData)
+	{
+		FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, ShaderData->ResourceCounts, OutQBSS.RegisterCounts[ShaderVisibility], bAllowUAVs);
+		OutQBSS.bNeedsAgsIntrinsicsSpace |= NeedsAgsIntrinsicsSpace(*ShaderData);
+	}
+
+	SetBoundShaderStateFlags(OutQBSS, ShaderData);
+}
+
+static bool IsCompatibleWithBindlessSamplers(const FD3D12ShaderData* ShaderData)
+{
+	if (ensure(ShaderData))
+	{
+		return ShaderData->UsesBindlessSamplers()
+			|| ShaderData->ResourceCounts.NumSamplers == 0;
+	}
+	return true;
+}
+
+static bool IsCompatibleWithBindlessResources(const FD3D12ShaderData* ShaderData)
+{
+	if (ensure(ShaderData))
+	{
+		return ShaderData->UsesBindlessResources()
+			|| (ShaderData->ResourceCounts.NumSRVs + ShaderData->ResourceCounts.NumUAVs) == 0;
+	}
+	return true;
+}
+
+inline bool BSSUsesRootConstants(const FBoundShaderStateInput& BSS)
+{
+	if (!GRHISupportsShaderRootConstants)
+	{
+		return false;
+	}
+
+	TArray<const FD3D12ShaderData*, TInlineAllocator<5>> ShaderData;
+
+	ShaderData.Add(FD3D12DynamicRHI::ResourceCast(BSS.GetVertexShader()));
+#if PLATFORM_SUPPORTS_MESH_SHADERS
+	ShaderData.Add(FD3D12DynamicRHI::ResourceCast(BSS.GetMeshShader()));
+	ShaderData.Add(FD3D12DynamicRHI::ResourceCast(BSS.GetAmplificationShader()));
+#endif
+	ShaderData.Add(FD3D12DynamicRHI::ResourceCast(BSS.GetPixelShader()));
+	ShaderData.Add(FD3D12DynamicRHI::ResourceCast(BSS.GetGeometryShader()));
+
+	bool bUsesRootConstants = false;
+	for (int32 DataIndex = 0; DataIndex < ShaderData.Num(); ++DataIndex)
+	{
+		if (ShaderData[DataIndex] == nullptr)
+		{
+			continue;
+		}
+
+		bUsesRootConstants = EnumHasAnyFlags(ShaderData[DataIndex]->ResourceCounts.UsageFlags, EShaderResourceUsageFlags::RootConstants);
+
+		if (bUsesRootConstants)
+		{
+			break;
+		}
+	}
+
+	return bUsesRootConstants;
+}
+	
+const FD3D12RootSignature* FD3D12Adapter::GetRootSignature(const FBoundShaderStateInput& BSS)
+{
+#if USE_STATIC_ROOT_SIGNATURE
+
+	if (BSSUsesRootConstants(BSS))
+	{
+		return &StaticGraphicsWithConstantsRootSignature;
+	}
+	else
+	{
+		return &StaticGraphicsRootSignature;
+	}
+
+#else //! USE_STATIC_ROOT_SIGNATURE
+
 	// BSS quantizer. There is a 1:1 mapping of quantized bound shader state objects to root signatures.
 	// The objective is to allow a single root signature to represent many bound shader state objects.
 	// The bigger the quantization step sizes, the fewer the root signatures.
-	FMemory::Memzero(&OutQBSS, sizeof(OutQBSS));
-	FD3D12QuantizedBoundShaderState::InitShaderRegisterCounts(ResourceBindingTier, ResourceCounts, OutQBSS.RegisterCounts[ShaderVisibility], bAllowUAVs);
+	FD3D12QuantizedBoundShaderState QBSS{};
+
+	QBSS.bAllowIAInputLayout = BSS.VertexDeclarationRHI != nullptr;	// Does the root signature need access to vertex buffers?
+
+	const D3D12_RESOURCE_BINDING_TIER ResourceBindingTier = GetResourceBindingTier();
+
+	QuantizeBoundShaderStateCommon(QBSS, FD3D12DynamicRHI::ResourceCast(BSS.GetVertexShader()),        ResourceBindingTier, SV_Vertex);
+#if PLATFORM_SUPPORTS_MESH_SHADERS
+	QuantizeBoundShaderStateCommon(QBSS, FD3D12DynamicRHI::ResourceCast(BSS.GetMeshShader()),          ResourceBindingTier, SV_Mesh);
+	QuantizeBoundShaderStateCommon(QBSS, FD3D12DynamicRHI::ResourceCast(BSS.GetAmplificationShader()), ResourceBindingTier, SV_Amplification);
+#endif
+	QuantizeBoundShaderStateCommon(QBSS, FD3D12DynamicRHI::ResourceCast(BSS.GetPixelShader()),         ResourceBindingTier, SV_Pixel, true /*bAllowUAVs*/);
+	QuantizeBoundShaderStateCommon(QBSS, FD3D12DynamicRHI::ResourceCast(BSS.GetGeometryShader()),      ResourceBindingTier, SV_Geometry);
+
+#if DO_CHECK && PLATFORM_SUPPORTS_BINDLESS_RENDERING
+	if (QBSS.bUseDirectlyIndexedResourceHeap || QBSS.bUseDirectlyIndexedSamplerHeap)
+	{
+		struct FGenericShaderPair
+		{
+			const FD3D12ShaderData* Data;
+			const FRHIGraphicsShader* RHI;
+		};
+		const FGenericShaderPair ShaderDatas[] =
+		{
+			{ FD3D12DynamicRHI::ResourceCast(BSS.GetVertexShader()), BSS.GetVertexShader() },
+#if PLATFORM_SUPPORTS_MESH_SHADERS
+			{ FD3D12DynamicRHI::ResourceCast(BSS.GetMeshShader()), BSS.GetMeshShader() },
+			{ FD3D12DynamicRHI::ResourceCast(BSS.GetAmplificationShader()), BSS.GetAmplificationShader() },
+#endif
+			{ FD3D12DynamicRHI::ResourceCast(BSS.GetPixelShader()), BSS.GetPixelShader() },
+			{ FD3D12DynamicRHI::ResourceCast(BSS.GetGeometryShader()), BSS.GetGeometryShader() },
+		};
+
+		for (const FGenericShaderPair& ShaderPair : ShaderDatas)
+		{
+			if (ShaderPair.RHI)
+			{
+				if (QBSS.bUseDirectlyIndexedResourceHeap)
+				{
+					checkf(IsCompatibleWithBindlessResources(ShaderPair.Data), TEXT("Mismatched dynamic resource usage. %s doesn't support binding with stages that use dynamic resources"), ShaderPair.RHI->GetShaderName());
+				}
+				if (QBSS.bUseDirectlyIndexedSamplerHeap)
+				{
+					checkf(IsCompatibleWithBindlessSamplers(ShaderPair.Data), TEXT("Mismatched dynamic resource usage. %s doesn't support binding with stages that use dynamic samplers"), ShaderPair.RHI->GetShaderName());
+				}
+			}
+		}
+	}
+#endif
+
+	return RootSignatureManager.GetRootSignature(QBSS);
+
+#endif //! USE_STATIC_ROOT_SIGNATURE
 }
 
-void QuantizeBoundShaderState(
-	const D3D12_RESOURCE_BINDING_TIER& ResourceBindingTier,
-	const FD3D12ComputeShader* const ComputeShader,
-	FD3D12QuantizedBoundShaderState &OutQBSS
-	)
+const FD3D12RootSignature* FD3D12Adapter::GetRootSignature(const FD3D12ComputeShader* ComputeShader)
 {
+#if USE_STATIC_ROOT_SIGNATURE
+
+	if (ComputeShader->UsesRootConstants() && GRHISupportsShaderRootConstants)
+	{
+		return &StaticComputeWithConstantsRootSignature;
+	}
+	else
+	{
+		return &StaticComputeRootSignature;
+	}
+
+#else //! USE_STATIC_ROOT_SIGNATURE
+
 	check(ComputeShader);
-	const bool bAllosUAVs = true;
-	QuantizeBoundShaderStateCommon(ResourceBindingTier, ComputeShader->ResourceCounts, SV_All, bAllosUAVs, OutQBSS);
-	check(OutQBSS.bAllowIAInputLayout == false); // No access to vertex buffers needed
+
+	// BSS quantizer. There is a 1:1 mapping of quantized bound shader state objects to root signatures.
+	// The objective is to allow a single root signature to represent many bound shader state objects.
+	// The bigger the quantization step sizes, the fewer the root signatures.
+	FD3D12QuantizedBoundShaderState QBSS{};
+
+	QuantizeBoundShaderStateCommon(QBSS, ComputeShader, GetResourceBindingTier(), SV_All, true /*bAllowUAVs*/);
+
+	check(QBSS.bAllowIAInputLayout == false); // No access to vertex buffers needed
+
+	return RootSignatureManager.GetRootSignature(QBSS);
+
+#endif //! USE_STATIC_ROOT_SIGNATURE
 }
 
 #if D3D12_RHI_RAYTRACING
 
-FD3D12QuantizedBoundShaderState GetRayTracingGlobalRootSignatureDesc()
+const FD3D12RootSignature* FD3D12Adapter::GetGlobalRayTracingRootSignature()
 {
-	FD3D12QuantizedBoundShaderState OutQBSS = {};
-	FShaderRegisterCounts& QBSSRegisterCounts = OutQBSS.RegisterCounts[SV_All];
+#if USE_STATIC_ROOT_SIGNATURE
 
-	OutQBSS.RootSignatureType = RS_RayTracingGlobal;
+	return &StaticRayTracingGlobalRootSignature;
+
+#else //!USE_STATIC_ROOT_SIGNATURE
+
+	FD3D12QuantizedBoundShaderState QBSS{};
+	FShaderRegisterCounts& QBSSRegisterCounts = QBSS.RegisterCounts[SV_All];
+
+	QBSS.RootSignatureType = RS_RayTracingGlobal;
+	QBSS.bUseDiagnosticBuffer = true;
+
+#if PLATFORM_SUPPORTS_BINDLESS_RENDERING
+	QBSS.bUseDirectlyIndexedResourceHeap = bBindlessResourcesAllowed;
+	QBSS.bUseDirectlyIndexedSamplerHeap = bBindlessSamplersAllowed;
+#endif
 
 	QBSSRegisterCounts.SamplerCount = MAX_SAMPLERS;
 	QBSSRegisterCounts.ShaderResourceCount = MAX_SRVS;
 	QBSSRegisterCounts.ConstantBufferCount = MAX_CBS;
 	QBSSRegisterCounts.UnorderedAccessCount = MAX_UAVS;
 
-	return OutQBSS;
+	return RootSignatureManager.GetRootSignature(QBSS);
+
+#endif //! USE_STATIC_ROOT_SIGNATURE
 }
 
-void QuantizeBoundShaderState(
-	EShaderFrequency ShaderFrequency,
-	const D3D12_RESOURCE_BINDING_TIER& ResourceBindingTier,
-	const FD3D12RayTracingShader* const RayTracingShader,
-	FD3D12QuantizedBoundShaderState &OutQBSS
-)
+const FD3D12RootSignature* FD3D12Adapter::GetRootSignature(const FD3D12RayTracingShader* RayTracingShader)
 {
-	FMemory::Memzero(&OutQBSS, sizeof(OutQBSS));
-	FShaderRegisterCounts& QBSSRegisterCounts = OutQBSS.RegisterCounts[SV_All];
+#if USE_STATIC_ROOT_SIGNATURE
 
-	switch (ShaderFrequency)
+	switch (RayTracingShader->GetFrequency())
+	{
+	default:
+		checkNoEntry(); // Unexpected shader target frequency
+		return nullptr;
+
+	case SF_RayGen:
+		return &StaticRayTracingGlobalRootSignature;
+
+	case SF_RayHitGroup:
+	case SF_RayCallable:
+	case SF_RayMiss:
+		return &StaticRayTracingLocalRootSignature;
+	}
+
+#else //! USE_STATIC_ROOT_SIGNATURE
+
+	FD3D12QuantizedBoundShaderState QBSS{};
+
+	FShaderRegisterCounts& QBSSRegisterCounts = QBSS.RegisterCounts[SV_All];
+
+	switch (RayTracingShader->GetFrequency())
 	{
 	case SF_RayGen:
-	{
 		// Shared conservative root signature layout is used for all raygen and miss shaders.
-
-		OutQBSS = GetRayTracingGlobalRootSignatureDesc();
-
-		break;
-	}
+		return GetGlobalRayTracingRootSignature();
 
 	case SF_RayHitGroup:
 	case SF_RayCallable:
 	case SF_RayMiss:
 	{
 		// Local root signature is used for hit group shaders, using the exact number of resources to minimize shader binding table record size.
-
 		check(RayTracingShader);
 		const FShaderCodePackedResourceCounts& Counts = RayTracingShader->ResourceCounts;
 
-		OutQBSS.RootSignatureType = RS_RayTracingLocal;
+		QBSS.RootSignatureType = RS_RayTracingLocal;
 
 		QBSSRegisterCounts.SamplerCount = Counts.NumSamplers;
 		QBSSRegisterCounts.ShaderResourceCount = Counts.NumSRVs;
@@ -924,6 +1506,12 @@ void QuantizeBoundShaderState(
 	default:
 		checkNoEntry(); // Unexpected shader target frequency
 	}
+
+	SetBoundShaderStateFlags(QBSS, RayTracingShader);
+
+	return RootSignatureManager.GetRootSignature(QBSS);
+
+#endif //! USE_STATIC_ROOT_SIGNATURE
 }
 #endif // D3D12_RHI_RAYTRACING
 
@@ -951,7 +1539,12 @@ FString ConvertToResourceStateString(uint32 ResourceState)
 {
 	if (ResourceState == 0)
 	{
-		return FString(TEXT("D3D12_RESOURCE_STATE_COMMON"));
+		return TEXT("D3D12_RESOURCE_STATE_COMMON");
+	}
+
+	if (ResourceState == D3D12_RESOURCE_STATE_TBD)
+	{
+		return TEXT("D3D12_RESOURCE_STATE_TBD");
 	}
 
 	const TCHAR* ResourceStateNames[] =
@@ -991,7 +1584,7 @@ FString ConvertToResourceStateString(uint32 ResourceState)
 	return ResourceStateString;
 }
 
-void LogResourceBarriers(uint32 NumBarriers, D3D12_RESOURCE_BARRIER* pBarriers, ID3D12CommandList* const pCommandList)
+void LogResourceBarriers(TConstArrayView<D3D12_RESOURCE_BARRIER> Barriers, ID3D12CommandList* const pCommandList)
 {
 	// Configure what resource barriers are logged.
 	const bool bLogAll = false;
@@ -1005,9 +1598,9 @@ void LogResourceBarriers(uint32 NumBarriers, D3D12_RESOURCE_BARRIER* pBarriers, 
 	ShouldLogMask |= bLogTransitionRenderTarget ? D3D12_RESOURCE_STATE_RENDER_TARGET : 0;
 	ShouldLogMask |= bLogTransitionUAV ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : 0;
 
-	for (uint32 i = 0; i < NumBarriers; i++)
+	for (int32 i = 0; i < Barriers.Num(); i++)
 	{
-		D3D12_RESOURCE_BARRIER &currentBarrier = pBarriers[i];
+		const D3D12_RESOURCE_BARRIER& currentBarrier = Barriers[i];
 
 		switch (currentBarrier.Type)
 		{
@@ -1029,7 +1622,7 @@ void LogResourceBarriers(uint32 NumBarriers, D3D12_RESOURCE_BARRIER* pBarriers, 
 
 			if (bShouldLog)
 			{
-				UE_LOG(LogD3D12RHI, Log, TEXT("*** BARRIER (CmdList: %016llX) %u/%u: %016llX (Sub: %u), %s -> %s"), pCommandList, i + 1, NumBarriers,
+				UE_LOG(LogD3D12RHI, Log, TEXT("*** BARRIER (CmdList: %016llX) %u/%u: %016llX (Sub: %u), %s -> %s"), pCommandList, i + 1, Barriers.Num(),
 					currentBarrier.Transition.pResource,
 					currentBarrier.Transition.Subresource,
 					*StateBefore,
@@ -1039,16 +1632,98 @@ void LogResourceBarriers(uint32 NumBarriers, D3D12_RESOURCE_BARRIER* pBarriers, 
 		}
 
 		case D3D12_RESOURCE_BARRIER_TYPE_UAV:
-			UE_LOG(LogD3D12RHI, Log, TEXT("*** BARRIER (CmdList: %016llX) %u/%u: UAV Barrier"), pCommandList, i + 1, NumBarriers);
+			UE_LOG(LogD3D12RHI, Log, TEXT("*** BARRIER (CmdList: %016llX) %u/%u: UAV Barrier"), pCommandList, i + 1, Barriers.Num());
+			break;
+
+		case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
+			UE_LOG(LogD3D12RHI, Log, TEXT("*** BARRIER (CmdList: %016llX) %u/%u: Aliasing Barrier, %016llX -> %016llX"), pCommandList, i + 1, Barriers.Num(), currentBarrier.Aliasing.pResourceBefore, currentBarrier.Aliasing.pResourceAfter);
 			break;
 
 		default:
 			check(false);
 			break;
-		}		
+		}
 	}
 }
 
+
+D3D12_RESOURCE_STATES GetD3D12ResourceState(ERHIAccess InRHIAccess, bool InIsAsyncCompute)
+{
+	// Add switch for common states (should cover all writeable states)
+	switch (InRHIAccess)
+	{
+	// all single write states
+	case ERHIAccess::RTV:					return D3D12_RESOURCE_STATE_RENDER_TARGET;
+	case ERHIAccess::UAVMask:		
+	case ERHIAccess::UAVCompute:	
+	case ERHIAccess::UAVGraphics:			return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+	case ERHIAccess::DSVWrite:				return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+	case ERHIAccess::CopyDest:				return D3D12_RESOURCE_STATE_COPY_DEST;
+	case ERHIAccess::ResolveDst:			return D3D12_RESOURCE_STATE_RESOLVE_DEST;
+	case ERHIAccess::Present:				return D3D12_RESOURCE_STATE_PRESENT;
+
+	// Generic read for mask read states
+	case ERHIAccess::ReadOnlyMask:	
+	case ERHIAccess::ReadOnlyExclusiveMask:	return D3D12_RESOURCE_STATE_GENERIC_READ;
+	default:
+	{
+		// Special case for DSV read & write (Depth write allows depth read as well in D3D)
+		if (InRHIAccess == ERHIAccess(ERHIAccess::DSVRead | ERHIAccess::DSVWrite))
+		{
+			return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+		}
+		else
+		{
+			// Should be combination from read only flags (write flags covered above)
+			check(!(EnumHasAnyFlags(InRHIAccess, ERHIAccess::WritableMask)));
+			check(EnumHasAnyFlags(InRHIAccess, ERHIAccess::ReadOnlyMask));
+
+			D3D12_RESOURCE_STATES State = D3D12_RESOURCE_STATE_COMMON;
+
+			// Translate the requested after state to a D3D state
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::SRVGraphics) && !InIsAsyncCompute)
+			{
+				State |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+			}
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::SRVCompute))
+			{
+				State |= D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+			}
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::VertexOrIndexBuffer))
+			{
+				State |= D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER;
+			}
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::CopySrc))
+			{
+				State |= D3D12_RESOURCE_STATE_COPY_SOURCE;
+			}
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::IndirectArgs))
+			{
+				State |= D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+			}
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::ResolveSrc))
+			{
+				State |= D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+			}
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::DSVRead))
+			{
+				State |= D3D12_RESOURCE_STATE_DEPTH_READ;
+			}
+#if PLATFORM_SUPPORTS_VARIABLE_RATE_SHADING
+			if (EnumHasAnyFlags(InRHIAccess, ERHIAccess::ShadingRateSource) && GRHISupportsAttachmentVariableRateShading)
+			{
+				State |= D3D12_RESOURCE_STATE_SHADING_RATE_SOURCE;
+			}
+#endif
+
+			// Should have at least one valid state
+			check(State != D3D12_RESOURCE_STATE_COMMON);
+
+			return State;
+		}
+	}
+	}
+}
 
 //==================================================================================================================================
 // CResourceState
@@ -1064,8 +1739,14 @@ void CResourceState::Initialize(uint32 SubresourceCount)
 	m_SubresourceState.SetNumUninitialized(SubresourceCount);
 	check(m_SubresourceState.Num() == SubresourceCount);
 
+	// No internal transition yet
+	bHasInternalTransition = 0;
+
 	// All subresources start out in an unknown state
 	SetResourceState(D3D12_RESOURCE_STATE_TBD);
+
+	// Unknown hidden resource state
+	SetUAVHiddenResourceState(D3D12_RESOURCE_STATE_TBD);
 }
 
 //----------------------------------------------------------------------------------------------------------------------------------
@@ -1108,7 +1789,7 @@ D3D12_RESOURCE_STATES CResourceState::GetSubresourceState(uint32 SubresourceInde
 {
 	if (m_AllSubresourcesSame)
 	{
-		return m_ResourceState;
+		return static_cast<D3D12_RESOURCE_STATES>(m_ResourceState);
 	}
 	else
 	{
@@ -1118,11 +1799,43 @@ D3D12_RESOURCE_STATES CResourceState::GetSubresourceState(uint32 SubresourceInde
 }
 
 //----------------------------------------------------------------------------------------------------------------------------------
+
+bool CResourceState::CheckAllSubresourceSame()
+{
+	// already marked same?
+	if (m_AllSubresourcesSame)
+	{
+		return true;
+	}
+	else
+	{
+		D3D12_RESOURCE_STATES State = m_SubresourceState[0];
+
+		// All subresources must be individually checked
+		const uint32 numSubresourceStates = m_SubresourceState.Num();
+		for (uint32 i = 1; i < numSubresourceStates; i++)
+		{
+			if (m_SubresourceState[i] != State)
+			{
+				return false;
+			}
+		}
+
+		SetResourceState(State);
+
+		return true;
+	}
+}
+
+//----------------------------------------------------------------------------------------------------------------------------------
 void CResourceState::SetResourceState(D3D12_RESOURCE_STATES State)
 {
 	m_AllSubresourcesSame = 1;
 
-	m_ResourceState = State;
+	// m_ResourceState is restricted to 31 bits.  Ensure State can be properly represented.
+	check((State & (1 << 31)) == 0);
+
+	m_ResourceState = *reinterpret_cast<uint32*>(&State);
 
 	// State is now tracked per-resource, so m_SubresourceState should not be read.
 #if UE_BUILD_DEBUG
@@ -1153,7 +1866,7 @@ void CResourceState::SetSubresourceState(uint32 SubresourceIndex, D3D12_RESOURCE
 			const uint32 numSubresourceStates = m_SubresourceState.Num();
 			for (uint32 i = 0; i < numSubresourceStates; i++)
 			{
-				m_SubresourceState[i] = m_ResourceState;
+				m_SubresourceState[i] = static_cast<D3D12_RESOURCE_STATES>(m_ResourceState);
 			}
 
 			m_AllSubresourcesSame = 0;
@@ -1168,30 +1881,11 @@ void CResourceState::SetSubresourceState(uint32 SubresourceIndex, D3D12_RESOURCE
 	}
 }
 
-bool FD3D12SyncPoint::IsValid() const
-{
-	return Fence != nullptr;
-}
-
-bool FD3D12SyncPoint::IsComplete() const
-{
-	check(IsValid());
-	return Fence->IsFenceComplete(Value);
-}
-
-void FD3D12SyncPoint::WaitForCompletion() const
-{
-	check(IsValid());
-	Fence->WaitForFence(Value);
-}
-
+#if ASSERT_RESOURCE_STATES
 // Forward declarations are required for the template functions
-template bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12View<D3D12_RENDER_TARGET_VIEW_DESC>* pView, const D3D12_RESOURCE_STATES& State);
-template bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12View<D3D12_UNORDERED_ACCESS_VIEW_DESC>* pView, const D3D12_RESOURCE_STATES& State);
-template bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12View<D3D12_SHADER_RESOURCE_VIEW_DESC>* pView, const D3D12_RESOURCE_STATES& State);
+template bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12View* pView, const D3D12_RESOURCE_STATES& State);
 
-template <class TView>
-bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12View<TView>* pView, const D3D12_RESOURCE_STATES& State)
+bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12View* pView, const D3D12_RESOURCE_STATES& State)
 {
 	// Check the view
 	if (!pView)
@@ -1213,11 +1907,11 @@ bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12Resource* pResou
 		return true;
 	}
 
-	CViewSubresourceSubset SubresourceSubset(Subresource, pResource->GetMipLevels(), pResource->GetArraySize(), pResource->GetPlaneCount());
-	return AssertResourceState(pCommandList, pResource, State, SubresourceSubset);
+	FD3D12ViewSubset ViewSubset(Subresource, pResource->GetMipLevels(), pResource->GetArraySize(), pResource->GetPlaneCount());
+	return AssertResourceState(pCommandList, pResource, State, ViewSubset);
 }
 
-bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12Resource* pResource, const D3D12_RESOURCE_STATES& State, const CViewSubresourceSubset& SubresourceSubset)
+bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12Resource* pResource, const D3D12_RESOURCE_STATES& State, const FD3D12ViewSubset& ViewSubset)
 {
 #if PLATFORM_WINDOWS
 	// Check the resource
@@ -1229,7 +1923,7 @@ bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12Resource* pResou
 	}
 
 	// Can only verify resource states if the debug layer is used
-	static const bool bWithD3DDebug = D3D12RHI_ShouldCreateWithD3DDebug();
+	static const bool bWithD3DDebug = GRHIGlobals.IsDebugLayerEnabled;
 	if (!bWithD3DDebug)
 	{
 		UE_LOG(LogD3D12RHI, Fatal, TEXT("*** AssertResourceState requires the debug layer ***"));
@@ -1245,21 +1939,19 @@ bool AssertResourceState(ID3D12CommandList* pCommandList, FD3D12Resource* pResou
 	check(pD3D12Resource);
 
 	// For each subresource in the view...
-	for (CViewSubresourceSubset::CViewSubresourceIterator it = SubresourceSubset.begin(); it != SubresourceSubset.end(); ++it)
+	for (uint32 SubresourceIndex : ViewSubset)
 	{
-		for (uint32 SubresourceIndex = it.StartSubresource(); SubresourceIndex < it.EndSubresource(); SubresourceIndex++)
+		const bool bGoodState = !!pDebugCommandList->AssertResourceState(pD3D12Resource, SubresourceIndex, State);
+		if (!bGoodState)
 		{
-			const bool bGoodState = !!pDebugCommandList->AssertResourceState(pD3D12Resource, SubresourceIndex, State);
-			if (!bGoodState)
-			{
-				return false;
-			}
+			return false;
 		}
 	}
 #endif // PLATFORM_WINDOWS
 
 	return true;
 }
+#endif
 
 //
 // Stat declarations.
@@ -1270,6 +1962,7 @@ DEFINE_STAT(STAT_D3D12CustomPresentTime);
 
 DEFINE_STAT(STAT_D3D12NumCommandAllocators);
 DEFINE_STAT(STAT_D3D12NumCommandLists);
+DEFINE_STAT(STAT_D3D12NumQueryHeaps);
 DEFINE_STAT(STAT_D3D12NumPSOs);
 
 DEFINE_STAT(STAT_D3D12TexturesAllocated);
@@ -1284,6 +1977,8 @@ DEFINE_STAT(STAT_D3D12UnlockBufferTime);
 DEFINE_STAT(STAT_D3D12CommitTransientResourceTime);
 DEFINE_STAT(STAT_D3D12DecommitTransientResourceTime);
 
+DEFINE_STAT(STAT_D3D12UAVBarriers);
+
 DEFINE_STAT(STAT_D3D12NewBoundShaderStateTime);
 DEFINE_STAT(STAT_D3D12CreateBoundShaderStateTime);
 DEFINE_STAT(STAT_D3D12NumBoundShaderState);
@@ -1293,6 +1988,8 @@ DEFINE_STAT(STAT_D3D12UpdateUniformBufferTime);
 
 DEFINE_STAT(STAT_D3D12CommitResourceTables);
 DEFINE_STAT(STAT_D3D12SetTextureInTableCalls);
+
+DEFINE_STAT(STAT_D3D12DispatchShaderBundle);
 
 DEFINE_STAT(STAT_D3D12ClearShaderResourceViewsTime);
 DEFINE_STAT(STAT_D3D12SetShaderResourceViewTime);
@@ -1314,9 +2011,35 @@ DEFINE_STAT(STAT_D3D12ExecuteCommandListTime);
 DEFINE_STAT(STAT_D3D12WaitForFenceTime);
 
 DEFINE_STAT(STAT_D3D12UsedVideoMemory);
+DEFINE_STAT(STAT_D3D12UsedSystemMemory);
 DEFINE_STAT(STAT_D3D12AvailableVideoMemory);
+DEFINE_STAT(STAT_D3D12DemotedVideoMemory);
 DEFINE_STAT(STAT_D3D12TotalVideoMemory);
-DEFINE_STAT(STAT_D3D12TextureAllocatorWastage);
+
+DEFINE_STAT(STAT_D3D12MemoryCurrentTotal);
+DEFINE_STAT(STAT_D3D12RenderTargets);
+DEFINE_STAT(STAT_D3D12UAVTextures);
+DEFINE_STAT(STAT_D3D12Textures);
+DEFINE_STAT(STAT_D3D12UAVBuffers);
+DEFINE_STAT(STAT_D3D12RTBuffers);
+DEFINE_STAT(STAT_D3D12Buffer);
+DEFINE_STAT(STAT_D3D12TransientHeaps);
+
+DEFINE_STAT(STAT_D3D12RenderTargetStandAloneAllocated);
+DEFINE_STAT(STAT_D3D12UAVTextureStandAloneAllocated);
+DEFINE_STAT(STAT_D3D12TextureStandAloneAllocated);
+DEFINE_STAT(STAT_D3D12UAVBufferStandAloneAllocated);
+DEFINE_STAT(STAT_D3D12BufferStandAloneAllocated);
+
+DEFINE_STAT(STAT_D3D12RenderTargetStandAloneCount);
+DEFINE_STAT(STAT_D3D12UAVTextureStandAloneCount);
+DEFINE_STAT(STAT_D3D12TextureStandAloneCount);
+DEFINE_STAT(STAT_D3D12UAVBufferStandAloneCount);
+DEFINE_STAT(STAT_D3D12BufferStandAloneCount);
+
+DEFINE_STAT(STAT_D3D12TextureAllocatorAllocated);
+DEFINE_STAT(STAT_D3D12TextureAllocatorUnused);
+DEFINE_STAT(STAT_D3D12TextureAllocatorCount);
 
 DEFINE_STAT(STAT_D3D12BufferPoolMemoryAllocated);
 DEFINE_STAT(STAT_D3D12BufferPoolMemoryUsed);
@@ -1324,7 +2047,17 @@ DEFINE_STAT(STAT_D3D12BufferPoolMemoryFree);
 DEFINE_STAT(STAT_D3D12BufferPoolAlignmentWaste);
 DEFINE_STAT(STAT_D3D12BufferPoolPageCount);
 DEFINE_STAT(STAT_D3D12BufferPoolFullPages);
-DEFINE_STAT(STAT_D3D12BufferStandAloneUsedMemory);
+DEFINE_STAT(STAT_D3D12BufferPoolFragmentation);
+DEFINE_STAT(STAT_D3D12BufferPoolFragmentationPercentage);
+
+DEFINE_STAT(STAT_D3D12UploadPoolMemoryAllocated);
+DEFINE_STAT(STAT_D3D12UploadPoolMemoryUsed);
+DEFINE_STAT(STAT_D3D12UploadPoolMemoryFree);
+DEFINE_STAT(STAT_D3D12UploadPoolAlignmentWaste);
+DEFINE_STAT(STAT_D3D12UploadPoolPageCount);
+DEFINE_STAT(STAT_D3D12UploadPoolFullPages);
+
+DEFINE_STAT(STAT_D3D12ReservedResourcePhysical);
 
 DEFINE_STAT(STAT_UniqueSamplers);
 
@@ -1347,5 +2080,15 @@ DEFINE_STAT(STAT_GlobalViewHeapBlockAllocations);
 
 DEFINE_STAT(STAT_ViewOnlineDescriptorHeapMemory);
 DEFINE_STAT(STAT_SamplerOnlineDescriptorHeapMemory);
+
+DEFINE_STAT(STAT_ExplicitSamplerDescriptorHeaps);
+DEFINE_STAT(STAT_ExplicitSamplerDescriptors);
+
+DEFINE_STAT(STAT_ExplicitViewDescriptorHeaps);
+DEFINE_STAT(STAT_ExplicitViewDescriptors);
+
+DEFINE_STAT(STAT_ExplicitMaxUsedSamplerDescriptors);
+DEFINE_STAT(STAT_ExplicitUsedSamplerDescriptors);
+DEFINE_STAT(STAT_ExplicitUsedViewDescriptors);
 
 #undef LOCTEXT_NAMESPACE

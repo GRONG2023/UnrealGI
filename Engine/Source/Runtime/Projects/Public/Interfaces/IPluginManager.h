@@ -4,9 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "PluginDescriptor.h"
+#include "Containers/VersePathFwd.h"
+#include "Templates/SharedPointer.h"
 
 struct FProjectDescriptor;
 class FJsonObject;
+struct FPluginReferenceDescriptor;
 
 /**
  * Enum for where a plugin is loaded from
@@ -67,7 +70,7 @@ struct FPluginStatus
 /**
  * Information about an enabled plugin.
  */
-class IPlugin
+class IPlugin : public TSharedFromThis<IPlugin>
 {
 public:
 	/* Virtual destructor */
@@ -86,23 +89,30 @@ public:
 	virtual const FString& GetFriendlyName() const = 0;
 
 	/**
-	 * Get a path to the plugin's descriptor
+	 * Get a filesystem path to the plugin's descriptor
 	 *
-	 * @return Path to the plugin's descriptor.
+	 * @return Filesystem path to the plugin's descriptor.
 	 */
 	virtual const FString& GetDescriptorFileName() const = 0;
 
 	/**
-	 * Get a path to the plugin's directory.
+	 * Get a filesystem path to the plugin's directory.
 	 *
-	 * @return Path to the plugin's base directory.
+	 * @return Filesystem path to the plugin's base directory.
 	 */
 	virtual FString GetBaseDir() const = 0;
 
 	/**
-	 * Get a path to the plugin's content directory.
+	 * Get a filesystem path to the plugin's directory.
 	 *
-	 * @return Path to the plugin's content directory.
+	 * @return Filesystem path to the plugin's base directory.
+	 */
+	virtual TArray<FString> GetExtensionBaseDirs() const = 0;
+
+	/**
+	 * Get a filesystem path to the plugin's content directory.
+	 *
+	 * @return Filesystem path to the plugin's content directory.
 	 */
 	virtual FString GetContentDir() const = 0;
 
@@ -147,6 +157,26 @@ public:
 	 * @return True if the plugin can contain content.
 	 */
 	virtual bool CanContainContent() const = 0;
+
+	/**
+	 * Determines if the plugin can contain Verse code.
+	 *
+	 * @return True if the plugin can contain Verse code.
+	 */
+	virtual bool CanContainVerse() const = 0;
+
+	/**
+	 * Gets the Verse path to the root of the plugin's content directory
+	 *
+	 * @return Verse path to the root of the plugin's content directory
+	 */
+	virtual const FString& GetVersePath() const = 0;
+
+	/**
+	 * Sets the Verse path to the root of the plugin's content directory
+	 * @param InVersePath Verse path to set
+	 */
+	virtual void SetVersePath(FString&& InVersePath) = 0;
 
 	/**
 	 * Returns the plugin's location
@@ -199,7 +229,14 @@ public:
 	 * 
 	 * @return True if the plugin was added or already in the list. False if it failed to load.
 	 */
-	virtual bool AddToPluginsList( const FString& PluginFilename ) = 0;
+	virtual bool AddToPluginsList(const FString& PluginFilename, FText* OutFailReason = nullptr) = 0;
+
+	/**
+	 * Remove a single plugin from the list of plugins.
+	 *
+	 * @return True if the plugin was not in the list. False if it can't be removed (see OutFailReason).
+	 */
+	virtual bool RemoveFromPluginsList(const FString& PluginFilename, FText* OutFailReason = nullptr) = 0;
 
 	/**
 	 * Loads all plug-ins
@@ -274,11 +311,33 @@ public:
 #endif
 
 	/**
-	 * Finds information for an enabled plugin.
+	 * Finds information for a plugin.
 	 *
 	 * @return	 Pointer to the plugin's information, or nullptr.
 	 */
-	virtual PROJECTS_API TSharedPtr<IPlugin> FindPlugin(const FString& Name) = 0;
+	virtual TSharedPtr<IPlugin> FindPlugin(const FStringView Name) = 0;
+	virtual TSharedPtr<IPlugin> FindPlugin(const ANSICHAR* Name) = 0;
+
+	virtual TSharedPtr<IPlugin> FindPluginFromPath(const FString& PluginPath) = 0;
+	virtual TSharedPtr<IPlugin> FindPluginFromDescriptor(const FPluginReferenceDescriptor& PluginDesc) = 0;
+
+	/**
+	 * Finds information for an enabled plugin.
+	 *
+	 * @return	 Pointer to the enabled plugin's information, or nullptr if not enabled or can't be found.
+	 */
+	virtual TSharedPtr<IPlugin> FindEnabledPlugin(const FStringView Name) = 0;
+	virtual TSharedPtr<IPlugin> FindEnabledPlugin(const ANSICHAR* Name) = 0;
+
+	virtual TSharedPtr<IPlugin> FindEnabledPluginFromPath(const FString& PluginPath) = 0;
+	virtual TSharedPtr<IPlugin> FindEnabledPluginFromDescriptor(const FPluginReferenceDescriptor& PluginDesc) = 0;
+
+	/** 
+	 * Finds all plugin descriptors underneath a given directory (recursively)
+	 * @param Directory Search folder
+	 * @param OutPluginFilePaths Receives found plugin descriptor file paths
+	 */
+	virtual void FindPluginsUnderDirectory(const FString& Directory, TArray<FString>& OutPluginFilePaths) = 0;
 
 	/**
 	 * Gets an array of all the enabled plugins.
@@ -295,19 +354,35 @@ public:
 	virtual TArray<TSharedRef<IPlugin>> GetEnabledPluginsWithContent() const = 0;
 
 	/**
+	 * Gets an array of all enabled plugins that can have Verse code.
+	 *
+	 * @return	Array of plugins with IsEnabled() and CanContainVerse() both true.
+	 */
+	virtual TArray<TSharedRef<IPlugin>> GetEnabledPluginsWithVerse() const = 0;
+
+	/**
+	 * Gets an array of all enabled plugins that can have content or Verse code.
+	 */
+	virtual TArray<TSharedRef<IPlugin>> GetEnabledPluginsWithContentOrVerse() const = 0;
+
+	/**
 	 * Gets an array of all the discovered plugins.
 	 *
 	 * @return	Array of the discovered plugins.
 	 */
 	virtual TArray<TSharedRef<IPlugin>> GetDiscoveredPlugins() = 0;
 
+#if WITH_EDITOR
 	/**
-	 * Gets status about all currently known plug-ins.
-	 *
-	 * @return	 Array of plug-in status objects.
+	 * Returns the set of built-in plugin names
 	 */
-	UE_DEPRECATED(4.18, "QueryStatusForAllPlugins() has been deprecated. Please use GetDiscoveredPlugins() instead.")
-	virtual TArray<FPluginStatus> QueryStatusForAllPlugins() const = 0;
+	virtual const TSet<FString>& GetBuiltInPluginNames() const = 0;
+
+	/**
+	 * Returns the plugin that owns the specified module, if any
+	 */
+	virtual TSharedPtr<IPlugin> GetModuleOwnerPlugin(FName ModuleName) const = 0;
+#endif //WITH_EDITOR
 
 	/**
 	 * Stores the specified path, utilizing it in future search passes when 
@@ -335,13 +410,30 @@ public:
 	 */
 	DECLARE_EVENT_OneParam(IPluginManager, FNewPluginMountedEvent, IPlugin&);
 
-
+	/**
+	 * Event signature for being notified that a new plugin has been created
+	 */
 	virtual FNewPluginMountedEvent& OnNewPluginCreated() = 0;
 
 	/**
-	 * Gets an array of plugins that loaded their own content pak file
+	 * Event for being notified that a new plugin has been mounted
 	 */
 	virtual FNewPluginMountedEvent& OnNewPluginMounted() = 0;
+
+	/**
+	 * Event for being notified that a new plugin and its content have been mounted
+	 */
+	virtual FNewPluginMountedEvent& OnNewPluginContentMounted() = 0;
+
+	/**
+	 * Event for being notified that a plugin has been edited
+	 */
+	virtual FNewPluginMountedEvent& OnPluginEdited() = 0;
+
+	/**
+	* Event for being notified that a plugin has been unmounted
+	*/
+	virtual FNewPluginMountedEvent& OnPluginUnmounted() = 0;
 
 	/**
 	 * Marks a newly created plugin as enabled, mounts its content and tries to load its modules
@@ -351,18 +443,48 @@ public:
 	/**
 	 * Marks an explicitly loaded plugin as enabled, mounts its content and tries to load its modules.
 	 * These plugins are not loaded implicitly, but instead wait for this function to be called.
+	 * 
+	 * @note Call MountExplicitlyLoadedPluginLocalizationData if you also want to load any localization data for this plugin.
 	 */
-	virtual void MountExplicitlyLoadedPlugin(const FString& PluginName) = 0;
+	virtual bool MountExplicitlyLoadedPlugin(const FString& PluginName) = 0;
+	virtual bool MountExplicitlyLoadedPlugin_FromFileName(const FString& PluginFileName) = 0;
+	virtual bool MountExplicitlyLoadedPlugin_FromDescriptor(const FPluginReferenceDescriptor& PluginDescriptor) = 0;
+
+	/**
+	 * Start loading localization data for an explicitly loaded plugin that has previously been mounted via one of the MountExplicitlyLoadedPlugin functions.
+	 * @return True if localization data started to load, or false if the plugin was missing or had no localization data to load.
+	 */
+	virtual bool MountExplicitlyLoadedPluginLocalizationData(const FString& PluginName) = 0;
+
+	/**
+	 * Start unloading localization data for an explicitly loaded plugin that had its localization data mounted via MountExplicitlyLoadedPluginLocalizationData.
+	 * @note Localization data is also automatically unloaded when calling UnmountExplicitlyLoadedPlugin.
+	 * @return True if localization data started to unload, or false if the plugin was missing or had no localization data to unload.
+	 */
+	virtual bool UnmountExplicitlyLoadedPluginLocalizationData(const FString& PluginName) = 0;
 
 	/**
 	 * Marks an explicitly loaded plugin as disabled, unmounts its content (does not work on plugins with compiled modules).
 	 */
 	virtual bool UnmountExplicitlyLoadedPlugin(const FString& PluginName, FText* OutReason) = 0;
+	virtual bool UnmountExplicitlyLoadedPlugin(const FString& PluginName, FText* OutReason, bool bAllowUnloadCode) = 0;
+
+	/**
+	 * Tries to get a list of plugin dependencies for a given plugin. Returns false if the plugin provided was not found
+	 */
+	virtual bool GetPluginDependencies(const FString& PluginName, TArray<FPluginReferenceDescriptor>& PluginDependencies) = 0;
+	virtual bool GetPluginDependencies_FromFileName(const FString& PluginFileName, TArray<FPluginReferenceDescriptor>& PluginDependencies) = 0;
+	virtual bool GetPluginDependencies_FromDescriptor(const FPluginReferenceDescriptor& PluginDescriptor, TArray<FPluginReferenceDescriptor>& PluginDependencies) = 0;
 
 	/**
 	* Does a reverse lookup to try to figure out what the UObject package name is for a plugin
 	*/
 	virtual FName PackageNameFromModuleName(FName ModuleName) = 0;
+
+	/**
+	* Does a reverse lookup to try to figure out what the package name is from a VersePath
+	*/
+	virtual bool TrySplitVersePath(const UE::Core::FVersePath& VersePath, FName& OutPackageName, FString& OutLeafPath) = 0;
 
 	/**
 	 * Determines if a content-only project requires a temporary target due to having a plugin enabled
@@ -386,6 +508,18 @@ public:
 	 * @param StagedPluginsFile A path to a file that contains all plugins that have been staged, and should be evaluated
 	 */
 	virtual bool IntegratePluginsIntoConfig(FConfigCacheIni& ConfigSystem, const TCHAR* EngineIniName, const TCHAR* PlatformName, const TCHAR* StagedPluginsFile) = 0;
+
+	/**
+	* Set root directories for where to find binaries for plugins.
+	*/
+	virtual void SetBinariesRootDirectories(const FString& EngineBinariesRootDir, const FString& ProjectBinariesRootDir) = 0;
+
+	/**
+	* If preload binaries is set all plugin binaries will be loaded in an early Loading phase.
+	* This is a temporary solution to work around issues with pak/iostore for modular builds
+	*/ 
+	virtual void SetPreloadBinaries() = 0;
+	virtual bool GetPreloadBinaries() = 0;
 
 public:
 

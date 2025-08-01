@@ -23,7 +23,7 @@
 #include "Widgets/SToolTip.h"
 #include "Widgets/Notifications/SErrorText.h"
 #include "Widgets/Input/SCheckBox.h"
-#include "EditorStyleSet.h"
+#include "Styling/AppStyle.h"
 #include "Factories/Factory.h"
 #include "Factories/CurveFactory.h"
 #include "Editor.h"
@@ -98,6 +98,7 @@ void SCurveEditor::Construct(const FArguments& InArgs)
 	bHideUI = InArgs._HideUI;
 	bAllowZoomOutput = InArgs._AllowZoomOutput;
 	bAlwaysDisplayColorCurves = InArgs._AlwaysDisplayColorCurves;
+	bAlwaysHideGradientEditor = InArgs._AlwaysHideGradientEditor;
 	bShowZoomButtons = InArgs._ShowZoomButtons;
 	bShowCurveSelector = InArgs._ShowCurveSelector;
 	bDrawInputGridNumbers = InArgs._ShowInputGridNumbers;
@@ -161,6 +162,11 @@ void SCurveEditor::Construct(const FArguments& InArgs)
 		FExecuteAction::CreateSP(this, &SCurveEditor::OnSelectInterpolationMode, RCIM_Cubic, RCTM_Auto),
 		FCanExecuteAction::CreateSP(this, &SCurveEditor::HasRichCurves),
 		FIsActionChecked::CreateSP(this, &SCurveEditor::IsInterpolationModeSelected, RCIM_Cubic, RCTM_Auto));
+
+	Commands->MapAction(FCurveEditorCommands::Get().InterpolationCubicSmartAuto,
+		FExecuteAction::CreateSP(this, &SCurveEditor::OnSelectInterpolationMode, RCIM_Cubic, RCTM_SmartAuto),
+		FCanExecuteAction::CreateSP(this, &SCurveEditor::HasRichCurves),
+		FIsActionChecked::CreateSP(this, &SCurveEditor::IsInterpolationModeSelected, RCIM_Cubic, RCTM_SmartAuto));
 
 	Commands->MapAction(FCurveEditorCommands::Get().InterpolationCubicUser,
 		FExecuteAction::CreateSP(this, &SCurveEditor::OnSelectInterpolationMode, RCIM_Cubic, RCTM_User),
@@ -291,187 +297,166 @@ void SCurveEditor::Construct(const FArguments& InArgs)
 
 	ChildSlot
 	[
-		SNew( SHorizontalBox )
-
-		+ SHorizontalBox::Slot()
-		.FillWidth(1.0f)
+		SNew( SVerticalBox )
+		+ SVerticalBox::Slot()
+		.FillHeight(1.0f)
 		[
-			SNew( SVerticalBox )
-
-			+ SVerticalBox::Slot()
-			.FillHeight(1.0f)
+			SNew(SHorizontalBox)
+			.Visibility( this, &SCurveEditor::GetCurveAreaVisibility )
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			.Padding(FMargin(30, 12, 0, 0))
 			[
-				SNew(SHorizontalBox)
-				.Visibility( this, &SCurveEditor::GetCurveAreaVisibility )
+				CurveSelector
+			]
 
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				.Padding(FMargin(30, 12, 0, 0))
+			+ SHorizontalBox::Slot()
+			.AutoWidth()
+			[
+				SNew(SBorder)
+				.VAlign(VAlign_Top)
+				.HAlign(HAlign_Left)
+				.BorderImage( FAppStyle::GetBrush("NoBorder") )
+				.DesiredSizeScale(FVector2D(256.0f,32.0f))
+				.Padding(FMargin(2, 12, 0, 0))
 				[
-					CurveSelector
-				]
+					SNew(SHorizontalBox)
 
-				+ SHorizontalBox::Slot()
-				.AutoWidth()
-				[
-					SNew(SBorder)
-					.VAlign(VAlign_Top)
-					.HAlign(HAlign_Left)
-					.BorderImage( FEditorStyle::GetBrush("NoBorder") )
-					.DesiredSizeScale(FVector2D(256.0f,32.0f))
-					.Padding(FMargin(2, 12, 0, 0))
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SButton)
+						.ToolTipText(LOCTEXT("ZoomToFitHorizontal", "Zoom To Fit Horizontal"))
+						.Visibility(this, &SCurveEditor::GetZoomButtonVisibility)
+						.OnClicked(this, &SCurveEditor::ZoomToFitHorizontalClicked)
+						.ContentPadding(1)
+						[
+							SNew(SImage) 
+							.Image( FAppStyle::GetBrush("CurveEd.FitHorizontal") ) 
+							.ColorAndOpacity( FSlateColor::UseForeground() ) 
+						]
+					]
+						
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
+					[
+						SNew(SButton)
+						.ToolTipText(LOCTEXT("ZoomToFitVertical", "Zoom To Fit Vertical"))
+						.Visibility(this, &SCurveEditor::GetZoomButtonVisibility)
+						.OnClicked(this, &SCurveEditor::ZoomToFitVerticalClicked)
+						.ContentPadding(1)
+						[
+							SNew(SImage) 
+							.Image( FAppStyle::GetBrush("CurveEd.FitVertical") ) 
+							.ColorAndOpacity( FSlateColor::UseForeground() ) 
+						]
+					]
+
+					+ SHorizontalBox::Slot()
+					.AutoWidth()
 					[
 						SNew(SHorizontalBox)
-
 						+ SHorizontalBox::Slot()
-						.AutoWidth()
+						.Padding(6.0f, 0.0, 3.0f, 0.0f)
+						.VAlign(VAlign_Center)
 						[
-							SNew(SButton)
-							.ToolTipText(LOCTEXT("ZoomToFitHorizontal", "Zoom To Fit Horizontal"))
-							.Visibility(this, &SCurveEditor::GetZoomButtonVisibility)
-							.OnClicked(this, &SCurveEditor::ZoomToFitHorizontalClicked)
-							.ContentPadding(1)
-							[
-								SNew(SImage) 
-								.Image( FEditorStyle::GetBrush("CurveEd.FitHorizontal") ) 
-								.ColorAndOpacity( FSlateColor::UseForeground() ) 
-							]
-						]
-						
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						[
-							SNew(SButton)
-							.ToolTipText(LOCTEXT("ZoomToFitVertical", "Zoom To Fit Vertical"))
-							.Visibility(this, &SCurveEditor::GetZoomButtonVisibility)
-							.OnClicked(this, &SCurveEditor::ZoomToFitVerticalClicked)
-							.ContentPadding(1)
-							[
-								SNew(SImage) 
-								.Image( FEditorStyle::GetBrush("CurveEd.FitVertical") ) 
-								.ColorAndOpacity( FSlateColor::UseForeground() ) 
-							]
-						]
-
-						+ SHorizontalBox::Slot()
-						.AutoWidth()
-						[
-							SNew(SBorder)
-							.BorderImage(FEditorStyle::GetBrush("NoBorder"))
+							SNew(STextBlock)
 							.Visibility(this, &SCurveEditor::GetEditVisibility)
-							.VAlign(VAlign_Center)
-							[
-								SNew(SHorizontalBox)
-
-								+ SHorizontalBox::Slot()
-								.AutoWidth()
-								[
-									SNew(SNumericEntryBox<float>)
-									.IsEnabled(this, &SCurveEditor::GetInputEditEnabled)
-									.Font(FEditorStyle::GetFontStyle("CurveEd.InfoFont"))
-									.Value(this, &SCurveEditor::OnGetTime)
-									.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
-									.OnValueCommitted(this, &SCurveEditor::OnTimeComitted)
-									.OnValueChanged(this, &SCurveEditor::OnTimeChanged)
-									.OnBeginSliderMovement(this, &SCurveEditor::OnBeginSliderMovement, LOCTEXT("SetTime", "Set New Time"))
-									.OnEndSliderMovement(this, &SCurveEditor::OnEndSliderMovement)
-									.LabelVAlign(VAlign_Center)
-									.AllowSpin(true)
-									.MinValue(TOptional<float>())
-									.MaxValue(TOptional<float>())
-									.MaxSliderValue(TOptional<float>())
-									.MinSliderValue(TOptional<float>())
-									.Delta(this, &SCurveEditor::GetInputNumericEntryBoxDelta)
-									.MinDesiredValueWidth(60.0f)
-									.Visibility(this, &SCurveEditor::GetTimeEditVisibility)
-									.Label()
-									[
-										SNew(STextBlock)
-										.Text(this, &SCurveEditor::GetInputAxisName)
-									]
-								]
-
-								+ SHorizontalBox::Slot()
-								.AutoWidth()
-								[
-									SNew(SNumericEntryBox<int32>)
-									.IsEnabled(this, &SCurveEditor::GetInputEditEnabled)
-									.Font(FEditorStyle::GetFontStyle("CurveEd.InfoFont"))
-									.Value(this, &SCurveEditor::OnGetTimeInFrames)
-									.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
-									.OnValueCommitted(this, &SCurveEditor::OnTimeInFramesComitted)
-									.OnValueChanged(this, &SCurveEditor::OnTimeInFramesChanged)
-									.OnBeginSliderMovement(this, &SCurveEditor::OnBeginSliderMovement, LOCTEXT("SetFrame", "Set New Frame"))
-									.OnEndSliderMovement(this, &SCurveEditor::OnEndSliderMovement)
-									.LabelVAlign(VAlign_Center)
-									.AllowSpin(true)
-									.MinValue(TOptional<int32>())
-									.MaxValue(TOptional<int32>())
-									.MaxSliderValue(TOptional<int32>())
-									.MinSliderValue(TOptional<int32>())
-									.Delta(1)
-									.MinDesiredValueWidth(60.0f)
-									.Visibility(this, &SCurveEditor::GetFrameEditVisibility)
-									.Label()
-									[
-										SNew(STextBlock)
-										.Text(this, &SCurveEditor::GetInputAxisName)
-									]
-								]
-							]
+							.Text(this, &SCurveEditor::GetInputAxisName)
+							.ShadowOffset(FVector2D(1,1))
 						]
-						
 						+ SHorizontalBox::Slot()
+						.VAlign(VAlign_Center)
 						.AutoWidth()
 						[
-							SNew(SBorder)
-							.BorderImage( FEditorStyle::GetBrush("NoBorder") )
-							.Visibility(this, &SCurveEditor::GetEditVisibility)
-							.VAlign(VAlign_Center)
-							[
-								SNew(SNumericEntryBox<float>)
-								.Font(FEditorStyle::GetFontStyle("CurveEd.InfoFont"))
-								.Value(this, &SCurveEditor::OnGetValue)
-								.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
-								.OnValueCommitted(this, &SCurveEditor::OnValueComitted)
-								.OnValueChanged(this, &SCurveEditor::OnValueChanged)
-								.OnBeginSliderMovement(this, &SCurveEditor::OnBeginSliderMovement, LOCTEXT("SetValue", "Set New Value"))
-								.OnEndSliderMovement(this, &SCurveEditor::OnEndSliderMovement)
-								.LabelVAlign(VAlign_Center)
-								.AllowSpin(true)
-								.MinValue(TOptional<float>())
-								.MaxValue(TOptional<float>())
-								.MaxSliderValue(TOptional<float>())
-								.MinSliderValue(TOptional<float>())
-								.Delta(this, &SCurveEditor::GetOutputNumericEntryBoxDelta)
-								.MinDesiredValueWidth(60.0f)
-								.Label()
-								[
-									SNew(STextBlock)
-									.Text(OutputAxisName)
-								]
-							]
+							SNew(SNumericEntryBox<float>)
+							.IsEnabled(this, &SCurveEditor::GetInputEditEnabled)
+							.Value(this, &SCurveEditor::OnGetTime)
+							.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
+							.OnValueCommitted(this, &SCurveEditor::OnTimeComitted)
+							.OnValueChanged(this, &SCurveEditor::OnTimeChanged)
+							.OnBeginSliderMovement(this, &SCurveEditor::OnBeginSliderMovement, LOCTEXT("SetTime", "Set New Time"))
+							.OnEndSliderMovement(this, &SCurveEditor::OnEndSliderMovement)
+							.AllowSpin(true)
+							.MinValue(TOptional<float>())
+							.MaxValue(TOptional<float>())
+							.MaxSliderValue(TOptional<float>())
+							.MinSliderValue(TOptional<float>())
+							.Delta(this, &SCurveEditor::GetInputNumericEntryBoxDelta)
+							.MinDesiredValueWidth(60.0f)
+							.Visibility(this, &SCurveEditor::GetTimeEditVisibility)
+								
 						]
+						+ SHorizontalBox::Slot()
+						.Padding(3.0f, 0.0f)
+						.VAlign(VAlign_Center)
+						.AutoWidth()
+						[
+							SNew(SNumericEntryBox<int32>)
+							.IsEnabled(this, &SCurveEditor::GetInputEditEnabled)
+							.Value(this, &SCurveEditor::OnGetTimeInFrames)
+							.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
+							.OnValueCommitted(this, &SCurveEditor::OnTimeInFramesComitted)
+							.OnValueChanged(this, &SCurveEditor::OnTimeInFramesChanged)
+							.OnBeginSliderMovement(this, &SCurveEditor::OnBeginSliderMovement, LOCTEXT("SetFrame", "Set New Frame"))
+							.OnEndSliderMovement(this, &SCurveEditor::OnEndSliderMovement)
+							.LabelVAlign(VAlign_Center)
+							.AllowSpin(true)
+							.MinValue(TOptional<int32>())
+							.MaxValue(TOptional<int32>())
+							.MaxSliderValue(TOptional<int32>())
+							.MinSliderValue(TOptional<int32>())
+							.Delta(1)
+							.MinDesiredValueWidth(60.0f)
+							.Visibility(this, &SCurveEditor::GetFrameEditVisibility)
+						]
+					]
+					+ SHorizontalBox::Slot()
+					.Padding(3.0f, 0.0f)
+					.VAlign(VAlign_Center)
+					[
+						SNew(STextBlock)
+						.Visibility(this, &SCurveEditor::GetEditVisibility)
+						.Text(OutputAxisName)
+						.ShadowOffset(FVector2D(1, 1))
+					]
+					+ SHorizontalBox::Slot()
+					.VAlign(VAlign_Center)
+					.AutoWidth()
+					[
+						SNew(SNumericEntryBox<float>)
+						.Visibility(this, &SCurveEditor::GetEditVisibility)
+						.Value(this, &SCurveEditor::OnGetValue)
+						.UndeterminedString(LOCTEXT("MultipleValues", "Multiple Values"))
+						.OnValueCommitted(this, &SCurveEditor::OnValueComitted)
+						.OnValueChanged(this, &SCurveEditor::OnValueChanged)
+						.OnBeginSliderMovement(this, &SCurveEditor::OnBeginSliderMovement, LOCTEXT("SetValue", "Set New Value"))
+						.OnEndSliderMovement(this, &SCurveEditor::OnEndSliderMovement)
+						.AllowSpin(true)
+						.MinValue(TOptional<float>())
+						.MaxValue(TOptional<float>())
+						.MaxSliderValue(TOptional<float>())
+						.MinSliderValue(TOptional<float>())
+						.Delta(this, &SCurveEditor::GetOutputNumericEntryBoxDelta)
+						.MinDesiredValueWidth(60.0f)
 					]
 				]
 			]
-
-
-			+ SVerticalBox::Slot()
-			.VAlign(VAlign_Bottom)
-			.FillHeight(.75f)
+		]
+		+ SVerticalBox::Slot()
+		.VAlign(VAlign_Bottom)
+		.FillHeight(.75f)
+		[
+			SNew( SBorder )
+			.Visibility( this, &SCurveEditor::GetColorGradientVisibility )
+			.BorderImage( FAppStyle::GetBrush("ToolPanel.GroupBorder") )
+			.BorderBackgroundColor( FLinearColor( .8f, .8f, .8f, .60f ) )
+			.Padding(1.0f)
 			[
-				SNew( SBorder )
-				.Visibility( this, &SCurveEditor::GetColorGradientVisibility )
-				.BorderImage( FEditorStyle::GetBrush("ToolPanel.GroupBorder") )
-				.BorderBackgroundColor( FLinearColor( .8f, .8f, .8f, .60f ) )
-				.Padding(1.0f)
-				[
-					SAssignNew( GradientViewer, SColorGradientEditor )
-					.ViewMinInput( ViewMinInput )
-					.ViewMaxInput( ViewMaxInput )
-					.IsEditingEnabled( this, &SCurveEditor::IsEditingEnabled )
-				]
+				SAssignNew( GradientViewer, SColorGradientEditor )
+				.ViewMinInput( ViewMinInput )
+				.ViewMaxInput( ViewMaxInput )
+				.IsEditingEnabled( this, &SCurveEditor::IsEditingEnabled )
 			]
 		]
 	];
@@ -600,42 +585,44 @@ TSharedRef<SWidget> SCurveEditor::CreateCurveSelectionWidget() const
 				.FillWidth(1.0f)
 				[
 					SNew(STextBlock)
-					.Font(FEditorStyle::GetFontStyle("CurveEd.LabelFont"))
+					.Font(FAppStyle::GetFontStyle("CurveEd.LabelFont"))
 					.ColorAndOpacity(CurveViewModel->Color)
 					.Text(FText::FromName(CurveViewModel->CurveInfo.CurveName))
 				]
 
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.VAlign(VAlign_Center)
+				.VAlign(VAlign_Fill)
 				[
 					SNew(SCheckBox)
+					.Style(&FAppStyle::Get().GetWidgetStyle<FCheckBoxStyle>("ToggleButtonCheckbox"))
 					.IsChecked(this, &SCurveEditor::IsCurveVisible, CurveViewModel)
 					.OnCheckStateChanged(const_cast<SCurveEditor*>(this), &SCurveEditor::OnCurveIsVisibleChanged, CurveViewModel)
 					.ToolTipText(this, &SCurveEditor::GetIsCurveVisibleToolTip, CurveViewModel)
-					.CheckedImage(FEditorStyle::GetBrush("CurveEd.Visible"))
-					.CheckedHoveredImage(FEditorStyle::GetBrush("CurveEd.VisibleHighlight"))
-					.CheckedPressedImage(FEditorStyle::GetBrush("CurveEd.Visible"))
-					.UncheckedImage(FEditorStyle::GetBrush("CurveEd.Invisible"))
-					.UncheckedHoveredImage(FEditorStyle::GetBrush("CurveEd.InvisibleHighlight"))
-					.UncheckedPressedImage(FEditorStyle::GetBrush("CurveEd.Invisible"))
+					.CheckedImage(FAppStyle::Get().GetBrush("Icons.Visible"))
+					.CheckedHoveredImage(FAppStyle::Get().GetBrush("Icons.Visible"))
+					.CheckedPressedImage(FAppStyle::Get().GetBrush("Icons.Visible"))
+					.UncheckedImage(FAppStyle::Get().GetBrush("Icons.Hidden"))
+					.UncheckedHoveredImage(FAppStyle::Get().GetBrush("Icons.Hidden"))
+					.UncheckedPressedImage(FAppStyle::Get().GetBrush("Icons.Hidden"))
 				]
 
 				+ SHorizontalBox::Slot()
 				.AutoWidth()
-				.VAlign(VAlign_Center)
+				.VAlign(VAlign_Fill)
 				.Padding(2, 0, 0, 0)
 				[
 					SNew(SCheckBox)
+					.Style(&FAppStyle::Get().GetWidgetStyle<FCheckBoxStyle>("ToggleButtonCheckbox"))
 					.IsChecked(this, &SCurveEditor::IsCurveLocked, CurveViewModel)
 					.OnCheckStateChanged(const_cast<SCurveEditor*>(this), &SCurveEditor::OnCurveIsLockedChanged, CurveViewModel)
 					.ToolTipText(this, &SCurveEditor::GetIsCurveLockedToolTip, CurveViewModel)
-					.CheckedImage(FEditorStyle::GetBrush("CurveEd.Locked"))
-					.CheckedHoveredImage(FEditorStyle::GetBrush("CurveEd.LockedHighlight"))
-					.CheckedPressedImage(FEditorStyle::GetBrush("CurveEd.Locked"))
-					.UncheckedImage(FEditorStyle::GetBrush("CurveEd.Unlocked"))
-					.UncheckedHoveredImage(FEditorStyle::GetBrush("CurveEd.UnlockedHighlight"))
-					.UncheckedPressedImage(FEditorStyle::GetBrush("CurveEd.Unlocked"))
+					.CheckedImage(FAppStyle::Get().GetBrush("Icons.Lock"))
+					.CheckedHoveredImage(FAppStyle::Get().GetBrush("Icons.Lock"))
+					.CheckedPressedImage(FAppStyle::Get().GetBrush("Icons.Lock"))
+					.UncheckedImage(FAppStyle::Get().GetBrush("Icons.Unlock"))
+					.UncheckedHoveredImage(FAppStyle::Get().GetBrush("Icons.Unlock"))
+					.UncheckedPressedImage(FAppStyle::Get().GetBrush("Icons.Unlock"))
 					.Visibility(bCanEditTrack ? EVisibility::Visible : EVisibility::Collapsed)
 				]
 			];
@@ -644,7 +631,7 @@ TSharedRef<SWidget> SCurveEditor::CreateCurveSelectionWidget() const
 
 	TSharedRef<SBorder> Border = SNew(SBorder)
 		.Padding(FMargin(3, 2, 2, 2))
-		.BorderImage(FEditorStyle::GetBrush("ToolPanel.GroupBorder"))
+		.BorderImage(FAppStyle::GetBrush("ToolPanel.GroupBorder"))
 		.BorderBackgroundColor(FLinearColor(0.0f, 0.0f, 0.0f, 0.3f))
 		[
 			CurveBox
@@ -718,7 +705,7 @@ EVisibility SCurveEditor::GetEditVisibility() const
 
 EVisibility SCurveEditor::GetColorGradientVisibility() const
 {
-	return bIsGradientEditorVisible && IsLinearColorCurve() ? EVisibility::Visible : EVisibility::Collapsed;
+	return IsGradientEditorVisible() && IsLinearColorCurve() ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 EVisibility SCurveEditor::GetZoomButtonVisibility() const
@@ -728,12 +715,20 @@ EVisibility SCurveEditor::GetZoomButtonVisibility() const
 
 EVisibility SCurveEditor::GetTimeEditVisibility() const
 {
-	return ShowTimeInFrames() ? EVisibility::Collapsed : EVisibility::Visible;
+	if (GetEditVisibility().IsVisible())
+	{
+		return ShowTimeInFrames() ? EVisibility::Collapsed : EVisibility::Visible;
+	}
+	return EVisibility::Collapsed;
 }
 
 EVisibility SCurveEditor::GetFrameEditVisibility() const
 {
-	return ShowTimeInFrames() ? EVisibility::Visible : EVisibility::Collapsed;
+	if (GetEditVisibility().IsVisible())
+	{
+		return ShowTimeInFrames() ? EVisibility::Visible : EVisibility::Collapsed;
+	}
+	return EVisibility::Collapsed;
 }
 
 bool SCurveEditor::GetInputEditEnabled() const
@@ -758,8 +753,8 @@ int32 SCurveEditor::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeo
 	// Rendering info
 	bool bEnabled = ShouldBeEnabled( bParentEnabled );
 	ESlateDrawEffect DrawEffects = bEnabled ? ESlateDrawEffect::None : ESlateDrawEffect::DisabledEffect;
-	const FSlateBrush* TimelineAreaBrush = FEditorStyle::GetBrush("CurveEd.TimelineArea");
-	const FSlateBrush* WhiteBrush = FEditorStyle::GetBrush("WhiteTexture");
+	const FSlateBrush* TimelineAreaBrush = FAppStyle::GetBrush("CurveEd.TimelineArea");
+	const FSlateBrush* WhiteBrush = FAppStyle::GetBrush("WhiteTexture");
 
 	FGeometry CurveAreaGeometry = AllottedGeometry;
 
@@ -782,7 +777,7 @@ int32 SCurveEditor::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeo
 		(
 		OutDrawElements,
 		BackgroundLayerId,
-		CurveAreaGeometry.ToPaintGeometry(FVector2D(ZeroInputX, 0), FVector2D(TimelineMaxX - ZeroInputX, CurveAreaGeometry.GetLocalSize().Y)),
+		CurveAreaGeometry.ToPaintGeometry(FVector2D(TimelineMaxX - ZeroInputX, CurveAreaGeometry.GetLocalSize().Y), FSlateLayoutTransform(FVector2D(ZeroInputX, 0.f))),
 		TimelineAreaBrush,
 		DrawEffects,
 		TimelineAreaBrush->GetTint(InWidgetStyle) * InWidgetStyle.GetColorAndOpacityTint()
@@ -813,7 +808,7 @@ int32 SCurveEditor::OnPaint(const FPaintArgs& Args, const FGeometry& AllottedGeo
 		(
 			OutDrawElements,
 			ZeroLineLayerId,
-			CurveAreaGeometry.ToPaintGeometry( FVector2D(0, ZeroOutputY), FVector2D(CurveAreaGeometry.Size.X, 1) ),
+			CurveAreaGeometry.ToPaintGeometry( FVector2D(CurveAreaGeometry.Size.X, 1), FSlateLayoutTransform(FVector2D(0.f, ZeroOutputY)) ),
 			WhiteBrush,
 			DrawEffects,
 			WhiteBrush->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint()
@@ -1014,7 +1009,7 @@ void SCurveEditor::PaintKeys(TSharedPtr<FCurveViewModel> CurveViewModel, FTrackS
 
 		// Get brush
 		bool IsSelected = IsKeySelected(FSelectedCurveKey(Curve,KeyHandle));
-		const FSlateBrush* KeyBrush = IsSelected ? FEditorStyle::GetBrush("CurveEd.CurveKeySelected") : FEditorStyle::GetBrush("CurveEd.CurveKey");
+		const FSlateBrush* KeyBrush = IsSelected ? FAppStyle::GetBrush("CurveEd.CurveKeySelected") : FAppStyle::GetBrush("CurveEd.CurveKey");
 		int32 LayerToUse = IsSelected ? SelectedLayerId: LayerId;
 
 		// Fade out keys that are not selected and whose curve is not selected as well.
@@ -1023,7 +1018,7 @@ void SCurveEditor::PaintKeys(TSharedPtr<FCurveViewModel> CurveViewModel, FTrackS
 		FSlateDrawElement::MakeBox(
 			OutDrawElements,
 			LayerToUse,
-			AllottedGeometry.ToPaintGeometry( KeyIconLocation, CONST_KeySize ),
+			AllottedGeometry.ToPaintGeometry( CONST_KeySize, FSlateLayoutTransform(KeyIconLocation) ),
 			KeyBrush,
 			DrawEffects,
 			KeyBrush->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint() * KeyColor * SelectionTint
@@ -1055,10 +1050,10 @@ void SCurveEditor::PaintTangent( TSharedPtr<FCurveViewModel> CurveViewModel, FTr
 	FVector2D ArriveTangentIconLocation = ArriveTangentLocation - (CONST_TangentSize / 2);
 	FVector2D LeaveTangentIconLocation = LeaveTangentLocation - (CONST_TangentSize / 2);
 
-	const FSlateBrush* TangentBrush = FEditorStyle::GetBrush("CurveEd.Tangent");
-	const FSlateBrush* TangentBrushSelected = FEditorStyle::GetBrush("CurveEd.TangentSelected");
-	const FLinearColor TangentColor = FEditorStyle::GetColor("CurveEd.TangentColor");
-	const FLinearColor TangentColorSelected = FEditorStyle::GetColor("CurveEd.TangentColorSelected");
+	const FSlateBrush* TangentBrush = FAppStyle::GetBrush("CurveEd.Tangent");
+	const FSlateBrush* TangentBrushSelected = FAppStyle::GetBrush("CurveEd.TangentSelected");
+	const FLinearColor TangentColor = FAppStyle::GetColor("CurveEd.TangentColor");
+	const FLinearColor TangentColorSelected = FAppStyle::GetColor("CurveEd.TangentColorSelected");
 
 	bool LeaveTangentSelected = bTangentSelected && bIsLeaveSelected;
 	bool ArriveTangentSelected = bTangentSelected && bIsArrivalSelected;
@@ -1068,8 +1063,8 @@ void SCurveEditor::PaintTangent( TSharedPtr<FCurveViewModel> CurveViewModel, FTr
 
 	//Add lines from tangent control point to 'key'
 	TArray<FVector2D> LinePoints;
-	LinePoints.Add(KeyLocation);
-	LinePoints.Add(ArriveTangentLocation);
+	LinePoints.Add(FVector2D(KeyLocation));
+	LinePoints.Add(FVector2D(ArriveTangentLocation));
 	FSlateDrawElement::MakeLines(
 		OutDrawElements,
 		LayerId,
@@ -1080,8 +1075,8 @@ void SCurveEditor::PaintTangent( TSharedPtr<FCurveViewModel> CurveViewModel, FTr
 		);
 
 	LinePoints.Empty();
-	LinePoints.Add(KeyLocation);
-	LinePoints.Add(LeaveTangentLocation);
+	LinePoints.Add(FVector2D(KeyLocation));
+	LinePoints.Add(FVector2D(LeaveTangentLocation));
 	FSlateDrawElement::MakeLines(
 		OutDrawElements,
 		LayerId,
@@ -1095,7 +1090,7 @@ void SCurveEditor::PaintTangent( TSharedPtr<FCurveViewModel> CurveViewModel, FTr
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		LayerToUse,
-		AllottedGeometry.ToPaintGeometry(ArriveTangentIconLocation, CONST_TangentSize ),
+		AllottedGeometry.ToPaintGeometry( CONST_TangentSize, FSlateLayoutTransform(ArriveTangentIconLocation) ),
 		ArriveTangentSelected ? TangentBrushSelected : TangentBrush,
 		DrawEffects,
 		ArriveTangentSelected ? TangentBrushSelected->GetTint( InWidgetStyle ) * ArriveSelectionTint : TangentBrush->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint() * ArriveSelectionTint
@@ -1104,7 +1099,7 @@ void SCurveEditor::PaintTangent( TSharedPtr<FCurveViewModel> CurveViewModel, FTr
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		LayerToUse,
-		AllottedGeometry.ToPaintGeometry(LeaveTangentIconLocation, CONST_TangentSize ),
+		AllottedGeometry.ToPaintGeometry( CONST_TangentSize, FSlateLayoutTransform(LeaveTangentIconLocation) ),
 		LeaveTangentSelected ? TangentBrushSelected : TangentBrush,
 		DrawEffects,
 		LeaveTangentSelected ? TangentBrushSelected->GetTint( InWidgetStyle ) * LeaveSelectionTint : TangentBrush->GetTint( InWidgetStyle ) * InWidgetStyle.GetColorAndOpacityTint() * LeaveSelectionTint
@@ -1170,8 +1165,8 @@ void SCurveEditor::PaintGridLines(const FGeometry &AllottedGeometry, FTrackScale
 					if (bDrawInputGridNumbers)
 					{
 						FString TimeStr = FString::Printf(TEXT("%.2f"), Time);
-						FSlateDrawElement::MakeText(OutDrawElements,LayerId,AllottedGeometry.MakeChild(FVector2D(X, 0.0), FVector2D(1.0f, ScaleX )).ToPaintGeometry(),TimeStr,
-							FEditorStyle::GetFontStyle("CurveEd.InfoFont"), DrawEffects, GridTextColor );
+						FSlateDrawElement::MakeText(OutDrawElements,LayerId,AllottedGeometry.MakeChild(FVector2D(1.0f, ScaleX ), FSlateLayoutTransform(FVector2D(X, 0.0))).ToPaintGeometry(),TimeStr,
+							FAppStyle::GetFontStyle("CurveEd.InfoFont"), DrawEffects, GridTextColor );
 					}
 
 					LinePoints.Empty();
@@ -1215,18 +1210,18 @@ void SCurveEditor::PaintGridLines(const FGeometry &AllottedGeometry, FTrackScale
 					if (bDrawOutputGridNumbers)
 					{
 						FString ValueStr = FString::Printf(TEXT("%.2f"), Value);
-						FSlateFontInfo Font = FEditorStyle::GetFontStyle("CurveEd.InfoFont");
+						FSlateFontInfo Font = FAppStyle::GetFontStyle("CurveEd.InfoFont");
 
 						const TSharedRef< FSlateFontMeasure > FontMeasureService = FSlateApplication::Get().GetRenderer()->GetFontMeasureService();
 						FVector2D DrawSize = FontMeasureService->Measure(ValueStr, Font);
 
 						// draw at the start
-						FSlateDrawElement::MakeText(OutDrawElements,LayerId,AllottedGeometry.MakeChild(FVector2D(0.0f, Y), FVector2D(ScaleY, 1.0f )).ToPaintGeometry(),ValueStr,
-												 Font, DrawEffects, GridTextColor );
+						FSlateDrawElement::MakeText(OutDrawElements,LayerId,AllottedGeometry.MakeChild(FVector2D(ScaleY, 1.0f ), FSlateLayoutTransform(FVector2D(0.0f, Y))).ToPaintGeometry(),
+							ValueStr, Font, DrawEffects, GridTextColor );
 
 						// draw at the last since sometimes start can be hidden
-						FSlateDrawElement::MakeText(OutDrawElements,LayerId,AllottedGeometry.MakeChild(FVector2D(AllottedGeometry.GetLocalSize().X-DrawSize.X, Y), FVector2D(ScaleY, 1.0f )).ToPaintGeometry(),ValueStr,
-												 Font, DrawEffects, GridTextColor );
+						FSlateDrawElement::MakeText(OutDrawElements,LayerId,AllottedGeometry.MakeChild(FVector2D(ScaleY, 1.0f ), FSlateLayoutTransform(FVector2D(AllottedGeometry.GetLocalSize().X-DrawSize.X, Y))).ToPaintGeometry(),
+							ValueStr, Font, DrawEffects, GridTextColor );
 					}
 					
 					LinePoints.Empty();
@@ -1251,8 +1246,8 @@ void SCurveEditor::PaintMarquee(const FGeometry& AllottedGeometry, const FSlateR
 	FSlateDrawElement::MakeBox(
 		OutDrawElements,
 		LayerId,
-		AllottedGeometry.ToPaintGeometry(MarqueTopLeft, MarqueBottomRight - MarqueTopLeft),
-		FEditorStyle::GetBrush(TEXT("MarqueeSelection"))
+		AllottedGeometry.ToPaintGeometry(MarqueBottomRight - MarqueTopLeft, FSlateLayoutTransform(MarqueTopLeft)),
+		FAppStyle::GetBrush(TEXT("MarqueeSelection"))
 		);
 }
 
@@ -2560,9 +2555,9 @@ TArray<FRealCurve*> SCurveEditor::GetCurvesToFit() const
 {
 	TArray<FRealCurve*> FitCurves;
 
-	for(auto CurveViewModel : CurveViewModels)
+	for(const TSharedPtr<FCurveViewModel>& CurveViewModel : CurveViewModels)
 	{
-		if (CurveViewModel->bIsVisible)
+		if (CurveViewModel->bIsVisible && CurveViewModel->CurveInfo.CurveToEdit != nullptr)
 		{
 			FitCurves.Add(CurveViewModel->CurveInfo.CurveToEdit);
 		}
@@ -2892,7 +2887,7 @@ void SCurveEditor::CreateContextMenu(const FGeometry& InMyGeometry, const FPoint
 			);
 		}
 
-		if( IsLinearColorCurve() )
+		if( IsLinearColorCurve() && !bAlwaysHideGradientEditor)
 		{
 			FUIAction ShowGradientAction( FExecuteAction::CreateSP( this, &SCurveEditor::OnShowGradientToggled ), FCanExecuteAction(), FIsActionChecked::CreateSP( this, &SCurveEditor::IsGradientEditorVisible ) );
 			MenuBuilder.AddMenuEntry
@@ -3814,7 +3809,14 @@ void SCurveEditor::OnObjectPropertyChanged(UObject* Object, FPropertyChangedEven
 {
 	if ( CurveOwner && CurveOwner->GetOwners().Contains(Object) )
 	{
-		ValidateSelection();
+		if (PropertyChangedEvent.ChangeType == EPropertyChangeType::ArrayClear)
+		{
+			EmptyAllSelection();
+		}
+		else
+		{
+			ValidateSelection();
+		}
 	}
 }
 

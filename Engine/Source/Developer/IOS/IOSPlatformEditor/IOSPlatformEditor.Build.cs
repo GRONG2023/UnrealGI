@@ -18,7 +18,7 @@ public class IOSPlatformEditor : ModuleRules
 				"MainFrame",
 				"Slate",
 				"SlateCore",
-				"EditorStyle",
+				
 				"PropertyEditor",
 				"SharedSettingsWidgets",
 				"SourceControl",
@@ -27,14 +27,17 @@ public class IOSPlatformEditor : ModuleRules
 				"MaterialShaderQualitySettings",
 				"RenderCore",
                 "AudioSettingsEditor",
-                "GameProjectGeneration"
-            }
-        );
+                "GameProjectGeneration",
+				"FreeImage",
+                "MacTargetPlatform",
+			}
+		);
 
 		PrivateIncludePathModuleNames.AddRange(
 			new string[] {
 				"GameProjectGeneration",
 				"Settings",
+				"TurnkeySupport",
 			}
 		);
 	}

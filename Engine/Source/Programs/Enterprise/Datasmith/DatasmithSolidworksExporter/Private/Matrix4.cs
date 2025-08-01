@@ -5,7 +5,6 @@ using System.Runtime.InteropServices;
 
 namespace DatasmithSolidworks
 {
-	[ComVisible(false)]
 	public class FMatrix4
 	{
 		public FVec3 XBasis { get { return new FVec3(Data[0], Data[1], Data[2]); } }
@@ -155,36 +154,6 @@ namespace DatasmithSolidworks
 			Result.Data[5] = InY;
 			Result.Data[10] = InZ;
 			return Result;
-		}
-
-		public static float[] LookAt(FVec3 InDirectionZ, FVec3 InFromPoint = null, FVec3 InUp = null)
-		{
-			float[] Ret = null;
-
-			if (InDirectionZ != null)
-			{
-				if (InUp == null)
-				{
-					InUp = new FVec3(0f, 1f, 0f);
-				}
-
-				var DirectionZ = InDirectionZ.Normalized();
-				var DirectionX = FVec3.Cross(InUp, DirectionZ);
-				var DirectionY = FVec3.Cross(DirectionZ, DirectionX);
-				Ret = new[] { DirectionX.X, DirectionY.X, DirectionZ.X, 0f ,
-							  DirectionX.Y, DirectionY.Y, DirectionZ.Y, 0f ,
-							  DirectionX.Z, DirectionY.Z, DirectionZ.Z, 0f ,
-							  0f, 0f, 0f, 1f };
-
-				if (InFromPoint != null)
-				{
-					Ret[3] = InFromPoint.X;
-					Ret[7] = InFromPoint.Y;
-					Ret[11] = InFromPoint.Z;
-				}
-			}
-
-			return Ret;
 		}
 
 		public static float[] FMatrix4x4Multiply(float[] InMatrixA, float[] InMatrixB)
@@ -384,20 +353,6 @@ namespace DatasmithSolidworks
 		public override bool Equals(object InObj)
 		{
 			return base.Equals(InObj);
-		}
-
-		public static bool operator ==(FMatrix4 InA, FMatrix4 InB)
-		{
-			if ((object)InA == null)
-			{
-				return (object)InB == null;
-			}
-			return InA.Equals(InB);
-		}
-
-		public static bool operator !=(FMatrix4 InA, FMatrix4 InB)
-		{
-			return !(InA == InB);
 		}
 	}
 }

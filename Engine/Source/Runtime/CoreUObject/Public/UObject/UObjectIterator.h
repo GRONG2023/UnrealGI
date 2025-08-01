@@ -7,7 +7,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
+#include "UObject/GarbageCollectionGlobals.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectArray.h"
 #include "UObject/Object.h"
@@ -55,6 +55,18 @@ enum class EObjectIteratorThreadSafetyOptions : uint8
 	ThreadSafeAdvance = 2 // Can be used for global iterators but locks the global UObjectArray each time the iterator advances to the next object (can be slow but does not result in deadlocks).
 };
 
+inline EInternalObjectFlags GetObjectIteratorDefaultInternalExclusionFlags(EInternalObjectFlags InternalExclusionFlags)
+{
+	InternalExclusionFlags |= UE::GC::GUnreachableObjectFlag | EInternalObjectFlags::PendingConstruction;
+	if (!IsInAsyncLoadingThread())
+	{
+		// We don't want to return any objects that are currently being background loaded unless we're using the object iterator during async loading.
+		InternalExclusionFlags |= EInternalObjectFlags::AsyncLoading;
+	}
+
+	return InternalExclusionFlags;
+}
+
 /**
  * Class for iterating through all objects, including class default objects.
  * Note that when Playing In Editor, this will find objects in the
@@ -97,14 +109,8 @@ public:
 		: FUObjectArray::TIterator(GUObjectArray, bOnlyGCedObjects)
 		, Class(InClass)
 		, ExclusionFlags(AdditionalExclusionFlags)
-		, InternalExclusionFlags(InInternalExclusionFlags)
+		, InternalExclusionFlags(GetObjectIteratorDefaultInternalExclusionFlags(InInternalExclusionFlags))
 	{
-		// We don't want to return any objects that are currently being background loaded unless we're using the object iterator during async loading.
-		InternalExclusionFlags |= EInternalObjectFlags::Unreachable | EInternalObjectFlags::PendingConstruction;
-		if (!IsInAsyncLoadingThread())
-		{
-			InternalExclusionFlags |= EInternalObjectFlags::AsyncLoading;
-		}
 		check(Class);
 
 		if (IteratorThreadSafety == EObjectIteratorThreadSafetyOptions::ThreadSafe)
@@ -260,10 +266,10 @@ public:
 	/**
 	 * Constructor
 	 */
-	explicit TObjectIterator(EObjectFlags AdditionalExclusionFlags = RF_ClassDefaultObject, bool bIncludeDerivedClasses = true, EInternalObjectFlags InternalExclusionFlags = EInternalObjectFlags::None)
+	explicit TObjectIterator(EObjectFlags AdditionalExclusionFlags = RF_ClassDefaultObject, bool bIncludeDerivedClasses = true, EInternalObjectFlags InInternalExclusionFlags = EInternalObjectFlags::None)
 		: Index(-1)
 	{
-		GetObjectsOfClass(T::StaticClass(), ObjectArray, bIncludeDerivedClasses, AdditionalExclusionFlags, InternalExclusionFlags);
+		GetObjectsOfClass(T::StaticClass(), ObjectArray, bIncludeDerivedClasses, AdditionalExclusionFlags, GetObjectIteratorDefaultInternalExclusionFlags(InInternalExclusionFlags));
 		Advance();
 	}
 
@@ -315,8 +321,8 @@ public:
 		return (T*)GetObject();
 	}
 
-	FORCEINLINE friend bool operator==(const TObjectIterator& Lhs, const TObjectIterator& Rhs) { return Lhs.Index == Rhs.Index; }
-	FORCEINLINE friend bool operator!=(const TObjectIterator& Lhs, const TObjectIterator& Rhs) { return Lhs.Index != Rhs.Index; }
+	FORCEINLINE bool operator==(const TObjectIterator& Rhs) const { return Index == Rhs.Index; }
+	FORCEINLINE bool operator!=(const TObjectIterator& Rhs) const { return Index != Rhs.Index; }
 
 protected:
 	/**
@@ -335,7 +341,7 @@ protected:
 	 */
 	FORCEINLINE bool Advance()
 	{
-		//@todo UE4 check this for LHS on Index on consoles
+		//@todo UE check this for LHS on Index on consoles
 		while(++Index < ObjectArray.Num())
 		{
 			if (GetObject())
@@ -364,8 +370,8 @@ public:
 	 * @param	AdditionalExclusionFlags	RF_* flags that should not be included in results
 	 * @param	InInternalExclusionFlags	EInternalObjectFlags flagged objects that should not be included in results
 	 */
-	explicit TObjectIterator(EObjectFlags AdditionalExclusionFlags = RF_ClassDefaultObject, bool bIncludeDerivedClasses = true, EInternalObjectFlags InternalExclusionFlags = EInternalObjectFlags::None)
-		: FThreadSafeObjectIterator(UObject::StaticClass(), false, AdditionalExclusionFlags, InternalExclusionFlags)
+	explicit TObjectIterator(EObjectFlags AdditionalExclusionFlags = RF_ClassDefaultObject, bool bIncludeDerivedClasses = true, EInternalObjectFlags InInternalExclusionFlags = EInternalObjectFlags::None)
+		: FThreadSafeObjectIterator(UObject::StaticClass(), false, AdditionalExclusionFlags, GetObjectIteratorDefaultInternalExclusionFlags(InInternalExclusionFlags))
 	{
 	}
 

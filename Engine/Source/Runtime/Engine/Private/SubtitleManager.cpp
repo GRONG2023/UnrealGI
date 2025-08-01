@@ -1,13 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "SubtitleManager.h"
-#include "EngineGlobals.h"
 #include "Engine/Engine.h"
 #include "CanvasItem.h"
 #include "CanvasTypes.h"
 #include "Audio.h"
 #include "Components/AudioComponent.h"
 #include "AudioThread.h"
+#include "Engine/World.h"
+#include "UnrealClient.h"
+#include "EngineLogs.h"
 
 DEFINE_LOG_CATEGORY(LogSubtitle);
 
@@ -459,7 +461,17 @@ void FSubtitleManager::DisplaySubtitles(FCanvas* InCanvas, FIntRect& InSubtitleR
 				FActiveSubtitle* Subtitle = ActiveSubtitles.Find(HighestPriorityID);
 				DisplaySubtitle(InCanvas, Subtitle, InSubtitleRegion, FLinearColor::White);
 			}
-			else
+			else if (ActiveMovieSubtitles.Num() > 0)
+			{
+				for (const auto& It : ActiveMovieSubtitles)
+				{
+					if (It.Value.IsValid())
+					{
+						DisplaySubtitle(InCanvas, It.Value.Get(), InSubtitleRegion, FLinearColor::White);
+					}
+				}
+			} 
+			else 
 			{
 				CurrentSubtitleHeight = 0.0f;
 			}

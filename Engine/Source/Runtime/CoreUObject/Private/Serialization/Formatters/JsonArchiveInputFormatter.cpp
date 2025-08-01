@@ -2,26 +2,31 @@
 
 #include "Serialization/Formatters/JsonArchiveInputFormatter.h"
 #include "Serialization/JsonReader.h"
+#include "Containers/StringView.h"
 #include "Dom/JsonObject.h"
-#include "Serialization/JsonSerializer.h"
 #include "Misc/Base64.h"
+#include "Misc/CString.h"
 #include "Misc/SecureHash.h"
+#include "Serialization/JsonSerializer.h"
+#include "Templates/TypeCompatibleBytes.h"
 #include "UObject/SoftObjectPath.h"
 #include "UObject/SoftObjectPtr.h"
 #include "UObject/WeakObjectPtr.h"
 #include "UObject/LazyObjectPtr.h"
+#include "UObject/ObjectPtr.h"
+#include <limits>
 
 #if WITH_TEXT_ARCHIVE_SUPPORT
 
-FJsonArchiveInputFormatter::FJsonArchiveInputFormatter(FArchive& InInner, TFunction<UObject* (const FString&)> InResolveObjectName) 
+FJsonArchiveInputFormatter::FJsonArchiveInputFormatter(FArchive& InInner, TFunction<UObject* (const FPackageIndex)> InResolveObject) 
 	: Inner(InInner)
-	, ResolveObjectName(InResolveObjectName)
+	, ResolveObject(InResolveObject)
 {
 	Inner.SetIsTextFormat(true);
 	Inner.ArAllowLazyLoading = false;
 
 	TSharedPtr< FJsonObject > RootObject;
-	TSharedRef< TJsonReader<char> > Reader = TJsonReaderFactory<char>::Create(&InInner);
+	TSharedRef< TJsonReader<UTF8CHAR> > Reader = TJsonReaderFactory<UTF8CHAR>::Create(&InInner);
 	ensure(FJsonSerializer::Deserialize(Reader, RootObject, FJsonSerializer::EFlags::StoreNumbersAsStrings));
 	ValueStack.Add(MakeShared<FJsonValueObject>(RootObject));
 
@@ -40,11 +45,7 @@ FArchive& FJsonArchiveInputFormatter::GetUnderlyingArchive()
 
 FStructuredArchiveFormatter* FJsonArchiveInputFormatter::CreateSubtreeReader()
 {
-	FJsonArchiveInputFormatter* Cloned = new FJsonArchiveInputFormatter(*this);
-	Cloned->ObjectStack.Empty();
-	Cloned->ValueStack.Empty();
-	Cloned->MapIteratorStack.Empty();
-	Cloned->ArrayValuesRemainingStack.Empty();
+	FJsonArchiveInputFormatter* Cloned = new FJsonArchiveInputFormatter(this->Inner, this->ResolveObject);
 	Cloned->ValueStack.Push(ValueStack.Top());
 
 	return Cloned;
@@ -61,16 +62,6 @@ void FJsonArchiveInputFormatter::EnterRecord()
 	ObjectStack.Emplace(Value->AsObject(), ValueStack.Num());
 }
 
-void FJsonArchiveInputFormatter::EnterRecord_TextOnly(TArray<FString>& OutFieldNames)
-{
-	EnterRecord();
-	ObjectStack.Top().JsonObject->Values.GetKeys(OutFieldNames);
-	for(int32 Idx = 0; Idx < OutFieldNames.Num(); Idx++)
-	{
-		OutFieldNames[Idx] = UnescapeFieldName(*OutFieldNames[Idx]);
-	}
-}
-
 void FJsonArchiveInputFormatter::LeaveRecord()
 {
 	check(ValueStack.Num() == ObjectStack.Top().ValueCountOnCreation);
@@ -83,12 +74,6 @@ void FJsonArchiveInputFormatter::EnterField(FArchiveFieldName Name)
 	TSharedPtr<FJsonValue> Field = NewObject->TryGetField(EscapeFieldName(Name.Name));
 	check(Field.IsValid());
 	ValueStack.Add(Field);
-}
-
-void FJsonArchiveInputFormatter::EnterField_TextOnly(FArchiveFieldName Name, EArchiveValueType& OutType)
-{
-	EnterField(Name);
-	OutType = GetValueType(*ValueStack.Top());
 }
 
 void FJsonArchiveInputFormatter::LeaveField()
@@ -141,11 +126,6 @@ void FJsonArchiveInputFormatter::EnterArrayElement()
 	check(ArrayValuesRemainingStack.Top() > 0);
 }
 
-void FJsonArchiveInputFormatter::EnterArrayElement_TextOnly(EArchiveValueType& OutType)
-{
-	OutType = GetValueType(*ValueStack.Top());
-}
-
 void FJsonArchiveInputFormatter::LeaveArrayElement()
 {
 	ValueStack.Pop();
@@ -158,11 +138,6 @@ void FJsonArchiveInputFormatter::EnterStream()
 	EnterArray(NumElements);
 }
 
-void FJsonArchiveInputFormatter::EnterStream_TextOnly(int32& NumElements)
-{
-	EnterArray(NumElements);
-}
-
 void FJsonArchiveInputFormatter::LeaveStream()
 {
 	LeaveArray();
@@ -170,11 +145,6 @@ void FJsonArchiveInputFormatter::LeaveStream()
 
 void FJsonArchiveInputFormatter::EnterStreamElement()
 {
-}
-
-void FJsonArchiveInputFormatter::EnterStreamElement_TextOnly(EArchiveValueType& OutType)
-{
-	OutType = GetValueType(*ValueStack.Top());
 }
 
 void FJsonArchiveInputFormatter::LeaveStreamElement()
@@ -199,12 +169,6 @@ void FJsonArchiveInputFormatter::EnterMapElement(FString& OutName)
 {
 	OutName = UnescapeFieldName(*MapIteratorStack.Top()->Key);
 	ValueStack.Add(MapIteratorStack.Top()->Value);
-}
-
-void FJsonArchiveInputFormatter::EnterMapElement_TextOnly(FString& OutName, EArchiveValueType& OutType)
-{
-	EnterMapElement(OutName);
-	OutType = GetValueType(*ValueStack.Top());
 }
 
 void FJsonArchiveInputFormatter::LeaveMapElement()
@@ -342,14 +306,102 @@ void FJsonArchiveInputFormatter::Serialize(int64& Value)
 	verify(ValueStack.Top()->TryGetNumber(Value));
 }
 
+namespace
+{
+template<typename FloatType, typename IntType>
+bool ParseFPSpecial(const FString& String, FloatType& OutValue, IntType SignMask, IntType ExponentMask, IntType SignificandMask)
+{
+	FStringView ResidualString{String};
+	
+	// Parse the Number: prefix
+	FStringView SpecialStringPrefix = TEXT("Number:");
+	if (!ResidualString.StartsWith(SpecialStringPrefix))
+	{
+		return false;
+	}
+	ResidualString.MidInline(SpecialStringPrefix.Len());
+
+	// Parse the sign.
+	if (!ResidualString.Len())
+	{
+		return false;
+	}
+	if (ResidualString[0] != TEXT('+') && ResidualString[0] != TEXT('-'))
+	{
+		return false;
+	}
+	const bool bIsNegative = ResidualString[0] == TEXT('-');
+	ResidualString.MidInline(1);
+
+	if(ResidualString == TEXT("inf"))
+	{
+		OutValue = bIsNegative
+			? -std::numeric_limits<FloatType>::infinity()
+			: +std::numeric_limits<FloatType>::infinity();
+		return true;
+	}
+	else if(ResidualString.StartsWith(TEXT("nan:0x")))
+	{
+		ResidualString.MidInline(6);
+		
+		// Assume that the string view is null terminated for the sake of FCString::Strtoui64.
+		check(*ResidualString.end() == 0);
+		
+		// Parse the significand.
+		TCHAR* SignificandEnd = nullptr;
+		uint64 Significand64 = FCString::Strtoui64(ResidualString.begin(), &SignificandEnd, 16);
+		if (SignificandEnd != ResidualString.end()
+			|| Significand64 == 0
+			|| Significand64 > static_cast<uint64>(SignificandMask))
+		{
+			return false;
+		}
+		const IntType Significand = static_cast<IntType>(Significand64);
+
+		// Construct the output NaN from its components.
+		IntType ValueAsInt = ExponentMask | Significand;
+		if (bIsNegative)
+		{
+			ValueAsInt |= SignMask;
+		}
+		OutValue = BitCast<FloatType>(ValueAsInt);
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+}
+
 void FJsonArchiveInputFormatter::Serialize(float& Value)
 {
-	verify(ValueStack.Top()->TryGetNumber(Value));
+	if(!ValueStack.Top()->TryGetNumber(Value))
+	{
+		FString SpecialString;
+		verify(ValueStack.Top()->TryGetString(SpecialString));
+
+		if(!ParseFPSpecial<float, uint32>(SpecialString, Value, 0x80000000, 0x7f800000, 0x007fffff))
+		{
+			Value = 0.0f;
+			checkf(false, TEXT("Expected float special but got string \"%s\""), *SpecialString);
+		}
+	}
 }
 
 void FJsonArchiveInputFormatter::Serialize(double& Value)
 {
-	verify(ValueStack.Top()->TryGetNumber(Value));
+	if(!ValueStack.Top()->TryGetNumber(Value))
+	{
+		FString SpecialString;
+		verify(ValueStack.Top()->TryGetString(SpecialString));
+		
+		if(!ParseFPSpecial<double, uint64>(SpecialString, Value, 0x8000000000000000, 0x7ff0000000000000, 0x000fffffffffffff))
+		{
+			Value = 0.0f;
+			checkf(false, TEXT("Expected double special but got string \"%s\""), *SpecialString);
+		}
+	}
 }
 
 void FJsonArchiveInputFormatter::Serialize(bool& Value)
@@ -377,10 +429,11 @@ void FJsonArchiveInputFormatter::Serialize(FName& Value)
 void FJsonArchiveInputFormatter::Serialize(UObject*& Value)
 {
 	FString StringValue;
-	const TCHAR Prefix[] = TEXT("Object:");
-	if (ValueStack.Top()->TryGetString(StringValue) && StringValue.StartsWith(Prefix))
+	if (ValueStack.Top()->TryGetString(StringValue))
 	{
-		Value = ResolveObjectName(*StringValue + UE_ARRAY_COUNT(Prefix) - 1);
+		FPackageIndex ObjectIndex;
+		LexFromString(ObjectIndex, *StringValue);
+		Value = ResolveObject(ObjectIndex);
 	}
 	else
 	{
@@ -412,7 +465,7 @@ void FJsonArchiveInputFormatter::Serialize(FSoftObjectPtr& Value)
 void FJsonArchiveInputFormatter::Serialize(FSoftObjectPath& Value)
 {
 	FString StringValue;
-	const TCHAR Prefix[] = TEXT("Object:");
+	const auto& Prefix = TEXT("Object:");
 	if (ValueStack.Top()->TryGetString(StringValue) && StringValue.StartsWith(Prefix))
 	{
 		Value.SetPath(*StringValue + UE_ARRAY_COUNT(Prefix) - 1);
@@ -426,7 +479,7 @@ void FJsonArchiveInputFormatter::Serialize(FSoftObjectPath& Value)
 void FJsonArchiveInputFormatter::Serialize(FLazyObjectPtr& Value)
 {
 	FString StringValue;
-	const TCHAR Prefix[] = TEXT("Lazy:");
+	const auto& Prefix = TEXT("Lazy:");
 	if (ValueStack.Top()->TryGetString(StringValue) && StringValue.StartsWith(Prefix))
 	{
 		FUniqueObjectGuid Guid;
@@ -437,6 +490,13 @@ void FJsonArchiveInputFormatter::Serialize(FLazyObjectPtr& Value)
 	{
 		Value.Reset();
 	}
+}
+
+void FJsonArchiveInputFormatter::Serialize(FObjectPtr& Value)
+{
+	UObject* Object;
+	Serialize(Object);
+	Value = Object;
 }
 
 void FJsonArchiveInputFormatter::Serialize(TArray<uint8>& Data)

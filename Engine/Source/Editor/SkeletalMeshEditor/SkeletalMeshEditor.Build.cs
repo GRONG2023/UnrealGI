@@ -20,7 +20,7 @@ public class SkeletalMeshEditor : ModuleRules
                 "InputCore",
 				"Slate",
 				"SlateCore",
-                "EditorStyle",
+				"EditorFramework",
                 "UnrealEd",
                 "SkeletonEditor",
                 "Kismet",
@@ -36,18 +36,12 @@ public class SkeletalMeshEditor : ModuleRules
 				"ClothingSystemRuntimeInterface",
 				"SkeletalMeshUtilitiesCommon",
 				"ToolMenus",
-            }
-		);
-
-        PrivateIncludePathModuleNames.AddRange(
-            new string[] {
-                "PropertyEditor",
-            }
-        );
-
-		DynamicallyLoadedModuleNames.AddRange(
-			new string[] {
-            }
+				"EditorSubsystem",
+				"StatusBar",
+				"PhysicsUtilities",
+				"InterchangeCore",
+				"InterchangeEngine"
+			}
 		);
 	}
 }

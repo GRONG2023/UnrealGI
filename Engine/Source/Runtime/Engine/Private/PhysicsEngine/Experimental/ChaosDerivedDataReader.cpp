@@ -2,12 +2,12 @@
 
 #include "Physics/Experimental/ChaosDerivedDataReader.h"
 
-#include "Chaos/ChaosArchive.h"
+#include "Chaos/CollisionConvexMesh.h"
 #include "Chaos/TriangleMeshImplicitObject.h"
 #include "Chaos/Convex.h"
 
 template<typename T, int d>
-FChaosDerivedDataReader<T, d>::FChaosDerivedDataReader(FBulkDataInterface* InBulkData)
+FChaosDerivedDataReader<T, d>::FChaosDerivedDataReader(FBulkData* InBulkData)
 	: bReadSuccessful(false)
 {
 	const int32 DataTypeSize = sizeof(T);
@@ -19,6 +19,8 @@ FChaosDerivedDataReader<T, d>::FChaosDerivedDataReader(FBulkDataInterface* InBul
 	int32 SerializedDataSize = -1;
 
 	ChaosAr << SerializedDataSize;
+	Ar.UsingCustomVersion(FFortniteValkyrieBranchObjectVersion::GUID);
+	
 
 	if(SerializedDataSize != DataTypeSize)
 	{
@@ -29,14 +31,13 @@ FChaosDerivedDataReader<T, d>::FChaosDerivedDataReader(FBulkDataInterface* InBul
 	{
 		{
 			LLM_SCOPE(ELLMTag::ChaosConvex);
-			ChaosAr << ConvexImplicitObjects;
+			ChaosAr << ConvexGeometries;
 		}
 
 		{
 			LLM_SCOPE(ELLMTag::ChaosTrimesh);
-			ChaosAr << TrimeshImplicitObjects << UVInfo << FaceRemap;
+			ChaosAr << TriMeshGeometries << UVInfo << FaceRemap;
 		}
-		
 
 		bReadSuccessful = true;
 	}

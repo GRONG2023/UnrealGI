@@ -2,26 +2,45 @@
 
 #pragma once
 
-#include "CoreTypes.h"
+#include "Containers/StringFwd.h"
 #include "CoreFwd.h"
+#include "CoreTypes.h"
 #include "HAL/PlatformCrt.h"
-#include "Misc/CompressionFlags.h"
 #include "Math/NumericLimits.h"
+#include "Misc/CompressionFlags.h"
+#include "Misc/EnumClassFlags.h"
+
+#if PLATFORM_CPU_X86_FAMILY
+#include <xmmintrin.h> // _mm_prefetch
+#elif PLATFORM_CPU_ARM_FAMILY && defined(_MSC_VER)
+#include <intrin.h> // __prefetch
+#endif
 
 class Error;
+class FDelegateHandle;
+class FOutputDevice;
+class FString;
+class FText;
 class GenericApplication;
-class IPlatformChunkInstall;
 class IInstallBundleManager;
+class IPlatformChunkInstall;
 class IPlatformCompression;
+class IPlatformHostCommunication;
+struct FCustomChunk;
+struct FDefaultDelegateUserPolicy;
 struct FGenericCrashContext;
 struct FGenericMemoryWarningContext;
-struct FCustomChunk;
+struct FGuid;
+
 enum class ECustomChunkType : uint8;
 
 template <typename FuncType>
 class TFunction;
 
-#if UE_BUILD_SHIPPING
+template <typename FuncType, typename UserPolicy>
+class TDelegate;
+
+#if UE_BUILD_SHIPPING && !WITH_EDITOR
 #define UE_DEBUG_BREAK() ((void)0)
 #else
 #define UE_DEBUG_BREAK() ((void)(FPlatformMisc::IsDebuggerPresent() && ([] () { UE_DEBUG_BREAK_IMPL(); } (), 1)))
@@ -52,6 +71,15 @@ enum class EBuildConfiguration : uint8
 };
 
 /**
+ * Controls behaviour for built in crash handling
+ */
+enum class ECrashHandlingType : uint8
+{
+	Default,	/* UE default handling */
+	Disabled,	/* UE doesn't handle crashes on main thread, general workers, rendering thread. */
+};
+
+/**
  * Returns the string representation of the specified EBuildConfiguration value.
  *
  * @param Configuration The string to get the EBuildConfiguration for.
@@ -73,22 +101,22 @@ namespace EBuildConfigurations
 	typedef EBuildConfiguration Type;
 
 	UE_DEPRECATED(4.24, "EBuildConfigurations::Unknown is deprecated. Use EBuildConfiguration::Unknown instead.")
-	static const EBuildConfiguration Unknown = EBuildConfiguration::Unknown;
+	static constexpr EBuildConfiguration Unknown = EBuildConfiguration::Unknown;
 
 	UE_DEPRECATED(4.24, "EBuildConfigurations::Debug is deprecated. Use EBuildConfiguration::Debug instead.")
-	static const EBuildConfiguration Debug = EBuildConfiguration::Debug;
+	static constexpr EBuildConfiguration Debug = EBuildConfiguration::Debug;
 
 	UE_DEPRECATED(4.24, "EBuildConfigurations::DebugGame is deprecated. Use EBuildConfiguration::DebugGame instead.")
-	static const EBuildConfiguration DebugGame = EBuildConfiguration::DebugGame;
+	static constexpr EBuildConfiguration DebugGame = EBuildConfiguration::DebugGame;
 
 	UE_DEPRECATED(4.24, "EBuildConfigurations::Development is deprecated. Use EBuildConfiguration::Development instead.")
-	static const EBuildConfiguration Development = EBuildConfiguration::Development;
+	static constexpr EBuildConfiguration Development = EBuildConfiguration::Development;
 
 	UE_DEPRECATED(4.24, "EBuildConfigurations::Test is deprecated. Use EBuildConfiguration::Test instead.")
-	static const EBuildConfiguration Test = EBuildConfiguration::Test;
+	static constexpr EBuildConfiguration Test = EBuildConfiguration::Test;
 
 	UE_DEPRECATED(4.24, "EBuildConfigurations::Shipping is deprecated. Use EBuildConfiguration::Shipping instead.")
-	static const EBuildConfiguration Shipping = EBuildConfiguration::Shipping;
+	static constexpr EBuildConfiguration Shipping = EBuildConfiguration::Shipping;
 
 	/**
 	 * Returns the string representation of the specified EBuildConfiguration value.
@@ -164,16 +192,16 @@ namespace EBuildTargets
 	typedef EBuildTargetType Type;
 
 	UE_DEPRECATED(4.24, "EBuildTargets::Unknown is deprecated. Use EBuildTargetType::Unknown instead.")
-	static const EBuildTargetType Unknown = EBuildTargetType::Unknown;
+	static constexpr EBuildTargetType Unknown = EBuildTargetType::Unknown;
 
 	UE_DEPRECATED(4.24, "EBuildTargets::Editor is deprecated. Use EBuildTargetType::Unknown instead.")
-	static const EBuildTargetType Editor = EBuildTargetType::Editor;
+	static constexpr EBuildTargetType Editor = EBuildTargetType::Editor;
 
 	UE_DEPRECATED(4.24, "EBuildTargets::Game is deprecated. Use EBuildTargetType::Unknown instead.")
-	static const EBuildTargetType Game = EBuildTargetType::Game;
+	static constexpr EBuildTargetType Game = EBuildTargetType::Game;
 
 	UE_DEPRECATED(4.24, "EBuildTargets::Server is deprecated. Use EBuildTargetType::Unknown instead.")
-	static const EBuildTargetType Server = EBuildTargetType::Server;
+	static constexpr EBuildTargetType Server = EBuildTargetType::Server;
 
 	UE_DEPRECATED(4.24, "EBuildTargets::FromString is deprecated. Use LexFromString() instead.")
 	CORE_API EBuildTargetType FromString( const FString& Target );
@@ -226,6 +254,9 @@ enum class EDeviceScreenOrientation : uint8
 
 	/** The orientation is landscape, oriented upright with the sensor */
 	LandscapeSensor,
+
+	/** The orientation is no longer locked and adjusts according to the sensor */
+	FullSensor,
 };
 
 
@@ -246,6 +277,18 @@ namespace EErrorReportMode
 		Balloon,
 	};
 }
+
+
+/**
+ * Enumerates supported message dialog category types.
+ */
+enum class EAppMsgCategory : uint8
+{
+	Warning,
+	Error,
+	Success,
+	Info,
+};
 
 
 namespace EAppMsgType
@@ -296,12 +339,12 @@ CORE_API const TCHAR* LexToString(EAppReturnType::Type Value);
 /*
  * Holds a computed SHA256 hash.
  */
-struct CORE_API FSHA256Signature
+struct FSHA256Signature
 {
 	uint8 Signature[32];
 
 	/** Generates a hex string of the signature */
-	FString ToString() const;
+	CORE_API FString ToString() const;
 };
 
 enum class EMobileHapticsType : uint8
@@ -315,6 +358,20 @@ enum class EMobileHapticsType : uint8
 	ImpactMedium,
 	ImpactHeavy,
 };
+
+/** Possible connection states */
+enum class ENetworkConnectionStatus : uint8
+{
+	/** Default state */
+	Unknown = 0,
+	/** No network connection or network device disabled */
+	Disabled,
+	/** Ad-hoc Wifi network or LAN with no external connection */
+	Local,
+	/** Connected to the network */
+	Connected
+};
+CORE_API const TCHAR* LexToString(ENetworkConnectionStatus EnumVal);
 
 enum class ENetworkConnectionType : uint8
 {
@@ -331,6 +388,18 @@ enum class ENetworkConnectionType : uint8
 	Ethernet,
 };
 
+typedef TDelegate<void(ENetworkConnectionType ConnectionType), FDefaultDelegateUserPolicy> FOnNetworkConnectionChangedDelegate;
+
+enum class EProcessDiagnosticFlags : uint32
+{
+	None            = 0,
+	MemorySanitizer = 1 << 0,
+	AnsiMalloc      = 1 << 1,
+	StompMalloc     = 1 << 2,
+};
+
+ENUM_CLASS_FLAGS(EProcessDiagnosticFlags);
+
 /**
  * Returns the string representation of the specified ENetworkConnection value.
  *
@@ -339,17 +408,161 @@ enum class ENetworkConnectionType : uint8
  */
 CORE_API const TCHAR* LexToString( ENetworkConnectionType Target );
 
+struct FProcessorGroupDesc 
+{
+	static constexpr uint16 MaxNumProcessorGroups = 16;
+	uint64 ThreadAffinities[MaxNumProcessorGroups] = {}; 
+	uint16 NumProcessorGroups = 0;
+};
+
+/**
+ * Different types of Page Fault stats
+ */
+struct FPageFaultStats
+{
+	/** Page faults for data already in memory (platform dependent) */
+	uint64 SoftPageFaults	= 0;
+
+	/** Page faults for data on disk (platform dependent) */
+	uint64 HardPageFaults	= 0;
+
+	/** All page fault types */
+	uint64 TotalPageFaults	= 0;
+};
+
+/**
+ * Flags for page fault stats to retrieve
+ */
+enum class EPageFaultFlags : uint8
+{
+	SoftPageFaults		= 0x01,
+	HardPageFaults		= 0x02,
+	TotalPageFaults		= 0x04,
+
+	All					= 0xFF
+};
+
+ENUM_CLASS_FLAGS(EPageFaultFlags);
+
+
+/**
+ * Different types of Input/Output stats
+ */
+struct FProcessIOStats
+{
+	/** Blocking Input operations */
+	uint64 BlockingInput	= 0;
+
+	/** Blocking Output operations */
+	uint64 BlockingOutput	= 0;
+
+	/** Blocking operations that were neither Input or Output operations (platform dependent) */
+	uint64 BlockingOther	= 0;
+
+	/** Input bytes transferred */
+	uint64 InputBytes		= 0;
+
+	/** Output bytes transferred */
+	uint64 OutputBytes		= 0;
+
+	/** Bytes transferred that were not from either Input or Output operations */
+	uint64 OtherBytes		= 0;
+};
+
+/**
+ * Flags for Input/Output stats to retrieve
+ */
+enum class EInputOutputFlags : uint8
+{
+	BlockingInput		= 0x01,
+	BlockingOutput		= 0x02,
+	BlockingOther		= 0x04,
+	InputBytes			= 0x08,
+	OutputBytes			= 0x10,
+	OtherBytes			= 0x20,
+
+	All					= 0xFF
+};
+
+ENUM_CLASS_FLAGS(EInputOutputFlags);
+
+/**
+ * Defines the type of format the backbuffer expects. You must update values in TonemapCommon.ush when changing this enum
+ */
+enum class EDisplayOutputFormat
+{
+	SDR_sRGB = 0,
+	SDR_Rec709 = 1,
+	SDR_ExplicitGammaMapping = 2,
+	HDR_ACES_1000nit_ST2084 = 3,
+	HDR_ACES_2000nit_ST2084 = 4,
+	HDR_ACES_1000nit_ScRGB = 5,
+	HDR_ACES_2000nit_ScRGB = 6,
+	HDR_LinearEXR = 7,
+	HDR_LinearNoToneCurve = 8,
+	HDR_LinearWithToneCurve = 9,
+
+	MAX
+};
+
+/**
+ * Display gamut, format, and chromacities. You must update values in TonemapCommon.ush when changing this enum + EHDRCaptureGamut
+ */
+enum class EDisplayColorGamut
+{
+	sRGB_D65 = 0,
+	DCIP3_D65 = 1,
+	Rec2020_D65 = 2,
+	ACES_D60 = 3,
+	ACEScg_D60 = 4,
+
+	MAX
+};
+
+/**
+ * Different types of Context Switch stats
+ */
+struct FContextSwitchStats
+{
+	/** Context switches that occurred voluntarily (e.g. yield - platform dependent) */
+	uint64 VoluntaryContextSwitches		= 0;
+
+	/** Context switches that were involuntary (e.g. quantum reached/exceeded - platform dependent) */
+	uint64 InvoluntaryContextSwitches	= 0;
+
+	/** All context switch types */
+	uint64 TotalContextSwitches			= 0;
+};
+
+/**
+ * Flags for Context Switch stats to retrieve
+ */
+enum class EContextSwitchFlags : uint8
+{
+	VoluntaryContextSwitches		= 0x01,
+	InvoluntaryContextSwitches		= 0x02,
+	TotalContextSwitches			= 0x04,
+
+	All								= 0xFF
+};
+
+ENUM_CLASS_FLAGS(EContextSwitchFlags);
+
 /**
  * Generic implementation for most platforms
  */
-struct CORE_API FGenericPlatformMisc
+struct FGenericPlatformMisc
 {
 	/**
 	 * Called during appInit() after cmd line setup
 	 */
-	static void PlatformPreInit();
+	static CORE_API void PlatformPreInit();
 	static void PlatformInit() { }
 
+
+	static CORE_API FDelegateHandle AddNetworkListener(FOnNetworkConnectionChangedDelegate&& InNewDelegate);
+	static CORE_API bool RemoveNetworkListener(FDelegateHandle Handle);
+	
 	/**
 	* Called to dismiss splash screen
 	*/
@@ -370,25 +583,23 @@ struct CORE_API FGenericPlatformMisc
 	static void SetCrashHandler(void (* CrashHandler)(const FGenericCrashContext& Context)) { }
 
 	/**
-	 * Retrieve a environment variable from the system
-	 *
-	 * @param VariableName The name of the variable (ie "Path")
-	 * @param Result The string to copy the value of the variable into
-	 * @param ResultLength The size of the Result string
+	 * Gets the current crash handling type.
 	 */
-	UE_DEPRECATED(4.21, "void FPlatformMisc::GetEnvironmentVariable(Name, Result, Length) is deprecated. Use FString FPlatformMisc::GetEnvironmentVariable(Name) instead.")
-	static void GetEnvironmentVariable(const TCHAR* VariableName, TCHAR* Result, int32 ResultLength)
-	{
-		*Result = 0;
-	}
-
+	static ECrashHandlingType GetCrashHandlingType() { return ECrashHandlingType::Default; }
+	
+	/**
+	 * Sets the type of crash handling done by the engine. Returns the new crash handling type. If disabling crash
+	 * handling make sure an alternative is active since threads that crash will just disappear.
+	 */
+	static ECrashHandlingType SetCrashHandlingType(ECrashHandlingType Type) { return ECrashHandlingType::Default; }
+	
 	/**
 	 * Retrieve a environment variable from the system
 	 *
 	 * @param VariableName The name of the variable (ie "Path")
 	 * @return Value of the variable, or an empty string if not set.
 	 */
-	static FString GetEnvironmentVariable(const TCHAR* VariableName);
+	static CORE_API FString GetEnvironmentVariable(const TCHAR* VariableName);
 
 	/**
 	 * Sets an environment variable to the local process's environment
@@ -396,7 +607,7 @@ struct CORE_API FGenericPlatformMisc
 	 * @param VariableName The name of the variable (ie "Path")
 	 * @param Value The string to set the variable to.
 	 */
-	static void SetEnvironmentVar(const TCHAR* VariableName, const TCHAR* Value);
+	static CORE_API void SetEnvironmentVar(const TCHAR* VariableName, const TCHAR* Value);
 
 	/**
 	 * Returns the maximum length of a path
@@ -409,7 +620,7 @@ struct CORE_API FGenericPlatformMisc
 	/**
 	 * return the delimiter between paths in the PATH environment variable.
 	 */
-	static const TCHAR* GetPathVarDelimiter();
+	static CORE_API const TCHAR* GetPathVarDelimiter();
 
 	/**
 	 * Retrieve the Mac address of the current adapter. This is generally platform-dependent code that other platforms must implement.
@@ -417,7 +628,7 @@ struct CORE_API FGenericPlatformMisc
 	 * @return array of bytes representing the Mac address, or empty array if unable to determine.
 	 */
 	UE_DEPRECATED(4.14, "GetMacAddress is deprecated. It is not reliable on all platforms")
-	static TArray<uint8> GetMacAddress();
+	static CORE_API TArray<uint8> GetMacAddress();
 
 	/**
 	 * Retrieve the Mac address of the current adapter as a string. This generally relies on GetMacAddress() being implemented for the platform, if possible.
@@ -425,7 +636,7 @@ struct CORE_API FGenericPlatformMisc
 	 * @return String representing the Mac address, or empty string.
 	 */
 	UE_DEPRECATED(4.14, "GetMacAddressString is deprecated. It is not reliable on all platforms")
-	static FString GetMacAddressString();
+	static CORE_API FString GetMacAddressString();
 
 	/**
 	 * Retrieve the Mac address of the current adapter as a hashed string (privacy). This generally relies on GetMacAddress() being implemented for the platform, if possible.
@@ -433,7 +644,7 @@ struct CORE_API FGenericPlatformMisc
 	 * @return String representing the hashed Mac address, or empty string.
 	 */
 	UE_DEPRECATED(4.14, "GetHasedMacAddressString is deprecated. It is not reliable on all platforms")
-	static FString GetHashedMacAddressString();
+	static CORE_API FString GetHashedMacAddressString();
 
 	/**
 	 * Returns a unique string for device identification. Differs from the deprecated GetUniqueDeviceId
@@ -450,18 +661,18 @@ struct CORE_API FGenericPlatformMisc
 	 *
 	 * @return the unique string generated by this platform for this device, or an empty string if one is not available.
 	 */
-	static FString GetDeviceId();
+	static CORE_API FString GetDeviceId();
 
 	/**
 	 * Returns a unique string for advertising identification
 	 *
 	 * @return the unique string generated by this platform for this device
 	 */
-	static FString GetUniqueAdvertisingId();
+	static CORE_API FString GetUniqueAdvertisingId();
 
 	// #CrashReport: 2015-02-24 Remove
 	/** Submits a crash report to a central server (release builds only) */
-	static void SubmitErrorReport( const TCHAR* InErrorHist, EErrorReportMode::Type InMode );
+	static CORE_API void SubmitErrorReport( const TCHAR* InErrorHist, EErrorReportMode::Type InMode );
 
 	/** Check to see if the platform is being viewed remotely. In such a mode we should aim to minimize screen refresh to get the best performance on the remote viewer */
 	static bool IsRemoteSession()
@@ -473,11 +684,14 @@ struct CORE_API FGenericPlatformMisc
 	FORCEINLINE static bool IsDebuggerPresent()
 	{
 #if UE_BUILD_SHIPPING
-		return 0;
+		return false;
 #else
-		return 1; // unknown platforms return true so that they can crash into a debugger
+		return true; // unknown platforms return true so that they can crash into a debugger
 #endif
 	}
+
+	/** Returns non-zero if a performance-sensitive diagnostic, like a memory sanitizer, is detected for this process */
+	static CORE_API EProcessDiagnosticFlags GetProcessDiagnostics();
 
 	/** Break into the debugger, if IsDebuggerPresent returns true, otherwise do nothing  */
 	UE_DEPRECATED(4.19, "FPlatformMisc::DebugBreak is deprecated. Use the UE_DEBUG_BREAK() macro instead.")
@@ -494,7 +708,7 @@ struct CORE_API FGenericPlatformMisc
 	 *
 	 * @return	CPU vendor name
 	 */
-	static FString GetCPUVendor();
+	static CORE_API FString GetCPUVendor();
 
 	/**
 	 * On x86(-64) platforms, uses cpuid instruction to get the CPU signature
@@ -510,55 +724,101 @@ struct CORE_API FGenericPlatformMisc
 	 *			Bits 20-27	Extended family
 	 *			Bits 28-31	Reserved
 	 */
-	static uint32 GetCPUInfo();
+	static CORE_API uint32 GetCPUInfo();
 
 	/** @return whether this cpu supports certain required instructions or not */
-	static bool HasNonoptionalCPUFeatures();
+	static CORE_API bool HasNonoptionalCPUFeatures();
 	/** @return whether to check for specific CPU compatibility or not */
-	static bool NeedsNonoptionalCPUFeaturesCheck();
+	static CORE_API bool NeedsNonoptionalCPUFeaturesCheck();
 
 	/**
 	 * Uses cpuid instruction to get the CPU brand string
 	 *
 	 * @return	CPU brand string
 	 */
-	static FString GetCPUBrand();
+	static CORE_API FString GetCPUBrand();
 
 	/**
 	 * Returns the CPU chipset if known
 	 *
 	 * @return	CPU chipset string (or "Unknown")
 	 */
-	static FString GetCPUChipset();
+	static CORE_API FString GetCPUChipset();
 
 	/**
 	 * @return primary GPU brand string
 	 */
-	static FString GetPrimaryGPUBrand();
+	static CORE_API FString GetPrimaryGPUBrand();
 
 	/**
 	 * @return	"DeviceMake|DeviceModel" if possible, and "CPUVendor|CPUBrand" otherwise, optionally returns "DeviceMake|DeviceModel|CPUChipset" if known
 	 */
-	static FString GetDeviceMakeAndModel();
+	static CORE_API FString GetDeviceMakeAndModel();
 
-	static struct FGPUDriverInfo GetGPUDriverInfo(const FString& DeviceDescription);
+	static CORE_API struct FGPUDriverInfo GetGPUDriverInfo(const FString& DeviceDescription);
 
 	/**
 	 * Gets the OS Version and OS Subversion.
 	 */
-	static void GetOSVersions( FString& out_OSVersionLabel, FString& out_OSSubVersionLabel );
+	static CORE_API void GetOSVersions( FString& out_OSVersionLabel, FString& out_OSSubVersionLabel );
 
 	/**
 	 * Gets a string representing the numeric OS version (as opposed to a translated OS version that GetOSVersions returns).
 	 * The returned string should try to be brief and avoid newlines and symbols, but there's technically no restriction on the string it can return.
 	 * If the implementation does not support this, it should return an empty string.
 	 */
-	static FString GetOSVersion();
+	static CORE_API FString GetOSVersion();
 
 	/** Retrieves information about the total number of bytes and number of free bytes for the specified disk path. */
-	static bool GetDiskTotalAndFreeSpace( const FString& InPath, uint64& TotalNumberOfBytes, uint64& NumberOfFreeBytes );
+	static CORE_API bool GetDiskTotalAndFreeSpace( const FString& InPath, uint64& TotalNumberOfBytes, uint64& NumberOfFreeBytes );
+
+	/**
+	 * Gets Page Fault stats covering the lifetime of the process
+	 *
+	 * @param OutStats	Outputs the page fault stats
+	 * @param Flags		The type of page fault stats to retrieve
+	 * @return			Whether or not stats were successfully retrieved
+	 */
+	static bool GetPageFaultStats(FPageFaultStats& OutStats, EPageFaultFlags Flags=EPageFaultFlags::All)
+	{
+		return false;
+	}
+
+	/**
+	 * Gets Blocking Input/Output stats covering the lifetime of the process
+	 *
+	 * @param OutStats	Outputs the IO stats
+	 * @param Flags		The type of IO stats to retrieve
+	 * @return			Whether or not stats were successfully retrieved
+	 */
+	static bool GetBlockingIOStats(FProcessIOStats& OutStats, EInputOutputFlags Flags=EInputOutputFlags::All)
+	{
+		return false;
+	}
+
+	/**
+	 * Gets Context Switch stats covering the lifetime of the process
+	 *
+	 * @param OutStats	Outputs the Context Switch stats
+	 * @param Flags		The type of Context Switch stats to retrieve
+	 * @return			Whether or not stats were successfully retrieved
+	 */
+	static bool GetContextSwitchStats(FContextSwitchStats& OutStats, EContextSwitchFlags Flags=EContextSwitchFlags::All)
+	{
+		return false;
+	}
 
 	static bool SupportsMessaging()
+	{
+		return true;
+	}
+
+	/**
+	 * For platforms that support cache storage functionality, setting a directory for it when it's not available can result in errors.
+	 * This method's purpose is to be overridden in such platforms, with logic that checks if said cache is available.
+	 * In all other platforms without this constraint, it should return true by default.
+	 */
+	static bool IsCacheStorageAvailable()
 	{
 		return true;
 	}
@@ -586,7 +846,7 @@ struct CORE_API FGenericPlatformMisc
 	/**
 	 * Enforces strict memory load/store ordering across the memory barrier call.
 	 */
-	FORCENOINLINE static void MemoryBarrier();
+	CORE_API FORCENOINLINE static void MemoryBarrier();
 
 	/**
 	 * Set a handler to be called when there is a memory warning from the OS
@@ -612,20 +872,28 @@ struct CORE_API FGenericPlatformMisc
 
 	static void SetLastError(uint32 ErrorCode) {}
 
-	static void RaiseException( uint32 ExceptionCode );
+	static CORE_API void RaiseException( uint32 ExceptionCode );
 
 public:
 
 	/**
 	 * Platform specific function for adding a named event that can be viewed in external tool
 	 */
-	static void BeginNamedEvent(const struct FColor& Color, const TCHAR* Text);
-	static void BeginNamedEvent(const struct FColor& Color, const ANSICHAR* Text);
+	static CORE_API void BeginNamedEvent(const struct FColor& Color, const TCHAR* Text);
+	static CORE_API void BeginNamedEvent(const struct FColor& Color, const ANSICHAR* Text);
+
+	/**
+	 * Stats logging for named event 
+	 */
+	template<typename CharType>
+	static void StatNamedEvent(const CharType* Text);
+	static CORE_API void TickStatNamedEvents();
+	static CORE_API void LogNameEventStatsInit();
 
 	/**
 	 * Platform specific function for closing a named event that can be viewed in external tool
 	 */
-	static void EndNamedEvent();
+	static CORE_API void EndNamedEvent();
 
 	/** Platform specific function for adding a named custom stat that can be viewed in external tool */
 	static void CustomNamedStat(const TCHAR* Text, float Value, const TCHAR* Graph, const TCHAR* Unit) {}
@@ -636,6 +904,12 @@ public:
 	 */
 	static void BeginProfilerColor(const struct FColor& Color) {}
 	static void EndProfilerColor() {}
+
+	/**
+	 * Profiler enter background events. These are for timing backgrounding. Some platforms have a timeout for this
+	 */
+	static void BeginEnterBackgroundEvent(const TCHAR* Text) {}
+	static void EndEnterBackgroundEvent() {}
 
 
 	/** Indicates the start of a frame for named events */
@@ -673,7 +947,7 @@ public:
 	 *	@param	InKeyValues			The mapping of key->value pairs to set
 	 *	@return	bool				true if the value was set correctly, false if not
 	 */
-	static bool SetStoredValues(const FString& InStoreId, const FString& InSectionName, const TMap<FString, FString>& InKeyValues);
+	static CORE_API bool SetStoredValues(const FString& InStoreId, const FString& InSectionName, const TMap<FString, FString>& InKeyValues);
 
 	/**
 	 *	Set the value for the given section and key in the platform specific key->value store
@@ -685,7 +959,7 @@ public:
 	 *	@param	InValue				The value to set
 	 *	@return	bool				true if the value was set correctly, false if not
 	 */
-	static bool SetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, const FString& InValue);
+	static CORE_API bool SetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, const FString& InValue);
 
 	/**
 	 *	Get the value for the given section and key from the platform specific key->value store
@@ -697,7 +971,7 @@ public:
 	 *	@param	OutValue			The value found
 	 *	@return	bool				true if the entry was found (and OutValue contains the result), false if not
 	 */
-	static bool GetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, FString& OutValue);
+	static CORE_API bool GetStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName, FString& OutValue);
 
 	/**
 	 *	Deletes value for the given section and key in the platform specific key->value store
@@ -708,7 +982,7 @@ public:
 	 *	@param	InKeyName			The name of the key to set the value for
 	 *	@return	bool				true if the value was deleted correctly, false if not found or couldn't delete
 	 */
-	static bool DeleteStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName);
+	static CORE_API bool DeleteStoredValue(const FString& InStoreId, const FString& InSectionName, const FString& InKeyName);
 
 	/**
 	 *	Deletes the given section and its contained values in the platform specific key->value store
@@ -718,17 +992,20 @@ public:
 	 *	@param	InSectionName		The section to delete.
 	 *	@return	bool				true if the section was deleted, false if not found or couldn't delete
 	 */
-	static bool DeleteStoredSection(const FString& InStoreId, const FString& InSectionName);
+	static CORE_API bool DeleteStoredSection(const FString& InStoreId, const FString& InSectionName);
 
 	/** Sends a message to a remote tool, and debugger consoles */
-	static void LowLevelOutputDebugString(const TCHAR *Message);
-	static void VARARGS LowLevelOutputDebugStringf(const TCHAR *Format, ... );
+	static CORE_API void LowLevelOutputDebugString(const TCHAR *Message);
+	static CORE_API void VARARGS LowLevelOutputDebugStringf(const TCHAR *Format, ... );
+
+	/** Whether LowLevelOutputDebugString[f] can receive structured output as lines of JSON. */
+	static CORE_API bool IsLowLevelOutputDebugStringStructured();
 
 	/** Sets the default output to UTF8 */
-	static void SetUTF8Output();
+	static CORE_API void SetUTF8Output();
 
 	/** Prints string to the default output */
-	static void LocalPrint( const TCHAR* Str );
+	static CORE_API void LocalPrint( const TCHAR* Str );
 
 	/** Whether LocalPrint can be called from any thread without overlapping */
 	static bool IsLocalPrintThreadSafe() { return false;  }
@@ -737,15 +1014,16 @@ public:
 	 * Whether the platform has a separate debug channel to stdout (eg. OutputDebugString on Windows). Used to suppress messages being output twice
 	 * if both go to the same place.
 	 */
-	static bool HasSeparateChannelForDebugOutput();
+	static CORE_API bool HasSeparateChannelForDebugOutput();
 
 	/**
 	 * Requests application exit.
 	 *
 	 * @param	Force	If true, perform immediate exit (dangerous because config code isn't flushed, etc).
 	 *				  If false, request clean main-loop exit from the platform specific code.
+	 * @param	CallSite a diagnostic message identifying the callsite.
 	 */
-	static void RequestExit( bool Force );
+	static CORE_API void RequestExit( bool Force, const TCHAR* CallSite = nullptr);
 
 	/**
 	 * Requests application exit with a specified return code. Name is different from RequestExit() so overloads of just one of functions are possible.
@@ -753,14 +1031,20 @@ public:
 	 * @param	Force 	   If true, perform immediate exit (dangerous because config code isn't flushed, etc).
 	 *					 If false, request clean main-loop exit from the platform specific code.
 	 * @param   ReturnCode This value will be returned from the program (on the platforms where it's possible). Limited to 0-255 to conform with POSIX.
+	 * @param	CallSite a diagnostic message identifying the callsite.
 	 */
-	static void RequestExitWithStatus( bool Force, uint8 ReturnCode );
+	static CORE_API void RequestExitWithStatus( bool Force, uint8 ReturnCode, const TCHAR* CallSite = nullptr);
 
 
 	/**
 	 * Requests application to restart
 	 */
-	static bool RestartApplication();
+	static CORE_API bool RestartApplication();
+
+    /**
+	 * Requests application to restart appending the passed in CmdLine to the restart
+	 */
+	static CORE_API bool RestartApplicationWithCmdLine(const char* CmdLine);
 
 	/**
 	 * Returns the last system error code in string form.  NOTE: Only one return value is valid at a time!
@@ -769,18 +1053,10 @@ public:
 	 * @param BufferLength the size of the buffer in character count
 	 * @param Error the error code to convert to string form
 	 */
-	static const TCHAR* GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error);
-
-	/** Copies text to the operating system clipboard. */
-	UE_DEPRECATED(4.18, "FPlatformMisc::ClipboardCopy() has been superseded by FPlatformApplicationMisc::ClipboardCopy()")
-	static void ClipboardCopy(const TCHAR* Str);
-
-	/** Pastes in text from the operating system clipboard. */
-	UE_DEPRECATED(4.18, "FPlatformMisc::ClipboardPaste() has been superseded by FPlatformApplicationMisc::ClipboardPaste()")
-	static void ClipboardPaste(class FString& Dest);
+	static CORE_API const TCHAR* GetSystemErrorMessage(TCHAR* OutBuffer, int32 BufferCount, int32 Error);
 
 	/** Create a new globally unique identifier. **/
-	static void CreateGuid(struct FGuid& Result);
+	static CORE_API void CreateGuid(struct FGuid& Result);
 
 	/**
 	 * Show a message box if possible, otherwise print a message and return the default
@@ -789,7 +1065,7 @@ public:
 	 * @param Caption String indicating the title of the message box
 	 * @return Very strange convention...not really EAppReturnType, see implementation
 	 */
-	static EAppReturnType::Type MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption );
+	static CORE_API EAppReturnType::Type MessageBoxExt( EAppMsgType::Type MsgType, const TCHAR* Text, const TCHAR* Caption );
 
 	/**
 	 * Handles Game Explorer, Firewall and FirstInstall commands, typically from the installer
@@ -829,16 +1105,24 @@ public:
 	}
 
 	/**
+	 * Platform-specific normalization of path
+	 * E.g. on Linux/Unix platforms, replaces ~ with user home directory, so ~/.config becomes /home/joe/.config (or /Users/Joe/.config)
+	 */
+	static void NormalizePath(FStringBuilderBase& InPath)
+	{
+	}
+
+	/**
 	 * @return platform specific path separator.
 	 */
-	static const TCHAR* GetDefaultPathSeparator();
+	static CORE_API const TCHAR* GetDefaultPathSeparator();
 
 	/**
 	 * Checks if platform wants to use a rendering thread on current device
 	 *
 	 * @return true if allowed, false if shouldn't use a separate rendering thread
 	 */
-	static bool UseRenderThread();
+	static CORE_API bool UseRenderThread();
 
 	/**
 	 * Checks if platform wants to allow an audio thread on current device (note: does not imply it will, only if okay given other criteria met)
@@ -856,30 +1140,32 @@ public:
 	 *
 	 * @return true if allows, false if shouldn't allow thread heartbeat hang detection
 	 */
-	static bool AllowThreadHeartBeat();
+	static CORE_API bool AllowThreadHeartBeat();
 
 	/**
 	 * return the number of hardware CPU cores
 	 */
-	static int32 NumberOfCores()
-	{
-		return 1;
-	}
+	static CORE_API int32 NumberOfCores();
+
+	/**
+	* @return a description of all the groups in the current system and their affinities
+	*/
+	static CORE_API const FProcessorGroupDesc& GetProcessorGroupDesc();
 
 	/**
 	 * return the number of logical CPU cores
 	 */
-	static int32 NumberOfCoresIncludingHyperthreads();
+	static CORE_API int32 NumberOfCoresIncludingHyperthreads();
 
 	/**
 	 * Return the number of worker threads we should spawn, based on number of cores
 	 */
-	static int32 NumberOfWorkerThreadsToSpawn();
+	static CORE_API int32 NumberOfWorkerThreadsToSpawn();
 
 	/**
 	 * Return the number of worker threads we should spawn to service IO, NOT based on number of cores
 	 */
-	static int32 NumberOfIOWorkerThreadsToSpawn();
+	static CORE_API int32 NumberOfIOWorkerThreadsToSpawn();
 
 	/**
 	 * Return the platform specific async IO system, or nullptr if the standard one should be used.
@@ -897,31 +1183,37 @@ public:
 	}
 
 	/** Get the application root directory. */
-	static const TCHAR* RootDir();
+	static CORE_API const TCHAR* RootDir();
 
 	/** get additional directories which can be considered as root directories */
-	static TArray<FString> GetAdditionalRootDirectories();
+	static CORE_API TArray<FString> GetAdditionalRootDirectories();
 	/** add an additional root directory */
-	static void AddAdditionalRootDirectory(const FString& RootDir);
+	static CORE_API void AddAdditionalRootDirectory(const FString& RootDir);
 
 	/** Get the engine directory */
-	static const TCHAR* EngineDir();
+	static CORE_API const TCHAR* EngineDir();
 
 	/** Get the directory the application was launched from (useful for commandline utilities) */
-	static const TCHAR* LaunchDir();
+	static CORE_API const TCHAR* LaunchDir();
 
 	/** Function to store the current working directory for use with LaunchDir() */
-	static void CacheLaunchDir();
+	static CORE_API void CacheLaunchDir();
 
 	/**
 	 *	Return the project directory
 	 */
-	static const TCHAR* ProjectDir();
+	static CORE_API const TCHAR* ProjectDir();
+
+	/**
+	 *	Return the engine and project directory based from the executable.
+	 *  This function would return different results than EngineDir and Project dir if for example -basedir is set on cmd line and/or pak files are used
+	 */
+	static CORE_API bool GetEngineAndProjectAbsoluteDirsFromExecutable(FString& OutProjectDir, FString& OutEngineDir);
 
 	/**
 	*	Return the CloudDir.  CloudDir can be per-user.
 	*/
-	static FString CloudDir();
+	static CORE_API FString CloudDir();
 
 	/**
 	*	Return true if the PersistentDownloadDir is available.
@@ -933,42 +1225,60 @@ public:
 		return true;
 	}
 
+	/** Ensure that there enough space in the persistent download dir. Returns true if there is sufficient space.
+	 *  If there is insufficient space and bAttemptToUseUI is true, the function will return false and the user may be prompted to clear space
+	 */
+	static CORE_API bool CheckPersistentDownloadStorageSpaceAvailable( uint64 BytesRequired, bool bAttemptToUseUI );
+
+
 	/**
 	 *	Return the GamePersistentDownloadDir.
 	 *	On some platforms, returns the writable directory for downloaded data that persists across play sessions.
 	 *	This dir is always per-game.
 	 */
-	static const TCHAR* GamePersistentDownloadDir();
+	static CORE_API const TCHAR* GamePersistentDownloadDir();
 
-	static const TCHAR* GeneratedConfigDir();
+	/**
+	 *	Return the temporary directory
+	 */
+	static CORE_API const TCHAR* GameTemporaryDownloadDir();
 
-	static const TCHAR* GetUBTPlatform();
+	static CORE_API const TCHAR* GeneratedConfigDir();
 
-	static const TCHAR* GetUBTTarget();
+	static CORE_API const TCHAR* GetUBTPlatform();
 
-	static void SetUBTTargetName(const TCHAR* InTargetName);
-	static const TCHAR* GetUBTTargetName();
+	static CORE_API const TCHAR* GetUBTTarget();
+
+	static CORE_API void SetUBTTargetName(const TCHAR* InTargetName);
+	static CORE_API const TCHAR* GetUBTTargetName();
 
 	/** 
 	 * Determines the shader format for the platform
 	 *
 	 * @return	Returns the shader format to be used by that platform
 	 */
-	static const TCHAR* GetNullRHIShaderFormat();
+	static CORE_API const TCHAR* GetNullRHIShaderFormat();
 
 	/**
 	 * Returns the platform specific chunk based install interface
 	 *
 	 * @return	Returns the platform specific chunk based install implementation
 	 */
-	static IPlatformChunkInstall* GetPlatformChunkInstall();
+	static CORE_API IPlatformChunkInstall* GetPlatformChunkInstall();
 
 	/**
 	 * Returns the platform specific compression interface
 	 *
 	 * @return Returns the platform specific compression interface
 	 */
-	static IPlatformCompression* GetPlatformCompression();
+	static CORE_API IPlatformCompression* GetPlatformCompression();
+
+	/**
+	 * Returns the platform specific interface for communication with processes running on the host pc.
+	 * 
+	 * @return Returns the platform specific host communication interface.
+	 */
+	static CORE_API IPlatformHostCommunication& GetPlatformHostCommunication();
 
 	/**
 	 * Has the OS execute a command and path pair (such as launch a browser)
@@ -1005,7 +1315,7 @@ public:
 	 *
 	 * @return whether the hash was computed successfully
 	 */
-	static bool GetSHA256Signature(const void* Data, uint32 ByteSize, FSHA256Signature& OutSignature);
+	static CORE_API bool GetSHA256Signature(const void* Data, uint32 ByteSize, FSHA256Signature& OutSignature);
 
 	/**
 	 * Get the default language (for localization) used by this platform.
@@ -1015,7 +1325,7 @@ public:
 	 *  - An optional four-letter ISO 15924 script code (eg, "Hans").
 	 *  - An optional two-letter ISO 3166-1 country code (eg, "CN").
 	 */
-	static FString GetDefaultLanguage();
+	static CORE_API FString GetDefaultLanguage();
 
 	/**
 	 * Get the default locale (for internationalization) used by this platform.
@@ -1024,13 +1334,13 @@ public:
 	 *  - An optional four-letter ISO 15924 script code (eg, "Hans").
 	 *  - An optional two-letter ISO 3166-1 country code (eg, "CN").
 	 */
-	static FString GetDefaultLocale();
+	static CORE_API FString GetDefaultLocale();
 
 	/**
 	 * Get the timezone identifier for this platform, or an empty string if the default timezone calculation will work.
 	 * @note This should return either an Olson timezone (eg, "America/Los_Angeles") or an offset from GMT/UTC (eg, "GMT-8:00").
 	 */
-	static FString GetTimeZoneId();
+	static CORE_API FString GetTimeZoneId();
 
 	/**
 	 *	Platform-specific Exec function
@@ -1046,7 +1356,7 @@ public:
 	}
 
 	/** @return Get the name of the platform specific file manager (eg, Explorer on Windows, Finder on OS X) */
-	static FText GetFileManagerName();
+	static CORE_API FText GetFileManagerName();
 
 	/** @return Whether filehandles can be opened on one thread and read/written on another thread */
 	static bool SupportsMultithreadedFileHandles()
@@ -1072,7 +1382,7 @@ public:
 	 * @return ensure is allowed
 	 */
 #if DO_ENSURE
-	static bool IsEnsureAllowed();
+	static CORE_API bool IsEnsureAllowed();
 #else
 	static bool IsEnsureAllowed() { return true; }
 #endif // DO_ENSURE
@@ -1081,7 +1391,7 @@ public:
 	 * Updates hotfixable ensure settings from config and commandline (config takes priority).
 	 */
 #if DO_ENSURE
-	static void UpdateHotfixableEnsureSettings();
+	static CORE_API void UpdateHotfixableEnsureSettings();
 #else
 	static void UpdateHotfixableEnsureSettings() {}
 #endif // DO_ENSURE
@@ -1089,19 +1399,45 @@ public:
 	/**
 	 * Ticks values that can be hotfixable in the config.
 	 */
-	static void TickHotfixables();
+	static CORE_API void TickHotfixables();
 
 	static void PromptForRemoteDebugging(bool bIsEnsure)
 	{
 	}
 
-	FORCEINLINE static void PrefetchBlock(const void* InPtr, int32 NumBytes = 1)
+	FORCEINLINE static void Prefetch(const void* Ptr)
 	{
+#if PLATFORM_CPU_X86_FAMILY
+		_mm_prefetch(static_cast<const char*>(Ptr), _MM_HINT_T0);
+#elif PLATFORM_CPU_ARM_FAMILY
+#	if defined(_MSC_VER)
+		__prefetch(Ptr);
+#	else
+		__asm__ __volatile__("prfm pldl1keep, [%[ptr]]\n" ::[ptr] "r"(Ptr) : );
+#	endif
+#else
+#	error Unknown architecture
+#endif
 	}
 
-	/** Platform-specific instruction prefetch */
-	FORCEINLINE static void Prefetch(void const* x, int32 offset = 0)
+	FORCEINLINE static void Prefetch(const void* Ptr, int32 Offset)
 	{
+		Prefetch(reinterpret_cast<const void*>(reinterpret_cast<UPTRINT>(Ptr) + Offset));
+	}
+
+	UE_DEPRECATED(5.2, "Must supply size when prefetching a block of data")
+	FORCEINLINE static void PrefetchBlock(const void* Ptr)
+	{
+		Prefetch(Ptr);
+	}
+
+	FORCEINLINE static void PrefetchBlock(const void* Ptr, int32 NumBytes)
+	{
+		// Use compile-time PLATFORM_CACHE_LINE_SIZE to avoid having to load a value before issuing prefetch instructions
+		for (int32 Line = 0, NumLines = (NumBytes + PLATFORM_CACHE_LINE_SIZE - 1) / PLATFORM_CACHE_LINE_SIZE; Line < NumLines; ++Line)
+		{
+			Prefetch(Ptr, Line * PLATFORM_CACHE_LINE_SIZE);
+		}
 	}
 
 	/**
@@ -1109,7 +1445,7 @@ public:
 	 *
 	 * @return the default profile name.
 	 */
-	static const TCHAR* GetDefaultDeviceProfileName();
+	static CORE_API const TCHAR* GetDefaultDeviceProfileName();
 
 	/**
 	 * Gets the current battery level.
@@ -1123,7 +1459,6 @@ public:
 
 	FORCEINLINE static void SetBrightness(float bBright) { }
 	FORCEINLINE static float GetBrightness() { return 1.0f; }
-	FORCEINLINE static void ResetBrightness() { } // resets brightness to brightness application started with
 	FORCEINLINE static bool SupportsBrightness() { return false; }
 
 	FORCEINLINE static bool IsInLowPowerMode() { return false;}
@@ -1133,12 +1468,12 @@ public:
 	 * Level is a relative value that is platform dependent. Lower is cooler, higher is warmer.
 	 * Level of -1 means Unimplemented.
 	 */
-	static float GetDeviceTemperatureLevel();
+	static CORE_API float GetDeviceTemperatureLevel();
 
 	/**
 	 * Allows a game/program/etc to control the game directory in a special place (for instance, monolithic programs that don't have .uprojects)
 	 */
-	static void SetOverrideProjectDir(const FString& InOverrideDir);
+	static CORE_API void SetOverrideProjectDir(const FString& InOverrideDir);
 
 	UE_DEPRECATED(4.18, "FPaths::SetOverrideGameDir() has been superseded by FPaths::SetOverrideProjectDir().")
 	static FORCEINLINE void SetOverrideGameDir(const FString& InOverrideDir) { return SetOverrideProjectDir(InOverrideDir); }
@@ -1147,7 +1482,23 @@ public:
 	 * Return an ordered list of target platforms this runtime can support (ie Android_DXT, Android
 	 * would mean that it prefers Android_DXT, but can use Android as well)
 	 */
-	static void GetValidTargetPlatforms(TArray<FString>& TargetPlatformNames);
+	static CORE_API void GetValidTargetPlatforms(TArray<FString>& TargetPlatformNames);
+
+	/*
+	 * Converts from a local user index to a FPlatformUserId
+	 *
+	 * @param LocalUserIndex	A logical index where 0 should always be a valid user
+	 * @returns					A platform-allocated opaque user id, or PLATFORMUSERID_NONE
+	 */
+	static CORE_API FPlatformUserId GetPlatformUserForUserIndex(int32 LocalUserIndex);
+
+	/*
+	 * Converts from a FPlatformUserId to local user index
+	 *
+	 * @param LocalUserIndex	A platform-allocated opaque user id
+	 * @returns					A valid logical index, or INDEX_NONE
+	 */
+	static CORE_API int32 GetUserIndexForPlatformUser(FPlatformUserId PlatformUser);
 
 	/**
 	 * Returns whether the platform wants to use a touch screen for virtual joysticks.
@@ -1205,7 +1556,7 @@ public:
 	{}
 
 	/** @return Memory representing a true type or open type font provided by the platform as a default font for unreal to consume; empty array if the default font failed to load. */
-	static TArray<uint8> GetSystemFontBytes();
+	static CORE_API TArray<uint8> GetSystemFontBytes();
 
 	/**
 	 * Returns whether WiFi connection is currently active
@@ -1214,6 +1565,16 @@ public:
 	{
 		return false;
 	}
+
+	/**
+	 * Returns the current status for the network connection
+	 */
+	static CORE_API ENetworkConnectionStatus GetNetworkConnectionStatus();
+
+	/**
+	 * Updates the current status for the network connection
+	 */
+	static CORE_API void SetNetworkConnectionStatus(ENetworkConnectionStatus NewNetworkConnectionStatus);
 
 	/**
 	 * Returns whether WiFi connection is currently active
@@ -1243,18 +1604,35 @@ public:
 	/**
 	 * Returns whether the platform is running on battery power or not.
 	 */
-	static bool IsRunningOnBattery();
+	static CORE_API bool IsRunningOnBattery();
 
 	/**
-	 * Returns the orientation of the device: e.g. Portrait, LandscapeRight.
-	 * @see EScreenOrientation
+	 * Returns the current orientation of the device: will be either Portrait, LandscapeLeft, PortraitUpsideDown or LandscapeRight.
+	 * 
+	 * @return An EDeviceScreenOrientation value.
 	 */
-	static EDeviceScreenOrientation GetDeviceOrientation();
+	static CORE_API EDeviceScreenOrientation GetDeviceOrientation();
+
 	/**
-	 * Change the orientation of the device: e.g. Portrait, LandscapeRight.
-	 * @see EScreenOrientation
+	 * Change the orientation of the device.
 	 */
-	static void SetDeviceOrientation(EDeviceScreenOrientation NewDeviceOrientation);
+	UE_DEPRECATED(5.1, "SetDeviceOrientation is deprecated. Use SetAllowedDeviceOrientation instead.")
+	static CORE_API void SetDeviceOrientation(EDeviceScreenOrientation NewDeviceOrientation);
+
+	/**
+	 * Returns the allowed orientation of the device. This is NOT the same as GetDeviceOrientation, which only returns Portrait, LandscapeLeft, 
+	 * PortraitUpsideDown or LandscapeRight. The allowed orientation limits what orientation your device can have. So if you set the allowed orientation 
+	 * to LandscapeLeft, GetDeviceOrientation will only ever return LandscapeLeft. But if you set the allowed orientation to LandscapeSensor, you are actually 
+	 * restricting the allowed orientations to LandscapeLeft OR LandscapeRight (depending on the sensor), so GetDeviceOrientation might return LandscapeLeft OR LandscapeRight.
+	 * 
+	 * @return An EDeviceScreenOrientation value.
+	 */
+	static CORE_API EDeviceScreenOrientation GetAllowedDeviceOrientation();
+
+	/**
+	 * Change the allowed orientation of the device. 
+	 */
+	static CORE_API void SetAllowedDeviceOrientation(EDeviceScreenOrientation NewAllowedDeviceOrientation);
 
 	/**
 	 * Returns the device volume if the device is capable of returning that information.
@@ -1262,7 +1640,7 @@ public:
 	 *   0 : Muted
 	 * 100 : Full Volume
 	 */
-	static int32 GetDeviceVolume();
+	static CORE_API int32 GetDeviceVolume();
 
 	/**
 	 * Get (or create) the unique ID used to identify this computer.
@@ -1270,7 +1648,7 @@ public:
 	 * This is NOT based on a machine fingerprint.
 	 */
 	UE_DEPRECATED(4.14, "GetMachineId is deprecated. Use GetLoginId instead.")
-	static FGuid GetMachineId();
+	static CORE_API FGuid GetMachineId();
 
 	/**
 	 * Returns a unique string associated with the login account of the current machine.
@@ -1284,7 +1662,7 @@ public:
 	 *
 	 * @return a string containing the LoginID, or empty if not available.
 	 */
-	static FString GetLoginId();
+	static CORE_API FString GetLoginId();
 
 	/**
 	 * Get the Epic account ID for the user who last used the Launcher.
@@ -1293,67 +1671,67 @@ public:
 	 *
 	 * @return an empty string if the account ID was not present or it failed to read it for any reason.
 	 */
-	static FString GetEpicAccountId();
+	static CORE_API FString GetEpicAccountId();
 
 	/**
-	 * Set the Epic account ID for the user who last used the Launcher
+	 * Get Device Tag of the device running the session.
 	 *
-	 * Note: This function is obsolete and should not be called under any circumstances.
+	 * Note: Gets from DeviceTag command line argument 
 	 *
-	 * @return true if the account ID was set successfully, false if something failed and it was not set.
+	 * @return empty string or the value from DeviceTag argument.
 	 */
-	static bool SetEpicAccountId( const FString& AccountId );
+	static CORE_API FString GetDeviceTag();
 
 	/**
 	 * Gets a globally unique ID the represents a particular operating system install.
 	 * @returns an opaque string representing the ID, or an empty string if the platform doesn't support one.
 	 */
-	static FString GetOperatingSystemId();
+	static CORE_API FString GetOperatingSystemId();
 
 	/**
 	 * Gets the current mode of convertible laptops, i.e. Laptop or Tablet.
 	 *
 	 * @return The laptop mode, or Unknown if not known, or NotSupported if not a convertible laptop.
 	 */
-	static EConvertibleLaptopMode GetConvertibleLaptopMode();
+	static CORE_API EConvertibleLaptopMode GetConvertibleLaptopMode();
 
 	/**
 	 * Get a string description of the mode the engine was running in.
 	 */
-	static const TCHAR* GetEngineMode();
+	static CORE_API const TCHAR* GetEngineMode();
 
 	/**
 	 * Returns an array of the user's preferred languages in order of preference
 	 * @return An array of language IDs ordered from most preferred to least
 	 */
-	static TArray<FString> GetPreferredLanguages();
+	static CORE_API TArray<FString> GetPreferredLanguages();
 
 	/**
 	 * Returns the currency code associated with the device's locale
 	 * @return the currency code associated with the device's locale
  	*/
-	static FString GetLocalCurrencyCode();
+	static CORE_API FString GetLocalCurrencyCode();
 
 	/**
 	 * Returns the currency symbol associated with the device's locale
 	 * @return the currency symbol associated with the device's locale
 	 */
-	static FString GetLocalCurrencySymbol();
+	static CORE_API FString GetLocalCurrencySymbol();
 
 	/**
 	 * Requests permission to send remote notifications to the user's device.
 	 */
-	static void RegisterForRemoteNotifications();
+	static CORE_API void RegisterForRemoteNotifications();
 
 	/**
 	 * Returns whether or not the device has been registered to receive remote notifications.
 	 */
-	static bool IsRegisteredForRemoteNotifications();
+	static CORE_API bool IsRegisteredForRemoteNotifications();
 
 	/**
 	* Requests unregistering from receiving remote notifications on the user's device.
 	*/
-	static void UnregisterForRemoteNotifications();
+	static CORE_API void UnregisterForRemoteNotifications();
 
 	/**
 	 * Allows platform at runtime to disable unsupported plugins
@@ -1400,27 +1778,34 @@ public:
 		return false;
 	}
 
-	static bool RequestDeviceCheckToken(TFunction<void(const TArray<uint8>&)> QuerySucceededFunc, TFunction<void(const FString&, const FString&)> QueryFailedFunc);
+	static CORE_API bool RequestDeviceCheckToken(TFunction<void(const TArray<uint8>&)> QuerySucceededFunc, TFunction<void(const FString&, const FString&)> QueryFailedFunc);
 
-	static TArray<FCustomChunk> GetOnDemandChunksForPakchunkIndices(const TArray<int32>& PakchunkIndices);
-	static TArray<FCustomChunk> GetAllOnDemandChunks();
-	static TArray<FCustomChunk> GetAllLanguageChunks();
-	static TArray<FCustomChunk> GetCustomChunksByType(ECustomChunkType DesiredChunkType);
+	UE_DEPRECATED(5.1, "Use named chunks instead")
+	static CORE_API TArray<FCustomChunk> GetOnDemandChunksForPakchunkIndices(const TArray<int32>& PakchunkIndices);
+
+	UE_DEPRECATED(5.1, "Use IPlatformChunkInstall::GetNamedChunksByType instead")
+	static CORE_API TArray<FCustomChunk> GetAllOnDemandChunks();
+
+	UE_DEPRECATED(5.1, "Use IPlatformChunkInstall::GetNamedChunksByType instead")
+	static CORE_API TArray<FCustomChunk> GetAllLanguageChunks();
+
+	UE_DEPRECATED(5.1, "Use IPlatformChunkInstall::GetNamedChunksByType instead")
+	static CORE_API TArray<FCustomChunk> GetCustomChunksByType(ECustomChunkType DesiredChunkType);
 
 	/**
 	 * Loads a text file relative to the package root on platforms that distribute apps in package formats.
 	 * For other platforms, the path is relative to the root directory.
 	 */
-	static FString LoadTextFileFromPlatformPackage(const FString& RelativePath);
+	static CORE_API FString LoadTextFileFromPlatformPackage(const FString& RelativePath);
 
-	static bool FileExistsInPlatformPackage(const FString& RelativePath);
+	static CORE_API bool FileExistsInPlatformPackage(const FString& RelativePath);
 
 	/**
 	 * Frees any memory retained by FGenericPlatformMisc.
 	 */
-	static void TearDown();
+	static CORE_API void TearDown();
 
-	static void ParseChunkIdPakchunkIndexMapping(TArray<FString> ChunkIndexRedirects, TMap<int32, int32>& OutMapping);
+	static CORE_API void ParseChunkIdPakchunkIndexMapping(TArray<FString> ChunkIndexRedirects, TMap<int32, int32>& OutMapping);
 
 	static void PumpMessagesOutsideMainLoop()
 	{
@@ -1447,7 +1832,7 @@ public:
 		return false;
 	}
 
-	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, int32& OutputDevice, int32& ColorGamut)
+	FORCEINLINE static void ChooseHDRDeviceAndColorGamut(uint32 DeviceId, uint32 DisplayNitLevel, EDisplayOutputFormat& OutputDevice, EDisplayColorGamut& ColorGamut)
 	{
 	}
 
@@ -1456,7 +1841,7 @@ public:
 		return PakchunkIndex;
 	}
 
-	static int32 GetPakchunkIndexFromPakFile(const FString& InFilename);
+	static CORE_API int32 GetPakchunkIndexFromPakFile(FStringView InFilename);
 
 	FORCEINLINE static bool Expand16BitIndicesTo32BitOnLoad()
 	{
@@ -1476,11 +1861,19 @@ public:
 	}
 
 	/**
-	 * retrieves the maximum refresh rate supported by the platform
+	 * retrieves the current maximum refresh rate supported by the platform
 	 */
 	static inline int32 GetMaxRefreshRate()
 	{
 		return 60;
+	}
+
+	/**
+	 * retrieves the maximum refresh rate supported by the platform
+	 */
+	static inline int32 GetMaxSupportedRefreshRate()
+	{
+		return GetMaxRefreshRate();
 	}
 
 	/**
@@ -1495,7 +1888,67 @@ public:
 	/**
 	 * Returns true if PGO is currently enabled
 	 */
-	static bool IsPGOEnabled();
+	static CORE_API bool IsPGOEnabled();
+
+	/**
+	 * Returns true if this binary has been instrumented for collection of data needed for profile-guided optimization (PGO)
+	 * This value is not expected to change during the run-time
+	 */
+	static CORE_API bool IsPGICapableBinary();
+
+	/**
+	 * On platforms that support run-time PGI on/off, starts a new collection with a given file name.
+	 *
+	 * @param AbsoluteFileName File to put the collection into
+	 * @return true if everything was successful
+	 */
+	static CORE_API bool StartNewPGOCollection(const FString& AbsoluteFileName) { return false; }
+
+	/**
+	 * Returns true if PGI (profile-guided instrumentation, needed for PGO) is currently ongoing.
+	 * Note that on some platforms can start and stop profile data collection.
+	 */
+	static CORE_API bool IsPGIActive();
+
+	/**
+	 * On platforms that support run-time PGI on/off, stops the current collection and writes out the file (or completes its write).
+	 * The filename must have been given to the StartNewPGICollection() at the start of collection (it is needed in advance since the
+	 * collection process may stream to it).
+	 *
+	 * @return true if everything was successful
+	 */
+	static CORE_API bool StopPGOCollectionAndCloseFile() { return false; }
+
+	static CORE_API void ShowConsoleWindow();
+
+	/*
+	 * For mobile devices, this function will return true if we wish to propagate the alpha to the backbuffer
+	 */
+	static CORE_API int GetMobilePropagateAlphaSetting();
+
+	/**
+	*	Return if the game is running on cloud server
+	*/
+	static bool IsRunningInCloud()
+	{
+		return false;
+	}
+
+	static void DisableScreenTimeout()
+	{
+	}
+
+	static void EnableScreenTimeout()
+	{
+	}
+
+	/*
+	 * Unix only function, but put a stub so we can call this for higher level code when we want to setup the Syscall Filters
+	 */
+	static bool SetupSyscallFilters()
+	{
+		return false;
+	}
 
 #if !UE_BUILD_SHIPPING
 	/**
@@ -1508,10 +1961,31 @@ public:
 
 protected:
 	/** Whether the user should be prompted to allow for a remote debugger to be attached */
-	static bool bShouldPromptForRemoteDebugging;
+	static CORE_API bool bShouldPromptForRemoteDebugging;
 	/** Whether the user should be prompted to allow for a remote debugger to be attached on an ensure */
-	static bool bPromptForRemoteDebugOnEnsure;
+	static CORE_API bool bPromptForRemoteDebugOnEnsure;
 #endif	//#if !UE_BUILD_SHIPPING
+
+	static CORE_API EDeviceScreenOrientation AllowedDeviceOrientation;
+
+	static CORE_API ENetworkConnectionStatus CurrentNetworkConnectionStatus;
+
+protected:
+	/**
+	 * Parse CoreLimit from CommandLine or from the SetCoreLimit value. The real number of physical cores and logical
+	 * cores must be provided so that CommandLine arguments can be translated.
+	 * 
+	 * @param bOutFullyInitialized True if commandline was available. If false, values are set to defaults.
+	 * @param OutPhysicalCoreLimit The maximum number of physical cores to report in NumberOfCores.
+	 *        Non-negative. 0 indicates unlimited.
+	 * @param OutLogicalCoreLimit The maximum number of logical cores to report in NumberOfCoresIncludingHyperthreads.
+	 *        Non-negative. 0 indicates unlimited.
+	 * @param bOutSetPhysicalCountToLogicalCount Whether NumberOfCores should be overridden to return
+	 *        NumberOfCoresIncludingHyperthreads.
+	 */
+	static CORE_API void GetConfiguredCoreLimits(int32 PlatformNumPhysicalCores, int32 PlatformNumLogicalCores,
+		bool& bOutFullyInitialized, int32& OutPhysicalCoreLimit, int32& OutLogicalCoreLimit,
+		bool& bOutSetPhysicalCountToLogicalCount);
 
 private:
 	struct FStaticData;

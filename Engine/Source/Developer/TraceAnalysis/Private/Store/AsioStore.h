@@ -9,8 +9,8 @@
 #include "Containers/UnrealString.h"
 #include "Utils.h"
 
-namespace Trace
-{
+namespace UE {
+namespace Trace {
 
 class FAsioReadable;
 class FAsioWriteable;
@@ -51,15 +51,16 @@ public:
 						FAsioStore(asio::io_context& IoContext, const TCHAR* InStoreDir);
 						~FAsioStore();
 	void				Close();
+	const TCHAR*		GetStoreDir() const;
 	uint32				GetChangeSerial() const;
 	uint32				GetTraceCount() const;
 	const FTrace*		GetTraceInfo(uint32 Index) const;
 	bool				HasTrace(uint32 Id) const;
 	FNewTrace			CreateTrace();
 	FAsioReadable*		OpenTrace(uint32 Id);
+	class				FDirWatcher;
 
 private:
-	class				FDirWatcher;
 	FTrace*				GetTrace(uint32 Id) const;
 	FTrace*				AddTrace(const TCHAR* Path);
 	void				ClearTraces();
@@ -76,3 +77,4 @@ private:
 };
 
 } // namespace Trace
+} // namespace UE

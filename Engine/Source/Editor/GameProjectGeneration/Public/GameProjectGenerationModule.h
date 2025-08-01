@@ -3,12 +3,22 @@
 
 #pragma once
 
+#include "AddToProjectConfig.h"
+#include "Containers/Array.h"
+#include "Containers/Map.h"
+#include "Containers/UnrealString.h"
 #include "CoreMinimal.h"
+#include "Delegates/Delegate.h"
+#include "HAL/Platform.h"
+#include "ModuleDescriptor.h"
 #include "Modules/ModuleInterface.h"
 #include "Modules/ModuleManager.h"
-#include "ModuleDescriptor.h"
-#include "AddToProjectConfig.h"
+#include "Templates/SharedPointer.h"
+#include "UObject/NameTypes.h"
 
+class FText;
+class UClass;
+struct FModuleContextInfo;
 struct FSlateBrush;
 struct FTemplateCategory;
 
@@ -70,7 +80,7 @@ public:
 	/** Tries to make the project file writable. Prompts to check out as necessary. */
 	virtual void TryMakeProjectFileWriteable(const FString& ProjectFile);
 
-	/** Prompts the user to update his project file, if necessary. */
+	/** Prompts the user to update their project file, if necessary. */
 	virtual void CheckForOutOfDateGameProjectFile();
 
 	/** Updates the currently loaded project. Returns true if the project was updated successfully or if no update was needed */
@@ -107,7 +117,7 @@ public:
 	 * Update the list of supported target platforms based upon the parameters provided
 	 * This will take care of checking out and saving the updated .uproject file automatically
 	 * 
-	 * @param	InPlatformName		Name of the platform to target (eg, WindowsNoEditor)
+	 * @param	InPlatformName		Name of the platform to target (eg, WindowsClient)
 	 * @param	bIsSupported		true if the platform should be supported by this project, false if it should not
 	 */
 	virtual void UpdateSupportedTargetPlatforms(const FName& InPlatformName, const bool bIsSupported);

@@ -182,6 +182,9 @@ public:
 
 private:
 
+	/** Delegate called when the property editor permission list is updated */
+	void OnPermissionListUpdated(TSoftObjectPtr<UStruct>, FName);
+
 	/** Restores the expansion state in the tree for a specific object set */
 	void RestoreExpandedItems();
 
@@ -208,6 +211,9 @@ private:
 	 * @param OutChildren		The list of children of InPropertyNode that should be visible 
 	 */
 	void OnGetChildrenForPropertyNode( TSharedPtr<FPropertyNode> InPropertyNode, TArray< TSharedPtr<FPropertyNode> >& OutChildren );
+
+	/** Check if a Property Node should be shown in the property tree if we have any external IsPropertyVisible delegates or permission lists */
+	bool IsPropertyNodeVisible(TSharedPtr<FPropertyNode> InPropertyNode);
 
 	/** 
 	 * Function called through a delegate on the favorites TreeView to request children of a property node  
@@ -282,9 +288,6 @@ private:
 	 * Saves favorites to INI                   
 	 */
 	void SaveFavorites();
-	
-	/** Set the color for the property node */
-	void SetColor(FLinearColor NewColor);
 
 	/**
 	 * Requests that a property node's expansion state be changed due to being filtered
@@ -323,8 +326,6 @@ private:
 	FString CurrentFilterText;
 	/** The title of the property view (for a window title) */
 	FString Title;
-	/** The property node that the color picker is currently editing. */
-	FPropertyNode* ColorPropertyNode;
 	/** Notify hook to call when properties are changed */
 	FNotifyHook* NotifyHook;
 	/** True if there is an active filter (text in the filter box) */

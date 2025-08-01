@@ -185,6 +185,7 @@ public:
 		, _HideUI(true)
 		, _AllowZoomOutput(true)
 		, _AlwaysDisplayColorCurves(false)
+		, _AlwaysHideGradientEditor(false)
 		, _ZoomToFitVertical(true)
 		, _ZoomToFitHorizontal(true)
 		, _ShowZoomButtons(true)
@@ -216,6 +217,7 @@ public:
 		SLATE_ARGUMENT( bool, HideUI )
 		SLATE_ARGUMENT( bool, AllowZoomOutput )
 		SLATE_ARGUMENT( bool, AlwaysDisplayColorCurves )
+		SLATE_ARGUMENT( bool, AlwaysHideGradientEditor )
 		SLATE_ARGUMENT( bool, ZoomToFitVertical )
 		SLATE_ARGUMENT( bool, ZoomToFitHorizontal )
 		SLATE_ARGUMENT( bool, ShowZoomButtons )
@@ -243,7 +245,7 @@ public:
 	UNREALED_API void SetZoomToFit(bool bNewZoomToFitVertical, bool bNewZoomToFitHorizontal);
 
 	/** Get the currently edited curve */
-	FCurveOwnerInterface* GetCurveOwner() const;
+	UNREALED_API FCurveOwnerInterface* GetCurveOwner() const;
 
 	/** Construct an object of type UCurveFactory and return it's reference*/
 	UNREALED_API UCurveFactory* GetCurveFactory( );
@@ -265,13 +267,17 @@ public:
 	 * @param Ar The archive to serialize with
 	 */
 	UNREALED_API virtual void AddReferencedObjects( FReferenceCollector& Collector ) override;
+	virtual FString GetReferencerName() const override
+	{
+		return TEXT("SCurveEditor");
+	}
 
 	/** Gets a list of the commands handled by this control */
 	UNREALED_API TSharedPtr<FUICommandList> GetCommands();
 
 	/** Gets or sets whether autoframing is allowed */
-	UNREALED_API bool GetAllowAutoFrame() const { return bAllowAutoFrame; }
-	UNREALED_API void SetAllowAutoFrame(bool bInAllowAutoFrame) { bAllowAutoFrame = bInAllowAutoFrame; }
+	bool GetAllowAutoFrame() const { return bAllowAutoFrame; }
+	void SetAllowAutoFrame(bool bInAllowAutoFrame) { bAllowAutoFrame = bInAllowAutoFrame; }
 
 	/** Gets whether autoframe will be invoked (combination of allow auto frame and curve editor auto frame setting) */
 	UNREALED_API bool GetAutoFrame() const;
@@ -592,11 +598,11 @@ private:
 
 	//~ Begin FEditorUndoClient Interface
 	UNREALED_API virtual void PostUndo(bool bSuccess) override;
-	UNREALED_API virtual void PostRedo(bool bSuccess) override { PostUndo(bSuccess); }
+	virtual void PostRedo(bool bSuccess) override { PostUndo(bSuccess); }
 	// End of FEditorUndoClient
 
 	bool AreCurvesVisible() const { return bAlwaysDisplayColorCurves || bAreCurvesVisible.Get(); }
-	bool IsGradientEditorVisible() const { return bIsGradientEditorVisible; }
+	bool IsGradientEditorVisible() const { return !bAlwaysHideGradientEditor && bIsGradientEditorVisible; }
 	bool IsLinearColorCurve() const;
 
 	bool IsCurveSelectable(TSharedPtr<FCurveViewModel> CurveViewModel) const;
@@ -670,7 +676,7 @@ protected:
 private:
 
 	/** User-supplied object for this curve editor */
-	UCurveEditorSettings* Settings;
+	TObjectPtr<UCurveEditorSettings> Settings;
 
 	/** Curve selection*/
 	TWeakPtr<SBox>		CurveSelectionWidget;
@@ -689,6 +695,8 @@ private:
 	bool				bAllowZoomOutput;
 	/** If we always show the color curves or allow the user to toggle this */
 	bool				bAlwaysDisplayColorCurves;
+	/** If we always hide the gradient editor */
+	bool				bAlwaysHideGradientEditor;
 
 	/** Whether or not to draw the numbers for the input grid. */
 	bool bDrawInputGridNumbers;
@@ -732,7 +740,7 @@ private:
 	bool bIsGradientEditorVisible;
 
 	/** Reference to curve factor instance*/
-	UCurveFactory* CurveFactory;
+	TObjectPtr<UCurveFactory> CurveFactory;
 
 	/** Gradient editor */
 	TSharedPtr<class SColorGradientEditor> GradientViewer;

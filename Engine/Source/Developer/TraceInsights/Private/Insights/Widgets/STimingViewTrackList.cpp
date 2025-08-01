@@ -2,9 +2,8 @@
 
 #include "STimingViewTrackList.h"
 
-#include "EditorFontGlyphs.h"
-#include "EditorStyleSet.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Text/STextBlock.h"
@@ -63,7 +62,7 @@ public:
 				{
 					Track.Pin()->SetVisibilityFlag(InCheckBoxState == ECheckBoxState::Checked);
 					Track.Pin()->SetDirtyFlag();
-					TimingView.Pin()->OnTrackVisibilityChanged();
+					TimingView.Pin()->HandleTrackVisibilityChanged();
 				})
 				.Content()
 				[
@@ -78,10 +77,16 @@ public:
 			//.HAlign(HAlign_Right)
 			//.VAlign(VAlign_Center)
 			//[
-			//	SNew(STextBlock)
-			//	.Font(FEditorStyle::Get().GetFontStyle("FontAwesome.9"))
-			//	.ColorAndOpacity_Lambda([this](){ return FSlateColor(Track.Pin()->GetColor()); })
-			//	.Text(FEditorFontGlyphs::Circle)
+			//	SNew(SBox)
+			//	.HAlign(HAlign_Center)
+			//	.VAlign(VAlign_Center)
+			//	.WidthOverride(12.0f)
+			//	.HeightOverride(12.0f)
+			//	[
+			//		SNew(SImage)
+			//		.ColorAndOpacity_Lambda([this]() { return FSlateColor(GraphSeries.Pin()->GetColor()); })
+			//		.Image(FAppStyle::Get().GetBrush("Icons.Circle"))
+			//	]
 			//]
 		];
 	}
@@ -126,7 +131,7 @@ void STimingViewTrackList::Construct(const FArguments& InArgs, const TSharedRef<
 			SNew(SHorizontalBox)
 			+SHorizontalBox::Slot()
 			.AutoWidth()
-			.Padding(2.0f, 0.0f)
+			.Padding(2.0f, 0.0f, 0.0f, 0.0f)
 			[
 				// Checkbox for bulk operations
 				SNew(SCheckBox)
@@ -160,10 +165,11 @@ void STimingViewTrackList::Construct(const FArguments& InArgs, const TSharedRef<
 						Track->SetVisibilityFlag(bVisible);
 						Track->SetDirtyFlag();
 					}
-					TimingView.Pin()->OnTrackVisibilityChanged();
+					TimingView.Pin()->HandleTrackVisibilityChanged();
 				})
 			]
 			+ SHorizontalBox::Slot()
+			.Padding(FMargin(0.0f, 0.0f, 4.0f, 0.0f))
 			.FillWidth(1.0f)
 			[
 				// Search box allows for filtering
@@ -172,6 +178,7 @@ void STimingViewTrackList::Construct(const FArguments& InArgs, const TSharedRef<
 			]
 		]
 		+ SVerticalBox::Slot()
+		.Padding(FMargin(2.0f, 0.0f))
 		.FillHeight(1.0f)
 		[
 			SNew(SScrollBorder, ListView.ToSharedRef())

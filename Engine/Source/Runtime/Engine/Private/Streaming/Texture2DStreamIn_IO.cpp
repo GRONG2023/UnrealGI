@@ -5,14 +5,17 @@ Texture2DStreamIn.cpp: Stream in helper for 2D textures using texture streaming 
 =============================================================================*/
 
 #include "Streaming/Texture2DStreamIn_IO.h"
-#include "RenderUtils.h"
-#include "HAL/PlatformFilemanager.h"
-#include "HAL/FileManager.h"
-#include "Misc/Paths.h"
-#include "DerivedDataCacheInterface.h"
-#include "Serialization/MemoryReader.h"
+#include "HAL/PlatformFile.h"
 #include "Streaming/TextureStreamingHelpers.h"
 #include "ContentStreaming.h"
+#include "Rendering/Texture2DResource.h"
+#include "Streaming/Texture2DStreamIn.h"
+#include "Streaming/Texture2DUpdate.h"
+
+#if PLATFORM_ANDROID
+#include "EngineLogs.h"
+#include "RenderUtils.h"
+#endif
 
 FTexture2DStreamIn_IO::FTexture2DStreamIn_IO(UTexture2D* InTexture, bool InPrioritizedIORequest)
 	: FTexture2DStreamIn(InTexture)
@@ -34,6 +37,7 @@ FTexture2DStreamIn_IO::~FTexture2DStreamIn_IO()
 
 static void ValidateMipBulkDataSize(const UTexture2D& Texture, int32 MipSizeX, int32 MipSizeY, int32 MipIndex, int64& BulkDataSize)
 {
+	// why is this not done on all platforms?
 #if PLATFORM_ANDROID
 	const int64 ExpectedMipSize = CalcTextureMipMapSize((uint32)MipSizeX, (uint32)MipSizeY, Texture.GetPixelFormat(), 0);
 	if (BulkDataSize != ExpectedMipSize)
@@ -55,7 +59,7 @@ void FTexture2DStreamIn_IO::SetIORequests(const FContext& Context)
 	for (int32 MipIndex = PendingFirstLODIdx; MipIndex < CurrentFirstLODIdx && !IsCancelled(); ++MipIndex)
 	{
 		const FTexture2DMipMap& MipMap = *Context.MipsView[MipIndex];
-		check(MipData[MipIndex]);
+		check(MipData[MipIndex].Data != nullptr);
 
 		int64 BulkDataSize = MipMap.BulkData.GetBulkDataSize();
 		if (BulkDataSize > 0)
@@ -65,14 +69,40 @@ void FTexture2DStreamIn_IO::SetIORequests(const FContext& Context)
 			TaskSynchronization.Increment();
 
 			// Validate buffer size for the mip, so we don't overrun it on streaming
+			// note: MipData[] should have size
+			// ValidateMipBulkDataSize only does anything on Android
 			ValidateMipBulkDataSize(*Context.Texture, MipMap.SizeX, MipMap.SizeY, MipIndex, BulkDataSize);
+			
+			// reads directly into MipData[] , doesn't respect Pitch
+			// we do get a completion callback at AsyncFileCallBack
+			// so in theory could fix Pitch there
+			uint32 DestPitch = MipData[MipIndex].Pitch;
+			FTexture2DResource::WarnRequiresTightPackedMip(MipMap.SizeX, MipMap.SizeY, Context.Resource->GetPixelFormat(), DestPitch);
+
+			EAsyncIOPriorityAndFlags Priority = AIOP_Low;
+			if (bPrioritizedIORequest)
+			{
+				static IConsoleVariable* CVarAsyncLoadingPrecachePriority = IConsoleManager::Get().FindConsoleVariable(TEXT("s.AsyncLoadingPrecachePriority"));
+				const bool bLoadBeforeAsyncPrecache = CVarStreamingLowResHandlingMode.GetValueOnAnyThread() == (int32)FRenderAssetStreamingSettings::LRHM_LoadBeforeAsyncPrecache;
+
+				if (CVarAsyncLoadingPrecachePriority && bLoadBeforeAsyncPrecache)
+				{
+					const int32 AsyncIOPriority = CVarAsyncLoadingPrecachePriority->GetInt();
+					// Higher priority than regular requests but don't go over max
+					Priority = (EAsyncIOPriorityAndFlags)FMath::Clamp<int32>(AsyncIOPriority + 1, AIOP_BelowNormal, AIOP_MAX);
+				}
+				else
+				{
+					Priority = AIOP_BelowNormal;
+				}
+			}
 
 			IORequests[MipIndex] = MipMap.BulkData.CreateStreamingRequest(
 				0,
 				BulkDataSize,
-				bPrioritizedIORequest ? (AIOP_FLAG_DONTCACHE|AIOP_BelowNormal) : (AIOP_FLAG_DONTCACHE|AIOP_Low),
+				Priority | AIOP_FLAG_DONTCACHE,
 				&AsyncFileCallBack,
-				(uint8*)MipData[MipIndex]);
+				(uint8*)MipData[MipIndex].Data);
 		}
 		else // Bulk data size can only be 0 when not available, in which case, we need to recache the file state.
 		{

@@ -1,13 +1,17 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "AI/Navigation/NavigationTypes.h"
-#include "AI/Navigation/NavRelevantInterface.h"
 #include "AI/NavigationSystemBase.h"
 #include "AI/Navigation/NavQueryFilter.h"
+#include "AI/Navigation/NavigationRelevantData.h"
+#include "Engine/Level.h"
 #include "EngineStats.h"
 #include "Components/ShapeComponent.h"
 #include "AI/Navigation/NavAreaBase.h"
+#include "GameFramework/WorldSettings.h"
+#include "WorldPartition/DataLayer/DataLayerAsset.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(NavigationTypes)
 
 DEFINE_STAT(STAT_Navigation_MetaAreaTranslation);
 
@@ -20,6 +24,70 @@ namespace FNavigationSystem
 	// and only those values will be used
 	const float FallbackAgentRadius = 35.f;
 	const float FallbackAgentHeight = 144.f;
+
+	bool IsLevelVisibilityChanging(const UObject* Object)
+	{
+		const UActorComponent* ObjectAsComponent = Cast<UActorComponent>(Object);
+		if (ObjectAsComponent)
+		{
+			if (const ULevel* Level = ObjectAsComponent->GetComponentLevel())
+			{
+				return Level->HasVisibilityChangeRequestPending();
+			}
+		}
+		else if (const AActor* Actor = Cast<AActor>(Object))
+		{
+			if (const ULevel* Level = Actor->GetLevel())
+			{
+				return Level->HasVisibilityChangeRequestPending();
+			}
+		}
+
+		return false;
+	}
+	
+	bool IsInBaseNavmesh(const UObject* Object)
+	{
+		const UActorComponent* ObjectAsComponent = Cast<UActorComponent>(Object);
+		if (const AActor* Actor = ObjectAsComponent ? ObjectAsComponent->GetOwner() : Cast<AActor>(Object))
+		{
+			if (!Actor->HasDataLayers())
+			{
+				return true;
+			}
+		
+			if (const UWorld* World = Object->GetWorld())
+			{
+				if (const AWorldSettings* WorldSettings = World->GetWorldSettings())
+				{
+					const TArray<TObjectPtr<UDataLayerAsset>>& BaseNavmeshLayers = WorldSettings->BaseNavmeshDataLayers;
+					for (const TObjectPtr<UDataLayerAsset>& DataLayer : BaseNavmeshLayers)
+					{
+						if (Actor->ContainsDataLayer(DataLayer))
+						{
+							return true;
+						}
+					}
+				}
+			}
+		}
+
+		return false;
+	}	
+}
+
+FNavigationDirtyArea::FNavigationDirtyArea(const FBox& InBounds, int32 InFlags, UObject* const InOptionalSourceObject /*= nullptr*/)
+	: Bounds(InBounds)
+	, Flags(InFlags)
+	, OptionalSourceObject(InOptionalSourceObject)
+{
+#if !NO_LOGGING
+	if (!Bounds.IsValid || Bounds.ContainsNaN())
+	{
+		UE_LOG(LogNavigation, Warning, TEXT("Creation of FNavigationDirtyArea with invalid bounds%s. Bounds: %s, SourceObject: %s."),
+			Bounds.ContainsNaN() ? TEXT(" (contains NaN)") : TEXT(""), *Bounds.ToString(), *GetFullNameSafe(OptionalSourceObject.Get()));
+	}
+#endif //!NO_LOGGING	
 }
 
 //----------------------------------------------------------------------//
@@ -35,25 +103,17 @@ uint32 FNavPathType::NextUniqueId = 0;
 //----------------------------------------------------------------------//
 // FNavDataConfig
 //----------------------------------------------------------------------//
-PRAGMA_DISABLE_DEPRECATION_WARNINGS
 FNavDataConfig::FNavDataConfig(float Radius, float Height)
 	: FNavAgentProperties(Radius, Height)
 	, Name(TEXT("Default"))
-	, Color(140, 255, 0, 164)
+	, Color(38, 75, 0, 164) // do not change this default value or the universe will explode!
 	, DefaultQueryExtent(DEFAULT_NAV_QUERY_EXTENT_HORIZONTAL, DEFAULT_NAV_QUERY_EXTENT_HORIZONTAL, DEFAULT_NAV_QUERY_EXTENT_VERTICAL)
 	, NavDataClass(FNavigationSystem::GetDefaultNavDataClass())
 {
 }
 
-FNavDataConfig::FNavDataConfig(const FNavDataConfig& Other)
-	: FNavAgentProperties(Other)
-	, Name(Other.Name)
-	, Color(Other.Color)
-	, DefaultQueryExtent(Other.DefaultQueryExtent)
-	, NavDataClass(Other.NavDataClass)
-{
-}
-PRAGMA_ENABLE_DEPRECATION_WARNINGS
+FNavDataConfig::FNavDataConfig(const FNavDataConfig& Other) = default;
+FNavDataConfig& FNavDataConfig::operator=(const FNavDataConfig& Other) = default;
 
 void FNavDataConfig::SetNavDataClass(UClass* InNavDataClass)
 {
@@ -63,6 +123,11 @@ void FNavDataConfig::SetNavDataClass(UClass* InNavDataClass)
 void FNavDataConfig::SetNavDataClass(TSoftClassPtr<AActor> InNavDataClass)
 {
 	NavDataClass = InNavDataClass;
+}
+
+bool FNavDataConfig::IsValid() const 
+{
+	return FNavAgentProperties::IsValid() && NavDataClass.IsValid();
 }
 
 void FNavDataConfig::Invalidate()
@@ -92,6 +157,10 @@ bool FNavigationRelevantData::HasPerInstanceTransforms() const
 
 bool FNavigationRelevantData::IsMatchingFilter(const FNavigationRelevantDataFilter& Filter) const
 {
+	if (Filter.bExcludeLoadedData && bLoadedData)
+	{
+		return false;
+	}
 	return (Filter.bIncludeGeometry && HasGeometry()) ||
 		(Filter.bIncludeOffmeshLinks && (Modifiers.HasPotentialLinks() || Modifiers.HasLinks())) ||
 		(Filter.bIncludeAreas && Modifiers.HasAreas()) ||
@@ -238,9 +307,63 @@ bool FNavAgentSelector::Serialize(FArchive& Ar)
 //----------------------------------------------------------------------//
 FNavHeightfieldSamples::FNavHeightfieldSamples()
 {
-#if WITH_PHYSX
-	//static_assert(sizeof(physx::PxI16) == sizeof(Heights.GetTypeSize()), "FNavHeightfieldSamples::Heights' type needs to be kept in sync with physx::PxI16");
-#endif // WITH_PHYSX
+}
+
+void FNavHeightfieldSamples::GetResourceSizeEx(FResourceSizeEx& CumulativeResourceSize)
+{
+	CumulativeResourceSize.AddDedicatedSystemMemoryBytes(sizeof(*this) + Heights.GetAllocatedSize() + Holes.GetAllocatedSize());
+}
+
+void FNavHeightfieldSamples::Empty()
+{
+	Heights.Empty();
+	Holes.Empty();
+}
+
+
+namespace UE::Navigation::NavLinkIdHelpers::Private
+{
+	uint64 MakeIdFromGUID(const FGuid Guid)
+	{
+		// Create array to guarantee contiguous memory layout 
+		const uint32 GuidArray[] = { Guid.A, Guid.B, Guid.C, Guid.D };
+		return CityHash64(reinterpret_cast<const char*>(GuidArray), sizeof(GuidArray));
+	}
+
+	uint64 MakeIdFromGUID(FNavLinkAuxiliaryId AuxiliaryId, const FGuid Guid)
+	{
+		const uint64 ActorGuidHash = MakeIdFromGUID(Guid);
+		return CityHash128to64({ AuxiliaryId.GetId(), ActorGuidHash});
+	}
+} // UE::Navigation::NavLinkHelpers
+
+const FNavLinkId FNavLinkId::Invalid = FNavLinkId();
+const FNavLinkAuxiliaryId FNavLinkAuxiliaryId::Invalid = FNavLinkAuxiliaryId();
+
+FNavLinkAuxiliaryId FNavLinkAuxiliaryId::GenerateUniqueAuxiliaryId()
+{
+	const uint64 AuxiliaryId = UE::Navigation::NavLinkIdHelpers::Private::MakeIdFromGUID(FGuid::NewGuid());
+
+	return FNavLinkAuxiliaryId(AuxiliaryId);
+}
+
+FNavLinkAuxiliaryId FNavLinkAuxiliaryId::GenerateUniqueAuxiliaryId(FStringView PathName)
+{
+	check(!PathName.IsEmpty());
+
+	const uint64 AuxiliaryId = UE::Navigation::NavLinkIdHelpers::Private::MakeIdFromGUID(FGuid::NewDeterministicGuid(PathName));
+
+	return FNavLinkAuxiliaryId(AuxiliaryId);
+}
+
+FNavLinkId FNavLinkId::GenerateUniqueId(FNavLinkAuxiliaryId AuxiliaryId, FGuid ActorInstanceGuid)
+{
+	// Apply NavLinkIdBitMask to differentiate Legacy Ids (that do not have the mask set).
+	const uint64 UniqueId = UE::Navigation::NavLinkIdHelpers::Private::MakeIdFromGUID(AuxiliaryId, ActorInstanceGuid) | NavLinkIdBitMask;
+
+	UE_LOG(LogNavLink, VeryVerbose, TEXT("%hs id: %u."), __FUNCTION__, UniqueId);
+
+	return FNavLinkId(UniqueId);
 }
 
 //----------------------------------------------------------------------//
@@ -248,21 +371,13 @@ FNavHeightfieldSamples::FNavHeightfieldSamples()
 //----------------------------------------------------------------------//
 const FNavAgentProperties FNavAgentProperties::DefaultProperties;
 
-FNavAgentProperties::FNavAgentProperties(const FNavAgentProperties& Other)
-	: Super(Other)
-	, AgentRadius(Other.AgentRadius)
-	, AgentHeight(Other.AgentHeight)
-	, AgentStepHeight(Other.AgentStepHeight)
-	, NavWalkingSearchHeightScale(Other.NavWalkingSearchHeightScale)
-	, PreferredNavData(Other.PreferredNavData)
-{
-
-}
+FNavAgentProperties::FNavAgentProperties(const FNavAgentProperties& Other) = default;
+FNavAgentProperties& FNavAgentProperties::operator=(const FNavAgentProperties& Other) = default;
 
 void FNavAgentProperties::UpdateWithCollisionComponent(UShapeComponent* CollisionComponent)
 {
 	check(CollisionComponent != NULL);
-	AgentRadius = CollisionComponent->Bounds.SphereRadius;
+	AgentRadius = FloatCastChecked<float>(CollisionComponent->Bounds.SphereRadius, UE::LWC::DefaultFloatPrecision);
 }
 
 bool FNavAgentProperties::IsNavDataMatching(const FNavAgentProperties& Other) const
@@ -291,3 +406,4 @@ TSubclassOf<UNavAreaBase> UNavAreaBase::PickAreaClassForAgent(const AActor& Acto
 
 	return GetClass();
 }
+

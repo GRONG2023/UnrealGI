@@ -19,11 +19,11 @@ struct FMaterialSpriteElement
 
 	/** The material that the sprite is rendered with. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=MaterialSpriteElement)
-	class UMaterialInterface* Material;
+	TObjectPtr<class UMaterialInterface> Material;
 	
 	/** A curve that maps distance on the X axis to the sprite opacity on the Y axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=MaterialSpriteElement)
-	UCurveFloat* DistanceToOpacityCurve;
+	TObjectPtr<UCurveFloat> DistanceToOpacityCurve;
 	
 	/** Whether the size is defined in screen-space or world-space. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=MaterialSpriteElement)
@@ -39,7 +39,7 @@ struct FMaterialSpriteElement
 
 	/** A curve that maps distance on the X axis to the sprite size on the Y axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=MaterialSpriteElement)
-	UCurveFloat* DistanceToSizeCurve;
+	TObjectPtr<UCurveFloat> DistanceToSizeCurve;
 
 	FMaterialSpriteElement()
 		: Material(NULL)
@@ -57,8 +57,8 @@ struct FMaterialSpriteElement
 /** 
  * A 2d material that will be rendered always facing the camera.
  */
-UCLASS(ClassGroup=Rendering, collapsecategories, hidecategories=(Object,Activation,"Components|Activation",Physics,Collision,Lighting,Mesh,PhysicsVolume), editinlinenew, meta=(BlueprintSpawnableComponent))
-class ENGINE_API UMaterialBillboardComponent : public UPrimitiveComponent
+UCLASS(ClassGroup=Rendering, collapsecategories, hidecategories=(Object,Activation,"Components|Activation",Physics,Collision,Lighting,Mesh,PhysicsVolume), editinlinenew, meta=(BlueprintSpawnableComponent), MinimalAPI)
+class UMaterialBillboardComponent : public UPrimitiveComponent
 {
 	GENERATED_UCLASS_BODY()
 
@@ -68,11 +68,11 @@ class ENGINE_API UMaterialBillboardComponent : public UPrimitiveComponent
 
 	/** Set all elements of this material billboard component */
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|MaterialSprite")
-	void SetElements(const TArray<FMaterialSpriteElement>& NewElements);
+	ENGINE_API void SetElements(const TArray<FMaterialSpriteElement>& NewElements);
 
 	/** Adds an element to the sprite. */
 	UFUNCTION(BlueprintCallable, Category="Rendering|Components|MaterialSprite")
-	void AddElement(
+	ENGINE_API void AddElement(
 		class UMaterialInterface* Material,
 		class UCurveFloat* DistanceToOpacityCurve,
 		bool bSizeIsInScreenSpace,
@@ -81,11 +81,21 @@ class ENGINE_API UMaterialBillboardComponent : public UPrimitiveComponent
 		class UCurveFloat* DistanceToSizeCurve
 		);
 
+	//~ Begin UObject Interface.
+	ENGINE_API virtual void PostLoad() override;
+	//~ End UObject Interface.
+	// 
 	//~ Begin UPrimitiveComponent Interface
-	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
-	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
-	virtual UMaterialInterface* GetMaterial(int32 Index) const override;
-	virtual void SetMaterial(int32 ElementIndex, class UMaterialInterface* Material) override;
-	virtual void GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials = false) const override;
+	ENGINE_API virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	ENGINE_API virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
+	ENGINE_API virtual UMaterialInterface* GetMaterial(int32 Index) const override;
+	ENGINE_API virtual void SetMaterial(int32 ElementIndex, class UMaterialInterface* Material) override;
+	ENGINE_API virtual void GetUsedMaterials(TArray<UMaterialInterface*>& OutMaterials, bool bGetDebugMaterials = false) const override;
 	//~ End UPrimitiveComponent Interface
+
+	//~ Begin USceneComponent Interface
+#if WITH_EDITOR
+	ENGINE_API virtual bool GetMaterialPropertyPath(int32 ElementIndex, UObject*& OutOwner, FString& OutPropertyPath, FProperty*& OutProperty) override;
+#endif // WITH_EDITOR
+	//~ End USceneComponent Interface
 };

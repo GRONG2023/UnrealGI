@@ -15,14 +15,14 @@
  *	Note that this node is generic and is handing multiple special cases,
  *	If you want a more efficient solution you'll need to implement it yourself (or wait for our BTTask_PlayCharacterAnimation)
  */
-UCLASS()
-class AIMODULE_API UBTTask_PlayAnimation : public UBTTaskNode
+UCLASS(MinimalAPI)
+class UBTTask_PlayAnimation : public UBTTaskNode
 {
 	GENERATED_UCLASS_BODY()
 
 	/** Animation asset to play. Note that it needs to match the skeleton of pawn this BT is controlling */
 	UPROPERTY(Category = Node, EditAnywhere)
-	UAnimationAsset* AnimationToPlay;
+	TObjectPtr<UAnimationAsset> AnimationToPlay;
 	
 	UPROPERTY(Category = Node, EditAnywhere)
 	uint32 bLooping : 1; 
@@ -32,26 +32,26 @@ class AIMODULE_API UBTTask_PlayAnimation : public UBTTaskNode
 	uint32 bNonBlocking : 1;
 
 	UPROPERTY()
-	UBehaviorTreeComponent* MyOwnerComp;
+	TObjectPtr<UBehaviorTreeComponent> MyOwnerComp;
 
 	UPROPERTY()
-	USkeletalMeshComponent* CachedSkelMesh;
+	TObjectPtr<USkeletalMeshComponent> CachedSkelMesh;
 
 	EAnimationMode::Type PreviousAnimationMode;
 
 	FTimerDelegate TimerDelegate;
 	FTimerHandle TimerHandle;
 
-	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
-	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
-	virtual FString GetStaticDescription() const override;
+	AIMODULE_API virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+	AIMODULE_API virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+	AIMODULE_API virtual FString GetStaticDescription() const override;
 
-	void OnAnimationTimerDone();
+	AIMODULE_API void OnAnimationTimerDone();
 	
 #if WITH_EDITOR
-	virtual FName GetNodeIconName() const override;
+	AIMODULE_API virtual FName GetNodeIconName() const override;
 #endif // WITH_EDITOR
 
 protected:
-	void CleanUp(UBehaviorTreeComponent& OwnerComp);
+	AIMODULE_API void CleanUp(UBehaviorTreeComponent& OwnerComp);
 };

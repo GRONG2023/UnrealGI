@@ -2,20 +2,33 @@
 
 #pragma once
 
+#include "Containers/ArrayView.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "UObject/Class.h"
-#include "Misc/InlineValue.h"
+#include "CoreTypes.h"
 #include "Evaluation/MovieSceneEvalTemplateBase.h"
+#include "Evaluation/MovieScenePlayback.h"
 #include "Evaluation/MovieSceneSegment.h"
+#include "Evaluation/PersistentEvaluationData.h"
+#include "Misc/AssertionMacros.h"
+#include "Misc/InlineValue.h"
+#include "Templates/Decay.h"
+#include "Templates/EnableIf.h"
+#include "Templates/PointerIsConvertibleFromTo.h"
+#include "Templates/UnrealTemplate.h"
+#include "Templates/UnrealTypeTraits.h"
+#include "UObject/Class.h"
+#include "UObject/ObjectMacros.h"
+
 #include "MovieSceneTrackImplementation.generated.h"
 
-
+class FArchive;
+class IMovieScenePlayer;
+class UObject;
 struct FMovieSceneEvaluationOperand;
 struct FMovieSceneEvaluationTrack;
 struct FMovieSceneExecutionTokens;
-struct FMovieSceneInterrogationData;
 struct FMovieSceneFieldEntry_ChildTemplate;
+struct FMovieSceneInterrogationData;
 
 /**
  * Structure that allows the implementation of setup/teardown/initialization/evaluation logic at the track level.
@@ -128,7 +141,7 @@ struct FMovieSceneTrackImplementationPtr
 	FMovieSceneTrackImplementationPtr(T&& In)
 		: TInlineValue(Forward<T>(In))
 	{
-		static_assert(!TIsSame<typename TDecay<T>::Type, FMovieSceneTrackImplementation>::Value, "Direct usage of FMovieSceneTrackImplementation is prohibited.");
+		static_assert(!std::is_same_v<typename TDecay<T>::Type, FMovieSceneTrackImplementation>, "Direct usage of FMovieSceneTrackImplementation is prohibited.");
 
 #if WITH_EDITOR
 		checkf(T::StaticStruct() == &In.GetScriptStruct() && T::StaticStruct() != FMovieSceneTrackImplementation::StaticStruct(), TEXT("%s type does not correctly override GetScriptStructImpl. Track will not serialize correctly."), *T::StaticStruct()->GetName());

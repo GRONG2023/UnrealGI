@@ -3,29 +3,23 @@
 #include "PostProcess/PostProcessDownsample.h"
 #include "PostProcess/PostProcessEyeAdaptation.h"
 #include "PixelShaderUtils.h"
+#include "DataDrivenShaderPlatformInfo.h"
+#include "SceneRendering.h"
 
 namespace
 {
 const int32 GDownsampleTileSizeX = 8;
 const int32 GDownsampleTileSizeY = 8;
 
-TAutoConsoleVariable<int32> CVarDownsampleQuality(
-	TEXT("r.Downsample.Quality"),
-	1,
-	TEXT("Defines the quality in which the Downsample passes. we might add more quality levels later.\n")
-	TEXT(" 0: low quality\n")
-	TEXT(">0: high quality (default: 1)\n"),
-	ECVF_Scalability | ECVF_RenderThreadSafe);
-
 BEGIN_SHADER_PARAMETER_STRUCT(FDownsampleParameters, )
 	SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, ViewUniformBuffer)
 	SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Input)
 	SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, Output)
-	SHADER_PARAMETER_RDG_TEXTURE(Texture2D, InputTexture)
+	SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, InputTexture)
 	SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)
 END_SHADER_PARAMETER_STRUCT()
 
-FDownsampleParameters GetDownsampleParameters(const FViewInfo& View, FScreenPassTexture Output, FScreenPassTexture Input, EDownsampleQuality DownsampleMethod)
+FDownsampleParameters GetDownsampleParameters(const FViewInfo& View, FScreenPassTexture Output, FScreenPassTextureSlice Input, EDownsampleQuality DownsampleMethod)
 {
 	check(Output.IsValid());
 	check(Input.IsValid());
@@ -37,7 +31,7 @@ FDownsampleParameters GetDownsampleParameters(const FViewInfo& View, FScreenPass
 	Parameters.ViewUniformBuffer = View.ViewUniformBuffer;
 	Parameters.Input = InputParameters;
 	Parameters.Output = OutputParameters;
-	Parameters.InputTexture = Input.Texture;
+	Parameters.InputTexture = Input.TextureSRV;
 	Parameters.InputSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	return Parameters;
 }
@@ -76,6 +70,7 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FDownsampleParameters, Common)
+		SHADER_PARAMETER(FScreenTransform, DispatchThreadIdToInputUV)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutComputeTexture)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -95,13 +90,6 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FDownsampleCS, "/Engine/Private/PostProcessDownsample.usf", "MainCS", SF_Compute);
 } //! namespace
 
-EDownsampleQuality GetDownsampleQuality()
-{
-	const int32 DownsampleQuality = FMath::Clamp(CVarDownsampleQuality.GetValueOnRenderThread(), 0, 1);
-
-	return static_cast<EDownsampleQuality>(DownsampleQuality);
-}
-
 FScreenPassTexture AddDownsamplePass(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
@@ -120,72 +108,94 @@ FScreenPassTexture AddDownsamplePass(
 
 	// Construct the output texture to be half resolution (rounded up to even) with an optional format override.
 	{
-		FRDGTextureDesc Desc = Inputs.SceneColor.Texture->Desc;
-		Desc.Reset();
-		Desc.Extent = FIntPoint::DivideAndRoundUp(Desc.Extent, 2);
+		const FRDGTextureDesc& InputDesc = Inputs.SceneColor.TextureSRV->Desc.Texture->Desc;
+		FRDGTextureDesc Desc = FRDGTextureDesc::Create2D(
+			FIntPoint::DivideAndRoundUp(InputDesc.Extent, 2),
+			Inputs.FormatOverride != PF_Unknown ? Inputs.FormatOverride  : InputDesc.Format,
+			FClearValueBinding(FLinearColor(0, 0, 0, 0)),
+			/* InFlags = */ TexCreate_ShaderResource | GFastVRamConfig.Downsample | (bIsComputePass ? TexCreate_UAV : (TexCreate_RenderTargetable | TexCreate_NoFastClear)));
+
 		Desc.Extent.X = FMath::Max(1, Desc.Extent.X);
 		Desc.Extent.Y = FMath::Max(1, Desc.Extent.Y);
-		Desc.Flags &= ~(TexCreate_RenderTargetable | TexCreate_UAV);
-		Desc.Flags |= bIsComputePass ? TexCreate_UAV : TexCreate_RenderTargetable;
-		Desc.Flags |= GFastVRamConfig.Downsample;
-		Desc.ClearValue = FClearValueBinding(FLinearColor(0, 0, 0, 0));
 
-		if (Inputs.FormatOverride != PF_Unknown)
+		if (Inputs.UserSuppliedOutput && Translate(Inputs.UserSuppliedOutput->GetDesc()) == Desc)
 		{
-			Desc.Format = Inputs.FormatOverride;
+			Output.Texture = GraphBuilder.RegisterExternalTexture(Inputs.UserSuppliedOutput, Inputs.Name);
 		}
-
-		Output.Texture = GraphBuilder.CreateTexture(Desc, Inputs.Name);
+		else
+		{
+			Output.Texture = GraphBuilder.CreateTexture(Desc, Inputs.Name);
+		}
 		Output.ViewRect = FIntRect::DivideAndRoundUp(Inputs.SceneColor.ViewRect, 2);
 		Output.LoadAction = ERenderTargetLoadAction::ENoAction;
 	}
 
-	FDownsamplePermutationDomain PermutationVector;
-	PermutationVector.Set<FDownsampleQualityDimension>(Inputs.Quality);
-
-	const FScreenPassTextureViewport SceneColorViewport(Inputs.SceneColor);
-	const FScreenPassTextureViewport OutputViewport(Output);
-
 	if (bIsComputePass)
 	{
-		FDownsampleCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDownsampleCS::FParameters>();
-		PassParameters->Common = GetDownsampleParameters(View, Output, Inputs.SceneColor, Inputs.Quality);
-		PassParameters->OutComputeTexture = GraphBuilder.CreateUAV(Output.Texture);
-
-		TShaderMapRef<FDownsampleCS> ComputeShader(View.ShaderMap, PermutationVector);
-
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME("Downsample.%s %dx%d (CS)", Inputs.Name, Inputs.SceneColor.ViewRect.Width(), Inputs.SceneColor.ViewRect.Height()),
-			ComputeShader,
-			PassParameters,
-			FComputeShaderUtils::GetGroupCount(OutputViewport.Rect.Size(), FIntPoint(GDownsampleTileSizeX, GDownsampleTileSizeY)));
+		AddDownsampleComputePass(GraphBuilder, View, Inputs.SceneColor, Output, Inputs.Quality, bIsComputePass ? ERDGPassFlags::Compute : ERDGPassFlags::Raster);
 	}
 	else
 	{
+		FDownsamplePermutationDomain PermutationVector;
+		PermutationVector.Set<FDownsampleQualityDimension>(Inputs.Quality);
+
 		FDownsamplePS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDownsamplePS::FParameters>();
 		PassParameters->Common = GetDownsampleParameters(View, Output, Inputs.SceneColor, Inputs.Quality);
 		PassParameters->RenderTargets[0] = Output.GetRenderTargetBinding();
 
 		TShaderMapRef<FDownsamplePS> PixelShader(View.ShaderMap, PermutationVector);
-
 		FPixelShaderUtils::AddFullscreenPass(
 			GraphBuilder,
 			View.ShaderMap,
-			RDG_EVENT_NAME("Downsample.%s %dx%d (PS)", Inputs.Name, Inputs.SceneColor.ViewRect.Width(), Inputs.SceneColor.ViewRect.Height()),
+			RDG_EVENT_NAME("Downsample(%s Quality=%s PS) %dx%d -> %dx%d",
+				Output.Texture->Name,
+				Inputs.Quality == EDownsampleQuality::High ? TEXT("High") : TEXT("Bilinear"),
+				Inputs.SceneColor.ViewRect.Width(), Inputs.SceneColor.ViewRect.Height(),
+				Output.ViewRect.Width(), Output.ViewRect.Height()),
 			PixelShader,
 			PassParameters,
-			OutputViewport.Rect);
+			Output.ViewRect);
 	}
 
 	return MoveTemp(Output);
+}
+
+void AddDownsampleComputePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, FScreenPassTextureSlice Input, FScreenPassTexture Output, EDownsampleQuality Quality, ERDGPassFlags PassFlags)
+{
+	check(PassFlags == ERDGPassFlags::Compute || PassFlags == ERDGPassFlags::AsyncCompute);
+
+	FDownsampleCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FDownsampleCS::FParameters>();
+	PassParameters->Common = GetDownsampleParameters(View, Output, Input, Quality);
+	PassParameters->DispatchThreadIdToInputUV = ((FScreenTransform::Identity + 0.5f) / Output.ViewRect.Size()) * FScreenTransform::ChangeTextureBasisFromTo(FScreenPassTextureViewport(Input), FScreenTransform::ETextureBasis::ViewportUV, FScreenTransform::ETextureBasis::TextureUV);
+	PassParameters->OutComputeTexture = GraphBuilder.CreateUAV(Output.Texture);
+
+	FDownsamplePermutationDomain PermutationVector;
+	PermutationVector.Set<FDownsampleQualityDimension>(Quality);
+
+	TShaderMapRef<FDownsampleCS> ComputeShader(View.ShaderMap, PermutationVector);
+	FComputeShaderUtils::AddPass(
+		GraphBuilder,
+		RDG_EVENT_NAME("Downsample(%s Quality=%s CS) %dx%d -> %dx%d",
+			Output.Texture->Name,
+			Quality == EDownsampleQuality::High ? TEXT("High") : TEXT("Bilinear"),
+			Input.ViewRect.Width(), Input.ViewRect.Height(),
+			Output.ViewRect.Width(), Output.ViewRect.Height()),
+		PassFlags,
+		ComputeShader,
+		PassParameters,
+		FComputeShaderUtils::GetGroupCount(Output.ViewRect.Size(), FIntPoint(GDownsampleTileSizeX, GDownsampleTileSizeY)));
+}
+
+void AddDownsampleComputePass(FRDGBuilder& GraphBuilder, const FViewInfo& View, FScreenPassTexture Input, FScreenPassTexture Output, EDownsampleQuality Quality, ERDGPassFlags PassFlags)
+{
+	return AddDownsampleComputePass(GraphBuilder, View, FScreenPassTextureSlice::CreateFromScreenPassTexture(GraphBuilder, Input), Output, Quality, PassFlags);
 }
 
 void FSceneDownsampleChain::Init(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& View,
 	const FEyeAdaptationParameters& EyeAdaptationParameters,
-	FScreenPassTexture HalfResolutionSceneColor,
+	FScreenPassTextureSlice HalfResolutionSceneColor,
 	EDownsampleQuality DownsampleQuality,
 	bool bLogLumaInAlpha)
 {
@@ -216,13 +226,13 @@ void FSceneDownsampleChain::Init(
 		PassInputs.SceneColor = Textures[PreviousStageIndex];
 		PassInputs.Quality = DownsampleQuality;
 
-		Textures[StageIndex] = AddDownsamplePass(GraphBuilder, View, PassInputs);
+		Textures[StageIndex] = FScreenPassTextureSlice::CreateFromScreenPassTexture(GraphBuilder, AddDownsamplePass(GraphBuilder, View, PassInputs));
 
 		if (bLogLumaInAlpha)
 		{
 			bLogLumaInAlpha = false;
 
-			Textures[StageIndex] = AddBasicEyeAdaptationSetupPass(GraphBuilder, View, EyeAdaptationParameters, Textures[StageIndex]);
+			Textures[StageIndex] = FScreenPassTextureSlice::CreateFromScreenPassTexture(GraphBuilder, AddBasicEyeAdaptationSetupPass(GraphBuilder, View, EyeAdaptationParameters, FScreenPassTexture(Textures[StageIndex])));
 		}
 	}
 

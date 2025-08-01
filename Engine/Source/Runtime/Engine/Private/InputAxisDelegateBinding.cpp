@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/InputAxisDelegateBinding.h"
-#include "GameFramework/Actor.h"
 #include "Components/InputComponent.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(InputAxisDelegateBinding)
 
 
 // Determines whether or not the Dynamic Delegate for the given binding
@@ -24,7 +25,7 @@ UInputAxisDelegateBinding::UInputAxisDelegateBinding(const FObjectInitializer& O
 {
 }
 
-void UInputAxisDelegateBinding::BindToInputComponent(UInputComponent* InputComponent) const
+void UInputAxisDelegateBinding::BindToInputComponent(UInputComponent* InputComponent, UObject* ObjectToBindTo) const
 {
 	TArray<FInputAxisBinding> BindsToAdd;
 
@@ -51,7 +52,7 @@ void UInputAxisDelegateBinding::BindToInputComponent(UInputComponent* InputCompo
 			FInputAxisBinding AB( Binding.InputAxisName );
 			AB.bConsumeInput = Binding.bConsumeInput;
 			AB.bExecuteWhenPaused = Binding.bExecuteWhenPaused;
-			AB.AxisDelegate.BindDelegate(InputComponent->GetOwner(), Binding.FunctionNameToBind);
+			AB.AxisDelegate.BindDelegate(ObjectToBindTo, Binding.FunctionNameToBind);
 
 			if (Binding.bOverrideParentBinding)
 			{
@@ -75,3 +76,4 @@ void UInputAxisDelegateBinding::BindToInputComponent(UInputComponent* InputCompo
 		InputComponent->AxisBindings.Add(BindsToAdd[Index]);
 	}
 }
+

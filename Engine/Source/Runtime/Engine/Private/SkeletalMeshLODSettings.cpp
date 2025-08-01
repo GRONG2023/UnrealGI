@@ -1,15 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Engine/SkeletalMeshLODSettings.h"
+#include "Engine/DataAsset.h"
 #include "Engine/SkeletalMesh.h"
+#include "Engine/SkinnedAssetCommon.h"
 #include "UObject/UObjectIterator.h"
-#include "Animation/Skeleton.h"
 #include "Animation/AnimSequence.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
-#include "UObject/EditorObjectVersion.h"
+#include "Rendering/SkeletalMeshModel.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(SkeletalMeshLODSettings)
 
 DEFINE_LOG_CATEGORY_STATIC(LogSkeletalMeshLODSettings, Warning, All)
 
+extern const TCHAR* GSkeletalMeshMinLodQualityLevelCVarName;
+extern const TCHAR* GSkeletalMeshMinLodQualityLevelScalabilitySection;
 
 USkeletalMeshLODSettings::USkeletalMeshLODSettings(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer)
@@ -18,6 +23,8 @@ USkeletalMeshLODSettings::USkeletalMeshLODSettings(const FObjectInitializer& Obj
 	MaxNumStreamedLODs.Default = 0;
 	// TODO: support saving some but not all optional LODs
 	MaxNumOptionalLODs.Default = 0;
+
+	MinQualityLevelLod.SetQualityLevelCVarForCooking(GSkeletalMeshMinLodQualityLevelCVarName, GSkeletalMeshMinLodQualityLevelScalabilitySection);
 }
 
 const FSkeletalMeshLODGroupSettings& USkeletalMeshLODSettings::GetSettingsForLODLevel(const int32 LODIndex) const
@@ -51,10 +58,11 @@ bool USkeletalMeshLODSettings::SetLODSettingsToMesh(USkeletalMesh* InMesh, int32
 		LODInfo->ScreenSize = Setting.ScreenSize;
 		LODInfo->LODHysteresis = Setting.LODHysteresis;
 		LODInfo->WeightOfPrioritization = Setting.WeightOfPrioritization;
+		LODInfo->bAllowMeshDeformer = Setting.bAllowMeshDeformer;
 		// if we have available bake pose
 		// it's possible for skeleton to be null if this happens in the middle of importing
 		// so if skeleton is null, we allow copy (the GetBakePose will check correct skeleton when get it)
-		if (Setting.BakePose && (!InMesh->GetSkeleton() || InMesh->GetSkeleton()->IsCompatible(Setting.BakePose->GetSkeleton())))
+		if (Setting.BakePose && (!InMesh->GetSkeleton() || !Setting.BakePose->GetSkeleton()))
 		{
 			LODInfo->BakePose = Setting.BakePose;
 		}
@@ -76,6 +84,36 @@ bool USkeletalMeshLODSettings::SetLODSettingsToMesh(USkeletalMesh* InMesh, int32
 			if (RefSkeleton.FindBoneIndex(Bone) != INDEX_NONE)
 			{
 				LODInfo->BonesToPrioritize.Add(FBoneReference(Bone));
+			}
+		}
+
+		// copy the shared setting to mesh setting
+#if WITH_EDITOR
+		const FSkeletalMeshLODModel* LodModel = InMesh->GetImportedModel()->LODModels.IsValidIndex(LODIndex) ? &(InMesh->GetImportedModel()->LODModels[LODIndex]) : nullptr;
+#endif
+		LODInfo->SectionsToPrioritize.Reset();
+		for (const int32 SettingSectionIndex : Setting.SectionsToPrioritize)
+		{
+			int32 FinalSettingSectionIndex = SettingSectionIndex;
+#if WITH_EDITOR
+			if (LodModel)
+			{
+				//Make sure all sections to prioritize are valid LODModel sections
+				FinalSettingSectionIndex = INDEX_NONE;
+				for (int32 SectionIndex = 0; SectionIndex < LodModel->Sections.Num(); ++SectionIndex)
+				{
+					const FSkelMeshSection& Section = LodModel->Sections[SectionIndex];
+					if (Section.ChunkedParentSectionIndex == INDEX_NONE && SettingSectionIndex == Section.OriginalDataSectionIndex)
+					{
+						FinalSettingSectionIndex = Section.OriginalDataSectionIndex;
+						break;
+					}
+				}
+			}
+#endif
+			if (FinalSettingSectionIndex != INDEX_NONE)
+			{
+				LODInfo->SectionsToPrioritize.AddUnique(FSectionReference(FinalSettingSectionIndex));
 			}
 		}
 
@@ -166,6 +204,7 @@ int32 USkeletalMeshLODSettings::SetLODSettingsToMesh(USkeletalMesh* InMesh) cons
 	if (InMesh)
 	{
 		InMesh->SetMinLod(MinLod);
+		InMesh->SetQualityLevelMinLod(MinQualityLevelLod);
 		InMesh->SetDisableBelowMinLodStripping(DisableBelowMinLodStripping);
 #if WITH_EDITORONLY_DATA
 		InMesh->SetOverrideLODStreamingSettings(bOverrideLODStreamingSettings);
@@ -192,6 +231,7 @@ int32 USkeletalMeshLODSettings::SetLODSettingsFromMesh(USkeletalMesh* InMesh)
 	if (InMesh)
 	{
 		MinLod = InMesh->GetMinLod();
+		MinQualityLevelLod = InMesh->GetQualityLevelMinLod();
 		DisableBelowMinLodStripping = InMesh->GetDisableBelowMinLodStripping();
 #if WITH_EDITORONLY_DATA
 		bOverrideLODStreamingSettings = InMesh->GetOverrideLODStreamingSettings();
@@ -218,6 +258,28 @@ int32 USkeletalMeshLODSettings::SetLODSettingsFromMesh(USkeletalMesh* InMesh)
 				Setting.BonesToPrioritize.Add(Bone.BoneName);
 			}
 
+#if WITH_EDITOR
+			// copy the shared setting to mesh setting
+			// make sure we have the section in the mesh 
+			const FSkeletalMeshLODModel& LodModel = InMesh->GetImportedModel()->LODModels[Index];
+#endif
+			Setting.SectionsToPrioritize.Reset();
+			for (const FSectionReference& SectionReference : LODInfo->SectionsToPrioritize)
+			{
+				int32 FinalSettingSectionIndex = SectionReference.SectionIndex;
+#if WITH_EDITOR
+				//In editor we can validate the prioritized sections
+				if (!SectionReference.IsValidToEvaluate(LodModel))
+				{
+					FinalSettingSectionIndex = INDEX_NONE;
+				}
+#endif
+				if (FinalSettingSectionIndex != INDEX_NONE)
+				{
+					Setting.SectionsToPrioritize.AddUnique(FinalSettingSectionIndex);
+				}
+			}
+
 			Setting.WeightOfPrioritization = LODInfo->WeightOfPrioritization;
 			Setting.BakePose = LODInfo->BakePose;
 			Setting.BoneFilterActionOption = EBoneFilterActionOption::Remove;
@@ -230,6 +292,8 @@ int32 USkeletalMeshLODSettings::SetLODSettingsFromMesh(USkeletalMesh* InMesh)
 				NewFilter.BoneName = LODInfo->BonesToRemove[BoneIndex].BoneName;
 				Setting.BoneList.Add(NewFilter);
 			}
+
+			Setting.bAllowMeshDeformer = LODInfo->bAllowMeshDeformer;
 		}
 
 		return NumSettings;
@@ -293,3 +357,4 @@ const float FSkeletalMeshLODGroupSettings::GetScreenSize() const
 {
 	return ScreenSize.Default;
 }
+

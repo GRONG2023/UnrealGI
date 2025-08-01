@@ -2,8 +2,9 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
-#include "RendererInterface.h"
+
+#include "Math/Color.h"
+#include "Math/Vector2D.h"
 
 class FViewInfo;
 class FLightSceneInfo;
@@ -15,6 +16,7 @@ struct FMobileLightShaftInfo
 	FVector2D Center = FVector2D::ZeroVector;
 	FLinearColor ColorMask = FLinearColor::Transparent;
 	FLinearColor ColorApply = FLinearColor::Transparent;
+	float BloomMaxBrightness = 100.0f;
 };
 
 // Returns mobile light shaft info for the light.
@@ -25,3 +27,6 @@ extern bool ShouldRenderLightShafts(const FSceneViewFamily& ViewFamily);
 
 // Returns whether the light proxy is eligible for light shaft rendering. Assumes light shafts are enabled.
 extern bool ShouldRenderLightShaftsForLight(const FViewInfo& View, const FLightSceneProxy& LightSceneProxy);
+
+// Returns the current downsample factor for the light shaft render target.
+extern int32 GetLightShaftDownsampleFactor();

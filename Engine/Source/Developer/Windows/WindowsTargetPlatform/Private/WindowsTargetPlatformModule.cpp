@@ -7,12 +7,11 @@
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
 #include "UObject/WeakObjectPtr.h"
+#if WITH_ENGINE
+#include "CookedEditorTargetPlatform.h"
+#endif
 
 #define LOCTEXT_NAMESPACE "FWindowsTargetPlatformModule"
-
-
-/** Holds the target platform singleton. */
-static ITargetPlatform* Singleton = nullptr;
 
 
 /**
@@ -26,7 +25,7 @@ public:
 	/** Destructor. */
 	~FWindowsTargetPlatformModule( )
 	{
-		Singleton = nullptr;
+
 	}
 
 public:
@@ -45,16 +44,26 @@ public:
 
 public:
 
-	// ITargetPlatformModule interface
-
-	virtual ITargetPlatform* GetTargetPlatform( ) override
+	virtual void GetTargetPlatforms(TArray<ITargetPlatform*>& TargetPlatforms) override
 	{
-		if (Singleton == nullptr && TGenericWindowsTargetPlatform<true, false, false>::IsUsable())
-		{
-			Singleton = new TGenericWindowsTargetPlatform<true, false, false>();
-		}
+		// Game TP
+		TargetPlatforms.Add(new TGenericWindowsTargetPlatform<FWindowsPlatformProperties<false, false, false>>());
+		// Editor TP
+		TargetPlatforms.Add(new TGenericWindowsTargetPlatform<FWindowsPlatformProperties<true, false, false>>());
+		// Server TP
+		TargetPlatforms.Add(new TGenericWindowsTargetPlatform<FWindowsPlatformProperties<false, true, false>>());
+		// Client TP
+		TargetPlatforms.Add(new TGenericWindowsTargetPlatform<FWindowsPlatformProperties<false, false, true>>());
 
-		return Singleton;
+#if WITH_ENGINE
+		// currently this TP requires the engine for allowing GameDelegates usage
+		bool bSupportCookedEditor;
+		if (GConfig->GetBool(TEXT("CookedEditorSettings"), TEXT("bSupportCookedEditor"), bSupportCookedEditor, GGameIni) && bSupportCookedEditor)
+		{
+			TargetPlatforms.Add(new TCookedEditorTargetPlatform<FWindowsEditorTargetPlatformParent>());
+			TargetPlatforms.Add(new TCookedCookerTargetPlatform<FWindowsEditorTargetPlatformParent>());
+		}
+#endif
 	}
 
 public:

@@ -114,7 +114,7 @@ typedef TSharedPtr< struct FReferenceTreeDataContainer > FReferenceTreeItemPtr;
 
 typedef STreeView< FReferenceTreeItemPtr > SReferenceTreeView;
 
-class UNREALED_API SReferenceTree : public SCompoundWidget
+class SReferenceTree : public SCompoundWidget
 {
 public:
 	SLATE_BEGIN_ARGS( SReferenceTree )
@@ -123,12 +123,12 @@ public:
 		SLATE_ARGUMENT(UObject*, Object)
 	SLATE_END_ARGS()
 
-	void Construct( const FArguments& InArgs );
+	UNREALED_API void Construct( const FArguments& InArgs );
 
-	~SReferenceTree();
+	UNREALED_API ~SReferenceTree();
 
-	static TWeakPtr< SWindow > SingletonInstance;
-	static void OpenDialog(UObject* InObject);
+	static UNREALED_API TWeakPtr< SWindow > SingletonInstance;
+	static UNREALED_API void OpenDialog(UObject* InObject);
 
 private:
 	/** Generates a row for the tree. */
@@ -184,7 +184,7 @@ private:
 	void DestroyGraphAndTree();
 
 	/** Called when the view properties menu option is chosen. */
-	void OnMenuViewProperties( UObject* InObject );
+	void OnMenuViewProperties( AActor* InActor );
 
 	/** Called when the show object in editor menu option is chosen. */
 	void OnMenuShowEditor( UObject* InObject );

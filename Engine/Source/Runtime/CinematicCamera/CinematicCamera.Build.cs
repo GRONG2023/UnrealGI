@@ -10,14 +10,13 @@ public class CinematicCamera : ModuleRules
 			new string[] {
 				"Core",
 				"CoreUObject",
+				"DeveloperSettings",
                 "Engine",
+                "MovieScene",
+                "MovieSceneTracks",
+                "Slate",
+                "SlateCore"
 			}
 		);
-
-        PrivateIncludePaths.AddRange(
-            new string[] {
-                "Runtime/CinematicCamera/Private"
-            })
-		;
 	}
 }

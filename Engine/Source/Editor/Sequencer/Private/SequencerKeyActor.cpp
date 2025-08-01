@@ -2,6 +2,7 @@
 
 #include "SequencerKeyActor.h"
 #include "Components/StaticMeshComponent.h"
+#include "Materials/Material.h"
 #include "Sections/MovieScene3DTransformSection.h"
 #include "SequencerEdMode.h"
 #include "Materials/MaterialInstance.h" 
@@ -18,6 +19,11 @@
 ASequencerKeyActor::ASequencerKeyActor()
 	: Super()
 {
+	if (UNLIKELY(IsRunningDedicatedServer()) || HasAnyFlags(RF_ClassDefaultObject))   // @todo vreditor: Hack to avoid loading mesh assets in the cooker on Linux
+	{
+		return;
+	}
+
 	UStaticMesh* KeyEditorMesh = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/VREditor/TransformGizmo/SM_Sequencer_Key"));
 	check(KeyEditorMesh != nullptr);
 	UMaterial* KeyEditorMaterial = LoadObject<UMaterial>(nullptr, TEXT("/Engine/VREditor/TransformGizmo/Main"));
@@ -80,12 +86,26 @@ void ASequencerKeyActor::PropagateKeyChange()
 		FFrameRate   TickResolution  = TrackSection->GetTypedOuter<UMovieScene>()->GetTickResolution();
 		FFrameNumber FrameNumber     = (KeyTime * TickResolution).RoundToFrame();
 
-		TArrayView<FMovieSceneFloatChannel*> FloatChannels = TrackSection->GetChannelProxy().GetChannels<FMovieSceneFloatChannel>();
+		FMovieSceneChannelProxy& SectionChannelProxy = TrackSection->GetChannelProxy();
+		TMovieSceneChannelHandle<FMovieSceneDoubleChannel> DoubleChannels[] = {
+			SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.X"),
+			SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Y"),
+			SectionChannelProxy.GetChannelByName<FMovieSceneDoubleChannel>("Location.Z")
+		};
 
 		const FVector Translation = GetActorTransform().GetLocation();
-		FloatChannels[0]->GetData().UpdateOrAddKey(FrameNumber, FMovieSceneFloatValue(Translation.X));
-		FloatChannels[1]->GetData().UpdateOrAddKey(FrameNumber, FMovieSceneFloatValue(Translation.Y));
-		FloatChannels[2]->GetData().UpdateOrAddKey(FrameNumber, FMovieSceneFloatValue(Translation.Z));
+		if (DoubleChannels[0].Get())
+		{
+			DoubleChannels[0].Get()->GetData().UpdateOrAddKey(FrameNumber, FMovieSceneDoubleValue(Translation.X));
+		}
+		if (DoubleChannels[1].Get())
+		{
+			DoubleChannels[1].Get()->GetData().UpdateOrAddKey(FrameNumber, FMovieSceneDoubleValue(Translation.Y));
+		}
+		if (DoubleChannels[2].Get())
+		{
+			DoubleChannels[2].Get()->GetData().UpdateOrAddKey(FrameNumber, FMovieSceneDoubleValue(Translation.Z));
+		}
 
 		// Draw a single transform track based on the data from this key
 		FEditorViewportClient* ViewportClient = StaticCast<FEditorViewportClient*>(GEditor->GetActiveViewport()->GetClient());

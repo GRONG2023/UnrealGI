@@ -5,10 +5,12 @@
 #include "CoreMinimal.h"
 #include "UObject/ObjectMacros.h"
 #include "Misc/MemStack.h"
-//#include "Animation/AnimationAsset.h"
+#include "Algo/Transform.h"
 #include "Animation/AnimLinkableElement.h"
 #include "Animation/AnimEnums.h"
 #include "Misc/SecureHash.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "UObject/UE5ReleaseStreamObjectVersion.h"
 #include "AnimTypes.generated.h"
 
 struct FMarkerPair;
@@ -17,6 +19,7 @@ struct FPassedMarker;
 
 class FMemoryReader;
 class FMemoryWriter;
+class UMirrorDataTable;
 
 // Disable debugging information for shipping and test builds.
 #define ENABLE_ANIM_DEBUG (1 && !(UE_BUILD_SHIPPING || UE_BUILD_TEST))
@@ -26,6 +29,8 @@ class FMemoryWriter;
 
 // Enable this if you want to locally measure detailed anim perf.  Disabled by default as it is introduces a lot of additional profile markers and associated overhead.
 #define ENABLE_VERBOSE_ANIM_PERF_TRACKING 0
+
+#define MAX_ANIMATION_TRACKS 65535
 
 namespace EAnimEventTriggerOffsets
 {
@@ -41,7 +46,7 @@ ENGINE_API float GetTriggerTimeOffsetForType(EAnimEventTriggerOffsets::Type Offs
 
 /** Enum for specifying a specific axis of a bone */
 UENUM()
-enum EBoneAxis
+enum EBoneAxis : int
 {
 	BA_X UMETA(DisplayName = "X Axis"),
 	BA_Y UMETA(DisplayName = "Y Axis"),
@@ -51,7 +56,7 @@ enum EBoneAxis
 
 /** Enum for controlling which reference frame a controller is applied in. */
 UENUM(BlueprintType)
-enum EBoneControlSpace
+enum EBoneControlSpace : int
 {
 	/** Set absolute position of bone in world space. */
 	BCS_WorldSpace UMETA(DisplayName = "World Space"),
@@ -66,7 +71,7 @@ enum EBoneControlSpace
 
 /** Enum for specifying the source of a bone's rotation. */
 UENUM()
-enum EBoneRotationSource
+enum EBoneRotationSource : int
 {
 	/** Don't change rotation at all. */
 	BRS_KeepComponentSpaceRotation UMETA(DisplayName = "No Change (Preserve Existing Component Space Rotation)"),
@@ -80,7 +85,7 @@ enum EBoneRotationSource
 UENUM()
 namespace EMontageNotifyTickType
 {
-	enum Type
+	enum Type : int
 	{
 		/** Queue notifies, and trigger them at the end of the evaluation phase (faster). Not suitable for changing sections or montage position. */
 		Queued,
@@ -93,7 +98,7 @@ namespace EMontageNotifyTickType
 UENUM()
 namespace ENotifyFilterType
 {
-	enum Type
+	enum Type : int
 	{
 		/** No filtering. */
 		NoFiltering,
@@ -284,9 +289,11 @@ struct FAnimNotifyEvent : public FAnimLinkableElement
 {
 	GENERATED_USTRUCT_BODY()
 
+#if WITH_EDITORONLY_DATA
 	/** The user requested time for this notify */
 	UPROPERTY()
 	float DisplayTime_DEPRECATED;
+#endif
 
 	/** An offset from the DisplayTime to the actual time we will trigger the notify, as we cannot always trigger it exactly at the time the user wants */
 	UPROPERTY()
@@ -303,10 +310,10 @@ struct FAnimNotifyEvent : public FAnimLinkableElement
 	FName NotifyName;
 
 	UPROPERTY(EditAnywhere, Instanced, BlueprintReadWrite, Category=AnimNotifyEvent)
-	class UAnimNotify * Notify;
+	TObjectPtr<class UAnimNotify>  Notify;
 
 	UPROPERTY(EditAnywhere, Instanced, BlueprintReadWrite, Category=AnimNotifyEvent)
-	class UAnimNotifyState * NotifyStateClass;
+	TObjectPtr<class UAnimNotifyState>  NotifyStateClass;
 
 	UPROPERTY()
 	float Duration;
@@ -334,6 +341,10 @@ struct FAnimNotifyEvent : public FAnimLinkableElement
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AnimNotifyTriggerSettings, meta = (ClampMin = "0"))
 	int32 NotifyFilterLOD;
 
+	/** Allow notify event to be filtered if requested at runtime (e. g. via an Anim Graph Message) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AnimNotifyTriggerSettings)
+	bool bCanBeFilteredViaRequest;
+	
 	/** If disabled this notify will be skipped on dedicated servers */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = AnimNotifyTriggerSettings)
 	bool bTriggerOnDedicatedServer;
@@ -366,18 +377,21 @@ private:
 public:
 	FAnimNotifyEvent()
 		: FAnimLinkableElement()
+#if WITH_EDITORONLY_DATA
 		, DisplayTime_DEPRECATED(0)
+#endif
 		, TriggerTimeOffset(0)
 		, EndTriggerTimeOffset(0)
 		, TriggerWeightThreshold(ZERO_ANIMWEIGHT_THRESH)
-		, Notify(NULL)
-		, NotifyStateClass(NULL)
+		, Notify(nullptr)
+		, NotifyStateClass(nullptr)
 		, Duration(0)
 		, bConvertedFromBranchingPoint(false)
 		, MontageTickType(EMontageNotifyTickType::Queued)
 		, NotifyTriggerChance(1.f)
 		, NotifyFilterType(ENotifyFilterType::NoFiltering)
 		, NotifyFilterLOD(0)
+		, bCanBeFilteredViaRequest(true)
 		, bTriggerOnDedicatedServer(true)
 		, bTriggerOnFollower(false)
 #if WITH_EDITORONLY_DATA
@@ -417,10 +431,10 @@ public:
 	/** Returns true is this AnimNotify is a BranchingPoint */
 	ENGINE_API bool IsBranchingPoint() const;
 
-	/** Returns true if this is blueprint derived notifies **/
+	/** Returns true if this is blueprint or native class-based notify (i.e. not a named notify) */
 	bool IsBlueprintNotify() const
 	{
-		return Notify != NULL || NotifyStateClass != NULL;
+		return Notify != nullptr || NotifyStateClass != nullptr;
 	}
 
 	bool operator ==(const FAnimNotifyEvent& Other) const
@@ -439,6 +453,9 @@ public:
 
 	/** Get the NotifyName pre-appended to "AnimNotify_", for calling the event */
 	ENGINE_API FName GetNotifyEventName() const;
+	
+	/** Get the mirrored NotifyName pre-appended to "AnimNotify_", for calling the event. If Notify is not mirrored returns result of GetNotifyEventName()*/
+	ENGINE_API FName GetNotifyEventName(const UMirrorDataTable* MirrorDataTable) const;
 };
 
 #if WITH_EDITORONLY_DATA
@@ -462,7 +479,7 @@ FORCEINLINE bool FAnimNotifyEvent::operator<(const FAnimNotifyEvent& Other) cons
 	// using SMALL_NUMBER here incase the underlying default changes as
 	// notifies can have an offset of KINDA_SMALL_NUMBER to be consider
 	// distinct
-	if (FMath::IsNearlyEqual(ATime, BTime, SMALL_NUMBER))
+	if (FMath::IsNearlyEqual(ATime, BTime, UE_SMALL_NUMBER))
 	{
 		return TrackIndex < Other.TrackIndex;
 	}
@@ -507,7 +524,17 @@ struct FAnimSyncMarker
 #endif
 
 	/** This can be used with the Sort() function on a TArray of FAnimSyncMarker to sort the notifies array by time, earliest first. */
-	ENGINE_API bool operator <(const FAnimSyncMarker& Other) const { return Time < Other.Time; }
+	bool operator <(const FAnimSyncMarker& Other) const { return Time < Other.Time; }
+
+	bool operator ==(const FAnimSyncMarker& Other) const
+	{
+		return MarkerName == Other.MarkerName &&
+#if WITH_EDITORONLY_DATA
+			TrackIndex == Other.TrackIndex &&
+			Guid == Other.Guid &&
+#endif
+			Time == Other.Time;
+	}
 };
 
 #if WITH_EDITORONLY_DATA
@@ -517,6 +544,7 @@ template<> struct TStructOpsTypeTraits<FAnimSyncMarker> : public TStructOpsTypeT
 	{ 
 		WithSerializer = true
 	};
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
 };
 #endif
 
@@ -555,7 +583,7 @@ struct FAnimNotifyTrack
  * Indicates whether an animation is additive, and what kind.
  */
 UENUM()
-enum EAdditiveAnimationType
+enum EAdditiveAnimationType : int
 {
 	/** No additive. */
 	AAT_None  UMETA(DisplayName="No additive"),
@@ -569,7 +597,7 @@ enum EAdditiveAnimationType
 UENUM()
 namespace ECurveBlendOption
 {
-	enum Type
+	enum Type : int
 	{
 		/* Last pose that contains valid curve value override it. */
 		Override, // redirect from MaxWeight old legacy behavior
@@ -630,7 +658,10 @@ struct FMarkerSyncData
 	TArray<FName>				UniqueMarkerNames;
 
 	void GetMarkerIndicesForTime(float CurrentTime, bool bLooping, const TArray<FName>& ValidMarkerNames, FMarkerPair& OutPrevMarker, FMarkerPair& OutNextMarker, float SequenceLength) const;
+	
+	UE_DEPRECATED(5.0, "Use other GetMarkerSyncPositionFromMarkerIndicies signature")
 	FMarkerSyncAnimPosition GetMarkerSyncPositionfromMarkerIndicies(int32 PrevMarker, int32 NextMarker, float CurrentTime, float SequenceLength) const;
+	FMarkerSyncAnimPosition GetMarkerSyncPositionFromMarkerIndicies(int32 PrevMarker, int32 NextMarker, float CurrentTime, float SequenceLength, const UMirrorDataTable* MirrorTable = nullptr) const;
 	void CollectUniqueNames();
 	void CollectMarkersInRange(float PrevPosition, float NewPosition, TArray<FPassedMarker>& OutMarkersPassedThisTick, float TotalDeltaMove);
 };
@@ -688,7 +719,7 @@ enum class EAnimInterpolationType : uint8
 	// ID type, should be used to access SmartNames as fundamental type may change.
 	typedef uint16 UID_Type;
 	// Max UID used for overflow checking
-	static const UID_Type MaxUID = MAX_uint16;
+	inline constexpr UID_Type MaxUID = MAX_uint16;
 }
 /**
  * Animation Key extraction helper as we have a lot of code that messes up the key length
@@ -734,7 +765,7 @@ private:
 UENUM()
 namespace EAxisOption
 {
-	enum Type
+	enum Type : int
 	{
 		X,
 		Y,
@@ -781,7 +812,7 @@ struct FAxisOption
 UENUM()
 namespace EComponentType
 {
-	enum Type
+	enum Type : int
 	{
 		None = 0,
 		TranslationX,
@@ -799,7 +830,7 @@ namespace EComponentType
 
 // @note We have a plan to support skeletal hierarchy. When that happens, we'd like to keep skeleton indexing.
 USTRUCT()
-struct ENGINE_API FTrackToSkeletonMap
+struct FTrackToSkeletonMap
 {
 	GENERATED_USTRUCT_BODY()
 
@@ -829,22 +860,22 @@ struct ENGINE_API FTrackToSkeletonMap
 * One element is used as a simple compression scheme where if all keys are the same, they'll be
 * reduced to 1 key that is constant over the entire sequence.
 */
-USTRUCT()
-struct ENGINE_API FRawAnimSequenceTrack
+USTRUCT(BlueprintType)
+struct FRawAnimSequenceTrack
 {
 	GENERATED_USTRUCT_BODY()
 
 	/** Position keys. */
 	UPROPERTY()
-	TArray<FVector> PosKeys;
+	TArray<FVector3f> PosKeys;
 
 	/** Rotation keys. */
 	UPROPERTY()
-	TArray<FQuat> RotKeys;
+	TArray<FQuat4f> RotKeys;
 
 	/** Scale keys. */
 	UPROPERTY()
-	TArray<FVector> ScaleKeys;
+	TArray<FVector3f> ScaleKeys;
 
 	// Serializer.
 	friend FArchive& operator<<(FArchive& Ar, FRawAnimSequenceTrack& T)
@@ -852,12 +883,114 @@ struct ENGINE_API FRawAnimSequenceTrack
 		T.PosKeys.BulkSerialize(Ar);
 		T.RotKeys.BulkSerialize(Ar);
 
-		if (Ar.UE4Ver() >= VER_UE4_ANIM_SUPPORT_NONUNIFORM_SCALE_ANIMATION)
+		if (Ar.UEVer() >= VER_UE4_ANIM_SUPPORT_NONUNIFORM_SCALE_ANIMATION)
 		{
 			T.ScaleKeys.BulkSerialize(Ar);
 		}
 
 		return Ar;
+	}
+
+	bool ContainsNaN() const
+	{
+		bool bContainsNaN = false;
+
+		auto CheckForNan = [&bContainsNaN](const auto& Keys) -> bool
+		{
+			if (!bContainsNaN)
+			{
+				for (const auto& Key : Keys)
+				{
+					if (Key.ContainsNaN())
+						return true;
+				}
+
+				return false;
+			}
+		
+			return true;
+		};
+
+		bContainsNaN = CheckForNan(PosKeys);
+		bContainsNaN = CheckForNan(RotKeys);
+		bContainsNaN = CheckForNan(ScaleKeys);
+
+		return bContainsNaN;
+	}
+
+	bool Serialize(FArchive& Ar)
+	{
+		Ar.UsingCustomVersion(FUE5ReleaseStreamObjectVersion::GUID); 
+
+		// Previously generated content was saved without bulk array serialization, so have to rely on UProperty serialization until resaved
+		if (Ar.CustomVer(FUE5ReleaseStreamObjectVersion::GUID) < FUE5ReleaseStreamObjectVersion::RawAnimSequenceTrackSerializer)
+		{
+			return false;
+		}
+ 
+		Ar << *this;
+ 
+		return true;
+	}
+
+	static const uint32 SingleKeySize = sizeof(FVector3f) + sizeof(FQuat4f) + sizeof(FVector3f);
+};
+
+template<> struct TStructOpsTypeTraits<FRawAnimSequenceTrack> : public TStructOpsTypeTraitsBase2<FRawAnimSequenceTrack>
+{
+	enum { WithSerializer = true };
+	static constexpr EPropertyObjectReferenceType WithSerializerObjectReferences = EPropertyObjectReferenceType::None;
+};
+
+UCLASS(MinimalAPI)
+class URawAnimSequenceTrackExtensions : public UBlueprintFunctionLibrary
+{
+	GENERATED_BODY()
+public:
+
+	/**
+	* Returns the positional keys contained by the FRawAnimSequenceTrack	
+	*/
+	UFUNCTION(BlueprintPure, Category = Animation, meta=(ScriptMethod))
+	static TArray<FVector> GetPositionalKeys(UPARAM(ref)const FRawAnimSequenceTrack& Track)
+	{
+		TArray<FVector> Keys;
+		Algo::Transform(Track.PosKeys, Keys, [](FVector3f FloatKey)
+		{
+			return FVector(FloatKey);
+		});
+
+		return Keys;
+	}
+
+	/**
+	* Returns the rotational keys contained by the FRawAnimSequenceTrack	
+	*/
+	UFUNCTION(BlueprintPure, Category = Animation, meta=(ScriptMethod))
+	static TArray<FQuat> GetRotationalKeys(UPARAM(ref)const FRawAnimSequenceTrack& Track)
+	{
+		TArray<FQuat> Keys;
+		Algo::Transform(Track.RotKeys, Keys, [](FQuat4f FloatKey)
+		{
+			return FQuat(FloatKey);
+		});
+
+		return Keys;
+	}
+
+	/**
+	* Returns the scale keys contained by the FRawAnimSequenceTrack	
+	*/
+	UFUNCTION(BlueprintPure, Category = Animation, meta=(ScriptMethod))
+	static TArray<FVector> GetScaleKeys(UPARAM(ref)const FRawAnimSequenceTrack& Track)
+	{
+		TArray<FVector> Keys;
+		Algo::Transform(Track.ScaleKeys, Keys, [](FVector3f FloatKey)
+		{
+			return FVector(FloatKey);
+		});
+
+		return Keys;
 	}
 };
 
@@ -868,18 +1001,30 @@ struct ENGINE_API FRawAnimSequenceTrack
 class FBoneData
 {
 public:
+	/** The bind pose orientation. */
 	FQuat		Orientation;
-	FVector		Position;
+
+	/** The bind pose position. */
+	FVector3f	Position;
+
+	/** The bind pose scale. */
+	FVector3f	Scale;
+
 	/** Bone name. */
 	FName		Name;
+
 	/** Direct descendants.  Empty for end effectors. */
 	TArray<int32> Children;
+
 	/** List of bone indices from parent up to root. */
 	TArray<int32>	BonesToRoot;
+
 	/** List of end effectors for which this bone is an ancestor.  End effectors have only one element in this list, themselves. */
 	TArray<int32>	EndEffectors;
+
 	/** If a Socket is attached to that bone */
 	bool		bHasSocket;
+
 	/** If matched as a Key end effector */
 	bool		bKeyEndEffector;
 
@@ -888,11 +1033,13 @@ public:
 	{
 		return GetDepth() ? BonesToRoot[0] : -1;
 	}
+
 	/**	@return		Distance to root; 0 for the root. */
 	int32 GetDepth() const
 	{
 		return BonesToRoot.Num();
 	}
+
 	/** @return		true if this bone is an end effector (has no children). */
 	bool IsEndEffector() const
 	{

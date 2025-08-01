@@ -7,41 +7,68 @@
 #include "Trace/Detail/Atomic.h"
 #include "Trace/Detail/LogScope.inl"
 
+namespace UE {
 namespace Trace {
 namespace Private {
 
 ////////////////////////////////////////////////////////////////////////////////
 void					Writer_InternalInitialize();
 FEventNode* volatile	GNewEventList; // = nullptr;
+FEventNode*				GEventListHead;// = nullptr;
+FEventNode*				GEventListTail;// = nullptr;
 
 
 
 ////////////////////////////////////////////////////////////////////////////////
 const FEventNode* FEventNode::FIter::GetNext()
 {
-	auto* Ret = (const FEventNode*)Inner;
+	auto* Ret = (FEventNode*)Inner;
 	if (Ret != nullptr)
 	{
 		Inner = Ret->Next;
+
+		if (Inner == nullptr)
+		{
+			GEventListTail = Ret;
+		}
 	}
 	return Ret;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+FEventNode::FIter FEventNode::Read()
+{
+	// This is the current event list as of the last ReadNew() call
+	if (GEventListHead)
+	{
+		return { GEventListHead };
+	}
 
+	// This is the current event list if ReadNew() has never been called
+	if (GNewEventList)
+	{
+		return { GNewEventList };
+	}
+
+	return {};
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 FEventNode::FIter FEventNode::ReadNew()
 {
-	FEventNode* EventList = AtomicLoadRelaxed(&GNewEventList);
+	FEventNode* EventList = AtomicExchangeAcquire(&GNewEventList, (FEventNode*)nullptr);
 	if (EventList == nullptr)
 	{
 		return {};
 	}
 
-	while (!AtomicCompareExchangeAcquire(&GNewEventList, (FEventNode*)nullptr, EventList))
+	if (GEventListHead == nullptr)
 	{
-		PlatformYield();
-		EventList = AtomicLoadRelaxed(&GNewEventList);
+		GEventListHead = EventList;
+	}
+	else
+	{
+		GEventListTail->Next = EventList;
 	}
 
 	return { EventList };
@@ -97,6 +124,9 @@ void FEventNode::Describe() const
 {
 	const FLiteralName& LoggerName = Info->LoggerName;
 	const FLiteralName& EventName = Info->EventName;
+	
+	// Definition events adds an extra field containing the definition id to the end.
+	const uint32 DefinitionIdFieldIdx = Info->FieldCount - ((Info->Flags & FEventInfo::DefinitionBits) ? 1 : 0);
 
 	// Calculate the number of fields and size of name data.
 	uint32 NamesSize = LoggerName.Length + EventName.Length;
@@ -106,25 +136,28 @@ void FEventNode::Describe() const
 	}
 
 	// Allocate the new event event in the log stream.
-	uint16 EventUid = EKnownEventUids::NewEvent << EKnownEventUids::_UidShift;
-
-	uint16 EventSize = sizeof(FNewEventEvent);
+	uint32 EventSize = sizeof(FNewEventEvent);
 	EventSize += sizeof(FNewEventEvent::Fields[0]) * Info->FieldCount;
 	EventSize += NamesSize;
+	EventSize = (EventSize + 1) & ~1; // align to 2 to keep UBSAN happy
 
-	FLogScope LogScope = FLogScope::Enter<FEventInfo::Flag_NoSync>(EventUid, EventSize);
-	auto& Event = *(FNewEventEvent*)(LogScope.GetPointer());
+	FLogScope LogScope = FLogScope::EnterImpl<FEventInfo::Flag_NoSync>(0, EventSize + sizeof(uint16));
+	auto* Ptr = (uint16*)(LogScope.GetPointer());
+	Ptr[-1] = EKnownEventUids::NewEvent; // Make event look like an important one. Ideally they are sent
+	Ptr[ 0] = uint16(EventSize);		 // as important and not Writer_DescribeEvents()'s redirected buf.
 
 	// Write event's main properties.
+	auto& Event = *(FNewEventEvent*)(Ptr + 1);
 	Event.EventUid = uint16(Uid) >> EKnownEventUids::_UidShift;
 	Event.LoggerNameSize = LoggerName.Length;
 	Event.EventNameSize = EventName.Length;
 	Event.Flags = 0;
 
-	uint32 Flags = Info->Flags;
+	const uint32 Flags = Info->Flags;
 	if (Flags & FEventInfo::Flag_Important)		Event.Flags |= uint8(EEventFlags::Important);
 	if (Flags & FEventInfo::Flag_MaybeHasAux)	Event.Flags |= uint8(EEventFlags::MaybeHasAux);
 	if (Flags & FEventInfo::Flag_NoSync)		Event.Flags |= uint8(EEventFlags::NoSync);
+	if (Flags & FEventInfo::DefinitionBits)		Event.Flags |= uint8(EEventFlags::Definition);
 
 	// Write details about event's fields
 	Event.FieldCount = uint8(Info->FieldCount);
@@ -132,10 +165,29 @@ void FEventNode::Describe() const
 	{
 		const FFieldDesc& Field = Info->Fields[i];
 		auto& Out = Event.Fields[i];
-		Out.Offset = Field.ValueOffset;
-		Out.Size = Field.ValueSize;
-		Out.TypeInfo = Field.TypeInfo;
-		Out.NameSize = Field.NameSize;
+		if (i == DefinitionIdFieldIdx)
+		{
+			Out.FieldType = EFieldFamily::DefinitionId;
+			Out.DefinitionId.Offset = Field.ValueOffset;
+			Out.DefinitionId.TypeInfo = Field.TypeInfo;
+		}
+		else if (Field.Reference != 0)
+		{
+			Out.FieldType = EFieldFamily::Reference;
+			// todo: What if the referenced type has not been initialized yet?
+			Out.Reference.Offset = Field.ValueOffset;
+			Out.Reference.TypeInfo = Field.TypeInfo;
+			Out.Reference.NameSize = Field.NameSize;
+			Out.Reference.RefUid = uint16(Field.Reference) >> EKnownEventUids::_UidShift;
+		}
+		else
+		{
+			Out.FieldType = EFieldFamily::Regular;
+			Out.Regular.Offset = Field.ValueOffset;
+			Out.Regular.Size = Field.ValueSize;
+			Out.Regular.TypeInfo = Field.TypeInfo;
+			Out.Regular.NameSize = Field.NameSize;
+		}
 	}
 
 	// Write names
@@ -157,8 +209,23 @@ void FEventNode::Describe() const
 	LogScope.Commit();
 }
 
+////////////////////////////////////////////////////////////////////////////////
+void FEventNode::OnConnect()
+{
+	// Re-add known events back as new events so that they get described again
+	if (GEventListHead == nullptr)
+	{
+		return;
+	}
+
+	GEventListTail->Next = AtomicExchangeAcquire(&GNewEventList, GEventListHead);
+
+	GEventListHead = GEventListTail = nullptr;
+}
+
 } // namespace Private
 } // namespace Trace
+} // namespace UE
 
 #endif // UE_TRACE_ENABLED
 

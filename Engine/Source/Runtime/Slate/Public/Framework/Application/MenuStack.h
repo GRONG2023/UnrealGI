@@ -84,7 +84,7 @@ public:
 	 * @param bIsCollapsedByParent	Is this menu collapsed when a parent menu receives focus/activation? If false, only focus/activation outside the entire stack will auto collapse it.
 	 * @param bEnablePerPixelTransparency Does the menu's content require per pixel transparency?
 	 */
-	TSharedRef<IMenu> Push(const FWidgetPath& InOwnerPath, const TSharedRef<SWidget>& InContent, const FVector2D& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately = true, const FVector2D& SummonLocationSize = FVector2D::ZeroVector, TOptional<EPopupMethod> InMethod = TOptional<EPopupMethod>(), const bool bIsCollapsedByParent = true, const bool bEnablePerPixelTransparency = false);
+	TSharedRef<IMenu> Push(const FWidgetPath& InOwnerPath, const TSharedRef<SWidget>& InContent, const UE::Slate::FDeprecateVector2DParameter& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately = true, const UE::Slate::FDeprecateVector2DParameter& SummonLocationSize = FVector2f::ZeroVector, TOptional<EPopupMethod> InMethod = TOptional<EPopupMethod>(), const bool bIsCollapsedByParent = true, const bool bEnablePerPixelTransparency = false);
 	
 	/**
 	 * Pushes a new child menu onto the stack.
@@ -99,7 +99,7 @@ public:
 	 * @param bIsCollapsedByParent	Is this menu collapsed when a parent menu receives focus/activation? If false, only focus/activation outside the entire stack will auto collapse it.
 	 * @param bEnablePerPixelTransparency Does the menu's content require per pixel transparency?
 	 */
-	TSharedRef<IMenu> Push(const TSharedPtr<IMenu>& InParentMenu, const TSharedRef<SWidget>& InContent, const FVector2D& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately = true, const FVector2D& SummonLocationSize = FVector2D::ZeroVector, const bool bIsCollapsedByParent = true, const bool bEnablePerPixelTransparency = false);
+	TSharedRef<IMenu> Push(const TSharedPtr<IMenu>& InParentMenu, const TSharedRef<SWidget>& InContent, const UE::Slate::FDeprecateVector2DParameter& SummonLocation, const FPopupTransitionEffect& TransitionEffect, const bool bFocusImmediately = true, const UE::Slate::FDeprecateVector2DParameter& SummonLocationSize = FVector2f::ZeroVector, const bool bIsCollapsedByParent = true, const bool bEnablePerPixelTransparency = false);
 
 	/**
 	 * Pushes a new menu onto the stack that is drawn by an external host widget.
@@ -190,6 +190,11 @@ public:
 	TSharedPtr<SWindow> GetHostWindow() const;
 
 	/**
+	 * @return	Returns the widget that is the parent widget that initially created the menu in the stack
+	 */
+	TSharedPtr<SWidget> GetHostWidget() const;
+
+	/**
 	* @return	True if the stack has one or more menus in it, false if it is empty.
 	*/
 	bool HasMenus() const;
@@ -241,8 +246,9 @@ private:
 	 * @param	InContent			The unwrapped content.
 	 * @param	OptionalMinWidth	Optional minimum width for the wrapped content.
 	 * @param	OptionalMinHeight	Optional minimum height for the wrapped content.
+	 * @param	bShouldShowBackground	Whether the menu wrapper should put a background behind the content.
 	 */
-	TSharedRef<SWidget> WrapContent(TSharedRef<SWidget> InContent, FOptionalSize OptionalMinWidth = FOptionalSize(), FOptionalSize OptionalMinHeight = FOptionalSize());
+	TSharedRef<SWidget> WrapContent(TSharedRef<SWidget> InContent, FOptionalSize OptionalMinWidth = FOptionalSize(), FOptionalSize OptionalMinHeight = FOptionalSize(), bool bShouldShowBackground = true);
 
 	/** Contains all the options passed to the pre-push stage of the menu creation process */
 	struct FPrePushArgs
@@ -261,10 +267,10 @@ private:
 	{
 		TSharedPtr<SWidget> WrappedContent;
 		TSharedPtr<SWidget> WidgetToFocus;
-		FVector2D AnimStartLocation;
-		FVector2D AnimFinalLocation;
+		FVector2f AnimStartLocation;
+		FVector2f AnimFinalLocation;
 		bool bAnchorSetsMinWidth;
-		FVector2D ExpectedSize;
+		FVector2f ExpectedSize;
 		bool bAllowAnimations;
 		bool bFocusImmediately;
 		bool bIsCollapsedByParent;
@@ -333,6 +339,9 @@ private:
 
 	/** The parent window of the root menu in the stack. NOT the actual menu window if it's a CreateNewWindow */
 	TSharedPtr<SWindow> HostWindow;
+
+	/** The parent widget of the root menu in the stack */
+	TWeakPtr<SWidget> HostWidget;
 
 	/** The parent window of the root menu in the stack. NOT the actual menu window if it's a CreateNewWindow */
 	TSharedPtr<SMenuPanel> HostWindowPopupPanel;

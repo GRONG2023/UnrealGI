@@ -8,11 +8,14 @@ using UnrealBuildTool;
 using System.Threading;
 using System.Text.RegularExpressions;
 using System.Linq;
+using EpicGames.Core;
 
 namespace Gauntlet
 {
 	public class IOSBuild : IBuild
 	{
+		public int PreferenceOrder { get { return 0; } }
+
 		public UnrealTargetConfiguration Configuration { get; protected set; }
 
 		public string SourceIPAPath;
@@ -22,6 +25,8 @@ namespace Gauntlet
 		public string PackageName;
 
 		public BuildFlags Flags { get; protected set; }
+
+		public string Flavor { get { return ""; } }
 
 		public UnrealTargetPlatform Platform { get { return UnrealTargetPlatform.IOS; } }
 
@@ -79,7 +84,7 @@ namespace Gauntlet
 					{
 						if (!File.Exists(ShouldExist) && !Directory.Exists(ShouldExist))
 						{
-							Log.Error(String.Format("unzip encountered an error or warning procesing IPA, possibly due to Zip64 issue, {0} missing", ShouldExist));
+							Log.Error(KnownLogEvents.Gauntlet_BuildDropEvent, "unzip encountered an error or warning procesing IPA, possibly due to Zip64 issue, {File} missing", ShouldExist);
 							return false;
 						}
 					}

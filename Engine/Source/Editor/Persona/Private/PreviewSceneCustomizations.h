@@ -12,7 +12,7 @@
 #include "AnimationEditorPreviewScene.h"
 
 #ifndef CHAOS_SIMULATION_DETAIL_VIEW_FACTORY_SELECTOR  // TODO: Decide whether to keep the detail view cloth selector after nvcloth has been removed
-#define CHAOS_SIMULATION_DETAIL_VIEW_FACTORY_SELECTOR WITH_CHAOS
+	#define CHAOS_SIMULATION_DETAIL_VIEW_FACTORY_SELECTOR 1
 #endif
 
 struct FAssetData;
@@ -21,6 +21,7 @@ class IDetailChildrenBuilder;
 class IDetailLayoutBuilder;
 class IPropertyUtilities;
 class UPreviewMeshCollectionFactory;
+class USkeleton;
 
 // An entry in the preview mode choice box
 struct FPersonaModeComboEntry
@@ -70,6 +71,9 @@ private:
 	void HandleMeshChanged(const FAssetData& InAssetData);
 
 	void HandlePreviewAnimBlueprintChanged(const FAssetData& InAssetData);
+	
+	// Called when the anim blueprint being edited is compiled.
+	void HandleAnimBlueprintCompiled(UBlueprint* Blueprint);
 
 	void HandleAdditionalMeshesChanged(const FAssetData& InAssetData, IDetailLayoutBuilder* DetailLayoutBuilder);
 
@@ -80,6 +84,9 @@ private:
 	void HandleUseCustomAnimBPCheckedStateChanged(ECheckBoxState CheckState);
 
 	ECheckBoxState HandleUseCustomAnimBPIsChecked() const;
+
+	// Reinitialize the preview controller in the preview scene.
+	void ReinitializePreviewController();
 
 #if CHAOS_SIMULATION_DETAIL_VIEW_FACTORY_SELECTOR
 	// Make the widget of each item in the preview cloth factory combo box
@@ -112,7 +119,7 @@ private:
 	TArray<TSharedPtr<FPersonaModeComboEntry>> ControllerItems;
 
 	/** This is list of class available to filter asset by. This list doesn't change once loaded, so only collect once */
-	static TArray<FName> AvailableClassNameList;
+	static TArray<FTopLevelAssetPath> AvailableClassNameList;
 
 #if CHAOS_SIMULATION_DETAIL_VIEW_FACTORY_SELECTOR
 	/** List of available cloth simulation factories. */
@@ -132,6 +139,7 @@ private:
 	* Called when reset to base is clicked
 	*/
 	void OnResetToBaseClicked(TSharedPtr<IPropertyHandle> PropertyHandle);
+	void OnResetAdditionalMeshes();
 
 	TSharedPtr<IPropertyHandle> AdditionalMeshesProperty;
 };
@@ -152,7 +160,7 @@ public:
 	virtual void CustomizeChildren(TSharedRef<IPropertyHandle> PropertyHandle, IDetailChildrenBuilder& ChildBuilder, IPropertyTypeCustomizationUtils& CustomizationUtils) override {}
 
 private:
-	bool HandleShouldFilterAsset(const FAssetData& InAssetData, FString SkeletonName);
+	bool HandleShouldFilterAsset(const FAssetData& InAssetData, FString SkeletonName, USkeleton* Skeleton);
 
 	void HandleMeshChanged(const FAssetData& InAssetData);
 

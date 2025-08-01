@@ -7,6 +7,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/EngineTypes.h"
+#include "DynamicRenderScaling.h"
+#include "TemporalUpscaler.h"
+
+
+/** Dynamic resolution of the primary ScreenPercentage. */
+extern ENGINE_API DynamicRenderScaling::FBudget GDynamicPrimaryResolutionFraction;
 
 
 /** Game thread events for dynamic resolution state. */
@@ -27,7 +34,7 @@ enum class EDynamicResolutionStateEvent : uint8
 
 
 /** Interface between the engine and state of dynamic resolution that can be overriden to implement a custom heurstic. */
-class ENGINE_API IDynamicResolutionState
+class IDynamicResolutionState
 {
 public:
 	virtual ~IDynamicResolutionState() { };
@@ -45,13 +52,22 @@ public:
 	/** Setup a screen percentage driver for a given view family. */
 	virtual void SetupMainViewFamily(class FSceneViewFamily& ViewFamily) = 0;
 
+	/** Apply the minimum/maximum resolution fraction for a third-party temporal upscaler. */
+	virtual void SetTemporalUpscaler(const UE::Renderer::Private::ITemporalUpscaler* InTemporalUpscaler) = 0;
+
 protected:
 
 	/** Returns a non thread safe aproximation of the current resolution fraction applied on render thread, mostly used for stats and analytic. */
-	virtual float GetResolutionFractionApproximation() const = 0;
+	virtual DynamicRenderScaling::TMap<float> GetResolutionFractionsApproximation() const = 0;
 
 	/** Returns the max resolution resolution fraction. */
-	virtual float GetResolutionFractionUpperBound() const = 0;
+	virtual DynamicRenderScaling::TMap<float> GetResolutionFractionsUpperBound() const = 0;
+
+	/** Returns the max resolution resolution fraction as specified in the budget (this can differ from the upper bound if the upper bound is dynamic)*/
+	virtual DynamicRenderScaling::TMap<float> GetResolutionFractionsUpperBoundBudgetValue() const
+	{
+		return GetResolutionFractionsUpperBound();
+	}
 
 	/** Enables/Disables dynamic resolution. This is only called by GEngine automatically. */
 	virtual void SetEnabled(bool bEnable) = 0;

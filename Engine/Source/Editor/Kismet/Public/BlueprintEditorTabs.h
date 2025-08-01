@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 
+class FName;
+
 struct KISMET_API FBlueprintEditorTabs
 {
 	// Tab identifiers
@@ -19,6 +21,7 @@ struct KISMET_API FBlueprintEditorTabs
 	static const FName MyBlueprintID;
 	static const FName ReplaceNodeReferencesID;
 	static const FName UserDefinedStructureID;
+	static const FName BlueprintDebuggerID;
 
 	// Document tab identifiers
 	static const FName GraphEditorID;

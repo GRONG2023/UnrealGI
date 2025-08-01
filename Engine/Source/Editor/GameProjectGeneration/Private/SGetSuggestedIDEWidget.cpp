@@ -2,23 +2,54 @@
 
 
 #include "SGetSuggestedIDEWidget.h"
-#include "HAL/PlatformProcess.h"
-#include "Widgets/Input/SButton.h"
-#include "SourceCodeNavigation.h"
-#include "Framework/Notifications/NotificationManager.h"
-#include "Widgets/Notifications/SNotificationList.h"
-#include "Widgets/Input/SHyperlink.h"
+
+#include "Delegates/Delegate.h"
 #include "EngineAnalytics.h"
 #include "Framework/Application/SlateApplication.h"
-#include "Interfaces/IAnalyticsProvider.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "HAL/Platform.h"
+#include "HAL/PlatformProcess.h"
+#include "IAnalyticsProviderET.h"
+#include "Internationalization/Internationalization.h"
+#include "Internationalization/Text.h"
+#include "Layout/Children.h"
+#include "SPrimaryButton.h"
+#include "SourceCodeNavigation.h"
+#include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/SWindow.h"
+
+class SWidget;
 
 #define LOCTEXT_NAMESPACE "GameProjectGeneration"
+
+void SGetDisableIDEWidget::Construct(const FArguments& InArgs)
+{
+	ChildSlot
+	[
+		CreateGetDisableIDEWidget()
+	];
+}
+
+TSharedRef<SWidget> SGetDisableIDEWidget::CreateGetDisableIDEWidget()
+{
+	return
+		SNew(SPrimaryButton)
+		.Text(FText::Format(LOCTEXT("IDEDisableButton", "Disable {0}"), FSourceCodeNavigation::GetSuggestedSourceCodeIDE()))
+		.OnClicked(this, &SGetDisableIDEWidget::OnDisableIDEClicked);
+}
+
+FReply SGetDisableIDEWidget::OnDisableIDEClicked()
+{
+	FSourceCodeNavigation::SetPreferredAccessor(TEXT("NullSourceCodeAccessor"));
+
+	return FReply::Handled();
+}
 
 TSharedPtr<SNotificationItem> SGetSuggestedIDEWidget::IDEDownloadNotification;
 
 void SGetSuggestedIDEWidget::Construct(const FArguments& InArgs)
 {
-	Visibility = TAttribute<EVisibility>(this, &SGetSuggestedIDEWidget::GetVisibility);
+	SetVisibility(InArgs._VisibilityOverride.IsSet() ? InArgs._VisibilityOverride : TAttribute<EVisibility>(this, &SGetSuggestedIDEWidget::GetVisibility));
 
 	ChildSlot
 	[
@@ -26,21 +57,22 @@ void SGetSuggestedIDEWidget::Construct(const FArguments& InArgs)
 	];
 }
 
-TSharedRef<SWidget> SGetSuggestedIDEWidget::CreateGetSuggestedIDEWidget() const
+TSharedRef<SWidget> SGetSuggestedIDEWidget::CreateGetSuggestedIDEWidget()
 {
 	if (FSourceCodeNavigation::GetCanDirectlyInstallSourceCodeIDE())
 	{
 		// If the installer for this platform's IDE can be downloaded and launched directly, show a button
-		return SNew(SButton)
+		return			
+			SNew(SPrimaryButton)
 			.Text(FText::Format(LOCTEXT("IDEInstallButtonText", "Install {0}"), FSourceCodeNavigation::GetSuggestedSourceCodeIDE()))
-			.OnClicked(const_cast<SGetSuggestedIDEWidget*>(this), &SGetSuggestedIDEWidget::OnInstallIDEClicked);
+			.OnClicked(this, &SGetSuggestedIDEWidget::OnInstallIDEClicked);
 	}
 	else
 	{
-		// If the user must open a web page, show a link
-		return SNew(SHyperlink)
+		return	
+			SNew(SPrimaryButton)
 			.Text(FText::Format(LOCTEXT("IDEDownloadLinkText", "Download {0}"), FSourceCodeNavigation::GetSuggestedSourceCodeIDE()))
-			.OnNavigate(const_cast<SGetSuggestedIDEWidget*>(this), &SGetSuggestedIDEWidget::OnDownloadIDEClicked, FSourceCodeNavigation::GetSuggestedSourceCodeIDEDownloadURL());
+			.OnClicked(this, &SGetSuggestedIDEWidget::OnDownloadIDEClicked, FSourceCodeNavigation::GetSuggestedSourceCodeIDEDownloadURL());
 	}
 }
 
@@ -49,9 +81,11 @@ EVisibility SGetSuggestedIDEWidget::GetVisibility() const
 	return FSourceCodeNavigation::IsCompilerAvailable() ? EVisibility::Collapsed : EVisibility::Visible;
 }
 
-void SGetSuggestedIDEWidget::OnDownloadIDEClicked(FString URL)
+FReply SGetSuggestedIDEWidget::OnDownloadIDEClicked(FString URL)
 {
 	FPlatformProcess::LaunchURL(*URL, NULL, NULL);
+
+	return FReply::Handled();
 }
 
 FReply SGetSuggestedIDEWidget::OnInstallIDEClicked()

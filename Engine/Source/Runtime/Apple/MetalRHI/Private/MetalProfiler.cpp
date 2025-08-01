@@ -18,14 +18,12 @@ DEFINE_STAT(STAT_MetalTextureMemUpdate);
 DEFINE_STAT(STAT_MetalDrawCallTime);
 DEFINE_STAT(STAT_MetalPipelineStateTime);
 DEFINE_STAT(STAT_MetalPrepareDrawTime);
-
+DEFINE_STAT(STAT_MetalSwitchToNoneTime);
 DEFINE_STAT(STAT_MetalSwitchToRenderTime);
-DEFINE_STAT(STAT_MetalSwitchToTessellationTime);
 DEFINE_STAT(STAT_MetalSwitchToComputeTime);
 DEFINE_STAT(STAT_MetalSwitchToBlitTime);
 DEFINE_STAT(STAT_MetalSwitchToAsyncBlitTime);
 DEFINE_STAT(STAT_MetalPrepareToRenderTime);
-DEFINE_STAT(STAT_MetalPrepareToTessellateTime);
 DEFINE_STAT(STAT_MetalPrepareToDispatchTime);
 DEFINE_STAT(STAT_MetalCommitRenderResourceTablesTime);
 DEFINE_STAT(STAT_MetalSetRenderStateTime);
@@ -71,6 +69,7 @@ void WriteString(FArchive* OutputFile, const char* String)
 
 FMetalEventNode::~FMetalEventNode()
 {
+    
 }
 
 float FMetalEventNode::GetTiming()
@@ -86,15 +85,16 @@ void FMetalEventNode::StartTiming()
 	Context->StartTiming(this);
 }
 
-mtlpp::CommandBufferHandler FMetalEventNode::Start(void)
+FMetalCommandBufferCompletionHandler FMetalEventNode::Start(void)
 {
-	mtlpp::CommandBufferHandler Block = [this](mtlpp::CommandBuffer const& CompletedBuffer)
+    FMetalCommandBufferCompletionHandler Block;
+    Block.BindLambda([this](MTL::CommandBuffer* CompletedBuffer)
 	{
-		const CFTimeInterval GpuTimeSeconds = CompletedBuffer.GetGpuStartTime();
+		const CFTimeInterval GpuTimeSeconds = CompletedBuffer->GPUStartTime();
 		const double CyclesPerSecond = 1.0 / FPlatformTime::GetSecondsPerCycle();
 		StartTime = GpuTimeSeconds * CyclesPerSecond;
-	};
-    return Block_copy(Block);
+	});
+    return Block;
 }
 
 void FMetalEventNode::StopTiming()
@@ -102,12 +102,13 @@ void FMetalEventNode::StopTiming()
 	Context->EndTiming(this);
 }
 
-mtlpp::CommandBufferHandler FMetalEventNode::Stop(void)
+FMetalCommandBufferCompletionHandler FMetalEventNode::Stop(void)
 {
-	mtlpp::CommandBufferHandler Block = [this](mtlpp::CommandBuffer const& CompletedBuffer)
+    FMetalCommandBufferCompletionHandler Block;
+    Block.BindLambda([this](MTL::CommandBuffer* CompletedBuffer)
 	{
 		// This is still used by ProfileGPU
-		const CFTimeInterval GpuTimeSeconds = CompletedBuffer.GetGpuEndTime();
+		const CFTimeInterval GpuTimeSeconds = CompletedBuffer->GPUEndTime();
 		const double CyclesPerSecond = 1.0 / FPlatformTime::GetSecondsPerCycle();
 		EndTime = GpuTimeSeconds * CyclesPerSecond;
 		
@@ -118,8 +119,8 @@ mtlpp::CommandBufferHandler FMetalEventNode::Stop(void)
 				delete this;
 			}
 		}
-	};
-	return Block_copy(Block);
+	});
+	return Block;
 }
 
 bool MetalGPUProfilerIsInSafeThread()
@@ -192,11 +193,6 @@ void FMetalGPUProfiler::BeginFrame()
 		CurrentEventNodeFrame = new FMetalEventNodeFrame(Context, GTriggerGPUProfile);
 		CurrentEventNodeFrame->StartFrame();
 		
-		if(GNumAlternateFrameRenderingGroups > 1)
-		{
-			GTriggerGPUProfile = false;
-		}
-
 		if(GTriggerGPUProfile)
 		{
 			bTrackingEvents = true;
@@ -302,10 +298,10 @@ void FMetalGPUProfiler::RecordFrame(TArray<FMetalCommandBufferTiming>& CommandBu
 #endif //STATS
 }
 
-void FMetalGPUProfiler::RecordPresent(const mtlpp::CommandBuffer& Buffer)
+void FMetalGPUProfiler::RecordPresent(MTL::CommandBuffer* CommandBuffer)
 {
-	const CFTimeInterval GpuStartTimeSeconds = Buffer.GetGpuStartTime();
-	const CFTimeInterval GpuEndTimeSeconds = Buffer.GetGpuEndTime();
+	const CFTimeInterval GpuStartTimeSeconds = CommandBuffer->GPUStartTime();
+    const CFTimeInterval GpuEndTimeSeconds = CommandBuffer->GPUStartTime();
 	const double CyclesPerSecond = 1.0 / FPlatformTime::GetSecondsPerCycle();
 	uint64 StartTimeCycles = uint64(GpuStartTimeSeconds * CyclesPerSecond);
 	uint64 EndTimeCycles = uint64(GpuEndTimeSeconds * CyclesPerSecond);
@@ -361,23 +357,23 @@ FString IMetalStatsScope::GetJSONRepresentation(uint32 Pid)
 	return JSONOutput;
 }
 
-FMetalCommandBufferStats::FMetalCommandBufferStats(mtlpp::CommandBuffer const& Buffer, uint64 InGPUThreadIndex)
+FMetalCommandBufferStats::FMetalCommandBufferStats(MTLCommandBufferPtr CommandBuffer, uint64 InGPUThreadIndex)
 {
-	CmdBuffer = Buffer;
+	CmdBuffer = CommandBuffer;
 	
-	Name = FString::Printf(TEXT("CommandBuffer: %p %s"), CmdBuffer.GetPtr(), *FString(CmdBuffer.GetLabel().GetPtr()));
+	Name = FString::Printf(TEXT("CommandBuffer: %p %s"), CmdBuffer.get(), *NSStringToFString(CmdBuffer->label()));
 	
 	CPUThreadIndex = FPlatformTLS::GetCurrentThreadId();
 	GPUThreadIndex = InGPUThreadIndex;
 	
-	Start(Buffer);
+	Start(CmdBuffer);
 }
 
 FMetalCommandBufferStats::~FMetalCommandBufferStats()
 {
 }
 
-void FMetalCommandBufferStats::Start(mtlpp::CommandBuffer const& Buffer)
+void FMetalCommandBufferStats::Start(MTLCommandBufferPtr& CommandBuffer)
 {
 	CPUStartTime = FPlatformTime::ToMilliseconds64(mach_absolute_time()) * 1000.0;
 	CPUEndTime = 0;
@@ -386,27 +382,30 @@ void FMetalCommandBufferStats::Start(mtlpp::CommandBuffer const& Buffer)
 	GPUEndTime = 0;
 }
 
-void FMetalCommandBufferStats::End(mtlpp::CommandBuffer const& Buffer)
+void FMetalCommandBufferStats::End(MTLCommandBufferPtr& CommandBuffer)
 {
-	check(Buffer.GetPtr() == CmdBuffer.GetPtr());
+	check(CommandBuffer == CmdBuffer);
 	
 	bool const bTracing = FMetalProfiler::GetProfiler() && FMetalProfiler::GetProfiler()->TracingEnabled();
-	CmdBuffer.AddCompletedHandler(^(const mtlpp::CommandBuffer & InnerBuffer) {
-		const CFTimeInterval GpuTimeSeconds = InnerBuffer.GetGpuStartTime();
-		GPUStartTime = GpuTimeSeconds * 1000000.0;
-		
-		const CFTimeInterval GpuEndTimeSeconds = InnerBuffer.GetGpuEndTime();
-		GPUEndTime = GpuEndTimeSeconds * 1000000.0;
-	
-		if (bTracing)
-		{
-			FMetalProfiler::GetProfiler()->AddCommandBuffer(this);
-		}
-		else
-		{
-			delete this;
-		}
-	});
+    
+    MTL::HandlerFunction CompletionHandler = [this, bTracing](MTL::CommandBuffer* CommandBuffer) {
+        const CFTimeInterval GpuTimeSeconds = CommandBuffer->GPUStartTime();
+        GPUStartTime = GpuTimeSeconds * 1000000.0;
+        
+        const CFTimeInterval GpuEndTimeSeconds = CommandBuffer->GPUEndTime();
+        GPUEndTime = GpuEndTimeSeconds * 1000000.0;
+    
+        if (bTracing)
+        {
+            FMetalProfiler::GetProfiler()->AddCommandBuffer(this);
+        }
+        else
+        {
+            delete this;
+        }
+    };
+    
+    CmdBuffer->addCompletedHandler(CompletionHandler);
 	
 	CPUEndTime = FPlatformTime::ToMilliseconds64(mach_absolute_time()) * 1000.0;
 }
@@ -439,10 +438,10 @@ FMetalDisplayStats::~FMetalDisplayStats()
 {
 }
 
-void FMetalDisplayStats::Start(mtlpp::CommandBuffer const& Buffer)
+void FMetalDisplayStats::Start(MTLCommandBufferPtr& Buffer)
 {
 }
-void FMetalDisplayStats::End(mtlpp::CommandBuffer const& Buffer)
+void FMetalDisplayStats::End(MTLCommandBufferPtr& Buffer)
 {
 }
 
@@ -475,11 +474,11 @@ void FMetalCPUStats::End(void)
 	CPUEndTime = FPlatformTime::ToMilliseconds64(mach_absolute_time()) * 1000.0;
 }
 
-void FMetalCPUStats::Start(mtlpp::CommandBuffer const& Buffer)
+void FMetalCPUStats::Start(MTLCommandBufferPtr& Buffer)
 {
 	
 }
-void FMetalCPUStats::End(mtlpp::CommandBuffer const& Buffer)
+void FMetalCPUStats::End(MTLCommandBufferPtr& Buffer)
 {
 	
 }
@@ -652,7 +651,7 @@ FMetalCPUStats* FMetalProfiler::AddCPUStat(FString const& Name)
 	}
 }
 
-FMetalCommandBufferStats* FMetalProfiler::AllocateCommandBuffer(const mtlpp::CommandBuffer &Buffer, uint64 GPUThreadIndex)
+FMetalCommandBufferStats* FMetalProfiler::AllocateCommandBuffer(MTLCommandBufferPtr Buffer, uint64 GPUThreadIndex)
 {
 	return new FMetalCommandBufferStats(Buffer, GPUThreadIndex);
 }
@@ -768,7 +767,7 @@ void FMetalProfiler::SaveTrace()
 		}
 		
 		static const uint32 BufferSize = 128;
-		char Buffer[BufferSize];
+		ANSICHAR Buffer[BufferSize];
 		for (uint32 CPUIndex : ThreadIDs)
 		{
 			bool bThreadName = false;
@@ -782,11 +781,11 @@ void FMetalProfiler::SaveTrace()
 			}
 			if (!bThreadName)
 			{
-				sprintf(Buffer, "Thread %d", CPUIndex);
+				snprintf(Buffer, BufferSize, "Thread %d", CPUIndex);
 			}
 			
 			FString Output = FString::Printf(TEXT("{\"pid\":%d, \"tid\":%d, \"ph\": \"M\", \"name\": \"thread_name\", \"args\":{\"name\":\"%s\"}},{\"pid\":%d, \"tid\":%d, \"ph\": \"M\", \"name\": \"thread_sort_index\", \"args\":{\"sort_index\": %d}},\n"),
-											 Pid, CPUIndex, UTF8_TO_TCHAR(Buffer), Pid, CPUIndex, SortIndex
+											 Pid, CPUIndex, ANSI_TO_TCHAR(Buffer), Pid, CPUIndex, SortIndex
 											 );
 			
 			

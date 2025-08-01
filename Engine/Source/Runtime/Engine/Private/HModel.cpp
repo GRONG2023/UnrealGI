@@ -7,10 +7,10 @@
 #include "HModel.h"
 #include "SceneView.h"
 #include "Model.h"
-#include "Components/ModelComponent.h"
 #include "Raster.h"
 #include "Engine/Polys.h"
 #include "Engine/Brush.h"
+#include "GenericPlatform/ICursor.h"
 
 IMPLEMENT_HIT_PROXY(HModel,HHitProxy);
 
@@ -98,7 +98,7 @@ bool HModel::ResolveSurface(const FSceneView* View,int32 X,int32 Y,uint32& OutSu
 
 			// Clip the node's FPoly against the view's near clipping plane.
 			if(	!View->bHasNearClippingPlane ||
-				NodePolygon.Split(-FVector(View->NearClippingPlane),View->NearClippingPlane * View->NearClippingPlane.W))
+				NodePolygon.Split(-FVector3f(View->NearClippingPlane),FVector3f(View->NearClippingPlane * View->NearClippingPlane.W)))
 			{
 				for(int32 LeadingVertexIndex = 2;LeadingVertexIndex < NodePolygon.Vertices.Num();LeadingVertexIndex++)
 				{
@@ -106,7 +106,7 @@ bool HModel::ResolveSurface(const FSceneView* View,int32 X,int32 Y,uint32& OutSu
 					FVector4 Vertices[3];
 					for(uint32 VertexIndex = 0;VertexIndex < 3;VertexIndex++)
 					{
-						FVector4 ScreenPosition = View->WorldToScreen(NodePolygon.Vertices[TriangleVertexIndices[VertexIndex]]);
+						FVector4 ScreenPosition = View->WorldToScreen((FVector)NodePolygon.Vertices[TriangleVertexIndices[VertexIndex]]);
 						float InvW = 1.0f / ScreenPosition.W;
 						float SizeX = View->UnscaledViewRect.Width();
 						float SizeY = View->UnscaledViewRect.Height();
@@ -128,7 +128,7 @@ bool HModel::ResolveSurface(const FSceneView* View,int32 X,int32 Y,uint32& OutSu
 						FVector2D(Vertices[0].X,Vertices[0].Y),
 						FVector2D(Vertices[1].X,Vertices[1].Y),
 						FVector2D(Vertices[2].X,Vertices[2].Y),
-						(Surf.PolyFlags & PF_TwoSided) ? false : FMath::IsNegativeFloat(EdgeA.X * EdgeB.Y - EdgeA.Y * EdgeB.X) // Check if a surface is twosided when it is selected in the editor viewport
+						(Surf.PolyFlags & PF_TwoSided) ? false : (EdgeA.X * EdgeB.Y - EdgeA.Y * EdgeB.X < 0.0f) // Check if a surface is twosided when it is selected in the editor viewport
 						);
 				}
 			}
@@ -143,4 +143,9 @@ void HModel::AddReferencedObjects(FReferenceCollector& Collector)
 {
 	Collector.AddReferencedObject(Component);
 	Collector.AddReferencedObject(Model);
+}
+
+EMouseCursor::Type HModel::GetMouseCursor()
+{
+	return EMouseCursor::Crosshairs;
 }

@@ -6,6 +6,8 @@
 #include "AudioMixer.h"
 #include "ProfilingDebugging/CsvProfiler.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(AudioMixerSubmixEffectEQ)
+
 // Link to "Audio" profiling category
 CSV_DECLARE_CATEGORY_MODULE_EXTERN(AUDIOMIXERCORE_API, Audio);
 
@@ -100,8 +102,8 @@ void FSubmixEffectSubmixEQ::OnProcessAudio(const FSoundEffectSubmixInputData& In
 	// Update parameters that may have been set from game thread
 	UpdateParameters(InData.NumChannels);
 
-	Audio::AlignedFloatBuffer& InAudioBuffer = *InData.AudioBuffer;
-	Audio::AlignedFloatBuffer& OutAudioBuffer = *OutData.AudioBuffer;
+	Audio::FAlignedFloatBuffer& InAudioBuffer = *InData.AudioBuffer;
+	Audio::FAlignedFloatBuffer& OutAudioBuffer = *OutData.AudioBuffer;
 
 	if (bEQSettingsSet && RenderThreadEQSettings.EQBands.Num() > 0)
 	{
@@ -221,6 +223,14 @@ void FSubmixEffectSubmixEQ::UpdateParameters(const int32 InNumOutputChannels)
 	if (PendingSettings.GetParams(&NewSettings))
 	{
 		bParamsChanged = true;
+
+		// Make sure we clamp our freq and bandwidth to reasonable values here
+		for (FSubmixEffectEQBand& Band : NewSettings.EQBands)
+		{
+			Band.Frequency = GetClampedFrequency(Band.Frequency);
+			Band.Bandwidth = GetClampedBandwidth(Band.Bandwidth);
+		}
+
 		RenderThreadEQSettings = NewSettings;
 	}
 
@@ -277,3 +287,4 @@ void USubmixEffectSubmixEQPreset::SetSettings(const FSubmixEffectSubmixEQSetting
 {
 	UpdateSettings(InSettings);
 }
+

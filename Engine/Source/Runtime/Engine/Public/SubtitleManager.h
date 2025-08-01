@@ -112,7 +112,7 @@ public:
 	 * @param SoundDuration Time  after which the subtitles do not display (in seconds).
 	 * @param Subtitles Collection of lines of subtitle and time offset to play them.
 	 */
-	void QueueSubtitles(PTRINT SubtitleID, float Priority, bool bManualWordWrap, bool bSingleLine, float SoundDuration, const TArray<FSubtitleCue>& Subtitles, float InStartTime, float InCurrentTime);
+	ENGINE_API void QueueSubtitles(PTRINT SubtitleID, float Priority, bool bManualWordWrap, bool bSingleLine, float SoundDuration, const TArray<FSubtitleCue>& Subtitles, float InStartTime, float InCurrentTime);
 
 	static void QueueSubtitles(const FQueueSubtitleParams& QueueSubtitlesParams);
 
@@ -157,7 +157,7 @@ public:
 	ENGINE_API static FSubtitleManager* GetSubtitleManager();
 
 	/** HACK: Returns the delegate for setting subtitle text */
-	ENGINE_API FSubtitleManagerSetSubtitleText&  OnSetSubtitleText() { return OnSetSubtitleTextDelegate; }
+	FSubtitleManagerSetSubtitleText&  OnSetSubtitleText() { return OnSetSubtitleTextDelegate; }
 
 	/**
 	 * HACK: Accept a movie subtitle and display it to all currently registered displays. This will not

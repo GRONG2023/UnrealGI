@@ -10,8 +10,11 @@
 #include "ChaosSolversModule.h"
 #include "Chaos/ChaosGameplayEventDispatcher.h"
 #include "Chaos/Framework/DebugSubstep.h"
+#include "Engine/Texture2D.h"
 #include "UObject/FortniteMainBranchObjectVersion.h"
 #include "PhysicsProxy/SingleParticlePhysicsProxy.h"
+
+#include UE_INLINE_GENERATED_CPP_BY_NAME(ChaosSolverActor)
 
 //DEFINE_LOG_CATEGORY_STATIC(AFA_Log, NoLogging, All);
 
@@ -185,7 +188,6 @@ AChaosSolverActor::AChaosSolverActor(const FObjectInitializer& ObjectInitializer
 	, DoGenerateBreakingData_DEPRECATED(true)
 	, DoGenerateTrailingData_DEPRECATED(true)
 	, MassScale_DEPRECATED(1.f)
-	, bGenerateContactGraph_DEPRECATED(true)
 	, bHasFloor(true)
 	, FloorHeight(0.f)
 	, ChaosDebugSubstepControl()
@@ -199,12 +201,11 @@ AChaosSolverActor::AChaosSolverActor(const FObjectInitializer& ObjectInitializer
 
 		// @question(Benn) : Does this need to be created on the Physics thread using a queued command?
 		PhysScene = MakeShareable(new FPhysScene_Chaos(this
-#if CHAOS_CHECKED
+#if CHAOS_DEBUG_NAME
 								  , TEXT("Solver Actor Physics")
 #endif
 		));
 		Solver = PhysScene->GetSolver();
-
 		// Ticking setup for collision/breaking notifies
 		PrimaryActorTick.TickGroup = TG_PostPhysics;
 		PrimaryActorTick.bCanEverTick = true;
@@ -269,6 +270,12 @@ void AChaosSolverActor::BeginPlay()
 	if(!Solver)
 	{
 		return;
+	}
+
+	// Make sure that the solver is registered in the right world
+	if(FChaosSolversModule* Module = FChaosSolversModule::GetModule())
+	{
+		Module->MigrateSolver(GetSolver(), GetWorld());
 	}
 
 	Solver->EnqueueCommandImmediate(
@@ -341,6 +348,8 @@ void AChaosSolverActor::PostLoad()
 				return EClusterUnionMethod::MinimalSpanningSubsetDelaunayTriangulation;
 			case EClusterConnectionTypeEnum::Chaos_PointImplicitAugmentedWithMinimalDelaunay:
 				return EClusterUnionMethod::PointImplicitAugmentedWithMinimalDelaunay;
+			case EClusterConnectionTypeEnum::Chaos_BoundsOverlapFilteredDelaunayTriangulation:
+				return EClusterUnionMethod::BoundsOverlapFilteredDelaunayTriangulation;
 			default:
 				break;
 			}
@@ -348,10 +357,8 @@ void AChaosSolverActor::PostLoad()
 			return EClusterUnionMethod::None;
 		};
 
-		Properties.Iterations = CollisionIterations_DEPRECATED;
-		Properties.CollisionPairIterations = 2;
-		Properties.PushOutIterations = PushOutIterations_DEPRECATED;
-		Properties.CollisionPushOutPairIterations = PushOutPairIterations_DEPRECATED;
+		Properties.PositionIterations = CollisionIterations_DEPRECATED;
+		Properties.VelocityIterations = PushOutIterations_DEPRECATED;
 		Properties.ClusterConnectionFactor = ClusterConnectionFactor_DEPRECATED;
 		Properties.ClusterUnionConnectionType = ConvertDeprecatedConnectionType(ClusterUnionConnectionType_DEPRECATED);
 		Properties.bGenerateBreakData = DoGenerateBreakingData_DEPRECATED;
@@ -360,7 +367,6 @@ void AChaosSolverActor::PostLoad()
 		Properties.BreakingFilterSettings = BreakingFilterSettings_DEPRECATED;
 		Properties.CollisionFilterSettings = CollisionFilterSettings_DEPRECATED;
 		Properties.TrailingFilterSettings = TrailingFilterSettings_DEPRECATED;
-		Properties.bGenerateContactGraph = bGenerateContactGraph_DEPRECATED;
 	}
 }
 
@@ -375,13 +381,12 @@ void AChaosSolverActor::Serialize(FArchive& Ar)
 void AChaosSolverActor::PostRegisterAllComponents()
 {
 	Super::PostRegisterAllComponents();
-#if INCLUDE_CHAOS
+
 	UWorld* const W = GetWorld(); 
 	if (W && !W->PhysicsScene_Chaos)
 	{
 		SetAsCurrentWorldSolver();
 	}
-#endif
 }
 
 void AChaosSolverActor::PostDuplicate(EDuplicateMode::Type DuplicateMode)
@@ -399,13 +404,19 @@ void AChaosSolverActor::MakeFloor()
 	if(bHasFloor)
 	{
 		TUniquePtr<Chaos::FGeometryParticle> FloorParticle = Chaos::FGeometryParticle::CreateParticle();
-		FloorParticle->SetGeometry(TUniquePtr<Chaos::TPlane<Chaos::FReal, 3>>(new Chaos::TPlane<Chaos::FReal, 3>(FVector(0), FVector(0, 0, 1))));
-		FloorParticle->SetX(Chaos::FVec3(0.f, 0.f, FloorHeight));
+		// todo(chaos) : Changing the floor to be a box for now because there's few cases where this may fail to collide with geometry collection
+		//				 since the box is finite, let's center it at the actor position for better user control
+		//FloorParticle->SetGeometry(TUniquePtr<Chaos::TPlane<Chaos::FReal, 3>>(new Chaos::TPlane<Chaos::FReal, 3>(FVector(0), FVector(0, 0, 1))));
+		const FVector SolverLocation = GetActorLocation();
+		const FVector BoxMin(-100000, -100000, -1000);
+		const FVector BoxMax(100000, 100000, 0);
+		FloorParticle->SetGeometry(MakeImplicitObjectPtr<Chaos::TBox<Chaos::FReal, 3>>(BoxMin, BoxMax));
+		FloorParticle->SetX(Chaos::FVec3(SolverLocation.X, SolverLocation.Y, FloorHeight));
 		FCollisionFilterData FilterData;
 		FilterData.Word1 = 0xFFFF;
 		FilterData.Word3 = 0xFFFF;
 		FloorParticle->SetShapeSimData(0, FilterData);
-		Proxy = FSingleParticlePhysicsProxy::Create(MoveTemp(FloorParticle));
+		Proxy = Chaos::FSingleParticlePhysicsProxy::Create(MoveTemp(FloorParticle));
 		Solver->RegisterObject(Proxy);
 	}
 }
@@ -415,9 +426,7 @@ void AChaosSolverActor::SetAsCurrentWorldSolver()
 	UWorld* const W = GetWorld();
 	if (W)
 	{
-#if INCLUDE_CHAOS
 		W->PhysicsScene_Chaos = PhysScene;
-#endif
 	}
 }
 
@@ -483,4 +492,5 @@ FAutoConsoleCommand SerializeForPerfTestCommand(TEXT("p.SerializeForPerfTest"), 
 #endif
 
 #endif
+
 

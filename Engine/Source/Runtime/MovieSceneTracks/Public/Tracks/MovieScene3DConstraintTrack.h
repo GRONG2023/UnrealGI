@@ -2,11 +2,23 @@
 
 #pragma once
 
+#include "Containers/Array.h"
 #include "CoreMinimal.h"
-#include "UObject/ObjectMacros.h"
-#include "MovieSceneTrack.h"
+#include "CoreTypes.h"
+#include "Internationalization/Text.h"
+#include "Misc/FrameNumber.h"
 #include "MovieSceneObjectBindingID.h"
+#include "MovieSceneSection.h"
+#include "MovieSceneTrack.h"
+#include "Templates/SubclassOf.h"
+#include "UObject/NameTypes.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "MovieScene3DConstraintTrack.generated.h"
+
+class UObject;
 
 /**
  * Base class for constraint tracks (tracks that are dependent upon other objects).
@@ -53,5 +65,5 @@ protected:
 
 	/** List of all constraint sections. */
 	UPROPERTY()
-	TArray<UMovieSceneSection*> ConstraintSections;
+	TArray<TObjectPtr<UMovieSceneSection>> ConstraintSections;
 };

@@ -2,18 +2,25 @@
 #pragma once
 
 #include "ClientPilotBlackboard.h"
+#include "UObject/Object.h"
+#include "UObject/ObjectMacros.h"
+#include "UObject/ObjectPtr.h"
+#include "UObject/UObjectGlobals.h"
+
 #include "ClientPilotBlackboardManager.generated.h"
 
+class UClientPilotBlackboard;
 
-UCLASS()
-class CLIENTPILOT_API UClientPilotBlackboardManager : public UObject
+
+UCLASS(MinimalAPI)
+class UClientPilotBlackboardManager : public UObject
 {
 GENERATED_BODY()
 protected:
-	static UClientPilotBlackboardManager * ObjectInstance;
+	static CLIENTPILOT_API UClientPilotBlackboardManager * ObjectInstance;
 
 public:
-	static UClientPilotBlackboardManager * GetInstance();
+	static CLIENTPILOT_API UClientPilotBlackboardManager * GetInstance();
 	UPROPERTY()
-	UClientPilotBlackboard* PilotBlackboard;
+	TObjectPtr<UClientPilotBlackboard> PilotBlackboard;
 };

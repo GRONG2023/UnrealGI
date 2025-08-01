@@ -5,12 +5,14 @@
 #include "BehaviorTree/BTCompositeNode.h"
 #include "BehaviorTree/Composites/BTComposite_SimpleParallel.h"
 
+#include UE_INLINE_GENERATED_CPP_BY_NAME(BTDecorator_Loop)
+
 UBTDecorator_Loop::UBTDecorator_Loop(const FObjectInitializer& ObjectInitializer) : Super(ObjectInitializer)
 {
 	NodeName = "Loop";
 	NumLoops = 3;
 	InfiniteLoopTimeoutTime = -1.f;
-	bNotifyActivation = true;
+	INIT_DECORATOR_NODE_NOTIFY_FLAGS();
 	
 	bAllowAbortNone = false;
 	bAllowAbortLowerPri = false;
@@ -27,7 +29,7 @@ void UBTDecorator_Loop::OnNodeActivation(FBehaviorTreeSearchData& SearchData)
 		(!bIsSpecialNode && ParentMemory->CurrentChild != ChildIndex))
 	{
 		// initialize counter if it's first activation
-		DecoratorMemory->RemainingExecutions = NumLoops;
+		DecoratorMemory->RemainingExecutions = IntCastChecked<uint8>(NumLoops);
 		DecoratorMemory->TimeStarted = GetWorld()->GetTimeSeconds();
 	}
 
@@ -95,7 +97,7 @@ void UBTDecorator_Loop::DescribeRuntimeValues(const UBehaviorTreeComponent& Owne
 	{
 		FBTLoopDecoratorMemory* DecoratorMemory = (FBTLoopDecoratorMemory*)NodeMemory;
 
-		const float TimeRemaining = FMath::Max(InfiniteLoopTimeoutTime - (GetWorld()->GetTimeSeconds() - DecoratorMemory->TimeStarted), 0.f);
+		const double TimeRemaining = FMath::Max(InfiniteLoopTimeoutTime - (GetWorld()->GetTimeSeconds() - DecoratorMemory->TimeStarted), 0.f);
 		Values.Add(FString::Printf(TEXT("time remaining: %s"), *FString::SanitizeFloat(TimeRemaining)));
 	}
 }
@@ -103,6 +105,16 @@ void UBTDecorator_Loop::DescribeRuntimeValues(const UBehaviorTreeComponent& Owne
 uint16 UBTDecorator_Loop::GetInstanceMemorySize() const
 {
 	return sizeof(FBTLoopDecoratorMemory);
+}
+
+void UBTDecorator_Loop::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	InitializeNodeMemory<FBTLoopDecoratorMemory>(NodeMemory, InitType);
+}
+
+void UBTDecorator_Loop::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	CleanupNodeMemory<FBTLoopDecoratorMemory>(NodeMemory, CleanupType);
 }
 
 #if WITH_EDITOR
@@ -113,3 +125,4 @@ FName UBTDecorator_Loop::GetNodeIconName() const
 }
 
 #endif	// WITH_EDITOR
+

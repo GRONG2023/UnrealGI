@@ -18,26 +18,51 @@ namespace MovieScene
 struct FNotImplemented;
 struct FComponentTypeDebugInfo;
 
+using FComponentReferenceCollectionPtr = void (*)(FReferenceCollector&, void*, int32);
+
 /**
  * Stub for components that do not need reference collection. Overload void AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, T* Component) for your own implementation
  * NOTE: The return value is _very_ important - overloaded AddReferencedObjectForComponent functions should return void otherwise they will not get called by the entity manager.
  */
 inline FNotImplemented* AddReferencedObjectForComponent(...) { return nullptr; }
 
-inline void AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, UObject** Component)
+/** Instantiation for raw pointers */
+template<typename T>
+typename TEnableIf<TPointerIsConvertibleFromTo<T, UObject>::Value>::Type AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, T** Component)
+{
+	// Ideally this would be a compile-time check buyt 
+	constexpr bool bTypeDependentFalse = !std::is_same_v<T, T>;
+	static_assert(bTypeDependentFalse, "Raw object pointers are no longer supported. Please use TObjectPtr<T> instead.");
+}
+
+template<typename T>
+void AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, TObjectPtr<T>* Component)
 {
 	ReferenceCollector->AddReferencedObject(*Component);
 }
 
+// Hack to enable garbage collection path for object keys
+inline void AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, FObjectKey* Component)
+{}
+
 template<typename T>
-typename TEnableIf< TIsSame<decltype(T::StaticStruct()), decltype(T::StaticStruct())>::Value >::Type AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, T* Component)
+void AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, TObjectKey<T>* Component)
+{}
+
+template<typename T, typename U = decltype(T::StaticStruct())>
+void AddReferencedObjectForComponent(FReferenceCollector* ReferenceCollector, T* Component)
 {
 	for (TPropertyValueIterator<const FObjectProperty> It(T::StaticStruct(), Component); It; ++It)
 	{
-		UObject** ObjectPtr = static_cast<UObject**>(const_cast<void*>(It.Value()));
-		ReferenceCollector->AddReferencedObject(*ObjectPtr);
+		ReferenceCollector->AddReferencedObject(It.Key()->GetObjectPtrPropertyValueRef(It.Value()));
 	}
 }
+
+template<typename T>
+struct THasAddReferencedObjectForComponent
+{
+	static constexpr bool Value = !std::is_same_v< FNotImplemented*, decltype( AddReferencedObjectForComponent((FReferenceCollector*)0, (T*)0) ) >;
+};
 
 /**
  * Class that is instantiated to specify custom behavior for interacting with component data
@@ -176,10 +201,28 @@ struct FComponentTypeInfo
 		ComplexComponentOps = MakeUnique<TComplexComponentOps<T>>();
 	}
 
+	/**
+	 * Define complex component operations for this type of component without implementing AddReferencedObjects - use with caution!
+	 */
+	template<typename T>
+	void MakeComplexComponentOpsNoAddReferencedObjects()
+	{
+		ComplexComponentOps = MakeUnique<TComplexComponentOpsBase<T>>();
+	}
+
+	/**
+	 * Define complex component with a specific reference collection callback
+	 */
+	template<typename T>
+	void MakeComplexComponentOps(FComponentReferenceCollectionPtr RefCollectionPtr)
+	{
+		ComplexComponentOps = MakeUnique<TComplexComponentOpsCustomRefCollection<T>>(RefCollectionPtr);
+	}
+
 private:
 
 	template<typename T>
-	struct TComplexComponentOps : IComplexComponentOps
+	struct TComplexComponentOpsBase : IComplexComponentOps
 	{
 		virtual void ConstructItems(void* Components, int32 Num) const
 		{
@@ -218,6 +261,12 @@ private:
 			}
 		}
 		virtual void AddReferencedObjects(FReferenceCollector& ReferenceCollector, void* ComponentStart, int32 Num)
+		{}
+	};
+	template<typename T>
+	struct TComplexComponentOps : TComplexComponentOpsBase<T>
+	{
+		virtual void AddReferencedObjects(FReferenceCollector& ReferenceCollector, void* ComponentStart, int32 Num)
 		{
 			T* ComponentData = static_cast<T*>(ComponentStart);
 			while (Num-- > 0)
@@ -226,6 +275,19 @@ private:
 
 				++ComponentData;
 			}
+		}
+	};
+	template<typename T>
+	struct TComplexComponentOpsCustomRefCollection : TComplexComponentOpsBase<T>
+	{
+		FComponentReferenceCollectionPtr RefCollectionPtr;
+		TComplexComponentOpsCustomRefCollection(FComponentReferenceCollectionPtr InRefCollectionPtr)
+			: RefCollectionPtr(InRefCollectionPtr)
+		{}
+
+		virtual void AddReferencedObjects(FReferenceCollector& ReferenceCollector, void* ComponentStart, int32 Num)
+		{
+			(*RefCollectionPtr)(ReferenceCollector, ComponentStart, Num);
 		}
 	};
 };
